@@ -7,7 +7,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from curobo.geom.types import Sphere
+from curobo.scene import Sphere
 from visualization_msgs.msg import Marker
 from visualization_msgs.msg import MarkerArray
 

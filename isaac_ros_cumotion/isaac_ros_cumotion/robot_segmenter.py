@@ -1,4 +1,4 @@
-# Copyright (c) 2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
 # property and proprietary rights in and to this material, related
@@ -11,11 +11,10 @@ from copy import deepcopy
 import os
 import time
 
-from curobo.types.base import TensorDeviceType
-from curobo.types.camera import CameraObservation
-from curobo.types.math import Pose as CuPose
-from curobo.types.state import JointState as CuJointState
-from curobo.wrap.model.robot_segmenter import RobotSegmenter
+from curobo.perception import RobotSegmenter
+from curobo.types import CameraObservation, DeviceCfg
+from curobo.types import JointState as CuJointState
+from curobo.types import Pose as CuPose
 
 import cv2
 from cv_bridge import CvBridge
@@ -100,7 +99,6 @@ class CumotionRobotSegmenter(Node):
         except rclpy.exceptions.ParameterUninitializedException:
             self.__yml_path = None
 
-        # If a YAML path is provided, override other XRDF/YAML file name
         if self.__yml_path is not None:
             self.__robot_file = self.__yml_path
 
@@ -148,7 +146,7 @@ class CumotionRobotSegmenter(Node):
 
         cuda_device_id = self.get_parameter('cuda_device').get_parameter_value().integer_value
 
-        self._tensor_args = TensorDeviceType(device=torch.device('cuda', cuda_device_id))
+        self._device_cfg = DeviceCfg(device=torch.device('cuda', cuda_device_id))
 
         # Enable ptrace for PyNITROS
         ret = os.system('echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope')
@@ -169,19 +167,12 @@ class CumotionRobotSegmenter(Node):
                        for topic in depth_image_topics]
         subscribers.append(Subscriber(self, JointState, joint_states_topic))
 
-        # A queue size of 10 means that only joint states of the past 0.02 seconds will be stored
-        # since joint states come at 500 hz, hence each joint state is 2 ms apart.
-        # Hence 10 * 2 means 20 ms of joint states will be stored.
-        # And for images which come at roughly 10 hz, that means the oldest image will be 1000 ms
-        # old since image comes every 100 ms, hence 10 of those meaning oldest image is 1000 ms
-        # Time sync slop is 0.1 meaning 100 ms threshold, that means oldest image will be the
-        # latest image that comes in, if not then the buffer in python is cleared quite often.
         self.approx_time_sync = PyNitrosMessageFilter(self,
-                                                      subscribers,
-                                                      ApproximateTimeSynchronizer,
-                                                      self.process_depth_and_joint_state,
-                                                      queue_size=10,
-                                                      slop=time_sync_slop)
+                                                       subscribers,
+                                                       ApproximateTimeSynchronizer,
+                                                       self.process_depth_and_joint_state,
+                                                       queue_size=10,
+                                                       slop=time_sync_slop)
 
         self.info_subscribers = []
 
@@ -231,14 +222,16 @@ class CumotionRobotSegmenter(Node):
         )
 
         self._cumotion_segmenter = RobotSegmenter.from_robot_file(
-            robot_config, distance_threshold=distance_threshold)
+            robot_config, distance_threshold=distance_threshold,
+            device_cfg=self._device_cfg,
+        )
 
         self._cumotion_base_frame = self._cumotion_segmenter.base_link
 
         self.__update_link_spheres_server = UpdateLinkSpheresServer(
             server_node=self,
             action_name=self._update_link_sphere_server,
-            robot_kinematics=self._cumotion_segmenter.robot_world.kinematics,
+            robot_kinematics=self._cumotion_segmenter.kinematics,
             robot_base_frame=self._cumotion_base_frame
         )
 
@@ -334,14 +327,14 @@ class CumotionRobotSegmenter(Node):
            self._num_cameras, depth_image.shape[-2], depth_image.shape[-1])
 
         if not self._cumotion_segmenter.ready:
-            intrinsics = self._tensor_args.to_device(intrinsics).view(self._num_cameras, 3, 3)
-            cam_obs = CameraObservation(depth_image=depth_image, intrinsics=intrinsics)
+            intrinsics_t = self._device_cfg.to_device(intrinsics).view(self._num_cameras, 3, 3)
+            cam_obs = CameraObservation(depth_image=depth_image, intrinsics=intrinsics_t)
             self._cumotion_segmenter.update_camera_projection(cam_obs)
             self.get_logger().info('Updated Projection Matrices')
         cam_obs = CameraObservation(depth_image=depth_image, pose=self._robot_pose_cameras)
         q = CuJointState.from_numpy(
-            position=js, joint_names=j_names, tensor_args=self._tensor_args).unsqueeze(0)
-        q = self._cumotion_segmenter.robot_world.get_active_js(q)
+            joint_names=j_names, position=js, device_cfg=self._device_cfg).unsqueeze(0)
+        q = self._cumotion_segmenter.kinematics.get_active_js(q)
 
         start_segmentation_time = time.time()
         depth_mask, segmented_depth = self._cumotion_segmenter.get_robot_mask_from_active_js(
@@ -357,7 +350,7 @@ class CumotionRobotSegmenter(Node):
         self.__update_link_spheres_server.publish_all_active_spheres(
             robot_joint_states=js,
             robot_joint_names=j_names,
-            tensor_args=self._tensor_args,
+            tensor_args=self._device_cfg,
             rgb=[1.0, 0.0, 0.0, 1.0]
         )
 
@@ -378,8 +371,8 @@ class CumotionRobotSegmenter(Node):
     Publish the robot spheres to the debug topic
     """
     def publish_robot_spheres(self, traj: CuJointState):
-        kin_state = self._cumotion_segmenter.robot_world.get_kinematics(traj.position)
-        spheres = kin_state.link_spheres_tensor.cpu().numpy()
+        kin_state = self._cumotion_segmenter.kinematics.compute_kinematics(traj)
+        spheres = kin_state.robot_spheres.squeeze(1).cpu().numpy()
         current_time = self.get_clock().now().to_msg()
 
         m_arr = get_spheres_marker(

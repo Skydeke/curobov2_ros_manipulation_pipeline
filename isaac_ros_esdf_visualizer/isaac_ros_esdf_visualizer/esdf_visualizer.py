@@ -17,13 +17,9 @@
 
 import os
 
-from curobo.geom.sdf.world import CollisionCheckerType
-from curobo.geom.sdf.world import WorldCollisionConfig
-from curobo.geom.sdf.world_voxel import WorldVoxelCollision
-from curobo.geom.types import Cuboid as CuCuboid
-from curobo.geom.types import VoxelGrid as CuVoxelGrid
-from curobo.geom.types import WorldConfig
-from curobo.types.base import TensorDeviceType
+from curobo._src.geom.types import Cuboid as CuCuboid
+from curobo._src.geom.types import VoxelGrid as CuVoxelGrid
+from curobo.types import DeviceCfg as TensorDeviceType
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Vector3
 from isaac_ros_cumotion_python_utils.utils import \

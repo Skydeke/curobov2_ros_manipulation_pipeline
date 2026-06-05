@@ -5,9 +5,8 @@ import threading
 import time
 from typing import List, Optional, Union
 
-from curobo.types.math import Pose as CuPose
-from curobo.types.state import JointState as CuJointState
-from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
+from curobo.types import Pose as CuPose
+from curobo.types import JointState as CuJointState
 from geometry_msgs.msg import Pose, Vector3
 from isaac_ros_cumotion_interfaces.action import MotionPlan
 from moveit_msgs.action import ExecuteTrajectory
@@ -114,7 +113,6 @@ class CumotionGoalSetClient:
         goal_pose: CuPose,
         link_name: str,
         start_state: Optional[CuJointState] = None,
-        plan_config: Optional[MotionGenPlanConfig] = None,
         visualize_trajectory: bool = True,
         execute: bool = False,
         goal_pose_array=None,
@@ -160,15 +158,6 @@ class CumotionGoalSetClient:
                 goal_msg.world = self.__latest_planning_scene.world
 
         goal_msg.hold_partial_pose = False
-        if plan_config is not None:
-            if plan_config.time_dilation_factor is not None:
-                goal_msg.time_dilation_factor = plan_config.time_dilation_factor
-            if plan_config.pose_cost_metric is not None:
-                if plan_config.pose_cost_metric.hold_partial_pose:
-                    goal_msg.hold_partial_pose = plan_config.pose_cost_metric.hold_partial_pose
-                    goal_msg.hold_partial_pose_vec_weight = (
-                        plan_config.pose_cost_metric.hold_vec_weight.cpu().flatten().tolist()
-                    )
 
         # send goal to server
         goal_msg.disable_collision_links = disable_collision_links

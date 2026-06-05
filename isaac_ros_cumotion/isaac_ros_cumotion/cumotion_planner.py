@@ -10,25 +10,15 @@
 from copy import deepcopy
 from os import path
 
+import json
 import threading
 import time
 from typing import List, Tuple
 
-from curobo.geom.sdf.world import CollisionCheckerType
-from curobo.geom.types import Cuboid
-from curobo.geom.types import Cylinder
-from curobo.geom.types import Mesh
-from curobo.geom.types import Sphere
-from curobo.geom.types import VoxelGrid as CuVoxelGrid
-from curobo.geom.types import WorldConfig
-from curobo.types.base import TensorDeviceType
-from curobo.types.math import Pose
-from curobo.types.state import JointState as CuJointState
-from curobo.util.logger import setup_curobo_logger
-from curobo.wrap.reacher.motion_gen import MotionGen
-from curobo.wrap.reacher.motion_gen import MotionGenConfig
-from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
-from curobo.wrap.reacher.motion_gen import MotionGenStatus
+from curobo.scene import Cuboid, Cylinder, Mesh, Sphere, VoxelGrid as CuVoxelGrid, Scene
+from curobo.types import DeviceCfg, GoalToolPose, JointState as CuJointState, Pose
+from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+from curobo.logging import setup_logger
 from geometry_msgs.msg import Point, Pose as RosPose, Vector3
 from isaac_manipulator_ros_python_utils.manipulator_types import (
     ObjectAttachmentShape
@@ -66,7 +56,6 @@ class CumotionActionServer(Node):
 
     def __init__(self):
         super().__init__('cumotion_action_server')
-        self.tensor_args = TensorDeviceType()
         self.declare_parameter('robot', 'ur5e.yml')
         self.declare_parameter('urdf_path', rclpy.Parameter.Type.STRING)
         self.declare_parameter('yml_file_path', rclpy.Parameter.Type.STRING)
@@ -76,8 +65,14 @@ class CumotionActionServer(Node):
         self.declare_parameter('num_trajopt_seeds', 6)
         self.declare_parameter('include_trajopt_retract_seed', True)
         self.declare_parameter('num_trajopt_time_steps', 32)
+        self.declare_parameter('num_trajopt_noisy_seeds', 2)
+        self.declare_parameter('trajopt_seed_ratio', '{"linear": 0.5, "bias": 0.5}')
         self.declare_parameter('trajopt_finetune_iters', 400)
         self.declare_parameter('interpolation_dt', 0.025)
+        self.declare_parameter('max_goalset', 12)
+        self.declare_parameter('ik_optimizer_config', '')
+        self.declare_parameter('trajopt_optimizer_config', '')
+        self.declare_parameter('enable_cuda_graph', True)
         self.declare_parameter('collision_cache_mesh', 20)
         self.declare_parameter('collision_cache_cuboid', 20)
         self.declare_parameter('voxel_size', 0.05)
@@ -108,9 +103,9 @@ class CumotionActionServer(Node):
             self.get_parameter('enable_curobo_debug_mode').get_parameter_value().bool_value
         )
         if debug_mode:
-            setup_curobo_logger('info')
+            setup_logger('info', 'curobo')
         else:
-            setup_curobo_logger('warning')
+            setup_logger('warning', 'curobo')
 
         self.__voxel_pub = self.create_publisher(Marker, '/curobo/voxels', 10)
         self.planner_busy = False
@@ -175,6 +170,18 @@ class CumotionActionServer(Node):
         self.__interpolation_dt = (
             self.get_parameter('interpolation_dt').get_parameter_value().double_value
         )
+        self.__max_goalset = (
+            self.get_parameter('max_goalset').get_parameter_value().integer_value
+        )
+        self.__ik_optimizer_config = (
+            self.get_parameter('ik_optimizer_config').get_parameter_value().string_value
+        )
+        self.__trajopt_optimizer_config = (
+            self.get_parameter('trajopt_optimizer_config').get_parameter_value().string_value
+        )
+        self.__enable_cuda_graph = (
+            self.get_parameter('enable_cuda_graph').get_parameter_value().bool_value
+        )
 
         include_trajopt_retract_seed = (
             self.get_parameter('include_trajopt_retract_seed').get_parameter_value().bool_value
@@ -183,8 +190,13 @@ class CumotionActionServer(Node):
             self.__num_trajopt_noisy_seeds = 1
             self.__trajopt_seed_ratio = {'linear': 1.0}
         else:
-            self.__num_trajopt_noisy_seeds = 2
-            self.__trajopt_seed_ratio = {'linear': 0.5, 'bias': 0.5}
+            self.__num_trajopt_noisy_seeds = (
+                self.get_parameter('num_trajopt_noisy_seeds').get_parameter_value().integer_value
+            )
+            seed_ratio_str = (
+                self.get_parameter('trajopt_seed_ratio').get_parameter_value().string_value
+            )
+            self.__trajopt_seed_ratio = json.loads(seed_ratio_str) if seed_ratio_str else {'linear': 0.5, 'bias': 0.5}
 
         collision_cache_cuboid = (
             self.get_parameter('collision_cache_cuboid').get_parameter_value().integer_value
@@ -309,11 +321,11 @@ class CumotionActionServer(Node):
         self.call_publish_static_planning_scene_service()
 
         self.__query_count = 0
-        self.__tensor_args = self.motion_gen.tensor_args
+        self.__tensor_args = self.motion_gen.device_cfg
         self.subscription = self.create_subscription(
             JointState, self.__joint_states_topic, self.js_callback, 10
         )
-        self.__js_buffer = None
+        self.__js_buffer = None  # populated by js_callback; never cleared after reads
 
         # Call on_timer every 0.01 seconds
         self.timer = self.create_timer(0.01, self.on_timer)
@@ -375,25 +387,25 @@ class CumotionActionServer(Node):
         }
 
     def load_motion_gen(self):
-        tensor_args = self.tensor_args
-        world_file = WorldConfig.from_dict(
-            {
-                'cuboid': {
-                    'table': {
-                        'pose': [0, 0, -0.05, 1, 0, 0, 0],  # x, y, z, qw, qx, qy, qz
-                        'dims': [2.0, 2.0, 0.1],
-                    }
-                },
+        device_cfg = DeviceCfg()
+
+        # Only build an initial scene model when ESDF/voxel support is needed.
+        # Collision objects (tables, boxes, etc.) are never hardcoded here —
+        # they are sent dynamically via the MoveIt planning-scene diff in each
+        # action request (or via nvblox ESDF when that integration is active).
+        world_file = None
+        if self.__read_esdf_grid or self.__publish_curobo_world_as_voxels:
+            world_objects = {
                 'voxel': {
                     'world_voxel': {
                         'dims': self.__grid_size_m,
-                        'pose': [0, 0, 0, 1, 0, 0, 0],  # x, y, z, qw, qx, qy, qz
+                        'pose': [0, 0, 0, 1, 0, 0, 0],
                         'voxel_size': self.__voxel_size,
-                        'feature_dtype': torch.bfloat16,
+                        'feature_dtype': str(torch.bfloat16),
                     },
-                },
+                }
             }
-        )
+            world_file = Scene.create(world_objects)
 
         robot_config = get_robot_config(
             robot_file=self.__robot_file,
@@ -401,32 +413,42 @@ class CumotionActionServer(Node):
             logger=self.get_logger()
         )
 
-        robot_dict = robot_config['robot_cfg']
-        motion_gen_config = MotionGenConfig.load_from_robot_config(
-            robot_dict,
-            world_file,
-            tensor_args,
-            num_graph_seeds=self.__num_graph_seeds,
-            num_trajopt_seeds=self.__num_trajopt_seeds,
-            num_trajopt_noisy_seeds=self.__num_trajopt_noisy_seeds,
-            trajopt_tsteps=self.__num_trajopt_time_steps,
-            trajopt_seed_ratio=self.__trajopt_seed_ratio,
-            interpolation_dt=self.__interpolation_dt,
+        create_kwargs = dict(
+            robot=robot_config,
+            scene_model=world_file,
             collision_cache=self.__collision_cache,
-            collision_checker_type=CollisionCheckerType.VOXEL,
-            ee_link_name=self.__tool_frame,
-            finetune_trajopt_iters=self.__trajopt_finetune_iters,
+            num_ik_seeds=self.__num_graph_seeds,
+            num_trajopt_seeds=self.__num_trajopt_seeds,
+            device_cfg=device_cfg,
+            use_cuda_graph=self.__enable_cuda_graph,
+            max_goalset=self.__max_goalset,
         )
 
-        motion_gen = MotionGen(motion_gen_config)
+        if self.__ik_optimizer_config:
+            create_kwargs["ik_optimizer_configs"] = self.__ik_optimizer_config
+        if self.__trajopt_optimizer_config:
+            create_kwargs["trajopt_optimizer_configs"] = self.__trajopt_optimizer_config
+
+        motion_gen_config = MotionPlannerCfg.create(**create_kwargs)
+
+        motion_gen = MotionPlanner(motion_gen_config)
         self.motion_gen = motion_gen
+        self.motion_gen.trajopt_solver.config.interpolation_dt = self.__interpolation_dt
         self.__robot_base_frame = self.motion_gen.kinematics.base_link
 
-        self.__world_collision = self.motion_gen.world_coll_checker
+        self.__world_collision = self.motion_gen.scene_collision_checker
+
         if not self.__add_ground_plane:
-            self.motion_gen.clear_world_cache()
-        self.__cumotion_grid_shape = self.__world_collision.get_voxel_grid(
-            'world_voxel').get_grid_shape()[0]
+            self.motion_gen.clear_scene_cache()
+
+        if self.__world_collision is not None:
+            voxel_grid = self.__world_collision.get_voxel_grid('world_voxel')
+            if voxel_grid is not None:
+                self.__cumotion_grid_shape = voxel_grid.get_grid_shape()[0]
+            else:
+                self.__cumotion_grid_shape = None
+        else:
+            self.__cumotion_grid_shape = None
 
     def warmup(self):
         self.get_logger().info('warming up cuMotion, wait until ready')
@@ -449,6 +471,10 @@ class CumotionActionServer(Node):
         )
 
     def update_voxel_grid(self, objects_to_clear=None) -> bool:
+        if self.__esdf_client is None:
+            self.get_logger().warn('ESDF client not initialized')
+            return False
+
         self.get_logger().info('Calling ESDF service')
 
         # Get the AABB
@@ -523,7 +549,7 @@ class CumotionActionServer(Node):
         array_data = torch.as_tensor(array_data)
 
         # Verify the grid shape
-        if array_shape != self.__cumotion_grid_shape:
+        if self.__cumotion_grid_shape is not None and array_shape != self.__cumotion_grid_shape:
             self.get_logger().fatal(
                 'Shape of received esdf voxel grid does not match the cumotion grid shape, '
                 f'{array_shape} vs. {self.__cumotion_grid_shape}')
@@ -557,7 +583,7 @@ class CumotionActionServer(Node):
         esdf_grid = CuVoxelGrid(
             name='world_voxel',
             dims=self.__grid_size_m,
-            pose=grid_center_m + [1, 0.0, 0.0, 0.0],  # x, y, z, qw, qx, qy, qz
+            pose=grid_center_m + [1, 0.0, 0.0, 0.0],
             voxel_size=self.__voxel_size,
             feature_dtype=torch.float32,
             feature_tensor=array_data,
@@ -669,13 +695,13 @@ class CumotionActionServer(Node):
         cmd_traj = JointTrajectory()
         q_traj = js.position.cpu().view(-1, js.position.shape[-1]).numpy()
         vel = js.velocity.cpu().view(-1, js.position.shape[-1]).numpy()
-        acc = js.acceleration.view(-1, js.position.shape[-1]).cpu().numpy()
+        acc = js.acceleration.view(-1, js.position.shape[-1]).cpu().numpy() if js.acceleration is not None else None
         for i in range(len(q_traj)):
             traj_pt = JointTrajectoryPoint()
             traj_pt.positions = q_traj[i].tolist()
-            if js is not None and i < len(vel):
+            if vel is not None and i < len(vel):
                 traj_pt.velocities = vel[i].tolist()
-            if js is not None and i < len(acc):
+            if acc is not None and i < len(acc):
                 traj_pt.accelerations = acc[i].tolist()
             time_d = rclpy.time.Duration(seconds=i * dt).to_msg()
             traj_pt.time_from_start = time_d
@@ -704,22 +730,22 @@ class CumotionActionServer(Node):
                     elif isinstance(cumotion_object, Mesh):
                         mesh_list.append(cumotion_object)
 
-            world_model = WorldConfig(
+            world_model = Scene(
                 cuboid=cuboid_list,
                 cylinder=cylinder_list,
                 sphere=sphere_list,
                 mesh=mesh_list,
-            ).get_collision_check_world()
+            )
             self.motion_gen.update_world(world_model)
         if self.__read_esdf_grid:
             world_update_status = self.update_voxel_grid(objects_to_clear)
         if self.__publish_curobo_world_as_voxels:
-            if self.__voxel_pub.get_subscription_count() > 0:
+            if self.__voxel_pub.get_subscription_count() > 0 and self.__world_collision is not None:
                 # Calculate occupancy and publish only when subscribed.
                 voxels = self.__world_collision.get_occupancy_in_bounding_box(
                     Cuboid(
                         name='test',
-                        pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],  # x, y, z, qw, qx, qy, qz
+                        pose=[0.0, 0.0, 0.0, 1, 0, 0, 0],
                         dims=self.__grid_size_m,
                     ),
                     voxel_size=self.__publish_voxel_size,
@@ -764,9 +790,9 @@ class CumotionActionServer(Node):
             return result
         start_state = None
         if len(plan_req.start_state.joint_state.position) > 0:
-            start_state = self.motion_gen.get_active_js(
+            start_state = self.motion_gen.kinematics.get_active_js(
                 CuJointState.from_position(
-                    position=self.tensor_args.to_device(
+                    position=self.__tensor_args.to_device(
                         plan_req.start_state.joint_state.position
                     ).unsqueeze(0),
                     joint_names=plan_req.start_state.joint_state.name,
@@ -786,10 +812,10 @@ class CumotionActionServer(Node):
 
             # read joint state:
             state = CuJointState.from_position(
-                position=self.tensor_args.to_device(self.__js_buffer['position']).unsqueeze(0),
+                position=self.__tensor_args.to_device(self.__js_buffer['position']).unsqueeze(0),
                 joint_names=self.__js_buffer['joint_names'],
             )
-            state.velocity = self.tensor_args.to_device(self.__js_buffer['velocity']).unsqueeze(0)
+            state.velocity = self.__tensor_args.to_device(self.__js_buffer['velocity']).unsqueeze(0)
             if state.velocity.shape != state.position.shape:
                 self.get_logger().error(
                     'start joint position shape is  ' + str(state.position.shape) +
@@ -798,7 +824,7 @@ class CumotionActionServer(Node):
                 )
                 goal_handle.abort(result)
                 return result
-            current_joint_state = self.motion_gen.get_active_js(state)
+            current_joint_state = self.motion_gen.kinematics.get_active_js(state)
             if start_state is not None and plan_req.start_state.is_diff:
                 start_state.position += current_joint_state.position
                 start_state.velocity += current_joint_state.velocity
@@ -816,13 +842,13 @@ class CumotionActionServer(Node):
                 for x in range(len(plan_req.goal_constraints[0].joint_constraints))
             ]
 
-            goal_state = self.motion_gen.get_active_js(
+            goal_state = self.motion_gen.kinematics.get_active_js(
                 CuJointState.from_position(
-                    position=self.tensor_args.to_device(goal_config).view(1, -1),
+                    position=self.__tensor_args.to_device(goal_config).view(1, -1),
                     joint_names=goal_jnames,
                 )
             )
-            goal_pose = self.motion_gen.compute_kinematics(goal_state).ee_pose.clone()
+            goal_tool_poses = self.motion_gen.compute_kinematics(goal_state).tool_poses.as_goal()
         elif (
             len(plan_req.goal_constraints[0].position_constraints) > 0
             and len(plan_req.goal_constraints[0].orientation_constraints) > 0
@@ -839,14 +865,19 @@ class CumotionActionServer(Node):
             orientation = plan_req.goal_constraints[0].orientation_constraints[0].orientation
             orientation = [orientation.w, orientation.x, orientation.y, orientation.z]
             pose_list = position + orientation
-            goal_pose = Pose.from_list(pose_list, tensor_args=self.tensor_args)
+            goal_pose = Pose.from_list(pose_list)
 
             # Check if link names match:
             position_link_name = plan_req.goal_constraints[0].position_constraints[0].link_name
             orientation_link_name = (
                 plan_req.goal_constraints[0].orientation_constraints[0].link_name
             )
-            plan_link_name = self.motion_gen.kinematics.ee_link
+            plan_link_name = self.motion_gen.tool_frames[0]
+
+            # Use tool_frame if provided
+            if self.__tool_frame is not None:
+                plan_link_name = self.__tool_frame
+
             if position_link_name != orientation_link_name:
                 self.get_logger().error(
                     'Link name for Target Position "'
@@ -870,6 +901,11 @@ class CumotionActionServer(Node):
                 result.error_code.val = MoveItErrorCodes.INVALID_LINK_NAME
                 goal_handle.abort(result)
                 return result
+            goal_tool_poses = GoalToolPose.from_poses(
+                {self.motion_gen.tool_frames[0]: goal_pose},
+                ordered_tool_frames=[self.motion_gen.tool_frames[0]],
+                num_goalset=1,
+            )
         else:
             self.get_logger().error('Goal constraints not supported')
             result.error_code.val = MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS
@@ -877,51 +913,38 @@ class CumotionActionServer(Node):
             return result
         with self.lock:
             self.planner_busy = True
-
-        self.motion_gen.reset(reset_seed=False)
-        motion_gen_result = self.motion_gen.plan_single(
-            start_state,
-            goal_pose,
-            MotionGenPlanConfig(max_attempts=self.__max_attempts, enable_graph_attempt=1,
-                                time_dilation_factor=time_dilation_factor),
-        )
-        with self.lock:
+            self.motion_gen.reset_seed()
+            motion_gen_result = self.motion_gen.plan_pose(
+                goal_tool_poses,
+                start_state,
+                max_attempts=self.__max_attempts,
+            )
             self.planner_busy = False
         result = MoveGroup.Result()
-        if motion_gen_result.success.item():
+        if motion_gen_result is not None and motion_gen_result.success is not None and motion_gen_result.success.any().item():
             result.error_code.val = MoveItErrorCodes.SUCCESS
             result.trajectory_start = plan_req.start_state
             traj = self.get_joint_trajectory(
-                motion_gen_result.optimized_plan, motion_gen_result.optimized_dt.item()
+                motion_gen_result.js_solution, motion_gen_result.js_solution.dt.item()
             )
-            result.planning_time = motion_gen_result.total_time
+            result.planning_time = motion_gen_result.total_time if hasattr(motion_gen_result, 'total_time') else 0.0
             result.planned_trajectory = traj
-        elif not motion_gen_result.valid_query:
+        elif motion_gen_result is None:
             self.get_logger().error(
-                f'Invalid planning query: {motion_gen_result.status}'
+                'Motion planning failed, result is None'
             )
-            if motion_gen_result.status == MotionGenStatus.INVALID_START_STATE_JOINT_LIMITS:
-                result.error_code.val = MoveItErrorCodes.START_STATE_INVALID
-            if motion_gen_result.status in [
-                    MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION,
-                    MotionGenStatus.INVALID_START_STATE_SELF_COLLISION,
-            ]:
-
-                result.error_code.val = MoveItErrorCodes.START_STATE_IN_COLLISION
         else:
             self.get_logger().error(
-                f'Motion planning failed wih status: {motion_gen_result.status}'
+                'Motion planning failed'
             )
-            if motion_gen_result.status == MotionGenStatus.IK_FAIL:
-                result.error_code.val = MoveItErrorCodes.NO_IK_SOLUTION
+            if result.error_code.val == MoveItErrorCodes.SUCCESS:
+                result.error_code.val = MoveItErrorCodes.PLANNING_FAILED
 
         self.get_logger().info(
-            'returned planning result (query, success, failure_status): '
+            'returned planning result (query, success): '
             + str(self.__query_count)
             + ' '
-            + str(motion_gen_result.success.item())
-            + ' '
-            + str(motion_gen_result.status)
+            + str(motion_gen_result.success.item() if motion_gen_result is not None and motion_gen_result.success is not None else False)
         )
         self.__query_count += 1
         if result.error_code.val == MoveItErrorCodes.SUCCESS:
@@ -931,6 +954,8 @@ class CumotionActionServer(Node):
         return result
 
     def publish_voxels(self, voxels):
+        if self.__world_collision is None:
+            return
         vox_size = self.__publish_voxel_size
 
         # create marker:
@@ -976,13 +1001,13 @@ class CumotionActionServer(Node):
 
         self.__voxel_pub.publish(marker)
 
-    def get_cu_pose_from_ros_pose(self, ros_pose: Point) -> Pose:
+    def get_cu_pose_from_ros_pose(self, ros_pose: RosPose) -> Pose:
         """
-        Convert a ROS Point message to a Curobo Pose.
+        Convert a ROS Pose message to a Curobo Pose.
 
         Args
         ----
-            ros_pose: ROS Point message
+            ros_pose: ROS Pose message
 
         Returns
         -------
@@ -1158,7 +1183,24 @@ class CumotionActionServer(Node):
         aabb_size = [Vector3(x=aabb_size[0], y=aabb_size[1], z=aabb_size[2])]
         return aabb_min, aabb_size, [], []
 
-    def execute_callback_ik(self, goal_handle: IKSolution.Goal):
+    def _create_transform_matrix(self, pose: RosPose) -> np.ndarray:
+        """Create a 4x4 homogeneous transformation matrix from a ROS pose."""
+        from scipy.spatial.transform import Rotation as R
+        world_pose_mat = np.eye(4)
+        world_pose_mat[:3, :3] = R.from_quat([
+            pose.orientation.x,
+            pose.orientation.y,
+            pose.orientation.z,
+            pose.orientation.w
+        ]).as_matrix()
+        world_pose_mat[:3, 3] = np.asarray([
+            pose.position.x,
+            pose.position.y,
+            pose.position.z
+        ])
+        return world_pose_mat
+
+    def execute_callback_ik(self, goal_handle):
         """
         Solve IK for a given pose.
 
@@ -1212,7 +1254,7 @@ class CumotionActionServer(Node):
 
         self.get_logger().info(f'Current joint state: {current_joint_state}')
 
-        seed_config = self.tensor_args.to_device(
+        seed_config = self.__tensor_args.to_device(
             torch.as_tensor(current_joint_state.position)
         )
         seed_config = seed_config.unsqueeze(0).unsqueeze(0)
@@ -1222,15 +1264,15 @@ class CumotionActionServer(Node):
         self.get_logger().info(f'Current joint state seed config: {seed_config}')
 
         pose = self.get_cu_pose_from_ros_pose(goal_handle.request.goal_pose)
-        ik_result = self.motion_gen.solve_ik(
+        ik_result = self.motion_gen.ik_solver.solve_pose(
             pose, return_seeds=num_solutions_to_return,
             seed_config=seed_config)
 
         result = IKSolution.Result()
 
-        joint_state_position_tensor = ik_result.js_solution.position
-        joint_state_velocity_tensor = ik_result.js_solution.velocity
-        joint_names = ik_result.js_solution.joint_names
+        joint_state_position_tensor = ik_result.solution.position
+        joint_state_velocity_tensor = ik_result.solution.velocity
+        joint_names = ik_result.solution.joint_names
 
         success_tensor = ik_result.success
 

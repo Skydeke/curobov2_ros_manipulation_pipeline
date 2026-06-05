@@ -7,13 +7,9 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from typing import List
+from typing import List, Tuple
 
-from curobo.types.math import Pose
-from curobo.types.state import JointState as CuJointState
-from curobo.wrap.reacher.motion_gen import MotionGenPlanConfig
-from curobo.wrap.reacher.motion_gen import MotionGenStatus
-from curobo.wrap.reacher.motion_gen import PoseCostMetric
+from curobo.types import GoalToolPose, JointState as CuJointState, Pose
 from geometry_msgs.msg import Pose as RosPose
 from isaac_ros_cumotion.cumotion_planner import CumotionActionServer
 from isaac_ros_cumotion_interfaces.action import MotionPlan
@@ -35,7 +31,7 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
 
     def warmup(self):
         self.get_logger().info('warming up cuMotion, wait until ready')
-        self.motion_gen.warmup(enable_graph=True, n_goalset=100, warmup_js_trajopt=True)
+        self.motion_gen.warmup(enable_graph=True, num_warmup_iterations=10)
         self.get_logger().info('cuMotion is ready for planning queries!')
 
     def toggle_link_collision(self, collision_link_names: List[str],
@@ -43,10 +39,10 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
         if len(collision_link_names) > 0:
             if enable_flag:
                 for k in collision_link_names:
-                    self.motion_gen.kinematics.kinematics_config.enable_link_spheres(k)
+                    self.motion_gen.kinematics.config.kinematics_config.enable_link_spheres(k)
             else:
                 for k in collision_link_names:
-                    self.motion_gen.kinematics.kinematics_config.disable_link_spheres(k)
+                    self.motion_gen.kinematics.config.kinematics_config.disable_link_spheres(k)
 
     def get_goal_poses(self, plan_req: MotionPlan.Goal) -> Pose:
         if plan_req.goal_pose.header.frame_id != self.motion_gen.kinematics.base_link:
@@ -73,10 +69,10 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
         if len(poses) == 0:
             self.get_logger().error('No goal pose found')
             return False, MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS, poses
-        goal_pose = Pose.from_batch_list(poses, self.motion_gen.tensor_args)
+        goal_pose = Pose.from_batch_list(poses)
         goal_pose = Pose(
-            position=goal_pose.position.view(1, -1, 3),
-            quaternion=goal_pose.quaternion.view(1, -1, 4),
+            position=goal_pose.position.contiguous().view(1, -1, 3),
+            quaternion=goal_pose.quaternion.contiguous().view(1, -1, 4),
         )
         return True, MoveItErrorCodes.SUCCESS, goal_pose
 
@@ -97,283 +93,263 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
         return world_pose_mat
 
     def motion_plan_execute_callback(self, goal_handle):
-        self.get_logger().info('Executing goal...')
-        pose_cost_metric = None
+        try:
+            self.motion_gen.reset_seed()
+            with self.lock:
+                self.planner_busy = True
+            self.get_logger().info('Executing goal...')
 
-        # check moveit scaling factors:
-        time_dilation_factor = goal_handle.request.time_dilation_factor
-        if time_dilation_factor == 0.0:
-            time_dilation_factor = 0.1
-            self.get_logger().warn('Cannot set time_dilation_factor = 0.0')
-        self.get_logger().info('Planning with time_dilation_factor: ' + str(time_dilation_factor))
+            time_dilation_factor = goal_handle.request.time_dilation_factor
+            if time_dilation_factor == 0.0:
+                time_dilation_factor = 0.1
+                self.get_logger().warn('Cannot set time_dilation_factor = 0.0')
+            self.get_logger().info('Planning with time_dilation_factor: ' + str(time_dilation_factor))
 
-        self.motion_gen.reset(reset_seed=False)
+            result = MotionPlan.Result()
+            result.success = False
+            result.error_code = MoveItErrorCodes()
 
-        result = MotionPlan.Result()
-        result.success = False
-        # Explicitly initialize error_code to ensure it's a proper MoveItErrorCodes message
-        result.error_code = MoveItErrorCodes()
-        if goal_handle.request.use_planning_scene:
-            self.get_logger().info('Updating planning scene')
-            scene = goal_handle.request.world
-            world_objects = scene.collision_objects
-            if goal_handle.request.enable_aabb_clearing:
-                padding = goal_handle.request.object_esdf_clearing_padding
-                if goal_handle.request.plan_grasp:
-                    world_pose_object = self.get_object_pose(
-                        goal_handle.request.world_frame,
-                        goal_handle.request.object_frame
-                    )
-                    objects_to_clear = self.calculate_aabbs_to_clear(
-                        world_pose_object=world_pose_object,
-                        mesh_resource=goal_handle.request.mesh_resource,
-                        object_esdf_clearing_padding=padding
-                    )
-                elif goal_handle.request.plan_pose:
-                    goal_pose = goal_handle.request.goal_pose.poses[0]
-                    objects_to_clear = self.calculate_aabbs_to_clear(
-                        world_pose_object=goal_pose,
-                        mesh_resource=goal_handle.request.mesh_resource,
-                        object_esdf_clearing_padding=padding,
-                        object_shape=goal_handle.request.object_shape,
-                        object_scale=goal_handle.request.object_scale
-                    )
-            else:
-                objects_to_clear = [], [], [], []
-            world_update_status = self.update_world_objects(
-                world_objects, objects_to_clear
-            )
-            if not world_update_status:
-                result.error_code.val = MoveItErrorCodes.COLLISION_CHECKING_UNAVAILABLE
-                self.get_logger().error('World update failed.')
-                goal_handle.abort(result)
+            objects_to_clear = [], [], [], []
+            if goal_handle.request.use_planning_scene:
+                self.get_logger().info('Updating planning scene')
+                scene = goal_handle.request.world
+                world_objects = scene.collision_objects
+                if goal_handle.request.enable_aabb_clearing:
+                    padding = goal_handle.request.object_esdf_clearing_padding
+                    if goal_handle.request.plan_grasp:
+                        world_pose_object = self.get_object_pose(
+                            goal_handle.request.world_frame,
+                            goal_handle.request.object_frame
+                        )
+                        objects_to_clear = self.calculate_aabbs_to_clear(
+                            world_pose_object=world_pose_object,
+                            mesh_resource=goal_handle.request.mesh_resource,
+                            object_esdf_clearing_padding=padding
+                        )
+                    elif goal_handle.request.plan_pose:
+                        goal_pose = goal_handle.request.goal_pose.poses[0]
+                        objects_to_clear = self.calculate_aabbs_to_clear(
+                            world_pose_object=goal_pose,
+                            mesh_resource=goal_handle.request.mesh_resource,
+                            object_esdf_clearing_padding=padding,
+                            object_shape=goal_handle.request.object_shape,
+                            object_scale=goal_handle.request.object_scale
+                        )
+                world_update_status = self.update_world_objects(
+                    world_objects, objects_to_clear
+                )
+                if not world_update_status:
+                    result.error_code.val = MoveItErrorCodes.COLLISION_CHECKING_UNAVAILABLE
+                    self.get_logger().error('World update failed.')
+                    goal_handle.abort(result)
+                    return result
+
+            # Early-return for scene-update-only requests (no planning needed).
+            # This check must happen BEFORE reading the joint state so that a
+            # scene-only goal sent at startup (before any /joint_states arrive)
+            # succeeds reliably.
+            plan_req = goal_handle.request
+            if not plan_req.plan_grasp and not plan_req.plan_cspace and not plan_req.plan_pose:
+                self.get_logger().info('No planning type set, scene update only')
+                result.success = True
+                goal_handle.succeed(result)
                 return result
 
-        start_state = None
-        plan_req = goal_handle.request
-        if plan_req.use_current_state:
-            if self._CumotionActionServer__js_buffer is None:
-                self.get_logger().error(
-                    'joint_state was not received from '
-                    + self._CumotionActionServer__joint_states_topic
+            # --- Read start state (only reached when actual planning is needed) ---
+            start_state = None
+            if plan_req.use_current_state:
+                with self.lock:
+                    if self._CumotionActionServer__js_buffer is None:
+                        self.get_logger().error(
+                            'joint_state was not received from '
+                            + self._CumotionActionServer__joint_states_topic
+                        )
+                        result.error_code.val = MoveItErrorCodes.INVALID_ROBOT_STATE
+                        goal_handle.abort(result)
+                        return result
+                    js_position = list(self._CumotionActionServer__js_buffer['position'])
+                    js_velocity = list(self._CumotionActionServer__js_buffer['velocity'])
+                    js_names = list(self._CumotionActionServer__js_buffer['joint_names'])
+                    # js_buffer intentionally kept; overwritten by the next /joint_states callback
+                state = CuJointState.from_position(
+                    position=self._CumotionActionServer__tensor_args.to_device(js_position).unsqueeze(0),
+                    joint_names=js_names,
                 )
+                state.velocity = self._CumotionActionServer__tensor_args.to_device(js_velocity).unsqueeze(0)
+                start_state = self.motion_gen.kinematics.get_active_js(state)
+            elif len(plan_req.start_state.position) > 0:
+                start_state = self.motion_gen.kinematics.get_active_js(
+                    CuJointState.from_position(
+                        position=self._CumotionActionServer__tensor_args.to_device(plan_req.start_state.position).unsqueeze(
+                            0
+                        ),
+                        joint_names=plan_req.start_state.name,
+                    )
+                )
+            else:
+                self.get_logger().error('joint state in start state was empty')
                 result.error_code.val = MoveItErrorCodes.INVALID_ROBOT_STATE
                 goal_handle.abort(result)
                 return result
-            # read joint state:
-            state = CuJointState.from_position(
-                position=self.tensor_args.to_device(
-                    self._CumotionActionServer__js_buffer['position']
-                ).unsqueeze(0),
-                joint_names=self._CumotionActionServer__js_buffer['joint_names'],
-            )
-            state.velocity = self.tensor_args.to_device(
-                self._CumotionActionServer__js_buffer['velocity']
-            ).unsqueeze(0)
-            start_state = self.motion_gen.get_active_js(state)
-            self._CumotionActionServer__js_buffer = None
-        elif len(plan_req.start_state.position) > 0:
-            start_state = self.motion_gen.get_active_js(
-                CuJointState.from_position(
-                    position=self.tensor_args.to_device(plan_req.start_state.position).unsqueeze(
-                        0
-                    ),
-                    joint_names=plan_req.start_state.name,
+
+            motion_gen_result = None
+            if plan_req.plan_grasp:
+                self.get_logger().info('Planning to Grasp Object with stop at offset distance')
+                success, error_code, poses = self.get_goal_poses(plan_req)
+                self.get_logger().info(f'Success, Error Code): {success}, {error_code}!')
+                if not success:
+                    result.error_code.val = error_code
+                    goal_handle.abort(result)
+                    return result
+
+                grasp_offset_pose = self.get_cu_pose_from_ros_pose(plan_req.grasp_offset_pose)
+                retract_offset_pose = self.get_cu_pose_from_ros_pose(plan_req.retract_offset_pose)
+
+                grasp_approach_offset = -0.15
+                if grasp_offset_pose is not None and hasattr(grasp_offset_pose, 'position') and grasp_offset_pose.position is not None:
+                    grasp_approach_offset = grasp_offset_pose.position[0, 0, 0, 0, 2].item()
+                grasp_lift_offset = 0.15
+                if retract_offset_pose is not None and hasattr(retract_offset_pose, 'position') and retract_offset_pose.position is not None:
+                    grasp_lift_offset = retract_offset_pose.position[0, 0, 0, 0, 2].item()
+
+                flat_pose = Pose(
+                    position=poses.position.view(-1, 3),
+                    quaternion=poses.quaternion.view(-1, 4),
                 )
-            )
-        else:
-            self.get_logger().error('joint state in start state was empty')
-            result.error_code.val = MoveItErrorCodes.INVALID_ROBOT_STATE
-            goal_handle.abort(result)
-            return result
-
-        if plan_req.plan_grasp:
-            self.get_logger().info('Planning to Grasp Object with stop at offset distance')
-            success, error_code, poses = self.get_goal_poses(plan_req)
-            self.get_logger().info(f'Success, Error Code): {success}, {error_code}!')
-            if not success:
-                result.error_code.val = error_code
-                goal_handle.abort(result)
-                return result
-            grasp_vec_weight = None
-            if len(plan_req.grasp_partial_pose_vec_weight) == 6:
-                grasp_vec_weight = [plan_req.grasp_partial_pose_vec_weight[i] for i in range(6)]
-
-            retract_vec_weight = None
-            if len(plan_req.retract_partial_pose_vec_weight) == 6:
-                retract_vec_weight = [plan_req.retract_partial_pose_vec_weight[i]
-                                      for i in range(6)]
-
-            grasp_constraint_in_goal_frame = plan_req.grasp_approach_constraint_in_goal_frame
-            retract_constraint_in_goal_frame = plan_req.retract_constraint_in_goal_frame
-            grasp_plan_result = self.motion_gen.plan_grasp(
-                start_state,
-                poses,
-                MotionGenPlanConfig(
-                    max_attempts=self._CumotionActionServer__max_attempts,
-                    enable_graph_attempt=1,
-                    time_dilation_factor=time_dilation_factor,
-                ),
-                grasp_approach_offset=self.get_cu_pose_from_ros_pose(plan_req.grasp_offset_pose),
-                grasp_approach_path_constraint=grasp_vec_weight,
-                retract_offset=self.get_cu_pose_from_ros_pose(plan_req.retract_offset_pose),
-                retract_path_constraint=retract_vec_weight,
-                disable_collision_links=plan_req.disable_collision_links,
-                plan_approach_to_grasp=plan_req.plan_approach_to_grasp,
-                plan_grasp_to_retract=plan_req.plan_grasp_to_retract,
-                grasp_approach_constraint_in_goal_frame=grasp_constraint_in_goal_frame,
-                retract_constraint_in_goal_frame=retract_constraint_in_goal_frame,
-            )
-            if grasp_plan_result.success.item():
-                # Explicitly create a new MoveItErrorCodes message
-                result.error_code = MoveItErrorCodes(val=MoveItErrorCodes.SUCCESS)
-                traj = self.get_joint_trajectory(
-                    grasp_plan_result.grasp_trajectory, grasp_plan_result.grasp_trajectory_dt,
+                goal_tool_poses = GoalToolPose.from_poses(
+                    {self.motion_gen.tool_frames[0]: flat_pose},
+                    ordered_tool_frames=[self.motion_gen.tool_frames[0]],
+                    num_goalset=poses.position.shape[1],
                 )
-                result.planning_time = grasp_plan_result.planning_time
-                result.planned_trajectory.append(traj)
-                if plan_req.plan_grasp_to_retract:
-                    traj = self.get_joint_trajectory(
-                        grasp_plan_result.retract_trajectory,
-                        grasp_plan_result.retract_trajectory_dt,
+                with self.lock:
+                    motion_gen_result = self.motion_gen.plan_grasp(
+                        goal_tool_poses,
+                        start_state,
+                        grasp_approach_offset=grasp_approach_offset,
+                        grasp_lift_offset=grasp_lift_offset,
+                        plan_approach_to_grasp=plan_req.plan_approach_to_grasp,
+                        plan_grasp_to_lift=plan_req.plan_grasp_to_retract,
+                        disable_collision_links=plan_req.disable_collision_links,
                     )
-                    result.planned_trajectory.append(traj)
-                result.success = True
-                result.goal_index = grasp_plan_result.goalset_index.item()
-            else:
-                result.success = False
-                result.message = str(grasp_plan_result.status)
-                # Set appropriate error code based on failure reason
-                if grasp_plan_result.status == MotionGenStatus.IK_FAIL:
-                    result.error_code.val = MoveItErrorCodes.NO_IK_SOLUTION
-                elif grasp_plan_result.status in [
-                    MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION,
-                    MotionGenStatus.INVALID_START_STATE_SELF_COLLISION,
-                ]:
-                    result.error_code.val = MoveItErrorCodes.START_STATE_IN_COLLISION
-                elif grasp_plan_result.status == MotionGenStatus.INVALID_START_STATE_JOINT_LIMITS:
-                    result.error_code.val = MoveItErrorCodes.START_STATE_INVALID
+                if motion_gen_result is not None and motion_gen_result.success is not None and motion_gen_result.success.any().item():
+                    result.error_code = MoveItErrorCodes(val=MoveItErrorCodes.SUCCESS)
+
+                    if motion_gen_result.approach_interpolated_trajectory is not None:
+                        approach_dt = motion_gen_result.approach_trajectory_dt.item() if motion_gen_result.approach_trajectory_dt is not None else 0.025
+                        traj = self.get_joint_trajectory(
+                            motion_gen_result.approach_interpolated_trajectory, approach_dt,
+                        )
+                        result.planned_trajectory.append(traj)
+
+                    if motion_gen_result.grasp_interpolated_trajectory is not None:
+                        grasp_dt = motion_gen_result.grasp_trajectory_dt.item() if motion_gen_result.grasp_trajectory_dt is not None else 0.025
+                        traj = self.get_joint_trajectory(
+                            motion_gen_result.grasp_interpolated_trajectory, grasp_dt,
+                        )
+                        result.planned_trajectory.append(traj)
+
+                    if plan_req.plan_grasp_to_retract and motion_gen_result.lift_interpolated_trajectory is not None:
+                        lift_dt = motion_gen_result.lift_trajectory_dt.item() if motion_gen_result.lift_trajectory_dt is not None else 0.025
+                        traj = self.get_joint_trajectory(
+                            motion_gen_result.lift_interpolated_trajectory, lift_dt,
+                        )
+                        result.planned_trajectory.append(traj)
+
+                    result.planning_time = motion_gen_result.planning_time
+                    result.success = True
+                    if motion_gen_result.goalset_index is not None:
+                        result.goal_index = motion_gen_result.goalset_index.item()
                 else:
+                    result.success = False
+                    result.message = str(motion_gen_result.status) if motion_gen_result is not None and motion_gen_result.status else 'Grasp planning failed'
                     result.error_code.val = MoveItErrorCodes.PLANNING_FAILED
-        else:
-            if plan_req.plan_cspace:
+            elif plan_req.plan_cspace:
                 self.get_logger().info('Planning CSpace target')
                 if len(plan_req.goal_state.position) <= 0:
                     self.get_logger().error('goal state is empty')
                     result.error_code.val = MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS
                     goal_handle.abort(result)
                     return result
-                goal_state = self.motion_gen.get_active_js(
+                goal_state = self.motion_gen.kinematics.get_active_js(
                     CuJointState.from_position(
-                        position=self.tensor_args.to_device(
+                        position=self._CumotionActionServer__tensor_args.to_device(
                             plan_req.goal_state.position).unsqueeze(0),
                         joint_names=plan_req.goal_state.name,
                     )
                 )
-                self.toggle_link_collision(plan_req.disable_collision_links, False)
-
-                motion_gen_result = self.motion_gen.plan_single_js(
-                    start_state,
-                    goal_state,
-                    MotionGenPlanConfig(
+                with self.lock:
+                    self.toggle_link_collision(plan_req.disable_collision_links, False)
+                    motion_gen_result = self.motion_gen.plan_cspace(
+                        goal_state,
+                        start_state,
                         max_attempts=self._CumotionActionServer__max_attempts,
-                        enable_graph_attempt=1,
-                        time_dilation_factor=time_dilation_factor,
-                    ),
-                )
-                self.toggle_link_collision(plan_req.disable_collision_links, True)
+                    )
+                    self.toggle_link_collision(plan_req.disable_collision_links, True)
 
             elif plan_req.plan_pose:
                 self.get_logger().info('Planning Pose target')
-                if plan_req.hold_partial_pose:
-                    if len(plan_req.grasp_partial_pose_vec_weight) < 6:
-                        self.get_logger().error('Partial pose vec weight should be of length 6')
-                        result.error_code.val = MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS
-                        goal_handle.abort(result)
-                        return result
-
-                    grasp_vec_weight = [plan_req.grasp_partial_pose_vec_weight[i]
-                                        for i in range(6)]
-                    pose_cost_metric = PoseCostMetric(
-                        hold_partial_pose=True,
-                        grasp_vec_weight=self.motion_gen.tensor_args.to_device(grasp_vec_weight),
-                    )
-
-                # read goal poses:
                 success, error_code, poses = self.get_goal_poses(plan_req)
                 if not success:
                     result.error_code.val = error_code
                     goal_handle.abort(result)
                     return result
 
-                self.toggle_link_collision(plan_req.disable_collision_links, False)
-                if poses.shape[1] == 1:
-                    poses.position = poses.position.view(-1, 3)
-                    poses.quaternion = poses.quaternion.view(-1, 4)
-                    motion_gen_result = self.motion_gen.plan_single(
-                        start_state,
-                        poses,
-                        MotionGenPlanConfig(
+                num_goalset = poses.position.shape[1]
+                with self.lock:
+                    self.toggle_link_collision(plan_req.disable_collision_links, False)
+                    for g in range(num_goalset):
+                        single_pose = Pose(
+                            position=poses.position[0, g:g+1, :].contiguous(),
+                            quaternion=poses.quaternion[0, g:g+1, :].contiguous(),
+                        )
+                        goal_tool_poses = GoalToolPose.from_poses(
+                            {self.motion_gen.tool_frames[0]: single_pose},
+                            ordered_tool_frames=[self.motion_gen.tool_frames[0]],
+                            num_goalset=1,
+                        )
+                        motion_gen_result = self.motion_gen.plan_pose(
+                            goal_tool_poses,
+                            start_state,
                             max_attempts=self._CumotionActionServer__max_attempts,
-                            enable_graph_attempt=1,
-                            time_dilation_factor=time_dilation_factor,
-                            pose_cost_metric=pose_cost_metric,
-                        ),
-                    )
-                else:
-                    motion_gen_result = self.motion_gen.plan_goalset(
-                        start_state,
-                        poses,
-                        MotionGenPlanConfig(
-                            max_attempts=self._CumotionActionServer__max_attempts,
-                            enable_graph_attempt=1,
-                            time_dilation_factor=time_dilation_factor,
-                            pose_cost_metric=pose_cost_metric,
-                        ),
-                    )
-                self.toggle_link_collision(plan_req.disable_collision_links, True)
+                        )
+                        if motion_gen_result is not None and motion_gen_result.success is not None and motion_gen_result.success.any().item():
+                            break
+                    self.toggle_link_collision(plan_req.disable_collision_links, True)
 
-            if motion_gen_result.success.item():
+            if motion_gen_result is not None and motion_gen_result.success is not None and motion_gen_result.success.any().item():
                 result.error_code.val = MoveItErrorCodes.SUCCESS
                 traj = self.get_joint_trajectory(
-                    motion_gen_result.optimized_plan, motion_gen_result.optimized_dt.item()
+                    motion_gen_result.js_solution, motion_gen_result.js_solution.dt.item()
                 )
-                result.planning_time = motion_gen_result.total_time
+                result.planning_time = motion_gen_result.total_time if hasattr(motion_gen_result, 'total_time') else 0.0
                 result.planned_trajectory.append(traj)
                 result.success = True
-                if not plan_req.plan_cspace:
+                if hasattr(motion_gen_result, 'goalset_index') and motion_gen_result.goalset_index is not None:
                     result.goal_index = motion_gen_result.goalset_index.item()
-            elif not motion_gen_result.valid_query:
-                self.get_logger().error(f'Invalid planning query: {motion_gen_result.status}')
-                if motion_gen_result.status == MotionGenStatus.INVALID_START_STATE_JOINT_LIMITS:
-                    result.error_code.val = MoveItErrorCodes.START_STATE_INVALID
-                if motion_gen_result.status in [
-                    MotionGenStatus.INVALID_START_STATE_WORLD_COLLISION,
-                    MotionGenStatus.INVALID_START_STATE_SELF_COLLISION,
-                ]:
-                    result.error_code.val = MoveItErrorCodes.START_STATE_IN_COLLISION
-            else:
-                self.get_logger().error(
-                    f'Motion planning failed wih status: {motion_gen_result.status}'
+            elif motion_gen_result is None:
+                self.get_logger().error('Motion planning failed: result is None')
+                result.error_code.val = MoveItErrorCodes.PLANNING_FAILED
+            elif not plan_req.plan_grasp:
+                self.get_logger().error('Motion planning failed')
+                result.error_code.val = MoveItErrorCodes.PLANNING_FAILED
+
+            if not plan_req.plan_grasp:
+                self.get_logger().info(
+                    'returned planning result (query, success): '
+                    + str(self._CumotionActionServer__query_count)
+                    + ' '
+                    + str(motion_gen_result.success.item() if motion_gen_result is not None and motion_gen_result.success is not None else False)
                 )
-                if motion_gen_result.status == MotionGenStatus.IK_FAIL:
-                    result.error_code.val = MoveItErrorCodes.NO_IK_SOLUTION
 
-            self.get_logger().info(
-                'returned planning result (query, success, failure_status): '
-                + str(self._CumotionActionServer__query_count)
-                + ' '
-                + str(motion_gen_result.success.item())
-                + ' '
-                + str(motion_gen_result.status)
-            )
-
-        self._CumotionActionServer__query_count += 1
-        if result.success:
-            goal_handle.succeed(result)
-        else:
-            goal_handle.abort(result)
-        return result
+            self._CumotionActionServer__query_count += 1
+            if result.success:
+                goal_handle.succeed(result)
+            else:
+                goal_handle.abort(result)
+            return result
+        finally:
+            with self.lock:
+                self.planner_busy = False
 
 
 def main(args=None):

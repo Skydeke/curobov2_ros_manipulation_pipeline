@@ -18,15 +18,14 @@ from typing import Dict, List, Tuple, Union
 
 from action_msgs.msg import GoalStatus
 import cupy as cp
-from curobo.cuda_robot_model.cuda_robot_model import CudaRobotModel
-from curobo.geom.types import Cuboid as CuCuboid
-from curobo.geom.types import Mesh as CuMesh
-from curobo.geom.types import Obstacle as CuObstacle
-from curobo.types.base import TensorDeviceType
-from curobo.types.camera import CameraObservation
-from curobo.types.math import Pose as CuPose
-from curobo.types.robot import RobotConfig
-from curobo.types.state import JointState as CuJointState
+from curobo._src.geom.types import Cuboid as CuCuboid
+from curobo._src.geom.types import Mesh as CuMesh
+from curobo._src.geom.types import Obstacle as CuObstacle
+from curobo.types import DeviceCfg as TensorDeviceType
+from curobo.types import CameraObservation
+from curobo.types import Pose as CuPose
+from curobo._src.types.robot import RobotCfg as RobotConfig
+from curobo.types import JointState as CuJointState
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PointStamped
 from geometry_msgs.msg import Pose, Vector3
@@ -289,8 +288,8 @@ class AttachObjectServer(Node):
         self.__cfg_base_link = robot_config['robot_cfg']['kinematics']['base_link']
 
         # Creating an instance of robot kinematics using config file:
-        robot_cfg = RobotConfig.from_dict(
-            robot_config, self.__tensor_args)
+        robot_cfg = RobotConfig.create(
+            robot_config, device_cfg=self.__tensor_args)
         self.__kin_model = CudaRobotModel(robot_cfg.kinematics)
 
         # Maintain the state of the object attachment
