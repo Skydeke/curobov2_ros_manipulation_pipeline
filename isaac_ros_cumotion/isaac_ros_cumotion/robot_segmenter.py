@@ -225,6 +225,7 @@ class CumotionRobotSegmenter(Node):
             robot_config, distance_threshold=distance_threshold,
             device_cfg=self._device_cfg,
         )
+        self._cumotion_segmenter._ops_dtype = torch.float32
 
         self._cumotion_base_frame = self._cumotion_segmenter.base_link
 
@@ -289,7 +290,7 @@ class CumotionRobotSegmenter(Node):
                         t = self.tf_buffer.lookup_transform(
                             self._cumotion_base_frame,
                             camera_headers[i].frame_id,
-                            timestamp,
+                            rclpy.time.Time(),
                             rclpy.duration.Duration(seconds=self._tf_lookup_duration),
                         )
                         self._robot_pose_camera[i] = CuPose.from_list(

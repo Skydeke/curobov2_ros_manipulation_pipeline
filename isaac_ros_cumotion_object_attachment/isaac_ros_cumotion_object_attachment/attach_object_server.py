@@ -18,14 +18,15 @@ from typing import Dict, List, Tuple, Union
 
 from action_msgs.msg import GoalStatus
 import cupy as cp
-from curobo._src.geom.types import Cuboid as CuCuboid
-from curobo._src.geom.types import Mesh as CuMesh
-from curobo._src.geom.types import Obstacle as CuObstacle
+from curobo.scene import Cuboid as CuCuboid
+from curobo.scene import Mesh as CuMesh
+from curobo.scene import Obstacle as CuObstacle
 from curobo.types import DeviceCfg as TensorDeviceType
 from curobo.types import CameraObservation
 from curobo.types import Pose as CuPose
-from curobo._src.types.robot import RobotCfg as RobotConfig
+
 from curobo.types import JointState as CuJointState
+from curobo.kinematics import Kinematics
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Point, PointStamped
 from geometry_msgs.msg import Pose, Vector3
@@ -285,12 +286,15 @@ class AttachObjectServer(Node):
         )
 
         # Extracting robot's base link name
-        self.__cfg_base_link = robot_config['robot_cfg']['kinematics']['base_link']
+        kinematics = robot_config['robot_cfg']['kinematics']
+        if isinstance(kinematics, dict):
+            self.__cfg_base_link = kinematics['base_link']
+        else:
+            self.__cfg_base_link = kinematics.kinematics_config.base_link
 
         # Creating an instance of robot kinematics using config file:
-        robot_cfg = RobotConfig.create(
-            robot_config, device_cfg=self.__tensor_args)
-        self.__kin_model = CudaRobotModel(robot_cfg.kinematics)
+        kcfg = robot_config['robot_cfg']['kinematics']
+        self.__kin_model = Kinematics(kcfg)
 
         # Maintain the state of the object attachment
         self.__object_state = ObjectState.DETACHED
@@ -446,9 +450,9 @@ class AttachObjectServer(Node):
 
         elif self.__object_state in [ObjectState.ATTACHED, ObjectState.ATTACHED_FALLBACK]:
             if attach_object:
-                self.get_logger().error(
-                    'Detach the current object before attempting to attach the new one.')
-                return False
+                self.get_logger().info(
+                    'Already attached, auto-detaching before re-attaching.')
+                return True
             else:
                 return True
 
@@ -554,6 +558,14 @@ class AttachObjectServer(Node):
         object detached. If successful, attempt to sync link spheres with other nodes.
         If sync succeeds, update the object state to attached.
         """
+        # Auto-detach if already attached
+        if self.__object_state in (ObjectState.ATTACHED, ObjectState.ATTACHED_FALLBACK):
+            self.get_logger().info('Auto-detaching previous object before re-attaching')
+            self.__kin_model.kinematics_config.detach_object(
+                link_name=self.__object_link_name)
+            self.sync_object_link_spheres_across_nodes(False, att_obj_srv_goal_handle)
+            self.__object_state = ObjectState.DETACHED
+
         max_retries = 5  # Maximum number of retries
         retries = 0
         success = False  # Initialize success before the loop
@@ -1134,7 +1146,29 @@ class AttachObjectServer(Node):
                     otherwise None.
 
         """
-        # Validate necessary data from subscribers
+        attached_object_shape = self.__attached_object_config.type
+
+        # For CUBE/MESH objects from perception, generate spheres directly from
+        # the marker geometry without needing depth camera or joint state data.
+        if attached_object_shape in (Marker.CUBE, Marker.MESH_RESOURCE):
+            self.get_logger().info(
+                f'Generating collision spheres from marker geometry (type={attached_object_shape})')
+            try:
+                attached_object_frame_sphere_tensor = self.get_spheres_in_attached_object_frame()
+                self.get_logger().info(
+                    f'Generated {attached_object_frame_sphere_tensor.shape[0]} spheres')
+                self.attach_object_collision_spheres(
+                    spheres_in_attached_object_frame=attached_object_frame_sphere_tensor
+                )
+                self.get_logger().info(
+                    f'Updated link spheres in kinematic model')
+                return True, None
+            except Exception as e:
+                self.get_logger().error(
+                    f'Failed to attach CUBE/MESH object: {traceback.format_exc()}')
+                return False, str(e)
+
+        # Validate necessary data from subscribers (for SPHERE type requiring depth camera)
         if not self.has_valid_subscriber_data():
             return False, None
 
@@ -1143,7 +1177,6 @@ class AttachObjectServer(Node):
             return False, None
 
         try:
-            attached_object_shape = self.__attached_object_config.type
             # Lock to prevent concurrent data modification during read and copy.
             with self.__lock:
                 error_msg = ('No depth images in the buffer, please check the time sync slop '
@@ -1180,18 +1213,12 @@ class AttachObjectServer(Node):
                 att_obj_srv_goal_handle=att_obj_srv_goal_handle
             )
 
-            if attached_object_shape in (Marker.CUBE, Marker.MESH_RESOURCE):
-                attached_object_frame_sphere_tensor = self.get_spheres_in_attached_object_frame()
-                self.attach_object_collision_spheres(
-                    spheres_in_attached_object_frame=attached_object_frame_sphere_tensor
-                )
-            elif attached_object_shape == Marker.SPHERE:
-                self.attach_object_collision_spheres_from_point_cloud(
-                    att_obj_srv_goal_handle=att_obj_srv_goal_handle,
-                    depth_image=depth_image,
-                    intrinsics=intrinsics,
-                    object_frame_origin=object_frame_origin,
-                    joint_states=joint_states)
+            self.attach_object_collision_spheres_from_point_cloud(
+                att_obj_srv_goal_handle=att_obj_srv_goal_handle,
+                depth_image=depth_image,
+                intrinsics=intrinsics,
+                object_frame_origin=object_frame_origin,
+                joint_states=joint_states)
 
             if self.__robot_sphere_markers_publisher.get_subscription_count() > 0:
                 self.publish_robot_spheres(
@@ -1451,17 +1478,12 @@ class AttachObjectServer(Node):
         object_frame = self.__object_link_name
         gripper_frame = self.__gripper_frame_name
 
-        # Type hint | self.__kin_model: CudaRobotModel
-        default_joint_positions = self.__kin_model.retract_config
-
-        # Type hint | robot_state: CudaRobotModelState
-        robot_state = self.__kin_model.compute_kinematics_from_joint_position(
-            joint_position=default_joint_positions
+        robot_state = self.__kin_model.compute_kinematics(
+            self.__kin_model.default_joint_state
         )
 
-        link_poses = robot_state.link_poses
-        robot_base_frame_pose_object_frame = link_poses[object_frame]
-        robot_base_frame_pose_gripper_frame = link_poses[gripper_frame]
+        robot_base_frame_pose_object_frame = robot_state.tool_poses.get_link_pose(object_frame)
+        robot_base_frame_pose_gripper_frame = robot_state.tool_poses.get_link_pose(gripper_frame)
 
         object_frame_pose_robot_base_frame = robot_base_frame_pose_object_frame.inverse()
 
@@ -1585,8 +1607,8 @@ class AttachObjectServer(Node):
 
         """
         cu_spheres = attached_object.get_bounding_spheres(
-            n_spheres=self.__object_attachment_n_spheres,
-            surface_sphere_radius=self.__surface_sphere_radius
+            num_spheres=self.__object_attachment_n_spheres,
+            surface_radius=self.__surface_sphere_radius
         )
 
         object_frame_position_sphere_centers = torch.tensor(
@@ -1728,8 +1750,9 @@ class AttachObjectServer(Node):
 
         active_jnames = self.__kin_model.joint_names
         joint_states = joint_states.get_ordered_joint_state(active_jnames)
-        out = self.__kin_model.get_state(joint_states.position)
-        object_frame_origin = out.link_poses[self.__object_link_name].position
+        out = self.__kin_model.compute_kinematics(joint_states)
+        object_frame_origin = out.tool_poses.get_link_pose(
+            self.__object_link_name).position
 
         self.__att_obj_srv_fb_msg.status = (
             f'Obtained object position using forward kinematics in {time.time() - start_time}s.'

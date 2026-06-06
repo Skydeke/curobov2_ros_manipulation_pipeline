@@ -20,7 +20,8 @@ import os
 from ament_index_python.packages import get_package_share_directory
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
@@ -154,6 +155,21 @@ def generate_launch_description():
             default_value='100',
             description='Minimum points for clustering'
         ),
+        DeclareLaunchArgument(
+            'object_attachment_gripper_frame_name',
+            default_value='grasp_frame',
+            description='Gripper frame name for object attachment'
+        ),
+        DeclareLaunchArgument(
+            'enable_segmenter',
+            default_value='false',
+            description='Enable robot segmenter nodes'
+        ),
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='false',
+            description='Use simulation time'
+        ),
     ]
 
     # LaunchConfiguration objects to pass to the launch files
@@ -186,6 +202,9 @@ def generate_launch_description():
     clustering_group_clusters = LaunchConfiguration(
         'clustering_group_clusters')
     clustering_min_points = LaunchConfiguration('clustering_min_points')
+    enable_segmenter = LaunchConfiguration('enable_segmenter')
+    object_attachment_gripper_frame_name = LaunchConfiguration(
+        'object_attachment_gripper_frame_name')
 
     # Shared world depth topic as a string array
     world_depth_topic = "['/cumotion/camera_1/world_depth']"
@@ -218,26 +237,29 @@ def generate_launch_description():
         }.items()
     )
 
-    robot_segmenter_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(robot_segmenter_launch_path),
-        launch_arguments={
-            'robot_segmenter.robot': robot,
-            'robot_segmenter.urdf_path': urdf_path,
-            'cumotion_planner.yml_file_path': yml_file_path,
-            'robot_segmenter.depth_image_topics': depth_image_topics,
-            'robot_segmenter.depth_camera_infos': depth_camera_info_topics,
-            'robot_segmenter.joint_states_topic': joint_states_topic,
-            'robot_segmenter.time_sync_slop': time_sync_slop,
-            'robot_segmenter.distance_threshold': distance_threshold,
-            'robot_segmenter.update_link_sphere_server':
-                update_link_sphere_server_segmenter,
-            'robot_segmenter.world_depth_publish_topics': world_depth_topic,
-            'robot_segmenter.depth_qos': 'SENSOR_DATA',
-            'robot_segmenter.depth_info_qos': 'SENSOR_DATA',
-            'robot_segmenter.mask_qos': 'SENSOR_DATA',
-            'robot_segmenter.world_depth_qos': 'SENSOR_DATA',
-
-        }.items()
+    robot_segmenter_launch = GroupAction(
+        actions=[IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(robot_segmenter_launch_path),
+            launch_arguments={
+                'robot_segmenter.robot': robot,
+                'robot_segmenter.urdf_path': urdf_path,
+                'cumotion_planner.yml_file_path': yml_file_path,
+                'robot_segmenter.depth_image_topics': depth_image_topics,
+                'robot_segmenter.depth_camera_infos': depth_camera_info_topics,
+                'robot_segmenter.joint_states_topic': joint_states_topic,
+                'robot_segmenter.time_sync_slop': time_sync_slop,
+                'robot_segmenter.distance_threshold': distance_threshold,
+                'robot_segmenter.update_link_sphere_server':
+                    update_link_sphere_server_segmenter,
+                'robot_segmenter.world_depth_publish_topics': world_depth_topic,
+                'robot_segmenter.depth_qos': 'SENSOR_DATA',
+                'robot_segmenter.depth_info_qos': 'SENSOR_DATA',
+                'robot_segmenter.mask_qos': 'DEFAULT',
+                'robot_segmenter.world_depth_qos': 'DEFAULT',
+                'standalone_mode': 'true',
+            }.items()
+        )],
+        condition=IfCondition(enable_segmenter)
     )
 
     object_attachment_launch = IncludeLaunchDescription(
@@ -245,6 +267,8 @@ def generate_launch_description():
         launch_arguments={
             'object_attachment.robot': robot,
             'object_attachment.urdf_path': urdf_path,
+            'object_attachment.object_attachment_gripper_frame_name':
+                object_attachment_gripper_frame_name,
             'object_attachment.time_sync_slop': time_sync_slop,
             'object_attachment.joint_states_topic': joint_states_topic,
             'object_attachment.depth_image_topics': world_depth_topic,
@@ -272,11 +296,10 @@ def generate_launch_description():
             'object_attachment.depth_info_qos': 'SENSOR_DATA',
         }.items()
     )
-    # Add sim time parameter as we always run this launch file with a ROSbag which needs this
-    # parameter so that object attachment can filter depth images correctly.
-    use_sim_time_param = [SetParameter(name='use_sim_time', value=True)]
+    use_sim_time = LaunchConfiguration('use_sim_time')
+    use_sim_time_param = SetParameter(name='use_sim_time', value=use_sim_time)
     # Return the LaunchDescription with all included launch files
-    return LaunchDescription(launch_args + use_sim_time_param + [
+    return LaunchDescription(launch_args + [use_sim_time_param] + [
         cumotion_launch,
         robot_segmenter_launch,
         object_attachment_launch

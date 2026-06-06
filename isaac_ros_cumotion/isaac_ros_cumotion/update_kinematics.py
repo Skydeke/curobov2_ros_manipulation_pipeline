@@ -60,7 +60,8 @@ def get_robot_config(robot_file: str,
         kcfg = KinematicsCfg.from_content_path(
             content_path,
             device_cfg=DeviceCfg(),
-            extra_collision_spheres={'attached_object': 100},
+            extra_collision_spheres={object_link_name: 100}
+            if object_link_name else None,
             tool_frames=[object_link_name] if object_link_name else None,
         )
 
