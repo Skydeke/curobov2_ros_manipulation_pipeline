@@ -170,6 +170,148 @@ def generate_launch_description():
             default_value='false',
             description='Use simulation time'
         ),
+
+        # cumotion_planner parameters forwarded to isaac_ros_cumotion.launch.py
+        DeclareLaunchArgument(
+            'cumotion_planner.time_dilation_factor',
+            default_value='0.5',
+            description='Time dilation factor for cuMotion'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.max_attempts',
+            default_value='10',
+            description='Maximum planning attempts'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.num_graph_seeds',
+            default_value='6',
+            description='Number of graph seeds'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.num_trajopt_seeds',
+            default_value='6',
+            description='Number of trajectory optimization seeds'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.include_trajopt_retract_seed',
+            default_value='True',
+            description='Include trajectory optimization retract seed'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.num_trajopt_time_steps',
+            default_value='32',
+            description='Number of trajectory optimization time steps'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.joint_states_topic',
+            default_value='/joint_states',
+            description='Joint states topic'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.interpolation_dt',
+            default_value='0.025',
+            description='Interpolation delta time'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.collision_cache_cuboid',
+            default_value='20',
+            description='Collision cache cuboid size'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.collision_cache_mesh',
+            default_value='20',
+            description='Collision cache mesh size'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.workspace_file_path',
+            default_value='',
+            description='Path to workspace bounds file'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.grid_size_m',
+            default_value='[2.0, 2.0, 2.0]',
+            description='Voxel grid size in meters'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.voxel_size',
+            default_value='0.05',
+            description='Voxel size in meters'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.read_esdf_world',
+            default_value='False',
+            description='Read ESDF world from nvblox'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.publish_curobo_world_as_voxels',
+            default_value='False',
+            description='Publish cuRobo world as voxels'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.add_ground_plane',
+            default_value='False',
+            description='Add ground plane'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.publish_voxel_size',
+            default_value='0.05',
+            description='Voxel publish size'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.max_publish_voxels',
+            default_value='50000',
+            description='Maximum number of voxels to publish'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.tool_frame',
+            default_value='',
+            description='Tool frame name'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.grid_center_m',
+            default_value='[0.0, 0.0, 0.0]',
+            description='Voxel grid center in meters'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.esdf_service_name',
+            default_value='/nvblox_node/get_esdf_and_gradient',
+            description='ESDF service name'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.enable_curobo_debug_mode',
+            default_value='False',
+            description='Enable cuRobo debug mode'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.override_moveit_scaling_factors',
+            default_value='False',
+            description='Override MoveIt scaling factors'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.enable_cuda_mps',
+            default_value='False',
+            description='Enable CUDA MPS'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.cuda_mps_pipe_directory',
+            default_value='/workspaces/isaac_ros-dev/ros_ws/mps_pipe_dir',
+            description='CUDA MPS pipe directory'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.cuda_mps_client_priority',
+            default_value='0',
+            description='CUDA MPS client priority'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.cuda_mps_active_thread_percentage',
+            default_value='100',
+            description='CUDA MPS active thread percentage'
+        ),
+        DeclareLaunchArgument(
+            'cumotion_planner.moveit_collision_objects_scene_file',
+            default_value='',
+            description='Path to MoveIt collision objects scene file'
+        ),
     ]
 
     # LaunchConfiguration objects to pass to the launch files
@@ -232,8 +374,64 @@ def generate_launch_description():
             'cumotion_planner.robot': robot,
             'cumotion_planner.urdf_path': urdf_path,
             'cumotion_planner.yml_file_path': yml_file_path,
+            'cumotion_planner.time_dilation_factor':
+                LaunchConfiguration('cumotion_planner.time_dilation_factor'),
+            'cumotion_planner.max_attempts':
+                LaunchConfiguration('cumotion_planner.max_attempts'),
+            'cumotion_planner.num_graph_seeds':
+                LaunchConfiguration('cumotion_planner.num_graph_seeds'),
+            'cumotion_planner.num_trajopt_seeds':
+                LaunchConfiguration('cumotion_planner.num_trajopt_seeds'),
+            'cumotion_planner.include_trajopt_retract_seed':
+                LaunchConfiguration('cumotion_planner.include_trajopt_retract_seed'),
+            'cumotion_planner.num_trajopt_time_steps':
+                LaunchConfiguration('cumotion_planner.num_trajopt_time_steps'),
+            'cumotion_planner.joint_states_topic':
+                LaunchConfiguration('cumotion_planner.joint_states_topic'),
+            'cumotion_planner.interpolation_dt':
+                LaunchConfiguration('cumotion_planner.interpolation_dt'),
+            'cumotion_planner.collision_cache_cuboid':
+                LaunchConfiguration('cumotion_planner.collision_cache_cuboid'),
+            'cumotion_planner.collision_cache_mesh':
+                LaunchConfiguration('cumotion_planner.collision_cache_mesh'),
+            'cumotion_planner.workspace_file_path':
+                LaunchConfiguration('cumotion_planner.workspace_file_path'),
+            'cumotion_planner.grid_size_m':
+                LaunchConfiguration('cumotion_planner.grid_size_m'),
+            'cumotion_planner.voxel_size':
+                LaunchConfiguration('cumotion_planner.voxel_size'),
+            'cumotion_planner.read_esdf_world':
+                LaunchConfiguration('cumotion_planner.read_esdf_world'),
+            'cumotion_planner.publish_curobo_world_as_voxels':
+                LaunchConfiguration('cumotion_planner.publish_curobo_world_as_voxels'),
+            'cumotion_planner.add_ground_plane':
+                LaunchConfiguration('cumotion_planner.add_ground_plane'),
+            'cumotion_planner.publish_voxel_size':
+                LaunchConfiguration('cumotion_planner.publish_voxel_size'),
+            'cumotion_planner.max_publish_voxels':
+                LaunchConfiguration('cumotion_planner.max_publish_voxels'),
+            'cumotion_planner.tool_frame':
+                LaunchConfiguration('cumotion_planner.tool_frame'),
+            'cumotion_planner.grid_center_m':
+                LaunchConfiguration('cumotion_planner.grid_center_m'),
+            'cumotion_planner.esdf_service_name':
+                LaunchConfiguration('cumotion_planner.esdf_service_name'),
+            'cumotion_planner.enable_curobo_debug_mode':
+                LaunchConfiguration('cumotion_planner.enable_curobo_debug_mode'),
+            'cumotion_planner.override_moveit_scaling_factors':
+                LaunchConfiguration('cumotion_planner.override_moveit_scaling_factors'),
             'cumotion_planner.update_link_sphere_server':
                 update_link_sphere_server_planner,
+            'cumotion_planner.enable_cuda_mps':
+                LaunchConfiguration('cumotion_planner.enable_cuda_mps'),
+            'cumotion_planner.cuda_mps_pipe_directory':
+                LaunchConfiguration('cumotion_planner.cuda_mps_pipe_directory'),
+            'cumotion_planner.cuda_mps_client_priority':
+                LaunchConfiguration('cumotion_planner.cuda_mps_client_priority'),
+            'cumotion_planner.cuda_mps_active_thread_percentage':
+                LaunchConfiguration('cumotion_planner.cuda_mps_active_thread_percentage'),
+            'cumotion_planner.moveit_collision_objects_scene_file':
+                LaunchConfiguration('cumotion_planner.moveit_collision_objects_scene_file'),
         }.items()
     )
 
@@ -252,8 +450,8 @@ def generate_launch_description():
                 'robot_segmenter.update_link_sphere_server':
                     update_link_sphere_server_segmenter,
                 'robot_segmenter.world_depth_publish_topics': world_depth_topic,
-                'robot_segmenter.depth_qos': 'SENSOR_DATA',
-                'robot_segmenter.depth_info_qos': 'SENSOR_DATA',
+                'robot_segmenter.depth_qos': 'DEFAULT',
+                'robot_segmenter.depth_info_qos': 'DEFAULT',
                 'robot_segmenter.mask_qos': 'DEFAULT',
                 'robot_segmenter.world_depth_qos': 'DEFAULT',
                 'standalone_mode': 'true',

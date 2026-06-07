@@ -205,11 +205,58 @@ class UpdateLinkSpheresServer:
         # Reshape the tensor to (N, 4), where N is the number of spheres
         sphere_tensor = sphere_tensor.view(-1, 4)
 
-        self.__robot_kinematics.config.kinematics_config.update_link_spheres(
-            link_name=goal_handle.request.object_link_name,
+        kin_config = self.__robot_kinematics.config.kinematics_config
+        link_name = goal_handle.request.object_link_name
+        num_spheres = sphere_tensor.shape[0]
+
+        if link_name not in kin_config.link_name_to_idx_map:
+            link_idx = len(kin_config.link_name_to_idx_map)
+            kin_config.link_name_to_idx_map[link_name] = link_idx
+        else:
+            link_idx = kin_config.link_name_to_idx_map[link_name]
+
+        existing = torch.nonzero(
+            kin_config.link_sphere_idx_map == link_idx
+        ).view(-1)
+
+        if existing.shape[0] < num_spheres:
+            spheres_to_add = num_spheres - existing.shape[0]
+            n_configs = kin_config.link_spheres.shape[0]
+            device = kin_config.link_spheres.device
+            dtype = kin_config.link_spheres.dtype
+            idx_dtype = kin_config.link_sphere_idx_map.dtype
+
+            new_idx = torch.full(
+                (spheres_to_add,), link_idx, device=device, dtype=idx_dtype
+            )
+            kin_config.link_sphere_idx_map = torch.cat(
+                [kin_config.link_sphere_idx_map, new_idx]
+            )
+
+            new_sph = torch.zeros(
+                (n_configs, spheres_to_add, 4), device=device, dtype=dtype
+            )
+            kin_config.link_spheres = torch.cat(
+                [kin_config.link_spheres, new_sph], dim=1
+            )
+
+            if kin_config.reference_link_spheres is not None:
+                new_ref = torch.zeros(
+                    (n_configs, spheres_to_add, 4), device=device, dtype=dtype
+                )
+                kin_config.reference_link_spheres = torch.cat(
+                    [kin_config.reference_link_spheres, new_ref], dim=1
+                )
+
+            kin_config.total_spheres += spheres_to_add
+
+        kin_config.update_link_spheres(
+            link_name=link_name,
             sphere_position_radius=sphere_tensor,
             start_sph_idx=0,
         )
+
+        self.__robot_kinematics.update_batch_size(1, 1, reset_buffers=True)
 
         time_total = time.time() - time_start
         feedback_msg.status = f'Attached object for {self.__action_name} in {time_total}s'
@@ -217,8 +264,12 @@ class UpdateLinkSpheresServer:
 
     def handle_detachment(self, goal_handle: ServerGoalHandle,
                           feedback_msg: UpdateLinkSpheres.Feedback) -> None:
-        self.__robot_kinematics.config.kinematics_config.detach_object(
-            link_name=goal_handle.request.object_link_name)
+        kin_config = self.__robot_kinematics.config.kinematics_config
+        link_name = goal_handle.request.object_link_name
+        if link_name in kin_config.link_name_to_idx_map:
+            kin_config.disable_link_spheres(link_name=link_name)
+            self.__server_node.get_logger().info(
+                f'Disabled link spheres for {link_name} on {self.__action_name}')
         feedback_msg.status = f'Detached Attached object for {self.__action_name}'
         goal_handle.publish_feedback(feedback_msg)
 
@@ -230,6 +281,16 @@ class UpdateLinkSpheresServer:
 
         if self.__debug_robot_publisher.get_subscription_count() == 0:
             return
+
+        # Sync locked joints (e.g. finger_joint) from the incoming JointState so that
+        # gripper collision spheres track the actual gripper position.
+        lock_js = self.__robot_kinematics.lock_jointstate
+        if lock_js is not None and lock_js.joint_names is not None:
+            lock_names = list(lock_js.joint_names)
+            for i, name in enumerate(robot_joint_names):
+                if name in lock_names:
+                    idx = lock_names.index(name)
+                    lock_js.position[idx] = float(robot_joint_states[i])
 
         q = CuJointState.from_numpy(
             joint_names=robot_joint_names,

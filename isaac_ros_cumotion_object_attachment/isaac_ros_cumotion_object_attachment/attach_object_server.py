@@ -561,8 +561,10 @@ class AttachObjectServer(Node):
         # Auto-detach if already attached
         if self.__object_state in (ObjectState.ATTACHED, ObjectState.ATTACHED_FALLBACK):
             self.get_logger().info('Auto-detaching previous object before re-attaching')
-            self.__kin_model.kinematics_config.detach_object(
-                link_name=self.__object_link_name)
+            kin_config = self.__kin_model.kinematics_config
+            if self.__object_link_name in kin_config.link_name_to_idx_map:
+                kin_config.disable_link_spheres(
+                    link_name=self.__object_link_name)
             self.sync_object_link_spheres_across_nodes(False, att_obj_srv_goal_handle)
             self.__object_state = ObjectState.DETACHED
 
@@ -817,8 +819,12 @@ class AttachObjectServer(Node):
         """
         detachment_time = time.time()
         try:
-            self.__kin_model.kinematics_config.detach_object(
-                link_name=self.__object_link_name)
+            kin_config = self.__kin_model.kinematics_config
+            if self.__object_link_name in kin_config.link_name_to_idx_map:
+                kin_config.disable_link_spheres(
+                    link_name=self.__object_link_name)
+                self.get_logger().info(
+                    f'Disabled link spheres for {self.__object_link_name}')
 
             self.__att_obj_srv_fb_msg.status = (
                 f'Object detached in {time.time()-detachment_time}s.')
@@ -830,6 +836,8 @@ class AttachObjectServer(Node):
                 self.__object_state = ObjectState.DETACHED
 
         except Exception as e:
+            self.get_logger().error(
+                f'Error in detachment: {traceback.format_exc()}')
             self.__att_obj_srv_fb_msg.status = (
                 f'Error in detachment: {str(e)}')
             att_obj_srv_goal_handle.publish_feedback(self.__att_obj_srv_fb_msg)
@@ -873,8 +881,9 @@ class AttachObjectServer(Node):
         for action_name, action_client in self.__action_clients.items():
             update_spheres_future = self.send_goal_to_update_spheres(
                 action_client, update_spheres_goal_msg, action_name, att_obj_srv_goal_handle)
-            update_spheres_goal_futures.append(
-                (action_name, update_spheres_future))
+            if update_spheres_future is not None:
+                update_spheres_goal_futures.append(
+                    (action_name, update_spheres_future))
 
         # Wait for the completion of goal at all dependent action servers
         all_succeeded = True
@@ -920,7 +929,10 @@ class AttachObjectServer(Node):
             to update spheres was accepted, rejected, or completed successfully.
 
         """
-        action_client.wait_for_server()
+        if not action_client.wait_for_server(timeout_sec=5.0):
+            self.get_logger().warn(
+                f'Action server {action_name} not available, skipping sync')
+            return None
         send_goal_future = action_client.send_goal_async(
             update_spheres_goal_msg,
             feedback_callback=(
@@ -1162,6 +1174,15 @@ class AttachObjectServer(Node):
                 )
                 self.get_logger().info(
                     f'Updated link spheres in kinematic model')
+
+                if self.__robot_sphere_markers_publisher.get_subscription_count() > 0:
+                    joint_states = self.__kin_model.default_joint_state
+                    self._sync_locked_joints_from_buffer(self.__kin_model)
+                    self.publish_robot_spheres(
+                        joint_states=joint_states,
+                        att_obj_srv_goal_handle=att_obj_srv_goal_handle
+                    )
+
                 return True, None
             except Exception as e:
                 self.get_logger().error(
@@ -1407,10 +1428,9 @@ class AttachObjectServer(Node):
         """
         Generate and return the collision spheres in the attached object's frame of reference.
 
-        Calculates the position of collision spheres relative to the attached object's
-        frame, taking into account the transformations between the detected object, gripper, and
-        attached object frames. The function also concatenates the computed sphere positions and
-        their radii into a tensor for further processing.
+        Looks up the TF from the marker's reference frame into the grasping_frame coordinate
+        system, expresses the object's pose in grasping_frame coordinates, and generates
+        bounding spheres using that relative pose.
 
         Args
         ----
@@ -1418,41 +1438,118 @@ class AttachObjectServer(Node):
 
         Returns
         -------
-            torch.Tensor: A tensor containing the sphere centers and radii, with the sphere
-            positions transformed to the attached object's frame.
+            torch.Tensor: A tensor of shape (N, 4) containing sphere [x, y, z, r] expressed
+            in the ``object_link_name`` (grasping_frame) coordinate system.
 
         """
-        grasp_pose = self.__attached_object_config.pose
-        gripper_frame_pose_object_frame = [grasp_pose.position.x,
-                                           grasp_pose.position.y,
-                                           grasp_pose.position.z,
-                                           grasp_pose.orientation.w,
-                                           grasp_pose.orientation.x,
-                                           grasp_pose.orientation.y,
-                                           grasp_pose.orientation.z]
-
-        attached_object_frame_pose_gripper_frame = (
-            self.get_gripper_to_attached_object_frame_transform()
+        marker_pose = self.__attached_object_config.pose
+        # header.frame_id tells us in which frame the perception result is expressed
+        # (typically "base_link" for this pipeline).
+        marker_frame = (
+            self.__attached_object_config.header.frame_id
+            or self.__cfg_base_link
         )
 
-        detected_object_frame_position_sphere_centers, radii_spheres = (
-            self.get_collision_spheres_in_detected_object_frame(
-                pose=gripper_frame_pose_object_frame
+        # --- Step 1: compute the object's pose in the grasping_frame coordinate system ---
+        try:
+            # lookup_transform(target, source) gives T_{target <- source}
+            # i.e. "how to express source-frame points in target-frame coordinates".
+            t = self.__tf_buffer.lookup_transform(
+                self.__object_link_name,   # target: grasping_frame
+                marker_frame,              # source: base_link (or whatever the marker is in)
+                rclpy.time.Time(),
             )
-        )
 
-        attached_object_frame_position_sphere_centers = (
-            attached_object_frame_pose_gripper_frame.transform_points(
-                points=detected_object_frame_position_sphere_centers
+            # Build 4×4 homogeneous matrix  T_{grasping_frame <- base_link}
+            r_t = R.from_quat([
+                t.transform.rotation.x,
+                t.transform.rotation.y,
+                t.transform.rotation.z,
+                t.transform.rotation.w,
+            ])
+            T_grasping_from_base = np.eye(4)
+            T_grasping_from_base[:3, :3] = r_t.as_matrix()
+            T_grasping_from_base[:3, 3] = [
+                t.transform.translation.x,
+                t.transform.translation.y,
+                t.transform.translation.z,
+            ]
+
+            # Build 4×4 matrix for the object pose in base_link:  T_{base_link <- object}
+            r_obj = R.from_quat([
+                marker_pose.orientation.x,
+                marker_pose.orientation.y,
+                marker_pose.orientation.z,
+                marker_pose.orientation.w,
+            ])
+            T_base_from_object = np.eye(4)
+            T_base_from_object[:3, :3] = r_obj.as_matrix()
+            T_base_from_object[:3, 3] = [
+                marker_pose.position.x,
+                marker_pose.position.y,
+                marker_pose.position.z,
+            ]
+
+            # T_{grasping_frame <- object}
+            T_grasping_from_object = T_grasping_from_base @ T_base_from_object
+
+            q_rel = R.from_matrix(T_grasping_from_object[:3, :3]).as_quat()  # [x, y, z, w]
+            # cuRobo pose list format: [x, y, z, qw, qx, qy, qz]
+            object_pose_in_grasping_frame = [
+                float(T_grasping_from_object[0, 3]),
+                float(T_grasping_from_object[1, 3]),
+                float(T_grasping_from_object[2, 3]),
+                float(q_rel[3]),  # w
+                float(q_rel[0]),  # x
+                float(q_rel[1]),  # y
+                float(q_rel[2]),  # z
+            ]
+
+        except TransformException as exc:
+            self.get_logger().warn(
+                f'Could not transform {marker_frame} -> {self.__object_link_name}: {exc}. '
+                'Spheres will be placed at the grasping_frame origin (fallback).'
+            )
+            # Fallback: place object at the grasping_frame origin (zero offset).
+            object_pose_in_grasping_frame = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+
+        # --- Step 2: generate bounding spheres in grasping_frame coordinates ---
+        # The centres returned by get_collision_spheres_in_detected_object_frame() are expressed
+        # in whatever frame the pose was given in — so they are now in grasping_frame.
+        grasping_frame_sphere_centers, radii_spheres = (
+            self.get_collision_spheres_in_detected_object_frame(
+                pose=object_pose_in_grasping_frame
             )
         )
 
         attached_object_frame_sphere_tensor = torch.cat(
-            (attached_object_frame_position_sphere_centers, radii_spheres),
+            (grasping_frame_sphere_centers, radii_spheres),
             dim=1
         )
 
         return attached_object_frame_sphere_tensor
+
+    def _sync_locked_joints_from_buffer(self, kinematics) -> None:
+        """Sync locked joints (e.g. finger_joint) from the most recent joint-state buffer.
+
+        cuRobo treats any joint not listed in ``cspace.joint_names`` as a locked joint whose
+        position is frozen at the XRDF default value (open gripper = 0.0 rad).  Calling this
+        helper pushes the actual gripper position from the last received JointState message into
+        the locked-joint tensor so that downstream kinematics computations and visualisation use
+        the correct gripper configuration.
+        """
+        if self.__js_buffer is None:
+            return
+        lock_js = kinematics.lock_jointstate
+        if lock_js is None or lock_js.joint_names is None:
+            return
+        lock_names = list(lock_js.joint_names)
+        j_names = self.__js_buffer['joint_names']
+        j_pos = self.__js_buffer['position']
+        for i, name in enumerate(j_names):
+            if name in lock_names:
+                idx = lock_names.index(name)
+                lock_js.position[idx] = float(j_pos[i])
 
     def get_gripper_to_attached_object_frame_transform(
             self
@@ -1646,12 +1743,59 @@ class AttachObjectServer(Node):
             None
 
         """
-        self.__kin_model.kinematics_config.update_link_spheres(
+        kin_config = self.__kin_model.kinematics_config
+
+        num_spheres = spheres_in_attached_object_frame.shape[0]
+
+        if self.__object_link_name not in kin_config.link_name_to_idx_map:
+            link_idx = len(kin_config.link_name_to_idx_map)
+            kin_config.link_name_to_idx_map[self.__object_link_name] = link_idx
+        else:
+            link_idx = kin_config.link_name_to_idx_map[self.__object_link_name]
+
+        existing = torch.nonzero(
+            kin_config.link_sphere_idx_map == link_idx
+        ).view(-1)
+
+        if existing.shape[0] < num_spheres:
+            spheres_to_add = num_spheres - existing.shape[0]
+            n_configs = kin_config.link_spheres.shape[0]
+            device = kin_config.link_spheres.device
+            dtype = kin_config.link_spheres.dtype
+            idx_dtype = kin_config.link_sphere_idx_map.dtype
+
+            new_idx = torch.full(
+                (spheres_to_add,), link_idx, device=device, dtype=idx_dtype
+            )
+            kin_config.link_sphere_idx_map = torch.cat(
+                [kin_config.link_sphere_idx_map, new_idx]
+            )
+
+            new_sph = torch.zeros(
+                (n_configs, spheres_to_add, 4), device=device, dtype=dtype
+            )
+            kin_config.link_spheres = torch.cat(
+                [kin_config.link_spheres, new_sph], dim=1
+            )
+
+            if kin_config.reference_link_spheres is not None:
+                new_ref = torch.zeros(
+                    (n_configs, spheres_to_add, 4), device=device, dtype=dtype
+                )
+                kin_config.reference_link_spheres = torch.cat(
+                    [kin_config.reference_link_spheres, new_ref], dim=1
+                )
+
+            kin_config.total_spheres += spheres_to_add
+
+        kin_config.update_link_spheres(
             link_name=self.__object_link_name,
             sphere_position_radius=spheres_in_attached_object_frame
         )
 
-        link_spheres_object_frame = self.__kin_model.kinematics_config.get_link_spheres(
+        self.__kin_model.update_batch_size(1, 1, reset_buffers=True)
+
+        link_spheres_object_frame = kin_config.get_link_spheres(
             link_name=self.__object_link_name)
 
         self.__object_spheres = link_spheres_object_frame.cpu().numpy()
@@ -2348,6 +2492,8 @@ class AttachObjectServer(Node):
             surface_sphere_radius=self.__surface_sphere_radius,
             link_name=self.__object_link_name
         )
+
+        self.__kin_model.update_batch_size(1, 1, reset_buffers=True)
 
         link_spheres_object_frame = self.__kin_model.kinematics_config.get_link_spheres(
             link_name=self.__object_link_name)
