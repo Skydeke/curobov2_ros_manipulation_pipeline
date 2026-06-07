@@ -252,18 +252,18 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
                     and hasattr(grasp_offset_pose, "position")
                     and grasp_offset_pose.position is not None
                 ):
-                    grasp_approach_offset = grasp_offset_pose.position[
-                        0, 0, 0, 0, 2
-                    ].item()
+                    grasp_approach_offset = (
+                        grasp_offset_pose.position.contiguous().view(-1)[2].item()
+                    )
                 grasp_lift_offset = 0.15
                 if (
                     retract_offset_pose is not None
                     and hasattr(retract_offset_pose, "position")
                     and retract_offset_pose.position is not None
                 ):
-                    grasp_lift_offset = retract_offset_pose.position[
-                        0, 0, 0, 0, 2
-                    ].item()
+                    grasp_lift_offset = (
+                        retract_offset_pose.position.contiguous().view(-1)[2].item()
+                    )
 
                 flat_pose = Pose(
                     position=poses.position.view(-1, 3),
@@ -280,6 +280,8 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
                         start_state,
                         grasp_approach_offset=grasp_approach_offset,
                         grasp_lift_offset=grasp_lift_offset,
+                        grasp_approach_in_tool_frame=False,
+                        grasp_lift_in_tool_frame=False,
                         plan_approach_to_grasp=plan_req.plan_approach_to_grasp,
                         plan_grasp_to_lift=plan_req.plan_grasp_to_retract,
                         disable_collision_links=plan_req.disable_collision_links,
@@ -375,33 +377,27 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
                     return result
 
                 num_goalset = poses.position.shape[1]
+                flat_pose = Pose(
+                    position=poses.position.view(-1, 3),
+                    quaternion=poses.quaternion.view(-1, 4),
+                )
+                goal_tool_poses = GoalToolPose.from_poses(
+                    {self.motion_gen.tool_frames[0]: flat_pose},
+                    ordered_tool_frames=[self.motion_gen.tool_frames[0]],
+                    num_goalset=num_goalset,
+                )
                 with self.lock:
                     self.toggle_link_collision(plan_req.disable_collision_links, False)
-                    for g in range(num_goalset):
-                        single_pose = Pose(
-                            position=poses.position[0, g : g + 1, :].contiguous(),
-                            quaternion=poses.quaternion[0, g : g + 1, :].contiguous(),
-                        )
-                        goal_tool_poses = GoalToolPose.from_poses(
-                            {self.motion_gen.tool_frames[0]: single_pose},
-                            ordered_tool_frames=[self.motion_gen.tool_frames[0]],
-                            num_goalset=1,
-                        )
-                        motion_gen_result = self.motion_gen.plan_pose(
-                            goal_tool_poses,
-                            start_state,
-                            max_attempts=self._CumotionActionServer__max_attempts,
-                        )
-                        if (
-                            motion_gen_result is not None
-                            and motion_gen_result.success is not None
-                            and motion_gen_result.success.any().item()
-                        ):
-                            break
+                    motion_gen_result = self.motion_gen.plan_pose(
+                        goal_tool_poses,
+                        start_state,
+                        max_attempts=self._CumotionActionServer__max_attempts,
+                    )
                     self.toggle_link_collision(plan_req.disable_collision_links, True)
 
             if (
-                motion_gen_result is not None
+                not plan_req.plan_grasp
+                and motion_gen_result is not None
                 and motion_gen_result.success is not None
                 and motion_gen_result.success.any().item()
             ):

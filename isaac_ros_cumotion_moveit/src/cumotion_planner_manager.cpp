@@ -75,6 +75,15 @@ planning_interface::PlanningContextPtr CumotionPlannerManager::getPlanningContex
     return planning_interface::PlanningContextPtr();
   }
 
+  if (req.planner_id != kCumotionPlannerId) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "Requested planner '%s' is not supported by cuMotion. Expected '%s'.",
+      req.planner_id.c_str(), kCumotionPlannerId);
+    error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+    return planning_interface::PlanningContextPtr();
+  }
+
   // Retrieve and configure existing context.
   const std::shared_ptr<CumotionPlanningContext> & context = planning_contexts_.at(req.group_name);
 
