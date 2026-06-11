@@ -250,6 +250,34 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
         )
         return world_pose_mat
 
+    def _log_collision_scene_state(self):
+        world_ids = list(self._world_objects.keys())
+        attached_ids = list(self._attached_object_ids)
+        js = self._CumotionActionServer__js_buffer
+        if js is not None:
+            pos = js.get("position", [])
+            names = js.get("joint_names", [])
+            pos_str = ", ".join(f"{p:.4f}" for p in pos[:7])
+            self.get_logger().info(
+                f"  joints[{len(names)}]: [{pos_str}]"
+            )
+        self.get_logger().info(
+            f"  world_objects ({len(world_ids)}): {world_ids}"
+        )
+        self.get_logger().info(
+            f"  attached_objects ({len(attached_ids)}): {attached_ids}"
+        )
+        for oid in world_ids:
+            obj = self._world_objects[oid]
+            for i, prim in enumerate(obj.primitives):
+                pose = obj.primitive_poses[i]
+                dims = list(prim.dimensions)
+                p = pose.position
+                self.get_logger().info(
+                    f"    {oid}: prim[{i}] pos=({p.x:.3f}, {p.y:.3f}, {p.z:.3f}) "
+                    f"dims={dims}"
+                )
+
     def motion_plan_execute_callback(self, goal_handle):
         try:
             self.motion_gen.reset_seed()
@@ -578,9 +606,11 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
                     result.goal_index = motion_gen_result.goalset_index.item()
             elif motion_gen_result is None:
                 self.get_logger().error("Motion planning failed: result is None")
+                self._log_collision_scene_state()
                 result.error_code.val = MoveItErrorCodes.PLANNING_FAILED
             elif not plan_req.plan_grasp:
                 self.get_logger().error("Motion planning failed")
+                self._log_collision_scene_state()
                 result.error_code.val = MoveItErrorCodes.PLANNING_FAILED
 
             if not plan_req.plan_grasp:

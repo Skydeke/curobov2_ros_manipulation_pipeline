@@ -323,8 +323,11 @@ class ESDFViserNode(Node):
     def __joint_state_cb(self, msg: JointState):
         if not hasattr(self, '_ESDFViserNode__viz'):
             return
+        names = [n for n in msg.name if n not in self.__locked_joint_names]
+        positions = [msg.position[i] for i, n in enumerate(msg.name)
+                     if n not in self.__locked_joint_names]
         self.__viz.set_joint_positions(
-            torch.tensor(msg.position, dtype=torch.float32, device='cuda'), list(msg.name)
+            torch.tensor(positions, dtype=torch.float32, device='cuda'), names
         )
 
     def __planning_scene_cb(self, msg: PlanningScene):

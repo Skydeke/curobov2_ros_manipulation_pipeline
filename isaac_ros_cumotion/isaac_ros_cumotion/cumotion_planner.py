@@ -784,32 +784,31 @@ class CumotionActionServer(Node):
 
     def update_world_objects(self, moveit_objects, objects_to_clear=None) -> bool:
         world_update_status = True
-        if len(moveit_objects) > 0:
-            cuboid_list = []
-            sphere_list = []
-            cylinder_list = []
-            mesh_list = []
-            for i, obj in enumerate(moveit_objects):
-                cumotion_objects, world_update_status = (
-                    self.get_cumotion_collision_object(obj)
-                )
-                for cumotion_object in cumotion_objects:
-                    if isinstance(cumotion_object, Cuboid):
-                        cuboid_list.append(cumotion_object)
-                    elif isinstance(cumotion_object, Cylinder):
-                        cylinder_list.append(cumotion_object)
-                    elif isinstance(cumotion_object, Sphere):
-                        sphere_list.append(cumotion_object)
-                    elif isinstance(cumotion_object, Mesh):
-                        mesh_list.append(cumotion_object)
-
-            world_model = Scene(
-                cuboid=cuboid_list,
-                cylinder=cylinder_list,
-                sphere=sphere_list,
-                mesh=mesh_list,
+        cuboid_list = []
+        sphere_list = []
+        cylinder_list = []
+        mesh_list = []
+        for i, obj in enumerate(moveit_objects):
+            cumotion_objects, world_update_status = (
+                self.get_cumotion_collision_object(obj)
             )
-            self.motion_gen.update_world(world_model)
+            for cumotion_object in cumotion_objects:
+                if isinstance(cumotion_object, Cuboid):
+                    cuboid_list.append(cumotion_object)
+                elif isinstance(cumotion_object, Cylinder):
+                    cylinder_list.append(cumotion_object)
+                elif isinstance(cumotion_object, Sphere):
+                    sphere_list.append(cumotion_object)
+                elif isinstance(cumotion_object, Mesh):
+                    mesh_list.append(cumotion_object)
+
+        world_model = Scene(
+            cuboid=cuboid_list,
+            cylinder=cylinder_list,
+            sphere=sphere_list,
+            mesh=mesh_list,
+        )
+        self.motion_gen.update_world(world_model)
         if self.__read_esdf_grid:
             world_update_status = self.update_voxel_grid(objects_to_clear)
         if self.__publish_curobo_world_as_voxels:
