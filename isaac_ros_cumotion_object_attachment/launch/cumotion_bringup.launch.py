@@ -312,6 +312,11 @@ def generate_launch_description():
             default_value='',
             description='Path to MoveIt collision objects scene file'
         ),
+        DeclareLaunchArgument(
+            'log_debug',
+            default_value='True',
+            description='Enable debug logging for segmenter'
+        ),
     ]
 
     # LaunchConfiguration objects to pass to the launch files
@@ -347,6 +352,7 @@ def generate_launch_description():
     enable_segmenter = LaunchConfiguration('enable_segmenter')
     object_attachment_gripper_frame_name = LaunchConfiguration(
         'object_attachment_gripper_frame_name')
+    log_debug = LaunchConfiguration('log_debug')
 
     # Shared world depth topic as a string array
     world_depth_topic = "['/cumotion/camera_1/world_depth']"
@@ -450,6 +456,7 @@ def generate_launch_description():
                 'robot_segmenter.update_link_sphere_server':
                     update_link_sphere_server_segmenter,
                 'robot_segmenter.world_depth_publish_topics': world_depth_topic,
+                'robot_segmenter.log_debug': log_debug,
                 'robot_segmenter.depth_qos': 'DEFAULT',
                 'robot_segmenter.depth_info_qos': 'DEFAULT',
                 'robot_segmenter.mask_qos': 'DEFAULT',

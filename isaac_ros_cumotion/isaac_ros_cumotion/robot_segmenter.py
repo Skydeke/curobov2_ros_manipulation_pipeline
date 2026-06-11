@@ -27,7 +27,9 @@ from isaac_ros_nitros_bridge_interfaces.msg import NitrosBridgeImage
 from isaac_ros_pynitros.isaac_ros_pynitros_message_filter import PyNitrosMessageFilter
 from isaac_ros_pynitros.isaac_ros_pynitros_publisher import PyNitrosPublisher
 from isaac_ros_pynitros.isaac_ros_pynitros_subscriber import PyNitrosSubscriber
-from isaac_ros_pynitros.pynitros_type_builders.pynitros_image_builder import PyNitrosImageBuilder
+from isaac_ros_pynitros.pynitros_type_builders.pynitros_image_builder import (
+    PyNitrosImageBuilder,
+)
 from isaac_ros_pynitros.pynitros_type_views.pynitros_image_view import PyNitrosImageView
 
 from message_filters import ApproximateTimeSynchronizer
@@ -52,49 +54,56 @@ class CumotionRobotSegmenter(Node):
     """This node filters out depth pixels assosiated with a robot body using a mask."""
 
     def __init__(self):
-        super().__init__('cumotion_robot_segmentation')
-        self.declare_parameter('robot', 'ur5e.yml')
-        self.declare_parameter('urdf_path', rclpy.Parameter.Type.STRING)
-        self.declare_parameter('yml_file_path', rclpy.Parameter.Type.STRING)
-        self.declare_parameter('cuda_device', 0)
-        self.declare_parameter('distance_threshold', 0.1)
-        self.declare_parameter('time_sync_slop', 0.1)
-        self.declare_parameter('tf_lookup_duration', 5.0)
+        super().__init__("cumotion_robot_segmentation")
+        self.declare_parameter("robot", "ur5e.yml")
+        self.declare_parameter("urdf_path", rclpy.Parameter.Type.STRING)
+        self.declare_parameter("yml_file_path", rclpy.Parameter.Type.STRING)
+        self.declare_parameter("cuda_device", 0)
+        self.declare_parameter("distance_threshold", 0.02)
+        self.declare_parameter("time_sync_slop", 0.1)
+        self.declare_parameter("tf_lookup_duration", 5.0)
 
-        self.declare_parameter('joint_states_topic', '/joint_states')
-        self.declare_parameter('debug_robot_topic', '/cumotion/robot_segmenter/robot_spheres')
+        self.declare_parameter("joint_states_topic", "/joint_states")
+        self.declare_parameter(
+            "debug_robot_topic", "/cumotion/robot_segmenter/robot_spheres"
+        )
 
-        self.declare_parameter('depth_image_topics', ['/cumotion/depth_1/image_raw'])
-        self.declare_parameter('depth_camera_infos', ['/cumotion/depth_1/camera_info'])
-        self.declare_parameter('robot_mask_publish_topics', ['/cumotion/depth_1/robot_mask'])
-        self.declare_parameter('world_depth_publish_topics', ['/cumotion/depth_1/world_depth'])
+        self.declare_parameter("depth_image_topics", ["/cumotion/depth_1/image_raw"])
+        self.declare_parameter("depth_camera_infos", ["/cumotion/depth_1/camera_info"])
+        self.declare_parameter(
+            "robot_mask_publish_topics", ["/cumotion/depth_1/robot_mask"]
+        )
+        self.declare_parameter(
+            "world_depth_publish_topics", ["/cumotion/depth_1/world_depth"]
+        )
 
-        self.declare_parameter('filter_speckles_in_mask', False)
-        self.declare_parameter('max_filtered_speckles_size', 1250)
+        self.declare_parameter("filter_speckles_in_mask", False)
+        self.declare_parameter("max_filtered_speckles_size", 1250)
 
-        self.declare_parameter('log_debug', False)
-        self.declare_parameter('update_link_sphere_server',
-                               'segmenter_attach_object')
+        self.declare_parameter("log_debug", True)
+        self.declare_parameter("update_link_sphere_server", "segmenter_attach_object")
 
-        depth_qos = add_qos_parameter(self, 'DEFAULT', 'depth_qos')
-        depth_info_qos = add_qos_parameter(self, 'DEFAULT', 'depth_info_qos')
-        mask_qos = add_qos_parameter(self, 'DEFAULT', 'mask_qos')
-        world_depth_qos = add_qos_parameter(self, 'DEFAULT', 'world_depth_qos')
+        depth_qos = add_qos_parameter(self, "DEFAULT", "depth_qos")
+        depth_info_qos = add_qos_parameter(self, "DEFAULT", "depth_info_qos")
+        mask_qos = add_qos_parameter(self, "DEFAULT", "mask_qos")
+        world_depth_qos = add_qos_parameter(self, "DEFAULT", "world_depth_qos")
 
-        self.__robot_file = self.get_parameter('robot').get_parameter_value().string_value
+        self.__robot_file = (
+            self.get_parameter("robot").get_parameter_value().string_value
+        )
 
         try:
-            self.__urdf_path = self.get_parameter('urdf_path')
+            self.__urdf_path = self.get_parameter("urdf_path")
             self.__urdf_path = self.__urdf_path.get_parameter_value().string_value
-            if self.__urdf_path == '':
+            if self.__urdf_path == "":
                 self.__urdf_path = None
         except rclpy.exceptions.ParameterUninitializedException:
             self.__urdf_path = None
 
         try:
-            self.__yml_path = self.get_parameter('yml_file_path')
+            self.__yml_path = self.get_parameter("yml_file_path")
             self.__yml_path = self.__yml_path.get_parameter_value().string_value
-            if self.__yml_path == '':
+            if self.__yml_path == "":
                 self.__yml_path = None
         except rclpy.exceptions.ParameterUninitializedException:
             self.__yml_path = None
@@ -103,105 +112,152 @@ class CumotionRobotSegmenter(Node):
             self.__robot_file = self.__yml_path
 
         distance_threshold = (
-            self.get_parameter('distance_threshold').get_parameter_value().double_value)
-        time_sync_slop = self.get_parameter('time_sync_slop').get_parameter_value().double_value
+            self.get_parameter("distance_threshold").get_parameter_value().double_value
+        )
+        time_sync_slop = (
+            self.get_parameter("time_sync_slop").get_parameter_value().double_value
+        )
         self._tf_lookup_duration = (
-            self.get_parameter('tf_lookup_duration').get_parameter_value().double_value
+            self.get_parameter("tf_lookup_duration").get_parameter_value().double_value
         )
         joint_states_topic = (
-            self.get_parameter('joint_states_topic').get_parameter_value().string_value)
-        debug_robot_topic = (
-            self.get_parameter('debug_robot_topic').get_parameter_value().string_value)
-        depth_image_topics = (
-            self.get_parameter('depth_image_topics').get_parameter_value().string_array_value)
-        depth_camera_infos = (
-            self.get_parameter('depth_camera_infos').get_parameter_value().string_array_value)
-        publish_mask_topics = (
-            self.get_parameter(
-                'robot_mask_publish_topics').get_parameter_value().string_array_value)
-        world_depth_topics = (
-            self.get_parameter(
-                'world_depth_publish_topics').get_parameter_value().string_array_value)
-        self._filter_speckles_in_mask = (
-            self.get_parameter('filter_speckles_in_mask').get_parameter_value().bool_value
+            self.get_parameter("joint_states_topic").get_parameter_value().string_value
         )
-        self._max_filtered_speckles_size = self.get_parameter(
-            'max_filtered_speckles_size').get_parameter_value().integer_value
+        debug_robot_topic = (
+            self.get_parameter("debug_robot_topic").get_parameter_value().string_value
+        )
+        depth_image_topics = (
+            self.get_parameter("depth_image_topics")
+            .get_parameter_value()
+            .string_array_value
+        )
+        depth_camera_infos = (
+            self.get_parameter("depth_camera_infos")
+            .get_parameter_value()
+            .string_array_value
+        )
+        publish_mask_topics = (
+            self.get_parameter("robot_mask_publish_topics")
+            .get_parameter_value()
+            .string_array_value
+        )
+        world_depth_topics = (
+            self.get_parameter("world_depth_publish_topics")
+            .get_parameter_value()
+            .string_array_value
+        )
+        self._filter_speckles_in_mask = (
+            self.get_parameter("filter_speckles_in_mask")
+            .get_parameter_value()
+            .bool_value
+        )
+        self._max_filtered_speckles_size = (
+            self.get_parameter("max_filtered_speckles_size")
+            .get_parameter_value()
+            .integer_value
+        )
         self._update_link_sphere_server = (
-            self.get_parameter('update_link_sphere_server').get_parameter_value().string_value)
+            self.get_parameter("update_link_sphere_server")
+            .get_parameter_value()
+            .string_value
+        )
 
-        self._log_debug = self.get_parameter('log_debug').get_parameter_value().bool_value
+        self._log_debug = (
+            self.get_parameter("log_debug").get_parameter_value().bool_value
+        )
         num_cameras = len(depth_image_topics)
         self._num_cameras = num_cameras
 
         if len(depth_camera_infos) != num_cameras:
             self.get_logger().error(
-                'Number of topics in depth_camera_infos does not match depth_image_topics')
+                "Number of topics in depth_camera_infos does not match depth_image_topics"
+            )
         if len(publish_mask_topics) != num_cameras:
             self.get_logger().error(
-                'Number of topics in publish_mask_topics does not match depth_image_topics')
+                "Number of topics in publish_mask_topics does not match depth_image_topics"
+            )
         if len(world_depth_topics) != num_cameras:
             self.get_logger().error(
-                'Number of topics in world_depth_topics does not match depth_image_topics')
+                "Number of topics in world_depth_topics does not match depth_image_topics"
+            )
 
-        cuda_device_id = self.get_parameter('cuda_device').get_parameter_value().integer_value
+        cuda_device_id = (
+            self.get_parameter("cuda_device").get_parameter_value().integer_value
+        )
 
-        self._device_cfg = DeviceCfg(device=torch.device('cuda', cuda_device_id))
+        self._device_cfg = DeviceCfg(device=torch.device("cuda", cuda_device_id))
 
         # Enable ptrace for PyNITROS
-        ret = os.system('echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope')
+        ret = os.system("echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope")
         if ret != 0:
-            self.get_logger().error('Failed to set ptrace_scope, \
+            self.get_logger().error("Failed to set ptrace_scope, \
              Please run the following command with privileges to enable ptrace: \
-             echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope')
+             echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope")
         else:
-            self.get_logger().info('Set ptrace_scope to 0 for PyNITROS')
-        bridge_topic_suffix = '_bridge'
-        ros_topic_suffix = '_ros'
+            self.get_logger().info("Set ptrace_scope to 0 for PyNITROS")
+        bridge_topic_suffix = "_bridge"
+        ros_topic_suffix = "_ros"
 
-        subscribers = [PyNitrosSubscriber(self,
-                                          message_type=NitrosBridgeImage,
-                                          sub_topic_name=topic,
-                                          enable_ros_subscribe=True,
-                                          qos_profile=depth_qos)
-                       for topic in depth_image_topics]
+        subscribers = [
+            PyNitrosSubscriber(
+                self,
+                message_type=NitrosBridgeImage,
+                sub_topic_name=topic,
+                enable_ros_subscribe=True,
+                qos_profile=depth_qos,
+            )
+            for topic in depth_image_topics
+        ]
         subscribers.append(Subscriber(self, JointState, joint_states_topic))
 
-        self.approx_time_sync = PyNitrosMessageFilter(self,
-                                                       subscribers,
-                                                       ApproximateTimeSynchronizer,
-                                                       self.process_depth_and_joint_state,
-                                                       queue_size=10,
-                                                       slop=time_sync_slop)
+        self.approx_time_sync = PyNitrosMessageFilter(
+            self,
+            subscribers,
+            ApproximateTimeSynchronizer,
+            self.process_depth_and_joint_state,
+            queue_size=10,
+            slop=time_sync_slop,
+        )
 
         self.info_subscribers = []
 
         for idx in range(num_cameras):
             self.info_subscribers.append(
                 self.create_subscription(
-                    CameraInfo, depth_camera_infos[idx],
-                    lambda msg, index=idx: self.camera_info_cb(msg, index), depth_info_qos)
+                    CameraInfo,
+                    depth_camera_infos[idx],
+                    lambda msg, index=idx: self.camera_info_cb(msg, index),
+                    depth_info_qos,
+                )
             )
 
         self.mask_publishers = [
-            PyNitrosPublisher(self, NitrosBridgeImage,
-                              pub_topic=topic+bridge_topic_suffix,
-                              pub_topic_raw=topic+ros_topic_suffix,
-                              qos_profile=mask_qos)
-            for topic in publish_mask_topics]
+            PyNitrosPublisher(
+                self,
+                NitrosBridgeImage,
+                pub_topic=topic + bridge_topic_suffix,
+                pub_topic_raw=topic + ros_topic_suffix,
+                qos_profile=mask_qos,
+            )
+            for topic in publish_mask_topics
+        ]
         self.world_depth_publishers = [
-            PyNitrosPublisher(self, NitrosBridgeImage,
-                              pub_topic=topic+bridge_topic_suffix,
-                              pub_topic_raw=topic+ros_topic_suffix,
-                              qos_profile=world_depth_qos)
-            for topic in world_depth_topics]
+            PyNitrosPublisher(
+                self,
+                NitrosBridgeImage,
+                pub_topic=topic + bridge_topic_suffix,
+                pub_topic_raw=topic + ros_topic_suffix,
+                qos_profile=world_depth_qos,
+            )
+            for topic in world_depth_topics
+        ]
 
-        self.mask_builder = PyNitrosImageBuilder(
-            num_buffer=40, timeout=5)
-        self.world_depth_builder = PyNitrosImageBuilder(
-            num_buffer=40, timeout=5)
+        self.mask_builder = PyNitrosImageBuilder(num_buffer=40, timeout=5)
+        self.world_depth_builder = PyNitrosImageBuilder(num_buffer=40, timeout=5)
 
-        self.debug_robot_publisher = self.create_publisher(MarkerArray, debug_robot_topic, 10)
+        self.debug_robot_publisher = self.create_publisher(
+            MarkerArray, debug_robot_topic, 10
+        )
 
         self.tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=60.0))
         self.tf_listener = TransformListener(self.tf_buffer, self)
@@ -218,11 +274,12 @@ class CumotionRobotSegmenter(Node):
         robot_config = get_robot_config(
             robot_file=self.__robot_file,
             urdf_file_path=self.__urdf_path,
-            logger=self.get_logger()
+            logger=self.get_logger(),
         )
 
         self._cumotion_segmenter = RobotSegmenter.from_robot_file(
-            robot_config, distance_threshold=distance_threshold,
+            robot_config,
+            distance_threshold=distance_threshold,
             device_cfg=self._device_cfg,
         )
         self._cumotion_segmenter._ops_dtype = torch.float32
@@ -233,14 +290,16 @@ class CumotionRobotSegmenter(Node):
             server_node=self,
             action_name=self._update_link_sphere_server,
             robot_kinematics=self._cumotion_segmenter.kinematics,
-            robot_base_frame=self._cumotion_base_frame
+            robot_base_frame=self._cumotion_base_frame,
         )
 
         self._robot_pose_cameras = None
-        self.get_logger().info(f'Node initialized with {self._num_cameras} cameras')
+        self.get_logger().info(f"Node initialized with {self._num_cameras} cameras")
 
     def process_depth_and_joint_state(self, *msgs):
-        if not all(isinstance(intrinsic, np.ndarray) for intrinsic in self._depth_intrinsics):
+        if not all(
+            isinstance(intrinsic, np.ndarray) for intrinsic in self._depth_intrinsics
+        ):
             return
 
         depth_buffers = []
@@ -250,18 +309,27 @@ class CumotionRobotSegmenter(Node):
         timestamp = None
 
         for msg in msgs:
-            if (isinstance(msg, PyNitrosImageView)):
+            if isinstance(msg, PyNitrosImageView):
 
-                img = torch.as_tensor(msg, device='cuda', dtype=torch.uint8)
-                if msg.get_encoding() == '32FC1':
-                    #  RealSense depth in 32 Float is in millimeters
-                    #  Hawk depth in 16 Float is in meters
-                    img = img.view(torch.float32).view(msg.get_height(), msg.get_width())
+                img = torch.as_tensor(msg, device="cuda", dtype=torch.uint8)
+                if msg.get_encoding() == "32FC1":
+                    # GZ depth in 32 Float is in meters; convert to mm to
+                    # match depth_to_meter=0.001 in projection rays
+                    img = img.view(torch.float32).view(
+                        msg.get_height(), msg.get_width()
+                    )
                     img = 1000.0 * img
-                elif msg.get_encoding() == '16UC1':
+                elif msg.get_encoding() == "16UC1":
                     img = img.view(torch.uint16).view(msg.get_height(), msg.get_width())
                     img = img.to(dtype=torch.float32)
 
+                if self._log_debug:
+                    self.get_logger().info(
+                        f"Depth encoding={msg.get_encoding()}, "
+                        f"shape={msg.get_height()}x{msg.get_width()}, "
+                        f"min={img.min().item():.3f}, max={img.max().item():.3f}, "
+                        f"nonzero={(img > 0).sum().item()}"
+                    )
                 header = Header()
                 header.frame_id = msg.get_frame_id()
                 header.stamp.sec = msg.get_timestamp_seconds()
@@ -269,51 +337,46 @@ class CumotionRobotSegmenter(Node):
                 depth_buffers.append(img)
                 camera_headers.append(header)
                 depth_encoding.append(msg.get_encoding())
-            if (isinstance(msg, JointState)):
-                js_buffer = {'joint_names': msg.name, 'position': msg.position}
+            if isinstance(msg, JointState):
+                js_buffer = {"joint_names": msg.name, "position": msg.position}
                 timestamp = msg.header.stamp
 
         if timestamp is None or len(camera_headers) == 0:
-            self.get_logger().warn('No timestamp or camera headers found')
+            self.get_logger().warn("No timestamp or camera headers found")
             return
 
         computation_time = -1.0
         node_time = -1.0
 
-        # Read camera transforms
-        if self._robot_pose_cameras is None:
-            self.get_logger().info('Reading TF from cameras')
+        # Read camera transforms (updated every cycle for moving cameras)
+        for i in range(self._num_cameras):
+            try:
+                t = self.tf_buffer.lookup_transform(
+                    self._cumotion_base_frame,
+                    camera_headers[i].frame_id,
+                    rclpy.time.Time(),
+                    rclpy.duration.Duration(seconds=self._tf_lookup_duration),
+                )
+                self._robot_pose_camera[i] = CuPose.from_list(
+                    [
+                        t.transform.translation.x,
+                        t.transform.translation.y,
+                        t.transform.translation.z,
+                        t.transform.rotation.w,
+                        t.transform.rotation.x,
+                        t.transform.rotation.y,
+                        t.transform.rotation.z,
+                    ]
+                )
+            except TransformException as ex:
+                self.get_logger().error(
+                    f"Could not transform {camera_headers[i].frame_id}"
+                    f"to {self._cumotion_base_frame}: {ex}"
+                )
+                continue
+        if all(x is not None for x in self._robot_pose_camera):
+            self._robot_pose_cameras = CuPose.cat(self._robot_pose_camera)
 
-            for i in range(self._num_cameras):
-                if self._robot_pose_camera[i] is None:
-                    try:
-                        t = self.tf_buffer.lookup_transform(
-                            self._cumotion_base_frame,
-                            camera_headers[i].frame_id,
-                            rclpy.time.Time(),
-                            rclpy.duration.Duration(seconds=self._tf_lookup_duration),
-                        )
-                        self._robot_pose_camera[i] = CuPose.from_list(
-                            [
-                                t.transform.translation.x,
-                                t.transform.translation.y,
-                                t.transform.translation.z,
-                                t.transform.rotation.w,
-                                t.transform.rotation.x,
-                                t.transform.rotation.y,
-                                t.transform.rotation.z,
-                            ]
-                        )
-                    except TransformException as ex:
-                        self.get_logger().error(
-                            f'Could not transform {camera_headers[i].frame_id}'
-                            f'to {self._cumotion_base_frame}: {ex}')
-                        continue
-            if None not in self._robot_pose_camera:
-                self._robot_pose_cameras = CuPose.cat(self._robot_pose_camera)
-                self.get_logger().info('Received TF from cameras to robot')
-
-        # Check if all camera transforms have been received
         if self._robot_pose_cameras is None:
             return
 
@@ -321,56 +384,76 @@ class CumotionRobotSegmenter(Node):
 
         depth_image = torch.stack(depth_buffers)
         intrinsics = np.copy(np.stack(self._depth_intrinsics))
-        js = np.copy(js_buffer['position'])
-        j_names = deepcopy(js_buffer['joint_names'])
+        js = np.copy(js_buffer["position"])
+        j_names = deepcopy(js_buffer["joint_names"])
 
         depth_image = depth_image.view(
-           self._num_cameras, depth_image.shape[-2], depth_image.shape[-1])
+            self._num_cameras, depth_image.shape[-2], depth_image.shape[-1]
+        )
 
         if not self._cumotion_segmenter.ready:
-            intrinsics_t = self._device_cfg.to_device(intrinsics).view(self._num_cameras, 3, 3)
-            cam_obs = CameraObservation(depth_image=depth_image, intrinsics=intrinsics_t)
+            intrinsics_t = self._device_cfg.to_device(intrinsics).view(
+                self._num_cameras, 3, 3
+            )
+            cam_obs = CameraObservation(
+                depth_image=depth_image, intrinsics=intrinsics_t
+            )
             self._cumotion_segmenter.update_camera_projection(cam_obs)
-            self.get_logger().info('Updated Projection Matrices')
-        cam_obs = CameraObservation(depth_image=depth_image, pose=self._robot_pose_cameras)
+            self.get_logger().info("Updated Projection Matrices")
+        cam_obs = CameraObservation(
+            depth_image=depth_image, pose=self._robot_pose_cameras
+        )
         q = CuJointState.from_numpy(
-            joint_names=j_names, position=js, device_cfg=self._device_cfg).unsqueeze(0)
+            joint_names=j_names, position=js, device_cfg=self._device_cfg
+        ).unsqueeze(0)
         q = self._cumotion_segmenter.kinematics.get_active_js(q)
 
         start_segmentation_time = time.time()
-        depth_mask, segmented_depth = self._cumotion_segmenter.get_robot_mask_from_active_js(
-            cam_obs, q)
+        depth_mask, segmented_depth = (
+            self._cumotion_segmenter.get_robot_mask_from_active_js(cam_obs, q)
+        )
         if self._log_debug:
             torch.cuda.synchronize()
             computation_time = time.time() - start_segmentation_time
         depth_mask = (depth_mask * 255).to(torch.uint8)
+        if self._log_debug:
+            self.get_logger().info(
+                f"Mask nonzero pixels: {depth_mask.sum().item()}, "
+                f"cam_pose: {self._robot_pose_cameras.position.cpu().numpy().tolist()}"
+            )
 
         for x in range(depth_mask.shape[0]):
-            self.publish_images(depth_mask, depth_encoding, segmented_depth, camera_headers, x)
+            self.publish_images(
+                depth_mask, depth_encoding, segmented_depth, camera_headers, x
+            )
 
         self.__update_link_spheres_server.publish_all_active_spheres(
             robot_joint_states=js,
             robot_joint_names=j_names,
             tensor_args=self._device_cfg,
-            rgb=[1.0, 0.0, 0.0, 1.0]
+            rgb=[1.0, 0.0, 0.0, 1.0],
         )
 
         if self.debug_robot_publisher.get_subscription_count() > 0:
             self.publish_robot_spheres(q)
         if self._log_debug:
             node_time = time.time() - start_node_time
-            self.get_logger().info(f'Node Time(ms), Computation Time(ms): {node_time * 1000.0},\
-                                    {computation_time * 1000.0}')
+            self.get_logger().info(
+                f"Node Time(ms), Computation Time(ms): {node_time * 1000.0},\
+                                    {computation_time * 1000.0}"
+            )
 
     """
     Callback function for camera info
     """
+
     def camera_info_cb(self, msg, idx):
         self._depth_intrinsics[idx] = msg.k
 
     """
     Publish the robot spheres to the debug topic
     """
+
     def publish_robot_spheres(self, traj: CuJointState):
         kin_state = self._cumotion_segmenter.kinematics.compute_kinematics(traj)
         spheres = kin_state.robot_spheres.squeeze(1).cpu().numpy()
@@ -391,10 +474,13 @@ class CumotionRobotSegmenter(Node):
         # get the invalid depth mask
         invalid_depth_mask = depth_image <= invalid_depth_value
         # combine the invalid depth and robot masks
-        combined_mask = np.logical_or(robot_mask, invalid_depth_mask).astype(np.uint8) * 255
+        combined_mask = (
+            np.logical_or(robot_mask, invalid_depth_mask).astype(np.uint8) * 255
+        )
         # filter speckles from the combined mask
         filtered_combined_mask = cv2.filterSpeckles(
-            combined_mask, 255, self._max_filtered_speckles_size, 0)[0]
+            combined_mask, 255, self._max_filtered_speckles_size, 0
+        )[0]
         # Set depth pixels to invalid if they are masked in the filtered mask
         depth_image[filtered_combined_mask.astype(bool)] = invalid_depth_value
         return (filtered_combined_mask, depth_image)
@@ -402,45 +488,49 @@ class CumotionRobotSegmenter(Node):
     """
     Publish the depth mask and segmented depth image using PyNITROS
     """
-    def publish_images(self,
-                       depth_masks,
-                       depth_encoding,
-                       segmented_depth_images,
-                       camera_header,
-                       idx):
+
+    def publish_images(
+        self, depth_masks, depth_encoding, segmented_depth_images, camera_header, idx
+    ):
         depth_mask = depth_masks[idx]
         segmented_depth = segmented_depth_images[idx]
 
         if self._filter_speckles_in_mask:
-            depth_mask, segmented_depth = self.filter_depth_mask(depth_mask, segmented_depth)
+            depth_mask, segmented_depth = self.filter_depth_mask(
+                depth_mask, segmented_depth
+            )
 
         depth_mask_stride = depth_mask.stride(0) * depth_mask.element_size()
         built_mask_image = self.mask_builder.build(
-                                            depth_mask.data_ptr(),
-                                            depth_mask.shape[0],
-                                            depth_mask.shape[1],
-                                            depth_mask_stride,
-                                            'mono8',
-                                            camera_header[idx],
-                                            0,
-                                            False)
+            depth_mask.data_ptr(),
+            depth_mask.shape[0],
+            depth_mask.shape[1],
+            depth_mask_stride,
+            "mono8",
+            camera_header[idx],
+            0,
+            False,
+        )
         self.mask_publishers[idx].publish(built_mask_image)
 
-        if depth_encoding[idx] == '32FC1':
+        if depth_encoding[idx] == "32FC1":
             segmented_depth = segmented_depth / 1000.0
-        elif depth_encoding[idx] == '16UC1':
+        elif depth_encoding[idx] == "16UC1":
             segmented_depth = segmented_depth.to(torch.uint16)
 
-        segmented_depth_stride = segmented_depth.stride(0) * segmented_depth.element_size()
+        segmented_depth_stride = (
+            segmented_depth.stride(0) * segmented_depth.element_size()
+        )
         built_depth_image = self.world_depth_builder.build(
-                                            segmented_depth.data_ptr(),
-                                            segmented_depth.shape[0],
-                                            segmented_depth.shape[1],
-                                            segmented_depth_stride,
-                                            depth_encoding[idx],
-                                            camera_header[idx],
-                                            0,
-                                            False)
+            segmented_depth.data_ptr(),
+            segmented_depth.shape[0],
+            segmented_depth.shape[1],
+            segmented_depth_stride,
+            depth_encoding[idx],
+            camera_header[idx],
+            0,
+            False,
+        )
         self.world_depth_publishers[idx].publish(built_depth_image)
 
 
@@ -454,10 +544,10 @@ def main(args=None):
 
     try:
         # Spin the node so the callback function is called.
-        cumotion_segmenter.get_logger().info('Starting CumotionRobotSegmenter node')
+        cumotion_segmenter.get_logger().info("Starting CumotionRobotSegmenter node")
         rclpy.spin(cumotion_segmenter)
     except KeyboardInterrupt:
-        cumotion_segmenter.get_logger().info('Destroying CumotionRobotSegmenter node')
+        cumotion_segmenter.get_logger().info("Destroying CumotionRobotSegmenter node")
 
     # Destroy the node explicitly
     cumotion_segmenter.destroy_node()
@@ -467,5 +557,5 @@ def main(args=None):
         rclpy.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
