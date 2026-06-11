@@ -7,27 +7,182 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
-from typing import List, Tuple
+from typing import Dict, List, Set, Tuple
 
+from curobo.scene import Cuboid, Cylinder, Mesh, Sphere
 from curobo.types import GoalToolPose, JointState as CuJointState, Pose
 from geometry_msgs.msg import Pose as RosPose
 from isaac_ros_cumotion.cumotion_planner import CumotionActionServer
 from isaac_ros_cumotion_interfaces.action import MotionPlan
+from moveit_msgs.msg import CollisionObject
 from moveit_msgs.msg import MoveItErrorCodes
+from moveit_msgs.msg import PlanningScene
+from shape_msgs.msg import SolidPrimitive
 import numpy as np
 import rclpy
 from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
 from scipy.spatial.transform import Rotation as R
+import torch
 
 
 class CumotionGoalSetPlannerServer(CumotionActionServer):
 
     def __init__(self):
         super().__init__()
+
+        self._world_objects: Dict[str, CollisionObject] = {}
+        self._attached_object_ids: Set[str] = set()
+        self._planning_scene_sub = self.create_subscription(
+            PlanningScene, "/planning_scene", self._on_planning_scene, 10
+        )
+
         self._goal_set_planner_server = ActionServer(
             self, MotionPlan, "cumotion/motion_plan", self.motion_plan_execute_callback
         )
+
+    def _on_planning_scene(self, msg: PlanningScene):
+        world_updated = False
+
+        for obj in msg.world.collision_objects:
+            if obj.operation == CollisionObject.ADD:
+                self._world_objects[obj.id] = obj
+                world_updated = True
+            elif obj.operation == CollisionObject.REMOVE:
+                self._world_objects.pop(obj.id, None)
+                self._attached_object_ids.discard(obj.id)
+                world_updated = True
+
+        for aco in msg.robot_state.attached_collision_objects:
+            obj = aco.object
+            if obj.operation == CollisionObject.ADD:
+                self._world_objects.pop(obj.id, None)
+                self._attached_object_ids.add(obj.id)
+                self._attach_object_to_link(obj, aco.link_name)
+                world_updated = True
+            elif obj.operation == CollisionObject.REMOVE:
+                self._attached_object_ids.discard(obj.id)
+                self._detach_object_from_link(aco.link_name)
+                world_updated = True
+
+        if world_updated:
+            self.update_world_objects(list(self._world_objects.values()))
+
+    def _build_cu_pose(self, ros_pose, frame_id=None):
+        return [
+            ros_pose.position.x, ros_pose.position.y, ros_pose.position.z,
+            ros_pose.orientation.w, ros_pose.orientation.x,
+            ros_pose.orientation.y, ros_pose.orientation.z,
+        ]
+
+    def _attach_object_to_link(self, obj: CollisionObject, link_name: str):
+        spheres_list = []
+        for i, prim in enumerate(obj.primitives):
+            pose = obj.primitive_poses[i]
+            cu_pose = self._build_cu_pose(pose)
+
+            if prim.type == SolidPrimitive.BOX:
+                obstacle = Cuboid(
+                    name=f"{obj.id}_{i}",
+                    pose=cu_pose,
+                    dims=[prim.dimensions[0], prim.dimensions[1], prim.dimensions[2]],
+                )
+            elif prim.type == SolidPrimitive.SPHERE:
+                obstacle = Sphere(
+                    name=f"{obj.id}_{i}",
+                    pose=cu_pose,
+                    radius=prim.dimensions[SolidPrimitive.SPHERE_RADIUS],
+                )
+            elif prim.type == SolidPrimitive.CYLINDER:
+                obstacle = Cylinder(
+                    name=f"{obj.id}_{i}",
+                    pose=cu_pose,
+                    height=prim.dimensions[SolidPrimitive.CYLINDER_HEIGHT],
+                    radius=prim.dimensions[SolidPrimitive.CYLINDER_RADIUS],
+                )
+            else:
+                continue
+
+            cu_spheres = obstacle.get_bounding_spheres(
+                num_spheres=100, surface_radius=0.01
+            )
+            for s in cu_spheres:
+                spheres_list.append([s.pose[0], s.pose[1], s.pose[2], s.radius])
+
+        for i, mesh in enumerate(obj.meshes):
+            mesh_pose = obj.mesh_poses[i]
+            cu_mesh_pose = self._build_cu_pose(mesh_pose)
+            verts = [[v.x, v.y, v.z] for v in mesh.vertices]
+            tris = [[v.vertex_indices[0], v.vertex_indices[1], v.vertex_indices[2]]
+                    for v in mesh.triangles]
+            obstacle = Mesh(
+                name=f"{obj.id}_mesh_{i}",
+                pose=cu_mesh_pose,
+                vertices=verts,
+                faces=tris,
+            )
+            cu_spheres = obstacle.get_bounding_spheres(
+                num_spheres=100, surface_radius=0.01
+            )
+            for s in cu_spheres:
+                spheres_list.append([s.pose[0], s.pose[1], s.pose[2], s.radius])
+
+        if not spheres_list:
+            self.get_logger().warn(f"No spheres generated for attached object {obj.id}")
+            return
+
+        sphere_tensor = torch.tensor(
+            spheres_list, device=self.motion_gen.device_cfg.device, dtype=torch.float32
+        )
+        kin_config = self.motion_gen.kinematics.config.kinematics_config
+
+        if link_name not in kin_config.link_name_to_idx_map:
+            link_idx = len(kin_config.link_name_to_idx_map)
+            kin_config.link_name_to_idx_map[link_name] = link_idx
+        else:
+            link_idx = kin_config.link_name_to_idx_map[link_name]
+
+        existing = torch.nonzero(kin_config.link_sphere_idx_map == link_idx).view(-1)
+        num_spheres = sphere_tensor.shape[0]
+
+        if existing.shape[0] < num_spheres:
+            spheres_to_add = num_spheres - existing.shape[0]
+            n_configs = kin_config.link_spheres.shape[0]
+            dev = kin_config.link_spheres.device
+            dtype = kin_config.link_spheres.dtype
+            idx_dtype = kin_config.link_sphere_idx_map.dtype
+
+            new_idx = torch.full((spheres_to_add,), link_idx, device=dev, dtype=idx_dtype)
+            kin_config.link_sphere_idx_map = torch.cat(
+                [kin_config.link_sphere_idx_map, new_idx]
+            )
+            new_sph = torch.zeros((n_configs, spheres_to_add, 4), device=dev, dtype=dtype)
+            kin_config.link_spheres = torch.cat([kin_config.link_spheres, new_sph], dim=1)
+
+            if kin_config.reference_link_spheres is not None:
+                new_ref = torch.zeros(
+                    (n_configs, spheres_to_add, 4), device=dev, dtype=dtype
+                )
+                kin_config.reference_link_spheres = torch.cat(
+                    [kin_config.reference_link_spheres, new_ref], dim=1
+                )
+            kin_config.total_spheres += spheres_to_add
+
+        kin_config.update_link_spheres(
+            link_name=link_name, sphere_position_radius=sphere_tensor
+        )
+        self.motion_gen.kinematics.update_batch_size(1, 1, reset_buffers=True)
+        self.get_logger().info(
+            f"Attached {sphere_tensor.shape[0]} spheres to link '{link_name}' for object '{obj.id}'"
+        )
+
+    def _detach_object_from_link(self, link_name: str):
+        kin_config = self.motion_gen.kinematics.config.kinematics_config
+        if link_name in kin_config.link_name_to_idx_map:
+            kin_config.disable_link_spheres(link_name=link_name)
+            self.get_logger().info(f"Detached spheres from link '{link_name}'")
+        else:
+            self.get_logger().warn(f"Link '{link_name}' not found for detachment")
 
     def warmup(self):
         self.get_logger().info("warming up cuMotion, wait until ready")
@@ -116,9 +271,14 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
 
             objects_to_clear = [], [], [], []
             if goal_handle.request.use_planning_scene:
-                self.get_logger().info("Updating planning scene")
                 scene = goal_handle.request.world
-                world_objects = scene.collision_objects
+                for obj in scene.collision_objects:
+                    if obj.operation == CollisionObject.ADD:
+                        self._world_objects[obj.id] = obj
+                    elif obj.operation == CollisionObject.REMOVE:
+                        self._world_objects.pop(obj.id, None)
+                        self._attached_object_ids.discard(obj.id)
+                self.update_world_objects(list(self._world_objects.values()))
                 if goal_handle.request.enable_aabb_clearing:
                     padding = goal_handle.request.object_esdf_clearing_padding
                     if goal_handle.request.plan_grasp:
@@ -140,9 +300,7 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
                             object_shape=goal_handle.request.object_shape,
                             object_scale=goal_handle.request.object_scale,
                         )
-                world_update_status = self.update_world_objects(
-                    world_objects, objects_to_clear
-                )
+                world_update_status = True
                 if not world_update_status:
                     result.error_code.val = (
                         MoveItErrorCodes.COLLISION_CHECKING_UNAVAILABLE
