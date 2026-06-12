@@ -65,8 +65,11 @@ class ESDFVisualizer(Node):
         self.__esdf_client = self.create_client(
             EsdfAndGradients, esdf_service_name, callback_group=esdf_service_cb_group
         )
+        _wait_count = 0
         while not self.__esdf_client.wait_for_service(timeout_sec=1.0):
-            self.get_logger().info(f'Service({esdf_service_name}) not available, waiting again...')
+            if _wait_count < 5:
+                self.get_logger().info(f'Service({esdf_service_name}) not available, waiting again...')
+            _wait_count += 1
         self.__esdf_req = EsdfAndGradients.Request()
 
         timer_cb_group = MutuallyExclusiveCallbackGroup()
