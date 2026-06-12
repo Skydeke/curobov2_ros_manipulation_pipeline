@@ -28,6 +28,15 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import SetParameter
 
 
+def _get_kortex_params_path() -> str:
+    """Resolve the path to kortex cumotion_params.yaml."""
+    try:
+        pkg = get_package_share_directory("iki_kortex_moveit_config")
+        return os.path.join(pkg, "config", "cumotion_params.yaml")
+    except Exception:
+        return ""
+
+
 def generate_launch_description():
 
     # The 'robot' argument can accept:
@@ -503,9 +512,25 @@ def generate_launch_description():
     )
     use_sim_time = LaunchConfiguration('use_sim_time')
     use_sim_time_param = SetParameter(name='use_sim_time', value=use_sim_time)
+
+    # esdf_viser — included here so it shares the filesystem with the rest of
+    # the cumotion stack and can access the URDF written by moveit_cumotion.
+    esdf_viser_launch_path = os.path.join(
+        get_package_share_directory('isaac_ros_esdf_visualizer'),
+        'launch',
+        'esdf_viser.launch.py')
+    kortex_params = _get_kortex_params_path()
+    esdf_viser_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(esdf_viser_launch_path),
+        launch_arguments={
+            'params_file': kortex_params,
+        }.items(),
+    )
+
     # Return the LaunchDescription with all included launch files
     return LaunchDescription(launch_args + [use_sim_time_param] + [
         cumotion_launch,
         robot_segmenter_launch,
-        object_attachment_launch
+        object_attachment_launch,
+        esdf_viser_launch,
     ])
