@@ -16,11 +16,14 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import re
+import tempfile
 
 import numpy as np
 import torch
 import yaml
 import yourdfpy
+from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Point
 from geometry_msgs.msg import Vector3
 from moveit_msgs.msg import CollisionObject, PlanningScene
@@ -39,11 +42,34 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 
 
+def _resolve_package_paths_in_urdf(urdf_path: str) -> str:
+    """Return a temp URDF copy with ``package://<pkg>/...`` resolved to absolute paths."""
+    with open(urdf_path) as f:
+        content = f.read()
+
+    def _replace(match):
+        pkg = match.group(1)
+        rel = match.group(2)
+        try:
+            share = get_package_share_directory(pkg)
+            return os.path.join(share, rel)
+        except Exception:
+            return match.group(0)
+
+    resolved = re.sub(r'package://([^/]+)/(.+)', _replace, content)
+    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.urdf', delete=False)
+    tmp.write(resolved)
+    tmp.close()
+    return tmp.name
+
+
 def _build_robot_data_dict(xrdf_path: str, urdf_path: str, asset_path: str) -> dict:
     with open(xrdf_path) as f:
         xrdf = yaml.safe_load(f)
 
-    urdf = yourdfpy.URDF.load(urdf_path, build_scene_graph=True)
+    # Resolve package:// URIs so meshes are found without symlinks
+    resolved_urdf = _resolve_package_paths_in_urdf(urdf_path)
+    urdf = yourdfpy.URDF.load(resolved_urdf, build_scene_graph=True)
 
     actuated_joint_names = [j.name for j in urdf.actuated_joints]
 
@@ -126,8 +152,8 @@ def _build_robot_data_dict(xrdf_path: str, urdf_path: str, asset_path: str) -> d
 
     kin["extra_links"] = extra_links
     kin["base_link"] = base_link
-    kin["urdf_path"] = urdf_path
-    kin["asset_root_path"] = asset_path
+    kin["urdf_path"] = resolved_urdf
+    kin["asset_root_path"] = ""
     kin["mesh_link_names"] = mesh_link_names
 
     return {"robot_cfg": {"kinematics": kin}}

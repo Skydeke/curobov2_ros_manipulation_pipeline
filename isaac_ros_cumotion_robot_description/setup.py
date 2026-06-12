@@ -40,6 +40,11 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
+    entry_points={
+        'console_scripts': [
+            'builder = isaac_ros_cumotion_robot_description.builder:main',
+        ],
+    },
     maintainer='Isaac ROS Maintainers',
     maintainer_email='isaac-ros-maintainers@nvidia.com',
     description='Package containing XRDF (extended robot description format) files for '
