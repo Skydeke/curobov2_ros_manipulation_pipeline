@@ -15,6 +15,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import os
 import re
 import tempfile
@@ -28,8 +29,9 @@ import yourdfpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Point, Vector3
 from moveit_msgs.msg import CollisionObject, PlanningScene
-from sensor_msgs.msg import JointState
+from sensor_msgs.msg import CameraInfo, Image, JointState, PointCloud2
 from shape_msgs.msg import SolidPrimitive
+from std_msgs.msg import String
 from isaac_ros_cumotion_python_utils.utils import (
     get_grid_center,
     get_grid_min_corner,
@@ -41,6 +43,11 @@ from isaac_ros_cumotion_interfaces.srv import GetEsdf
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
+from tf2_ros import TransformException
+from tf2_ros.buffer import Buffer
+from tf2_ros.transform_listener import TransformListener
+
+from curobo.types import Pose as CuPose
 
 
 def _resolve_package_paths_in_urdf(urdf_path: str) -> str:
@@ -263,6 +270,9 @@ class ESDFViserNode(Node):
         self.declare_parameter("viser_add_control_frames", False)
         self.declare_parameter("viser_visualize_robot_spheres", False)
         self.declare_parameter("viser_visualize_collision_meshes", False)
+        self.declare_parameter("visualize_cameras", True)
+        self.declare_parameter("camera_rgb_topics", "['/kortex_vision/color/image']")
+        self.declare_parameter("camera_rgb_info_topics", "['/kortex_vision/color/camera_info']")
         self.__esdf_future = None
 
         self.__workspace_file_path = (
@@ -336,6 +346,18 @@ class ESDFViserNode(Node):
             .bool_value
         )
 
+        self.__viz_cameras_enabled = (
+            self.get_parameter("visualize_cameras").get_parameter_value().bool_value
+        )
+        camera_rgb_topics_str = (
+            self.get_parameter("camera_rgb_topics").get_parameter_value().string_value
+        )
+        camera_rgb_info_topics_str = (
+            self.get_parameter("camera_rgb_info_topics").get_parameter_value().string_value
+        )
+        camera_rgb_topics = ast.literal_eval(camera_rgb_topics_str)
+        camera_rgb_info_topics = ast.literal_eval(camera_rgb_info_topics_str)
+
         if os.path.exists(self.__workspace_file_path):
             min_corner, max_corner = load_grid_corners_from_workspace_file(
                 self.__workspace_file_path
@@ -383,6 +405,9 @@ class ESDFViserNode(Node):
             visualize_collision_meshes=viser_viz_meshes,
         )
 
+        self.__tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=60.0))
+        self.__tf_listener = TransformListener(self.__tf_buffer, self)
+
         self.__draw_grid_box()
         self.__draw_origin_gizmo()
         self._setup_esdf_slice()
@@ -407,6 +432,69 @@ class ESDFViserNode(Node):
         )
         self.create_subscription(
             PlanningScene, planning_scene_topic, self.__planning_scene_cb, 10
+        )
+
+        self.create_subscription(
+            PointCloud2, "/curobo_mapper/colored_surface",
+            self.__colored_surface_cb, 10
+        )
+
+        num_cameras = min(len(camera_rgb_topics), len(camera_rgb_info_topics))
+        if self.__viz_cameras_enabled and num_cameras > 0:
+            self.__latest_camera_images = [None] * num_cameras
+            self.__latest_camera_infos = [None] * num_cameras
+            self.__camera_frame_handles = [None] * num_cameras
+            self.__camera_image_handles = [None] * num_cameras
+            for i in range(num_cameras):
+                self.create_subscription(
+                    Image, camera_rgb_topics[i],
+                    lambda msg, idx=i: self.__rgb_cb(msg, idx), 10
+                )
+                self.create_subscription(
+                    CameraInfo, camera_rgb_info_topics[i],
+                    lambda msg, idx=i: self.__cam_info_cb(msg, idx), 10
+                )
+            self.__camera_viz_timer = self.create_timer(
+                0.1, self.__update_camera_visualization
+            )
+            self.get_logger().info(
+                f"Camera visualization enabled: {num_cameras} camera(s)"
+            )
+
+        # --- Text query GUI ---
+        self.__text_query_pub = self.create_publisher(
+            String, "/curobo_mapper/text_query", 1
+        )
+        vserver = self.__viz._server
+        gui = vserver.gui
+        self.__text_input = gui.add_text(
+            "Semantic Search", initial_value="",
+        )
+        self.__text_top_k = gui.add_number(
+            "top_k", min=1, max=2000, step=1, initial_value=500,
+        )
+        self.__text_min_score = gui.add_slider(
+            "min_score", min=0.0, max=1.0, step=0.01, initial_value=0.05,
+        )
+        self.__text_search_btn = gui.add_button("Search")
+        self.__text_clear_btn = gui.add_button("Clear Matches")
+
+        @self.__text_search_btn.on_click
+        def _(_):
+            txt = self.__text_input.value.strip()
+            if not txt:
+                return
+            q = String(data=txt)
+            self.__text_query_pub.publish(q)
+            self.get_logger().info(f"Text query sent: '{txt}'")
+
+        @self.__text_clear_btn.on_click
+        def _(_):
+            self.__text_query_pub.publish(String(data=""))
+
+        self.create_subscription(
+            PointCloud2, "/curobo_mapper/matched_features",
+            self.__matched_features_cb, 10
         )
 
         timer_cb_group = MutuallyExclusiveCallbackGroup()
@@ -598,6 +686,78 @@ class ESDFViserNode(Node):
             name=name, mesh=m
         )
 
+    def __rgb_cb(self, msg: Image, idx: int):
+        if msg.encoding == "rgb8":
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3
+            )
+        elif msg.encoding == "bgr8":
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3
+            )[:, :, ::-1]
+        elif msg.encoding == "rgba8":
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 4
+            )[:, :, :3]
+        elif msg.encoding == "bgra8":
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 4
+            )[:, :, 2::-1]
+        else:
+            return
+        self.__latest_camera_images[idx] = rgb
+
+    def __cam_info_cb(self, msg: CameraInfo, idx: int):
+        self.__latest_camera_infos[idx] = msg
+
+    def _lookup_camera_pose(self, camera_frame: str):
+        try:
+            t = self.__tf_buffer.lookup_transform(
+                self.__robot_base_frame,
+                camera_frame,
+                rclpy.time.Time(),
+                rclpy.duration.Duration(seconds=0.1),
+            )
+            return CuPose.from_list([
+                t.transform.translation.x,
+                t.transform.translation.y,
+                t.transform.translation.z,
+                t.transform.rotation.w,
+                t.transform.rotation.x,
+                t.transform.rotation.y,
+                t.transform.rotation.z,
+            ])
+        except TransformException:
+            return None
+
+    def __update_camera_visualization(self):
+        for i in range(len(self.__latest_camera_infos)):
+            info = self.__latest_camera_infos[i]
+            img = self.__latest_camera_images[i]
+            if info is None or img is None:
+                continue
+            camera_frame = info.header.frame_id
+            pose = self._lookup_camera_pose(camera_frame)
+            if pose is None:
+                continue
+            if self.__camera_frame_handles[i] is not None:
+                self.__camera_frame_handles[i].remove()
+            self.__camera_frame_handles[i] = self.__viz.add_frame(
+                f"/cameras/frame_{i}", pose, scale=0.12,
+            )
+            fx = info.k[0]
+            render_width = 0.3 * info.width / fx
+            render_height = render_width * info.height / info.width
+            if self.__camera_image_handles[i] is not None:
+                self.__camera_image_handles[i].remove()
+            self.__camera_image_handles[i] = self.__viz.add_image(
+                image=img,
+                render_width=render_width,
+                render_height=render_height,
+                pose=pose,
+                name=f"/cameras/image_{i}",
+            )
+
     def timer_callback(self):
         if self.__esdf_client is None:
             self.__esdf_client = self.create_client(
@@ -717,6 +877,50 @@ class ESDFViserNode(Node):
 
         if self.__slice_show and self.__slice_show.value:
             self._update_esdf_slice()
+
+    def __colored_surface_cb(self, msg: PointCloud2):
+        n = msg.width
+        if n == 0:
+            return
+        packed = np.frombuffer(msg.data, dtype=np.float32).reshape(n, 4)
+        positions = packed[:, :3].copy()
+        rgb_uint32 = packed[:, 3].view(np.uint32).copy()
+        colors = np.zeros((n, 3), dtype=np.uint8)
+        colors[:, 0] = (rgb_uint32 >> 16) & 0xFF
+        colors[:, 1] = (rgb_uint32 >> 8) & 0xFF
+        colors[:, 2] = rgb_uint32 & 0xFF
+        if np.all(colors == 0):
+            return
+        self.__viz.add_point_cloud(
+            pointcloud=positions,
+            colors=colors,
+            point_size=float(self.__voxel_size),
+            name="/colored_surface",
+        )
+
+    def __matched_features_cb(self, msg: PointCloud2):
+        n = msg.width
+        if n == 0:
+            self.__viz.add_point_cloud(
+                pointcloud=np.zeros((0, 3), dtype=np.float32),
+                colors=np.zeros((0, 3), dtype=np.uint8),
+                point_size=float(self.__voxel_size) * 1.5,
+                name="/matched_features",
+            )
+            return
+        packed = np.frombuffer(msg.data, dtype=np.float32).reshape(n, 4)
+        positions = packed[:, :3].copy()
+        rgb_uint32 = packed[:, 3].view(np.uint32).copy()
+        colors = np.zeros((n, 3), dtype=np.uint8)
+        colors[:, 0] = (rgb_uint32 >> 16) & 0xFF
+        colors[:, 1] = (rgb_uint32 >> 8) & 0xFF
+        colors[:, 2] = rgb_uint32 & 0xFF
+        self.__viz.add_point_cloud(
+            pointcloud=positions,
+            colors=colors,
+            point_size=float(self.__voxel_size) * 1.5,
+            name="/matched_features",
+        )
 
 
 def main(args=None):

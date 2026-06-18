@@ -23,7 +23,7 @@
     roughness: 3.0
 
     # Camera configuration
-    camera_correction_frame: "curobo_frame"
+    camera_correction_frame: ["curobo_frame"]
     num_cameras: 1
     device: "cuda:0"
 
