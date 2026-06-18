@@ -60,19 +60,6 @@ def generate_launch_description():
             'CUDA_MPS_CLIENT_PRIORITY': launch_configs['cuda_mps_client_priority']
         })
 
-    # Static planning scene server
-    static_planning_scene_server = Node(
-        package='isaac_ros_cumotion',
-        executable='static_planning_scene',
-        name='static_planning_scene_server',
-        output='screen',
-        parameters=[{
-            'moveit_collision_objects_scene_file':
-                LaunchConfiguration('cumotion_planner.moveit_collision_objects_scene_file')
-        }],
-        emulate_tty=True,
-    )
-
     cumotion_planner_node = Node(
         name='cumotion_planner',
         package='isaac_ros_cumotion',
@@ -86,6 +73,5 @@ def generate_launch_description():
     )
 
     return launch.LaunchDescription(launch_args + [
-        static_planning_scene_server,
         cumotion_planner_node
     ])

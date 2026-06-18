@@ -1,11 +1,4 @@
 geometry_msgs/Pose goal_pose
-string object_frame
-string world_frame
-string mesh_resource
-string object_shape
-geometry_msgs/Vector3 object_scale
-bool enable_aabb_clearing
-float32[] object_esdf_clearing_padding
 sensor_msgs/JointState seed_state
 int32 num_solutions_to_return
 ---

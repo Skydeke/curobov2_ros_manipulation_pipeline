@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypesets="g"?>
+<package format="3">
+  <name>isaac_ros_mapper</name>
+  <version>0.1.0</version>
+  <description>cuRobo Mapper — TSDF integration + ESDF service for motion planning.</description>
+  <maintainer email="nvidia@example.com">NVIDIA</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>isaac_ros_cumotion_interfaces</depend>
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>tf2_ros</depend>
+
+  <exec_depend>curobo_core</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

@@ -42,6 +42,7 @@ set(ACTION_FILES
 
 set(SRV_FILES
 "srv/PublishStaticPlanningScene.srv"
+"srv/GetEsdf.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

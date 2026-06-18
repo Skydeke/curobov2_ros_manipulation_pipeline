@@ -116,7 +116,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'update_esdf_on_request',
             default_value='False',
-            description='Whether object attachment should request an updated ESDF from nvblox '
+            description='Whether object attachment should request an updated ESDF '
                         'as part of the service call'
         ),
         DeclareLaunchArgument(
@@ -249,7 +249,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'cumotion_planner.read_esdf_world',
             default_value='False',
-            description='Read ESDF world from nvblox'
+            description='Read ESDF world from the cuRobo mapper'
         ),
         DeclareLaunchArgument(
             'cumotion_planner.publish_curobo_world_as_voxels',
@@ -283,7 +283,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'cumotion_planner.esdf_service_name',
-            default_value='/nvblox_node/get_esdf_and_gradient',
+            default_value='/curobo_mapper/get_esdf_and_gradient',
             description='ESDF service name'
         ),
         DeclareLaunchArgument(
@@ -381,6 +381,11 @@ def generate_launch_description():
         get_package_share_directory('isaac_ros_cumotion_object_attachment'),
         'launch',
         'object_attachment.launch.py')
+
+    mapper_launch_path = os.path.join(
+        get_package_share_directory('isaac_ros_mapper'),
+        'launch',
+        'mapper.launch.py')
 
     # Include the launch files with updated arguments
     cumotion_launch = IncludeLaunchDescription(
@@ -527,10 +532,23 @@ def generate_launch_description():
         }.items(),
     )
 
+    # cuRobo Mapper for TSDF/ESDF
+    mapper_launch = GroupAction(
+        actions=[IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(mapper_launch_path),
+            launch_arguments={
+                'depth_image_topics': depth_image_topics,
+                'depth_camera_info_topics': depth_camera_info_topics,
+                'esdf_service_name': '/curobo_mapper/get_esdf_and_gradient',
+            }.items(),
+        )],
+    )
+
     # Return the LaunchDescription with all included launch files
     return LaunchDescription(launch_args + [use_sim_time_param] + [
         cumotion_launch,
         robot_segmenter_launch,
         object_attachment_launch,
+        mapper_launch,
         esdf_viser_launch,
     ])

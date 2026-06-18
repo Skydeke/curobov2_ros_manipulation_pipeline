@@ -24,7 +24,6 @@ from isaac_manipulator_ros_python_utils.manipulator_types import ObjectAttachmen
 from isaac_ros_cumotion.update_kinematics import get_robot_config
 from isaac_ros_cumotion.update_kinematics import UpdateLinkSpheresServer
 from isaac_ros_cumotion_interfaces.action import IKSolution
-from isaac_ros_cumotion_interfaces.srv import PublishStaticPlanningScene
 from isaac_ros_cumotion_python_utils.utils import (
     get_grid_center,
     get_grid_min_corner,
@@ -37,7 +36,7 @@ from moveit_msgs.msg import CollisionObject
 from moveit_msgs.msg import MoveItErrorCodes
 from moveit_msgs.msg import RobotTrajectory
 import numpy as np
-from nvblox_msgs.srv import EsdfAndGradients
+from isaac_ros_cumotion_interfaces.srv import GetEsdf
 import rclpy
 from rclpy.action import ActionServer
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -94,7 +93,7 @@ class CumotionActionServer(Node):
         self.declare_parameter("use_aabb_on_request", True)
 
         self.declare_parameter(
-            "esdf_service_name", "/nvblox_node/get_esdf_and_gradient"
+            "esdf_service_name", "/curobo_mapper/get_esdf_and_gradient"
         )
         self.declare_parameter(
             "static_planning_scene_service_name", "/publish_static_planning_scene"
@@ -238,6 +237,9 @@ class CumotionActionServer(Node):
             "mesh": collision_cache_mesh,
         }
 
+        self.declare_parameter("clear_robot_spheres_from_esdf", True)
+        self.declare_parameter("robot_esdf_clearing_padding", 0.0)
+
         # ESDF service
 
         self.__read_esdf_grid = (
@@ -267,6 +269,16 @@ class CumotionActionServer(Node):
         )
         self.__use_aabb_on_request = (
             self.get_parameter("use_aabb_on_request").get_parameter_value().bool_value
+        )
+        self.__clear_robot_spheres_from_esdf = (
+            self.get_parameter("clear_robot_spheres_from_esdf")
+            .get_parameter_value()
+            .bool_value
+        )
+        self.__robot_esdf_clearing_padding = (
+            self.get_parameter("robot_esdf_clearing_padding")
+            .get_parameter_value()
+            .double_value
         )
         self.__publish_voxel_size = (
             self.get_parameter("publish_voxel_size").get_parameter_value().double_value
@@ -320,7 +332,7 @@ class CumotionActionServer(Node):
 
             esdf_service_cb_group = MutuallyExclusiveCallbackGroup()
             self.__esdf_client = self.create_client(
-                EsdfAndGradients,
+                GetEsdf,
                 esdf_service_name,
                 callback_group=esdf_service_cb_group,
             )
@@ -336,38 +348,12 @@ class CumotionActionServer(Node):
                 self.get_logger().info(
                     f"Service({esdf_service_name}) not available, waiting again..."
                 )
-            self.__esdf_req = EsdfAndGradients.Request()
-
-        # Static planning scene service
-        static_planning_scene_service_name = (
-            self.get_parameter("static_planning_scene_service_name")
-            .get_parameter_value()
-            .string_value
-        )
-        static_planning_scene_cb_group = MutuallyExclusiveCallbackGroup()
-        self.__static_planning_scene_client = self.create_client(
-            PublishStaticPlanningScene,
-            static_planning_scene_service_name,
-            callback_group=static_planning_scene_cb_group,
-        )
-        max_wait_attempts = 30
-        wait_attempts = 0
-        while not self.__static_planning_scene_client.wait_for_service(timeout_sec=1.0):
-            wait_attempts += 1
-            if wait_attempts >= max_wait_attempts:
-                self.get_logger().fatal(
-                    f"Service({static_planning_scene_service_name}) not available after 30 seconds"
-                )
-                raise SystemExit
-            self.get_logger().info(
-                f"Service({static_planning_scene_service_name}) not available, waiting again..."
-            )
+            self.__esdf_req = GetEsdf.Request()
 
         self.load_motion_gen()
         self.warmup()
 
         self._world_objects = []
-        self.call_publish_static_planning_scene_service()
 
         self.__query_count = 0
         self.__tensor_args = self.motion_gen.device_cfg
@@ -396,37 +382,6 @@ class CumotionActionServer(Node):
         self._tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=60.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
-    def call_publish_static_planning_scene_service(self):
-        """Call the static planning scene service to load collision objects."""
-        try:
-            request = PublishStaticPlanningScene.Request()
-            future = self.__static_planning_scene_client.call_async(request)
-            future.add_done_callback(self.static_scene_service_callback)
-        except Exception as e:
-            self.get_logger().error(
-                f"Failed to call static planning scene service: {e}"
-            )
-
-    def static_scene_service_callback(self, future):
-        """Process the static planning scene service completion."""
-        try:
-            response = future.result()
-            if not response.success:
-                self.get_logger().warning(
-                    f"Static planning scene service failed: {response.message}"
-                )
-            else:
-                self._world_objects = response.planning_scene.world.collision_objects
-                self.get_logger().info(
-                    f"Updated world objects with {len(self._world_objects)} "
-                    "collision objects"
-                )
-                self.get_logger().info("Static planning scene loaded successfully.")
-        except Exception as e:
-            self.get_logger().error(
-                f"Failed to get static planning scene service result: {e}"
-            )
-
     def js_callback(self, msg):
         self.__js_buffer = {
             "joint_names": msg.name,
@@ -445,12 +400,13 @@ class CumotionActionServer(Node):
         if self.__read_esdf_grid or self.__publish_curobo_world_as_voxels:
             import math
 
-            grid_shape = [round(d / self.__voxel_size) for d in self.__grid_size_m]
+            raw_grid_shape = [round(d / self.__voxel_size) for d in self.__grid_size_m]
+            grid_shape = [s + 1 for s in raw_grid_shape]
             num_voxels = math.prod(grid_shape)
             world_objects = {
                 "voxel": {
                     "world_voxel": {
-                        "dims": self.__grid_size_m,
+                        "dims": [s * self.__voxel_size for s in grid_shape],
                         "pose": [0, 0, 0, 1, 0, 0, 0],
                         "voxel_size": self.__voxel_size,
                         "feature_dtype": torch.float16,
@@ -496,15 +452,10 @@ class CumotionActionServer(Node):
         if not self.__add_ground_plane:
             self.motion_gen.clear_scene_cache()
 
-        if self.__world_collision is not None:
-            try:
-                voxel_grid = self.__world_collision.get_voxel_grid(0)
-                if voxel_grid is not None:
-                    self.__cumotion_grid_shape = voxel_grid.get_grid_shape()[0]
-                else:
-                    self.__cumotion_grid_shape = None
-            except Exception:
-                self.__cumotion_grid_shape = None
+        if self.__read_esdf_grid or self.__publish_curobo_world_as_voxels:
+            self.__cumotion_grid_shape = None
+            raw_grid_shape = [round(d / self.__voxel_size) for d in self.__grid_size_m]
+            self.__raw_grid_shape = raw_grid_shape
         else:
             self.__cumotion_grid_shape = None
 
@@ -546,8 +497,31 @@ class CumotionActionServer(Node):
         aabb_size.y = self.__grid_size_m[1]
         aabb_size.z = self.__grid_size_m[2]
 
+        # Merge robot self-clearing spheres with any attached-object clearing
+        sphere_centers = []
+        sphere_radii = []
+        aabb_mins = []
+        aabb_sizes = []
+
+        if self.__clear_robot_spheres_from_esdf:
+            robot_centers, robot_radii = self.get_robot_spheres_to_clear()
+            sphere_centers.extend(robot_centers)
+            sphere_radii.extend(robot_radii)
+
+        if objects_to_clear:
+            if objects_to_clear[0]:
+                aabb_mins.extend(objects_to_clear[0])
+                aabb_sizes.extend(objects_to_clear[1])
+            if objects_to_clear[2]:
+                sphere_centers.extend(objects_to_clear[2])
+                sphere_radii.extend(objects_to_clear[3])
+
+        merged_clear = None
+        if aabb_mins or sphere_centers:
+            merged_clear = (aabb_mins, aabb_sizes, sphere_centers, sphere_radii)
+
         # Request the esdf grid
-        esdf_future = self.send_request(aabb_min, aabb_size, objects_to_clear)
+        esdf_future = self.send_request(aabb_min, aabb_size, merged_clear)
         while not esdf_future.done():
             time.sleep(0.001)
         response = esdf_future.result()
@@ -560,9 +534,62 @@ class CumotionActionServer(Node):
         ):
             self.get_logger().error("ESDF data is empty, try again after few seconds.")
             return False
-        self.__world_collision.update_voxel_data(esdf_grid)
+        ft = esdf_grid.feature_tensor
+        self.get_logger().info(
+            f"ESDF tensor: shape={tuple(ft.shape)}, "
+            f"dtype={ft.dtype}, "
+            f"min={ft.min().item():.4f}, "
+            f"max={ft.max().item():.4f}, "
+            f"mean={ft.mean().item():.4f}, "
+            f"collision_voxels={ (ft > 0).sum().item() }"
+        )
+        if self.__world_collision.data.has_voxels():
+            voxels = self.__world_collision.data.voxels
+            names = voxels.get_names(0)
+            if "world_voxel" in names:
+                voxels.update_data(esdf_grid, 0)
+            else:
+                voxels.load_batch([esdf_grid], 0)
         self.get_logger().info("Updated ESDF grid")
         return True
+
+    def get_robot_spheres_to_clear(self):
+        if self.__js_buffer is None:
+            return [], []
+
+        js_names = deepcopy(self.__js_buffer["joint_names"])
+        js_position = np.copy(self.__js_buffer["position"])
+
+        state = CuJointState.from_position(
+            position=self.__tensor_args.to_device(js_position).unsqueeze(0),
+            joint_names=js_names,
+        )
+        active_js = self.motion_gen.kinematics.get_active_js(state)
+        kin_state = self.motion_gen.kinematics.compute_kinematics(active_js)
+        spheres = kin_state.robot_spheres.squeeze(0).squeeze(0)
+
+        valid = spheres[:, 3] > 0.0
+        spheres = spheres[valid]
+
+        centers = []
+        radii = []
+        padding = self.__robot_esdf_clearing_padding
+        for i in range(spheres.shape[0]):
+            centers.append(
+                Point(
+                    x=float(spheres[i, 0].item()),
+                    y=float(spheres[i, 1].item()),
+                    z=float(spheres[i, 2].item()),
+                )
+            )
+            radii.append(float(spheres[i, 3].item()) + padding)
+
+        if centers:
+            self.get_logger().info(
+                f"Clearing {len(centers)} robot spheres from ESDF"
+            )
+
+        return centers, radii
 
     def send_request(self, aabb_min_m, aabb_size_m, objects_to_clear=None):
         self.__esdf_req.visualize_esdf = True
@@ -627,6 +654,19 @@ class CumotionActionServer(Node):
         # The grid position is defined as the center point of the grid.
         grid_center_m = get_grid_center(grid_origin, self.__grid_size_m)
 
+        # nvblox adds one voxel of padding per dimension in the response,
+        # so use the actual response dims, not the requested grid_size_m.
+        response_dims = [s * self.__voxel_size for s in array_shape]
+        grid_center_m = get_grid_center(grid_origin, response_dims)
+
+        self.get_logger().info(
+            f"ESDF grid: origin={grid_origin}, "
+            f"req_grid_center={get_grid_center(grid_origin, self.__grid_size_m)}, "
+            f"response_dims={response_dims}, "
+            f"actual_center={grid_center_m}, "
+            f"pose={grid_center_m + [1, 0.0, 0.0, 0.0]}"
+        )
+
         # Array data is reshaped to x y z channels
         array_data = array_data.view(
             array_shape[0], array_shape[1], array_shape[2]
@@ -635,19 +675,9 @@ class CumotionActionServer(Node):
         # Array is squeezed to 1 dimension
         array_data = array_data.reshape(-1, 1)
 
-        # nvblox assigns a value of -1000.0 for unobserved voxels, making it positive
-        array_data[array_data < -999.9] = 1000.0
-
-        # nvblox uses negative distance inside obstacles, cuRobo needs the opposite:
-        array_data = -1.0 * array_data
-
-        # nvblox treats surface voxels as distance = 0.0, while cuRobo treats
-        # distance = 0.0 as not in collision. Adding an offset.
-        array_data += 0.5 * self.__voxel_size
-
         esdf_grid = CuVoxelGrid(
             name="world_voxel",
-            dims=self.__grid_size_m,
+            dims=response_dims,
             pose=grid_center_m + [1, 0.0, 0.0, 0.0],
             voxel_size=self.__voxel_size,
             feature_dtype=torch.float32,
@@ -1005,6 +1035,14 @@ class CumotionActionServer(Node):
             result.error_code.val = MoveItErrorCodes.INVALID_GOAL_CONSTRAINTS
             goal_handle.abort(result)
             return result
+        self.get_logger().info(
+            f"Start state joints: {start_state.position.cpu().squeeze().tolist()}"
+        )
+        self.get_logger().info(
+            f"Goal tool pose: pos={goal_tool_poses.position.cpu().squeeze().tolist()}, "
+            f"quat={goal_tool_poses.quaternion.cpu().squeeze().tolist()}"
+        )
+
         with self.lock:
             self.planner_busy = True
             self.motion_gen.reset_seed()
@@ -1316,65 +1354,13 @@ class CumotionActionServer(Node):
         return world_pose_mat
 
     def execute_callback_ik(self, goal_handle):
-        """
-        Solve IK for a given pose.
-
-        Args
-        ----
-        goal_handle : IKSolution.Goal
-            The goal handle for the IK solution.
-
-        Returns
-        -------
-        IKSolution.Result
-            The result of the IK solution.
-
-        """
-        mesh_resource = goal_handle.request.mesh_resource
-        object_shape = goal_handle.request.object_shape
-        object_scale = goal_handle.request.object_scale
-        enable_aabb_clearing = goal_handle.request.enable_aabb_clearing
-        object_esdf_clearing_padding = goal_handle.request.object_esdf_clearing_padding
         num_solutions_to_return = goal_handle.request.num_solutions_to_return
-
-        # Get the world objects from the goal handle
-        self.get_logger().info("Firing ESDF call for IK solutions")
-        world_pose_object = self.get_object_pose(
-            goal_handle.request.world_frame, goal_handle.request.object_frame
-        )
-        if enable_aabb_clearing:
-            objects_to_clear = self.calculate_aabbs_to_clear(
-                world_pose_object=world_pose_object,
-                mesh_resource=mesh_resource,
-                object_esdf_clearing_padding=object_esdf_clearing_padding,
-                object_shape=object_shape,
-                object_scale=object_scale,
-            )
-        else:
-            objects_to_clear = [], [], [], []
-
-        world_update_status = self.update_world_objects(
-            self._world_objects, objects_to_clear
-        )
-        result = IKSolution.Result()
-        if not world_update_status:
-            result.error_code.val = MoveItErrorCodes.COLLISION_CHECKING_UNAVAILABLE
-            self.get_logger().error("World update failed.")
-            return result
-
-        self.get_logger().error("ESDF call for IK solutions completed")
-
         current_joint_state = goal_handle.request.seed_state
-
-        self.get_logger().info(f"Current joint state: {current_joint_state}")
 
         seed_config = self.__tensor_args.to_device(
             torch.as_tensor(current_joint_state.position)
         )
         seed_config = seed_config.unsqueeze(0).unsqueeze(0)
-
-        self.get_logger().info(f"Current joint state seed config: {seed_config.shape}")
-        self.get_logger().info(f"Current joint state seed config: {seed_config}")
 
         pose = self.get_cu_pose_from_ros_pose(goal_handle.request.goal_pose)
         ik_result = self.motion_gen.ik_solver.solve_pose(
@@ -1382,11 +1368,9 @@ class CumotionActionServer(Node):
         )
 
         result = IKSolution.Result()
-
         joint_state_position_tensor = ik_result.solution.position
         joint_state_velocity_tensor = ik_result.solution.velocity
         joint_names = ik_result.solution.joint_names
-
         success_tensor = ik_result.success
 
         ros_joint_states, success_list = self.get_joint_state_from_tensor(
@@ -1397,7 +1381,6 @@ class CumotionActionServer(Node):
         )
 
         solve_time = ik_result.solve_time
-
         result.joint_states = ros_joint_states
         result.success = success_list
         result.planning_time = solve_time

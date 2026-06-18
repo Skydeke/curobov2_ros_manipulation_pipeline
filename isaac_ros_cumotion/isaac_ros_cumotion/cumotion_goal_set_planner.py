@@ -7,6 +7,7 @@
 # without an express license agreement from NVIDIA CORPORATION or
 # its affiliates is strictly prohibited.
 
+import os
 from typing import Dict, List, Set, Tuple
 
 from curobo.scene import Cuboid, Cylinder, Mesh, Sphere
@@ -14,6 +15,8 @@ from curobo.types import GoalToolPose, JointState as CuJointState, Pose
 from geometry_msgs.msg import Pose as RosPose
 from isaac_ros_cumotion.cumotion_planner import CumotionActionServer
 from isaac_ros_cumotion_interfaces.action import MotionPlan
+from isaac_ros_cumotion_interfaces.srv import PublishStaticPlanningScene
+from isaac_ros_cumotion_python_utils.moveit_scene_file_parser import MoveItSceneFileReader
 from moveit_msgs.msg import CollisionObject
 from moveit_msgs.msg import MoveItErrorCodes
 from moveit_msgs.msg import PlanningScene
@@ -22,6 +25,7 @@ import numpy as np
 import rclpy
 from rclpy.action import ActionServer
 from rclpy.executors import MultiThreadedExecutor
+from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from scipy.spatial.transform import Rotation as R
 import torch
 
@@ -33,6 +37,36 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
 
         self._world_objects: Dict[str, CollisionObject] = {}
         self._attached_object_ids: Set[str] = set()
+
+        # Load static planning scene from file directly (no separate service node needed)
+        self.declare_parameter("moveit_collision_objects_scene_file", "")
+        scene_file = (
+            self.get_parameter("moveit_collision_objects_scene_file")
+            .get_parameter_value().string_value
+        )
+        if scene_file and os.path.exists(scene_file):
+            try:
+                reader = MoveItSceneFileReader()
+                scene_msg = reader.parse_scene_file(scene_file)
+                for obj in scene_msg.world.collision_objects:
+                    self._world_objects[obj.id] = obj
+                self.get_logger().info(
+                    f"Loaded {len(self._world_objects)} collision objects from "
+                    f"'{scene_file}'"
+                )
+                self.update_world_objects(list(self._world_objects.values()))
+            except Exception as e:
+                self.get_logger().error(f"Failed to load static scene: {e}")
+
+        # Offer the static planning scene service for external callers
+        self._static_scene_srv = self.create_service(
+            PublishStaticPlanningScene,
+            "publish_static_planning_scene",
+            self._static_scene_service_callback,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+
+        self._planning_scene_pub = self.create_publisher(PlanningScene, "/planning_scene", 10)
         self._planning_scene_sub = self.create_subscription(
             PlanningScene, "/planning_scene", self._on_planning_scene, 10
         )
@@ -40,6 +74,41 @@ class CumotionGoalSetPlannerServer(CumotionActionServer):
         self._goal_set_planner_server = ActionServer(
             self, MotionPlan, "cumotion/motion_plan", self.motion_plan_execute_callback
         )
+
+    def _static_scene_service_callback(self, request, response):
+        scene_file = request.scene_file_path
+        if not scene_file:
+            scene_file = (
+                self.get_parameter("moveit_collision_objects_scene_file")
+                .get_parameter_value().string_value
+            )
+        if not scene_file:
+            response.success = False
+            response.message = "No static planning scene file path provided"
+            response.status = 1
+            return response
+        if not os.path.exists(scene_file):
+            response.success = False
+            response.message = f"Scene file not found: {scene_file}"
+            response.status = 2
+            return response
+        try:
+            reader = MoveItSceneFileReader()
+            scene_msg = reader.parse_scene_file(scene_file)
+            self._planning_scene_pub.publish(scene_msg)
+            for obj in scene_msg.world.collision_objects:
+                self._world_objects[obj.id] = obj
+            self.update_world_objects(list(self._world_objects.values()))
+            response.planning_scene = scene_msg
+            response.success = True
+            response.message = "Planning scene published successfully."
+            response.status = 0
+        except Exception as e:
+            self.get_logger().error(f"Failed to publish planning scene: {e}")
+            response.success = False
+            response.message = f"Failed to publish planning scene: {e}"
+            response.status = 3
+        return response
 
     def _on_planning_scene(self, msg: PlanningScene):
         world_updated = False

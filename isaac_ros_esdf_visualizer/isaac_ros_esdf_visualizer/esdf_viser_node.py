@@ -18,14 +18,15 @@
 import os
 import re
 import tempfile
+from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 import yaml
 import yourdfpy
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Point
-from geometry_msgs.msg import Vector3
+from geometry_msgs.msg import Point, Vector3
 from moveit_msgs.msg import CollisionObject, PlanningScene
 from sensor_msgs.msg import JointState
 from shape_msgs.msg import SolidPrimitive
@@ -36,14 +37,13 @@ from isaac_ros_cumotion_python_utils.utils import (
     is_grid_valid,
     load_grid_corners_from_workspace_file,
 )
-from nvblox_msgs.srv import EsdfAndGradients
+from isaac_ros_cumotion_interfaces.srv import GetEsdf
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 
 
 def _resolve_package_paths_in_urdf(urdf_path: str) -> str:
-    """Return a temp URDF copy with ``package://<pkg>/...`` resolved to absolute paths."""
     with open(urdf_path) as f:
         content = f.read()
 
@@ -56,8 +56,8 @@ def _resolve_package_paths_in_urdf(urdf_path: str) -> str:
         except Exception:
             return match.group(0)
 
-    resolved = re.sub(r'package://([^/]+)/(.+)', _replace, content)
-    tmp = tempfile.NamedTemporaryFile(mode='w', suffix='.urdf', delete=False)
+    resolved = re.sub(r"package://([^/]+)/(.+)", _replace, content)
+    tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".urdf", delete=False)
     tmp.write(resolved)
     tmp.close()
     return tmp.name
@@ -67,10 +67,8 @@ def _build_robot_data_dict(xrdf_path: str, urdf_path: str, asset_path: str) -> d
     with open(xrdf_path) as f:
         xrdf = yaml.safe_load(f)
 
-    # Resolve package:// URIs so meshes are found without symlinks
     resolved_urdf = _resolve_package_paths_in_urdf(urdf_path)
     urdf = yourdfpy.URDF.load(resolved_urdf, build_scene_graph=True)
-
     actuated_joint_names = [j.name for j in urdf.actuated_joints]
 
     mesh_link_names = []
@@ -89,7 +87,6 @@ def _build_robot_data_dict(xrdf_path: str, urdf_path: str, asset_path: str) -> d
         base_link = urdf.robot.links[0].name if urdf.robot.links else "base_link"
 
     kin = {}
-
     coll_geom = xrdf.get("collision", {}).get("geometry", "collision_model")
     spheres = xrdf.get("geometry", {}).get(coll_geom, {}).get("spheres", {})
     kin["collision_spheres"] = spheres
@@ -101,7 +98,6 @@ def _build_robot_data_dict(xrdf_path: str, urdf_path: str, asset_path: str) -> d
     sc = xrdf.get("self_collision", {})
     kin["self_collision_ignore"] = sc.get("ignore", {})
     kin["self_collision_buffer"] = sc.get("buffer_distance", {})
-
     kin["tool_frames"] = xrdf.get("tool_frames", [])
 
     csp = xrdf.get("cspace", {})
@@ -159,6 +155,73 @@ def _build_robot_data_dict(xrdf_path: str, urdf_path: str, asset_path: str) -> d
     return {"robot_cfg": {"kinematics": kin}}
 
 
+def _extract_esdf_slice(
+    esdf_grid: torch.Tensor,
+    origin: torch.Tensor,
+    voxel_size: float,
+    slice_pose: np.ndarray,
+    grid_size_m: np.ndarray,
+    slice_resolution: int = 128,
+) -> np.ndarray:
+    device = esdf_grid.device
+    nx, ny, nz = esdf_grid.shape
+
+    half_extent = torch.tensor(
+        [(nx - 1) * voxel_size / 2.0,
+         (ny - 1) * voxel_size / 2.0,
+         (nz - 1) * voxel_size / 2.0],
+        device=device,
+    )
+
+    half = max(grid_size_m[0], grid_size_m[1]) / 2.0
+    u = torch.linspace(-half, half, slice_resolution, device=device)
+    v = torch.linspace(-half, half, slice_resolution, device=device)
+    uu, vv = torch.meshgrid(u, v, indexing="xy")
+
+    local_points = torch.stack(
+        [
+            uu.flatten(),
+            vv.flatten(),
+            torch.zeros(slice_resolution * slice_resolution, device=device),
+            torch.ones(slice_resolution * slice_resolution, device=device),
+        ],
+        dim=1,
+    )
+
+    pose_tensor = torch.tensor(slice_pose, dtype=torch.float32, device=device)
+    world_points = (pose_tensor @ local_points.T).T[:, :3]
+
+    local_pts = world_points - origin.to(device)
+    normalized = local_pts / half_extent
+
+    coords = normalized[:, [2, 1, 0]]
+    coords = coords.view(1, 1, slice_resolution, slice_resolution, 3).float()
+
+    esdf_5d = esdf_grid.float().unsqueeze(0).unsqueeze(0)
+    sampled = F.grid_sample(
+        esdf_5d, coords, mode="bilinear", padding_mode="border", align_corners=True
+    )
+    values = sampled.squeeze().cpu().numpy()
+
+    max_dist = max(np.max(values), 0.1)
+    max_negative_dist = max(np.abs(np.min(values)), 0.05)
+    normalized_pos = np.clip(values / max_dist, -1, 1)
+    normalized_neg = np.clip(values / max_negative_dist, -1, 1)
+
+    colors = np.zeros((slice_resolution, slice_resolution, 3), dtype=np.uint8)
+    neg_mask = normalized_neg < 0
+    colors[neg_mask, 0] = ((1 + normalized_neg[neg_mask]) * 255).astype(np.uint8)
+    colors[neg_mask, 1] = ((1 + normalized_neg[neg_mask]) * 255).astype(np.uint8)
+    colors[neg_mask, 2] = 255
+    pos_mask = normalized_pos >= 0
+    colors[pos_mask, 0] = 255
+    colors[pos_mask, 1] = ((1 - normalized_pos[pos_mask]) * 255).astype(np.uint8)
+    colors[pos_mask, 2] = ((1 - normalized_pos[pos_mask]) * 255).astype(np.uint8)
+
+    colors[np.abs(values) < voxel_size * 0.5] = [0, 255, 0]
+    return colors
+
+
 class ESDFViserNode(Node):
 
     def __init__(self):
@@ -166,6 +229,15 @@ class ESDFViserNode(Node):
         self.__obstacle_handles = {}
         self.__attached_object_handles = {}
         self.__attached_object_meshes = []
+        self.__esdf_grid_data: Optional[torch.Tensor] = None
+        self.__esdf_origin: Optional[np.ndarray] = None
+        self.__esdf_grid_center: Optional[np.ndarray] = None
+        self.__esdf_voxel_size: float = 0.0
+        self.__slice_gizmo = None
+        self.__slice_show = None
+        self.__slice_image = None
+        self.__slice_slider = None
+        self.__origin_gizmo = None
 
         self.declare_parameter("workspace_file_path", "")
         self.declare_parameter("grid_center_m", [0.0, 0.0, 0.0])
@@ -265,9 +337,6 @@ class ESDFViserNode(Node):
         )
 
         if os.path.exists(self.__workspace_file_path):
-            self.get_logger().info(
-                f"Loading grid center and dims from workspace file: {self.__workspace_file_path}."
-            )
             min_corner, max_corner = load_grid_corners_from_workspace_file(
                 self.__workspace_file_path
             )
@@ -275,44 +344,24 @@ class ESDFViserNode(Node):
                 min_corner, max_corner, self.__voxel_size
             )
             self.__grid_center_m = get_grid_center(min_corner, self.__grid_size_m)
-        else:
-            self.get_logger().info(
-                "Loading grid position and dims from grid_center_m and grid_size_m parameters."
-            )
-            self.get_logger().info(
-                f"Params: grid_center={self.__grid_center_m}, "
-                f"grid_size={self.__grid_size_m}, "
-                f"voxel_size={self.__voxel_size}, "
-                f"max_voxels={self.__max_publish_voxels}, "
-                f"service={esdf_service_name}"
-            )
 
         if is_grid_valid(self.__grid_size_m, self.__voxel_size):
-            self.get_logger().fatal(
-                "Number of voxels should be at least 1 in every dimension."
-            )
             raise SystemExit
 
         try:
             from curobo.viewer import ViserVisualizer
         except ImportError as e:
-            self.get_logger().fatal(
-                "curobo.viewer not available. Ensure curobo_core is installed."
-            )
             raise SystemExit from e
 
         cp = None
         if viser_add_robot:
             if not viser_content_path or not viser_urdf_path:
-                self.get_logger().warn(
-                    "viser_add_robot_to_scene is true but viser_content_path or "
-                    "viser_urdf_path is empty; disabling robot visualization"
-                )
                 viser_add_robot = False
             else:
                 cp = _build_robot_data_dict(
                     viser_content_path, viser_urdf_path, viser_asset_path
                 )
+
         self.__locked_joint_names = (
             set(
                 cp.get("robot_cfg", {})
@@ -333,11 +382,10 @@ class ESDFViserNode(Node):
             visualize_robot_spheres=viser_viz_spheres,
             visualize_collision_meshes=viser_viz_meshes,
         )
-        self.get_logger().info(
-            f"Viser visualizer started at http://{viser_host}:{viser_port}"
-        )
 
         self.__draw_grid_box()
+        self.__draw_origin_gizmo()
+        self._setup_esdf_slice()
 
         self.__esdf_service_name = esdf_service_name
         self.__esdf_client = None
@@ -351,6 +399,7 @@ class ESDFViserNode(Node):
             self.create_subscription(
                 JointState, joint_state_topic, self.__joint_state_cb, 10
             )
+
         planning_scene_topic = (
             self.get_parameter("planning_scene_topic")
             .get_parameter_value()
@@ -363,6 +412,18 @@ class ESDFViserNode(Node):
         timer_cb_group = MutuallyExclusiveCallbackGroup()
         self.timer = self.create_timer(
             period, self.timer_callback, callback_group=timer_cb_group
+        )
+
+    def __draw_origin_gizmo(self):
+        """Add a transform gizmo at the grid origin for visualization."""
+        # Calculate the grid origin (min corner)
+        min_corner = get_grid_min_corner(self.__grid_center_m, self.__grid_size_m)
+
+        # Add transform controls gizmo at the origin
+        self.__origin_gizmo = self.__viz._server.scene.add_transform_controls(
+            "/esdf_origin_gizmo",
+            scale=0.3,
+            position=tuple(min_corner),
         )
 
     def __draw_grid_box(self):
@@ -396,13 +457,89 @@ class ESDFViserNode(Node):
             (3, 7),
         ]
         lines = np.array([[corners[i], corners[j]] for i, j in edges], dtype=np.float32)
-        yellow = np.array([255, 255, 0], dtype=np.uint8)
         self.__viz._server.scene.add_line_segments(
             "/esdf_grid_box",
             points=lines,
-            colors=yellow,
+            colors=np.array([255, 255, 0], dtype=np.uint8),
             line_width=2.0,
         )
+
+    def _setup_esdf_slice(self):
+        server = self.__viz._server
+        self.__slice_show = server.gui.add_checkbox(
+            "Show ESDF Slice", initial_value=False
+        )
+
+        self.__slice_slider = server.gui.add_slider(
+            "Slice Height",
+            min=float(self.__grid_center_m[2] - self.__grid_size_m[2] / 2.0),
+            max=float(self.__grid_center_m[2] + self.__grid_size_m[2] / 2.0),
+            step=float(self.__voxel_size),
+            initial_value=float(self.__grid_center_m[2]),
+        )
+
+        self.__slice_gizmo = server.scene.add_transform_controls(
+            "/esdf_slice_gizmo",
+            scale=0.2,
+            position=(
+                float(self.__grid_center_m[0]),
+                float(self.__grid_center_m[1]),
+                float(self.__grid_center_m[2]),
+            ),
+        )
+
+        self.__slice_image = server.scene.add_image(
+            "/esdf_slice_gizmo/slice_image",
+            image=np.zeros((1, 1, 3), dtype=np.uint8),
+            render_width=float(self.__grid_size_m[0]),
+            render_height=float(self.__grid_size_m[1]),
+            visible=False,
+        )
+
+        @self.__slice_gizmo.on_update
+        def _on_slice_update(_):
+            if self.__slice_show.value:
+                self.__slice_slider.value = self.__slice_gizmo.position[2]
+                self._update_esdf_slice()
+
+        @self.__slice_show.on_update
+        def _on_slice_toggle(_):
+            self.__slice_image.visible = self.__slice_show.value
+            if self.__slice_show.value:
+                self._update_esdf_slice()
+
+        @self.__slice_slider.on_update
+        def _on_slider(_):
+            if self.__slice_show.value:
+                pos = list(self.__slice_gizmo.position)
+                pos[2] = self.__slice_slider.value
+                self.__slice_gizmo.position = tuple(pos)
+                self._update_esdf_slice()
+
+    def _update_esdf_slice(self):
+        if self.__esdf_grid_data is None or self.__esdf_grid_center is None:
+            return
+        import trimesh
+
+        q = self.__slice_gizmo.wxyz
+        slice_pose = trimesh.transformations.quaternion_matrix([q[0], q[1], q[2], q[3]])
+        slice_pose[:3, 3] = self.__slice_gizmo.position
+
+        grid_shape = self.__esdf_grid_data.shape
+        actual_grid_size = np.array([
+            grid_shape[0] * self.__esdf_voxel_size,
+            grid_shape[1] * self.__esdf_voxel_size,
+            grid_shape[2] * self.__esdf_voxel_size,
+        ])
+        slice_colors = _extract_esdf_slice(
+            esdf_grid=self.__esdf_grid_data,
+            origin=torch.as_tensor(self.__esdf_grid_center),
+            voxel_size=self.__esdf_voxel_size,
+            slice_pose=slice_pose,
+            grid_size_m=actual_grid_size,
+            slice_resolution=256,
+        )
+        self.__slice_image.image = slice_colors
 
     def __joint_state_cb(self, msg: JointState):
         if not hasattr(self, "_ESDFViserNode__viz"):
@@ -421,34 +558,13 @@ class ESDFViserNode(Node):
         if not hasattr(self, "_ESDFViserNode__viz"):
             return
 
-        import trimesh
-
-        # Clear world obstacles
         for h in self.__obstacle_handles.values():
             h.remove()
         self.__obstacle_handles.clear()
-
-        # Add world collision objects
         for co in msg.world.collision_objects:
             for prim, pose_msg in zip(co.primitives, co.primitive_poses):
                 name = "/obstacles/" + co.id + "/" + str(co.primitives.index(prim))
                 self.__add_prim_mesh(name, prim, pose_msg)
-
-        # Handle attached objects — store mesh + link-relative pose for tracking
-        for h in self.__attached_object_handles.values():
-            h.remove()
-        self.__attached_object_handles.clear()
-        self.__attached_object_meshes.clear()
-
-        for aco in msg.robot_state.attached_collision_objects:
-            obj = aco.object
-            for prim, pose_msg in zip(obj.primitives, obj.primitive_poses):
-                name = "/attached/" + obj.id + "/" + str(obj.primitives.index(prim))
-                m = self.__build_prim_mesh(prim)
-                if m is None:
-                    continue
-                # pose is relative to aco.link_name
-                self.__attached_object_meshes.append((m, name, aco.link_name, pose_msg))
 
     def __build_prim_mesh(self, prim):
         import trimesh
@@ -478,95 +594,119 @@ class ESDFViserNode(Node):
         mat = trimesh.transformations.quaternion_matrix(q)
         mat[:3, 3] = [pose_msg.position.x, pose_msg.position.y, pose_msg.position.z]
         m.apply_transform(mat)
-        h = self.__viz._server.scene.add_mesh_trimesh(name=name, mesh=m)
-        self.__obstacle_handles[name] = h
+        self.__obstacle_handles[name] = self.__viz._server.scene.add_mesh_trimesh(
+            name=name, mesh=m
+        )
 
     def timer_callback(self):
         if self.__esdf_client is None:
             self.__esdf_client = self.create_client(
-                EsdfAndGradients, self.__esdf_service_name
+                GetEsdf, self.__esdf_service_name
             )
-
-        if not self.__esdf_client.service_is_ready():
+        if not self.__esdf_client.service_is_ready() or self.__esdf_future is not None:
             return
 
-        if self.__esdf_future is None:
-            min_corner = get_grid_min_corner(self.__grid_center_m, self.__grid_size_m)
-            aabb_min = Point()
-            aabb_min.x = min_corner[0]
-            aabb_min.y = min_corner[1]
-            aabb_min.z = min_corner[2]
-            aabb_size = Vector3()
-            aabb_size.x = self.__grid_size_m[0]
-            aabb_size.y = self.__grid_size_m[1]
-            aabb_size.z = self.__grid_size_m[2]
+        req = GetEsdf.Request()
+        req.visualize_esdf = True
+        req.update_esdf = self.__update_esdf_on_request
 
-            req = EsdfAndGradients.Request()
-            req.visualize_esdf = True
-            req.update_esdf = self.__update_esdf_on_request
-            req.use_aabb = self.__use_aabb_on_request
-            req.frame_id = self.__robot_base_frame
-            req.aabb_min_m = aabb_min
-            req.aabb_size_m = aabb_size
-            req.aabbs_to_clear_min_m = []
-            req.aabbs_to_clear_size_m = []
-            req.spheres_to_clear_center_m = []
-            req.spheres_to_clear_radius_m = []
+        # --- THE FIX: Force nvblox to dynamically calculate bounds from active memory ---
+        req.use_aabb = True
+        req.frame_id = self.__robot_base_frame
 
-            self.__esdf_future = self.__esdf_client.call_async(req)
+        # Pass fallbacks for safety interfaces
+        req.aabb_min_m = Point(
+            x=0.0 - self.__grid_size_m[0] * 0.5,
+            y=0.0 - self.__grid_size_m[1] * 0.5,
+            z=0.0 - self.__grid_size_m[2] * 0.5,
+        )
+        req.aabb_size_m = Vector3(
+            x=self.__grid_size_m[0],
+            y=self.__grid_size_m[1],
+            z=self.__grid_size_m[2],
+        )
 
-        if self.__esdf_future.done():
-            response = self.__esdf_future.result()
+        self.__esdf_future = self.__esdf_client.call_async(req)
+        self.__esdf_future.add_done_callback(self.__esdf_response_cb)
+
+    def __esdf_response_cb(self, future):
+        try:
+            response = future.result()
             if response.success:
                 self.__update_visualization(response)
-            else:
-                self.get_logger().info("ESDF request failed. Not updating the grid.")
+        finally:
             self.__esdf_future = None
 
     def __update_visualization(self, esdf_data):
         esdf_array = esdf_data.esdf_and_gradients
-        shape = [
-            esdf_array.layout.dim[0].size,
-            esdf_array.layout.dim[1].size,
-            esdf_array.layout.dim[2].size,
-        ]
-        data = np.array(esdf_array.data, dtype=np.float32).reshape(shape)
 
-        # Same sign convention as esdf_visualizer.py:
-        # nvblox uses negative distance inside obstacles, flip for visualization.
-        # nvblox assigns -1000.0 for unobserved voxels.
-        data[data < -999.9] = 1000.0
-        data = -data
-        data += 0.5 * esdf_data.voxel_size_m
+        # 1. Dynamically read dimensions directly from the message layout
+        #    nvblox stores dims in C-order (x-slowest, z-fastest):
+        #    dim[0] = nx, dim[1] = ny, dim[2] = nz
+        nx = esdf_array.layout.dim[0].size
+        ny = esdf_array.layout.dim[1].size
+        nz = esdf_array.layout.dim[2].size
 
-        occupied = data > 0
-        indices = np.argwhere(occupied)
-
-        if len(indices) == 0:
-            self.get_logger().debug("No occupied voxels found.")
+        if nx == 0 or ny == 0 or nz == 0:
+            self.get_logger().warn(
+                "Received empty or uninitialized ESDF layout dimensions."
+            )
             return
+
+        # 2. Reshape to (nx, ny, nz) matching physical x-y-z ordering
+        raw_data = np.array(esdf_array.data, dtype=np.float32).reshape(nx, ny, nz)
+
+        # 3. No transpose needed — already in correct C-order
+        data = np.transpose(raw_data, (0, 1, 2))
 
         voxel_size = esdf_data.voxel_size_m
         origin = np.array(
-            [
-                esdf_data.origin_m.x,
-                esdf_data.origin_m.y,
-                esdf_data.origin_m.z,
-            ]
+            [esdf_data.origin_m.x, esdf_data.origin_m.y, esdf_data.origin_m.z]
         )
-        positions = origin + (indices.astype(np.float64) + 0.5) * voxel_size
 
-        values = data[occupied]
+        # 4. Filter out unobserved regions (nvblox uses -1000 for unobserved)
+        # ESDF convention: positive = outside (free), negative = inside (occupied)
+        # Negate so occupied voxels have positive values
+        unobserved_mask = data < -999.0
+        data_clean = data.copy()
+        data_clean[unobserved_mask] = 1000.0
+        data_occupied = -data_clean
+        occupied_mask = data_occupied > 0.0
+        if not np.any(occupied_mask):
+            self.get_logger().warn("No occupied voxels found in ESDF grid.")
+            return
+
+        indices = np.argwhere(occupied_mask)
+        positions = origin + (indices.astype(np.float64) + 0.5) * voxel_size
+        values = data_occupied[occupied_mask]
+
+        # 5. Downsample if needed
         if len(positions) > self.__max_publish_voxels:
             step = max(1, len(positions) // self.__max_publish_voxels)
             positions = positions[::step]
             values = values[::step]
 
-        # Color: red channel varies with distance (deeper inside = brighter red)
+        # 6. Generate vertex color maps
         max_val = max(np.max(values), 0.01)
         colors = np.zeros((len(positions), 3), dtype=np.uint8)
         colors[:, 0] = np.clip((values / max_val) * 255, 50, 255).astype(np.uint8)
         colors[:, 1] = np.clip((1 - values / max_val) * 80, 0, 80).astype(np.uint8)
+
+        # 7. Store parameters
+        self.__esdf_grid_data = torch.as_tensor(data, dtype=torch.float32).contiguous()
+        self.__esdf_origin = origin
+        self.__esdf_grid_center = origin + (np.array([nx, ny, nz]) * voxel_size / 2.0)
+        self.__esdf_voxel_size = voxel_size
+
+        actual_grid_size = np.array([nx, ny, nz]) * voxel_size
+        actual_center = origin + (actual_grid_size / 2.0)
+
+        if self.__slice_gizmo:
+            self.__slice_gizmo.position = tuple(actual_center)
+
+        # Update origin gizmo position
+        if self.__origin_gizmo:
+            self.__origin_gizmo.position = tuple(origin)
 
         self.__viz.add_point_cloud(
             pointcloud=positions.astype(np.float32),
@@ -574,19 +714,18 @@ class ESDFViserNode(Node):
             point_size=float(voxel_size),
             name="/esdf/voxels",
         )
-        self.get_logger().debug(f"Published {len(positions)} voxels to Viser")
+
+        if self.__slice_show and self.__slice_show.value:
+            self._update_esdf_slice()
 
 
 def main(args=None):
     rclpy.init(args=args)
     node = ESDFViserNode()
     try:
-        node.get_logger().info("Starting ESDFViserNode")
         rclpy.spin(node)
     except KeyboardInterrupt:
-        node.get_logger().info("Destroying ESDFViserNode")
-    except Exception as e:
-        node.get_logger().info(f"Shutting down due to exception of type {type(e)}: {e}")
+        pass
     node.destroy_node()
     if rclpy.ok():
         rclpy.shutdown()
@@ -594,3 +733,4 @@ def main(args=None):
 
 if __name__ == "__main__":
     main()
+
