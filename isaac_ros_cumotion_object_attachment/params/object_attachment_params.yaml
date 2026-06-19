@@ -16,7 +16,7 @@
     # Topic names
     joint_states_topic: /joint_states
     depth_image_topics: [/depth_image]
-    depth_camera_infos: [/rgb/camera_info]
+    depth_camera_info_topics: [/rgb/camera_info]
 
     # Object attachment params
     object_link_name: 'attached_object'
@@ -38,9 +38,6 @@
     # QOS
     depth_qos: 'DEFAULT'
     depth_info_qos: 'DEFAULT'
-
-    # Sphere radius
-    surface_sphere_radius: 0.01
 
     # nvblox params
     update_esdf_on_request: False

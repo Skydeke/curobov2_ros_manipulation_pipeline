@@ -8,7 +8,7 @@
     mask_qos: 'DEFAULT'
     world_depth_qos: 'DEFAULT'
     depth_image_topics: [/depth_image]
-    depth_camera_infos: [/rgb/camera_info]
+    depth_camera_info_topics: [/rgb/camera_info]
     robot_mask_publish_topics: [/cumotion/camera_1/robot_mask]
     world_depth_publish_topics: [/cumotion/camera_1/world_depth]
     filter_speckles_in_mask: False

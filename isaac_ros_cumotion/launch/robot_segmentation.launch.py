@@ -89,7 +89,7 @@ def launch_setup(context, *args, **kwargs):
     input_img_topics = context.perform_substitution(
             LaunchConfiguration('robot_segmenter.depth_image_topics'))
     input_camera_infos = context.perform_substitution(
-        LaunchConfiguration('robot_segmenter.depth_camera_infos'))
+        LaunchConfiguration('robot_segmenter.depth_camera_info_topics'))
     output_mask_topics = context.perform_substitution(
         LaunchConfiguration('robot_segmenter.robot_mask_publish_topics'))
     output_depth_topics = context.perform_substitution(
@@ -117,7 +117,7 @@ def launch_setup(context, *args, **kwargs):
             name=f'robot_segmenter_{i+1}',
             parameters=[launch_configs,
                         {'depth_image_topics': [list_input_img_topics[i]],
-                         'depth_camera_infos': [list_input_camera_infos[i]],
+                         'depth_camera_info_topics': [list_input_camera_infos[i]],
                          'robot_mask_publish_topics': [list_output_mask_topics[i]],
                          'world_depth_publish_topics': [list_output_depth_topics[i]]}],
             output='screen',

@@ -69,7 +69,7 @@ class CumotionRobotSegmenter(Node):
         )
 
         self.declare_parameter("depth_image_topics", ["/cumotion/depth_1/image_raw"])
-        self.declare_parameter("depth_camera_infos", ["/cumotion/depth_1/camera_info"])
+        self.declare_parameter("depth_camera_info_topics", ["/cumotion/depth_1/camera_info"])
         self.declare_parameter(
             "robot_mask_publish_topics", ["/cumotion/depth_1/robot_mask"]
         )
@@ -131,8 +131,8 @@ class CumotionRobotSegmenter(Node):
             .get_parameter_value()
             .string_array_value
         )
-        depth_camera_infos = (
-            self.get_parameter("depth_camera_infos")
+        depth_camera_info_topics = (
+            self.get_parameter("depth_camera_info_topics")
             .get_parameter_value()
             .string_array_value
         )
@@ -168,9 +168,9 @@ class CumotionRobotSegmenter(Node):
         num_cameras = len(depth_image_topics)
         self._num_cameras = num_cameras
 
-        if len(depth_camera_infos) != num_cameras:
+        if len(depth_camera_info_topics) != num_cameras:
             self.get_logger().error(
-                "Number of topics in depth_camera_infos does not match depth_image_topics"
+                "Number of topics in depth_camera_info_topics does not match depth_image_topics"
             )
         if len(publish_mask_topics) != num_cameras:
             self.get_logger().error(
@@ -225,7 +225,7 @@ class CumotionRobotSegmenter(Node):
             self.info_subscribers.append(
                 self.create_subscription(
                     CameraInfo,
-                    depth_camera_infos[idx],
+                    depth_camera_info_topics[idx],
                     lambda msg, index=idx: self.camera_info_cb(msg, index),
                     depth_info_qos,
                 )

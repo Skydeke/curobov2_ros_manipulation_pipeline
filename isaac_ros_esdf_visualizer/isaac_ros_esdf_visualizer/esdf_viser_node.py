@@ -257,7 +257,7 @@ class ESDFViserNode(Node):
             "esdf_service_name", "/nvblox_node/get_esdf_and_gradient"
         )
         self.declare_parameter("robot_base_frame", "base_link")
-        self.declare_parameter("joint_state_topic", "/joint_states")
+        self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("planning_scene_topic", "/planning_scene")
         self.declare_parameter("esdf_service_call_period_secs", 1.0)
         self.declare_parameter("viser_host", "0.0.0.0")
@@ -271,7 +271,7 @@ class ESDFViserNode(Node):
         self.declare_parameter("viser_visualize_robot_spheres", False)
         self.declare_parameter("viser_visualize_collision_meshes", False)
         self.declare_parameter("visualize_cameras", True)
-        self.declare_parameter("camera_rgb_topics", "['/kortex_vision/color/image']")
+        self.declare_parameter("rgb_image_topics", ["/kortex_vision/color/image"])
         self.declare_parameter("camera_rgb_info_topics", "['/kortex_vision/color/camera_info']")
         self.__esdf_future = None
 
@@ -349,13 +349,14 @@ class ESDFViserNode(Node):
         self.__viz_cameras_enabled = (
             self.get_parameter("visualize_cameras").get_parameter_value().bool_value
         )
-        camera_rgb_topics_str = (
-            self.get_parameter("camera_rgb_topics").get_parameter_value().string_value
+        camera_rgb_topics = (
+            self.get_parameter("rgb_image_topics")
+            .get_parameter_value()
+            .string_array_value
         )
         camera_rgb_info_topics_str = (
             self.get_parameter("camera_rgb_info_topics").get_parameter_value().string_value
         )
-        camera_rgb_topics = ast.literal_eval(camera_rgb_topics_str)
         camera_rgb_info_topics = ast.literal_eval(camera_rgb_info_topics_str)
 
         if os.path.exists(self.__workspace_file_path):
@@ -416,13 +417,13 @@ class ESDFViserNode(Node):
         self.__esdf_client = None
 
         if viser_add_robot:
-            joint_state_topic = (
-                self.get_parameter("joint_state_topic")
+            joint_states_topic = (
+                self.get_parameter("joint_states_topic")
                 .get_parameter_value()
                 .string_value
             )
             self.create_subscription(
-                JointState, joint_state_topic, self.__joint_state_cb, 10
+                JointState, joint_states_topic, self.__joint_state_cb, 10
             )
 
         planning_scene_topic = (

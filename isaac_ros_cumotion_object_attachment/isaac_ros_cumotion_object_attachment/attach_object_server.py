@@ -105,7 +105,7 @@ class AttachObjectServer(Node):
         self.declare_parameter('joint_states_topic', '/joint_states')
         self.declare_parameter('depth_image_topics', [
                                '/cumotion/camera_1/world_depth'])
-        self.declare_parameter('depth_camera_infos', [
+        self.declare_parameter('depth_camera_info_topics', [
                                '/camera_1/aligned_depth_to_color/camera_info'])
         self.declare_parameter('object_link_name', 'attached_object')
         self.declare_parameter('object_attachment_gripper_frame_name', 'grasp_frame')
@@ -165,8 +165,8 @@ class AttachObjectServer(Node):
             'joint_states_topic').get_parameter_value().string_value
         self.__depth_image_topics = self.get_parameter(
             'depth_image_topics').get_parameter_value().string_array_value
-        self.__depth_camera_infos = self.get_parameter(
-            'depth_camera_infos').get_parameter_value().string_array_value
+        self.__depth_camera_info_topics = self.get_parameter(
+            'depth_camera_info_topics').get_parameter_value().string_array_value
         self.__object_link_name = self.get_parameter(
             'object_link_name').get_parameter_value().string_value
         self.__gripper_frame_name = self.get_parameter(
@@ -213,9 +213,9 @@ class AttachObjectServer(Node):
 
         if len(self.__depth_image_topics) > 0 and self.__depth_image_topics[0]:
             # Validate topic lengths when nvblox and robot segmentor are enabled
-            if len(self.__depth_camera_infos) != self.__num_cameras:
+            if len(self.__depth_camera_info_topics) != self.__num_cameras:
                 self.get_logger().error(
-                    'Number of topics in depth_camera_infos does not match depth_image_topics')
+                    'Number of topics in depth_camera_info_topics does not match depth_image_topics')
 
             # Create subscribers for depth image and robot joint state:
             subscribers = [
@@ -242,7 +242,7 @@ class AttachObjectServer(Node):
         for idx in range(self.__num_cameras):
             self.__info_subscribers.append(
                 self.create_subscription(
-                    CameraInfo, self.__depth_camera_infos[idx],
+                    CameraInfo, self.__depth_camera_info_topics[idx],
                     lambda msg, index=idx: self.camera_info_cb(msg, index), depth_info_qos)
             )
 
