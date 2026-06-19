@@ -715,7 +715,7 @@ class MapperNode(Node):
         response.esdf_and_gradients.data = esdf_data.tolist()
 
         dt = time_module.perf_counter() - t0
-        self.get_logger().info(
+        self.get_logger().debug(
             f"ESDF — shape=({nx},{ny},{nz}), vs={voxel_grid.voxel_size:.4f}, "
             f"origin=({ox:.3f},{oy:.3f},{oz:.3f}), "
             f"min={ft.min().item():.4f}, max={ft.max().item():.4f}, "
@@ -751,6 +751,7 @@ class MapperNode(Node):
                 feature_vector=text_emb[0],
                 top_k=self._text_query_top_k,
                 minimum_score=self._text_query_min_score,
+                surface_only=True,
                 feature_projector=self._feature_model.project_features,
             )
         except Exception as e:
@@ -763,23 +764,19 @@ class MapperNode(Node):
             return
 
         centers = matched.voxels.centers
-        scores = matched.scores_per_voxel(fill_value=0.0)
 
         n = len(centers)
         max_voxels = 100_000
         if n > max_voxels:
-            stride = int(n / max_voxels)
+            stride = int(np.ceil(n / max_voxels))
             centers = centers[::stride]
-            scores = scores[::stride]
             n = len(centers)
 
         centers_np = centers.cpu().numpy()
-        scores_np = scores.cpu().numpy().astype(np.float32)
 
         colors_np = np.zeros((n, 3), dtype=np.uint8)
-        colors_np[:, 0] = np.clip((scores_np * 2.0) * 255, 0, 255).astype(np.uint8)
-        colors_np[:, 1] = np.clip((1.0 - abs(scores_np - 0.5) * 2.0) * 128, 0, 128).astype(np.uint8)
-        colors_np[:, 2] = np.clip((1.0 - scores_np * 1.5) * 255, 0, 255).astype(np.uint8)
+        colors_np[:, 1] = 255
+        colors_np[:, 2] = 255
 
         cloud = PointCloud2()
         cloud.header = Header(frame_id=self._robot_base_frame)
@@ -810,11 +807,13 @@ class MapperNode(Node):
         cloud.data = packed.tobytes()
         self._matched_features_pub.publish(cloud)
 
+        top_score = float(matched.block_scores[0].item())
         self.get_logger().info(
             f"Matched {n} voxels, "
-            f"top score={scores_np.max():.3f}, "
+            f"top score={top_score:.3f}, "
             f"blocks={len(matched.block_scores)}"
         )
+        torch.cuda.empty_cache()
 
     # ------------------------------------------------------------------
     # Debug voxel / surface publisher
@@ -841,7 +840,6 @@ class MapperNode(Node):
         centers_np = centers.cpu().numpy()
         colors_np = colors_uint8.cpu().numpy()
         n = len(centers_np)
-        vs = float(self._vs)
 
         # Publish colored surface as PointCloud2
         cloud = PointCloud2()
@@ -916,26 +914,7 @@ class MapperNode(Node):
                 fcloud.data = fpacked.tobytes()
                 self._features_pca_pub.publish(fcloud)
 
-        # Publish Marker for RViz
-        points = [Point(x=float(c[0]), y=float(c[1]), z=float(c[2])) for c in centers_np]
-        marker_colors = [
-            ColorRGBA(r=colors_np[i, 0] / 255.0, g=colors_np[i, 1] / 255.0, b=colors_np[i, 2] / 255.0, a=1.0)
-            for i in range(n)
-        ]
-        msg = Marker()
-        msg.header = Header(frame_id=self._robot_base_frame)
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.ns = "colored_voxels"
-        msg.id = 0
-        msg.type = Marker.CUBE_LIST
-        msg.action = Marker.ADD
-        msg.scale.x = vs
-        msg.scale.y = vs
-        msg.scale.z = vs
-        msg.pose.orientation.w = 1.0
-        msg.points = points
-        msg.colors = marker_colors
-        self._debug_voxel_pub.publish(msg)
+
 
 
 def main(args=None):
