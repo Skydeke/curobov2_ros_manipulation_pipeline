@@ -855,40 +855,8 @@ class ESDFViserNode(Node):
         if self.__slice_show and self.__slice_show.value:
             self._update_esdf_slice()
 
-        # 5. Filter out unobserved regions (nvblox uses -1000 for unobserved)
-        # ESDF convention: positive = outside (free), negative = inside (occupied)
-        # Negate so occupied voxels have positive values
-        unobserved_mask = data < -999.0
-        data_clean = data.copy()
-        data_clean[unobserved_mask] = 1000.0
-        data_occupied = -data_clean
-        occupied_mask = data_occupied > 0.0
-        if not np.any(occupied_mask):
-            self.get_logger().warn("No occupied voxels found in ESDF grid.")
-            return
-
-        indices = np.argwhere(occupied_mask)
-        positions = origin + (indices.astype(np.float64) + 0.5) * voxel_size
-        values = data_occupied[occupied_mask]
-
-        # 6. Downsample if needed
-        if len(positions) > self.__max_publish_voxels:
-            step = max(1, len(positions) // self.__max_publish_voxels)
-            positions = positions[::step]
-            values = values[::step]
-
-        # 7. Generate vertex color maps
-        max_val = max(np.max(values), 0.01)
-        colors = np.zeros((len(positions), 3), dtype=np.uint8)
-        colors[:, 0] = np.clip((values / max_val) * 255, 50, 255).astype(np.uint8)
-        colors[:, 1] = np.clip((1 - values / max_val) * 80, 0, 80).astype(np.uint8)
-
-        self.__viz.add_point_cloud(
-            pointcloud=positions.astype(np.float32),
-            colors=colors,
-            point_size=float(voxel_size),
-            name="/esdf/voxels",
-        )
+        # 5. ESDF voxel point cloud is intentionally not published — the colored
+        # surface from __colored_surface_cb already visualizes occupied regions.
 
     def __colored_surface_cb(self, msg: PointCloud2):
         n = msg.width
