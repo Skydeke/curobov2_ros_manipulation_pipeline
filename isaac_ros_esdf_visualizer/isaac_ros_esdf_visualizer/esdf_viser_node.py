@@ -498,9 +498,33 @@ class ESDFViserNode(Node):
             self.__matched_features_cb, 10
         )
 
+        self.create_subscription(
+            PointCloud2, "/curobo_mapper/features_pca",
+            self.__features_pca_cb, 1
+        )
+
+        self.__feature_pca_image: Optional[np.ndarray] = None
+        self.create_subscription(
+            Image, "/curobo_mapper/feature_pca_image",
+            self.__feature_pca_image_cb, 1
+        )
+
+        vserver = self.__viz._server
+        with vserver.gui.add_folder("Live View"):
+            blank = np.zeros((240, 320, 3), dtype=np.uint8)
+            self.__current_rgb_image = vserver.gui.add_image(
+                blank, label="Current RGB", format="jpeg", jpeg_quality=80
+            )
+            self.__current_feature_pca_image = vserver.gui.add_image(
+                blank, label="Current Feature PCA", format="jpeg", jpeg_quality=80
+            )
+
         timer_cb_group = MutuallyExclusiveCallbackGroup()
         self.timer = self.create_timer(
             period, self.timer_callback, callback_group=timer_cb_group
+        )
+        self.__image_timer = self.create_timer(
+            0.2, self.__update_image_panels,
         )
 
     def __draw_origin_gizmo(self):
@@ -734,8 +758,7 @@ class ESDFViserNode(Node):
     def __update_camera_visualization(self):
         for i in range(len(self.__latest_camera_infos)):
             info = self.__latest_camera_infos[i]
-            img = self.__latest_camera_images[i]
-            if info is None or img is None:
+            if info is None:
                 continue
             camera_frame = info.header.frame_id
             pose = self._lookup_camera_pose(camera_frame)
@@ -745,18 +768,6 @@ class ESDFViserNode(Node):
                 self.__camera_frame_handles[i].remove()
             self.__camera_frame_handles[i] = self.__viz.add_frame(
                 f"/cameras/frame_{i}", pose, scale=0.12,
-            )
-            fx = info.k[0]
-            render_width = 0.3 * info.width / fx
-            render_height = render_width * info.height / info.width
-            if self.__camera_image_handles[i] is not None:
-                self.__camera_image_handles[i].remove()
-            self.__camera_image_handles[i] = self.__viz.add_image(
-                image=img,
-                render_width=render_width,
-                render_height=render_height,
-                pose=pose,
-                name=f"/cameras/image_{i}",
             )
 
     def timer_callback(self):
@@ -825,7 +836,26 @@ class ESDFViserNode(Node):
             [esdf_data.origin_m.x, esdf_data.origin_m.y, esdf_data.origin_m.z]
         )
 
-        # 4. Filter out unobserved regions (nvblox uses -1000 for unobserved)
+        # 4. Store the raw ESDF grid so the slice always has the latest data,
+        #    regardless of whether occupied voxels are found below.
+        self.__esdf_grid_data = torch.as_tensor(data, dtype=torch.float32).contiguous()
+        self.__esdf_origin = origin
+        self.__esdf_grid_center = origin + (np.array([nx, ny, nz]) * voxel_size / 2.0)
+        self.__esdf_voxel_size = voxel_size
+
+        actual_grid_size = np.array([nx, ny, nz]) * voxel_size
+        actual_center = origin + (actual_grid_size / 2.0)
+
+        # Don't reset slice_gizmo.position — user's manual placement is preserved
+
+        # Update origin gizmo position
+        if self.__origin_gizmo:
+            self.__origin_gizmo.position = tuple(origin)
+
+        if self.__slice_show and self.__slice_show.value:
+            self._update_esdf_slice()
+
+        # 5. Filter out unobserved regions (nvblox uses -1000 for unobserved)
         # ESDF convention: positive = outside (free), negative = inside (occupied)
         # Negate so occupied voxels have positive values
         unobserved_mask = data < -999.0
@@ -841,33 +871,17 @@ class ESDFViserNode(Node):
         positions = origin + (indices.astype(np.float64) + 0.5) * voxel_size
         values = data_occupied[occupied_mask]
 
-        # 5. Downsample if needed
+        # 6. Downsample if needed
         if len(positions) > self.__max_publish_voxels:
             step = max(1, len(positions) // self.__max_publish_voxels)
             positions = positions[::step]
             values = values[::step]
 
-        # 6. Generate vertex color maps
+        # 7. Generate vertex color maps
         max_val = max(np.max(values), 0.01)
         colors = np.zeros((len(positions), 3), dtype=np.uint8)
         colors[:, 0] = np.clip((values / max_val) * 255, 50, 255).astype(np.uint8)
         colors[:, 1] = np.clip((1 - values / max_val) * 80, 0, 80).astype(np.uint8)
-
-        # 7. Store parameters
-        self.__esdf_grid_data = torch.as_tensor(data, dtype=torch.float32).contiguous()
-        self.__esdf_origin = origin
-        self.__esdf_grid_center = origin + (np.array([nx, ny, nz]) * voxel_size / 2.0)
-        self.__esdf_voxel_size = voxel_size
-
-        actual_grid_size = np.array([nx, ny, nz]) * voxel_size
-        actual_center = origin + (actual_grid_size / 2.0)
-
-        if self.__slice_gizmo:
-            self.__slice_gizmo.position = tuple(actual_center)
-
-        # Update origin gizmo position
-        if self.__origin_gizmo:
-            self.__origin_gizmo.position = tuple(origin)
 
         self.__viz.add_point_cloud(
             pointcloud=positions.astype(np.float32),
@@ -875,9 +889,6 @@ class ESDFViserNode(Node):
             point_size=float(voxel_size),
             name="/esdf/voxels",
         )
-
-        if self.__slice_show and self.__slice_show.value:
-            self._update_esdf_slice()
 
     def __colored_surface_cb(self, msg: PointCloud2):
         n = msg.width
@@ -897,6 +908,24 @@ class ESDFViserNode(Node):
             colors=colors,
             point_size=float(self.__voxel_size),
             name="/colored_surface",
+        )
+
+    def __features_pca_cb(self, msg: PointCloud2):
+        n = msg.width
+        if n == 0:
+            return
+        packed = np.frombuffer(msg.data, dtype=np.float32).reshape(n, 4)
+        positions = packed[:, :3].copy()
+        rgb_uint32 = packed[:, 3].view(np.uint32).copy()
+        colors = np.zeros((n, 3), dtype=np.uint8)
+        colors[:, 0] = (rgb_uint32 >> 16) & 0xFF
+        colors[:, 1] = (rgb_uint32 >> 8) & 0xFF
+        colors[:, 2] = rgb_uint32 & 0xFF
+        self.__viz.add_point_cloud(
+            pointcloud=positions,
+            colors=colors,
+            point_size=float(self.__voxel_size),
+            name="/features_pca",
         )
 
     def __matched_features_cb(self, msg: PointCloud2):
@@ -922,6 +951,25 @@ class ESDFViserNode(Node):
             point_size=float(self.__voxel_size) * 1.5,
             name="/matched_features",
         )
+
+    def __feature_pca_image_cb(self, msg: Image):
+        if msg.encoding == "rgb8":
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 3
+            )
+        elif msg.encoding == "rgba8":
+            rgb = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, 4
+            )[:, :, :3]
+        else:
+            return
+        self.__feature_pca_image = rgb
+
+    def __update_image_panels(self):
+        if self.__latest_camera_images[0] is not None:
+            self.__current_rgb_image.image = self.__latest_camera_images[0]
+        if self.__feature_pca_image is not None:
+            self.__current_feature_pca_image.image = self.__feature_pca_image
 
 
 def main(args=None):

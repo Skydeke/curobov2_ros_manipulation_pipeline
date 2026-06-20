@@ -9,7 +9,13 @@ from rclpy.node import Node
 from geometry_msgs.msg import Point, Pose as RosPose
 from isaac_ros_cumotion_interfaces.srv import GetEsdf
 from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
-from std_msgs.msg import ColorRGBA, Float32MultiArray, Header, MultiArrayDimension, String
+from std_msgs.msg import (
+    ColorRGBA,
+    Float32MultiArray,
+    Header,
+    MultiArrayDimension,
+    String,
+)
 from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
@@ -21,7 +27,6 @@ from curobo.perception import FilterDepth, Mapper, MapperCfg
 from curobo.types import CameraObservation
 from curobo.types import Pose as CuPose
 
-
 RADIO_MODEL_NAME = "c-radio_v3-B"
 
 
@@ -32,8 +37,12 @@ class CRadioInference:
         hub_version = RADIO_MODEL_NAME.strip().lower()
         self.model = (
             torch.hub.load(
-                "NVlabs/RADIO", "radio_model", source="github",
-                version=hub_version, progress=True, skip_validation=True,
+                "NVlabs/RADIO",
+                "radio_model",
+                source="github",
+                version=hub_version,
+                progress=True,
+                skip_validation=True,
                 adaptor_names=adaptor_names,
             )
             .eval()
@@ -118,8 +127,10 @@ class CRadioInference:
         target_h, target_w = self.model.get_nearest_supported_resolution(H, W)
         img = rgb_uint8.permute(2, 0, 1).float() / 255.0
         img = torch.nn.functional.interpolate(
-            img.unsqueeze(0), size=(target_h, target_w),
-            mode="bilinear", align_corners=False,
+            img.unsqueeze(0),
+            size=(target_h, target_w),
+            mode="bilinear",
+            align_corners=False,
         )
         output = self.model(img)
         if isinstance(output, dict):
@@ -131,7 +142,9 @@ class CRadioInference:
         return features[0].view(target_h // ps, target_w // ps, -1).contiguous()
 
 
-def _pca_basis(centered: torch.Tensor, prev_basis: Optional[torch.Tensor] = None) -> torch.Tensor:
+def _pca_basis(
+    centered: torch.Tensor, prev_basis: Optional[torch.Tensor] = None
+) -> torch.Tensor:
     N, D = centered.shape
     device, dtype = centered.device, centered.dtype
     basis = torch.zeros((D, 3), device=device, dtype=dtype)
@@ -148,7 +161,11 @@ def _pca_basis(centered: torch.Tensor, prev_basis: Optional[torch.Tensor] = None
             basis[:, :rank] = eigvecs[:, -rank:].flip(dims=[1]).to(dtype)
         except RuntimeError:
             pass
-    if prev_basis is not None and prev_basis.shape == basis.shape and torch.isfinite(prev_basis).all():
+    if (
+        prev_basis is not None
+        and prev_basis.shape == basis.shape
+        and torch.isfinite(prev_basis).all()
+    ):
         prev = prev_basis.to(device=device, dtype=dtype)
         signs = torch.where((basis * prev).sum(dim=0) >= 0, 1.0, -1.0).to(basis)
         basis = basis * signs
@@ -167,7 +184,11 @@ def pca_colorize_tensor(
     valid_rows = torch.isfinite(flat).all(dim=1)
     valid = flat[valid_rows]
     centered = valid - valid.mean(dim=0, keepdim=True) if valid.shape[0] > 0 else valid
-    if prev_basis is not None and prev_basis.shape == (D, 3) and torch.isfinite(prev_basis).all():
+    if (
+        prev_basis is not None
+        and prev_basis.shape == (D, 3)
+        and torch.isfinite(prev_basis).all()
+    ):
         basis = prev_basis.to(device=flat.device, dtype=flat.dtype)
     else:
         basis = _pca_basis(centered)
@@ -178,7 +199,9 @@ def pca_colorize_tensor(
     hi = torch.quantile(proj, high_pct, dim=0)
     spread = hi - lo
     scaled = ((proj - lo) / spread.clamp(min=1e-6)).clamp(0.0, 1.0)
-    scaled = torch.where(spread.unsqueeze(0) > 1e-6, scaled, torch.full_like(scaled, 0.5))
+    scaled = torch.where(
+        spread.unsqueeze(0) > 1e-6, scaled, torch.full_like(scaled, 0.5)
+    )
     colors[valid_rows] = (scaled * 255.0).to(torch.uint8)
     return colors, basis
 
@@ -191,13 +214,13 @@ class MapperNode(Node):
         # --- TSDF parameters ---
         self.declare_parameter("voxel_size", 0.02)
         self.declare_parameter("esdf_voxel_size", 0.02)
-        self.declare_parameter("extent_meters_xyz", [5.0, 5.0, 5.0])
+        self.declare_parameter("grid_size_m", [5.0, 5.0, 5.0])
         self.declare_parameter("grid_center_m", [0.0, 0.0, 0.0])
         self.declare_parameter("depth_minimum_distance", 0.05)
         self.declare_parameter("depth_maximum_distance", 5.0)
         self.declare_parameter("truncation_distance", -1.0)
         self.declare_parameter("minimum_tsdf_weight", 1.0)
-        self.declare_parameter("decay_factor", 0.3)
+        self.declare_parameter("decay_factor", 1.0)
         self.declare_parameter("block_size", 2)
         self.declare_parameter("roughness", 3.0)
         self.declare_parameter("num_cameras", 1)
@@ -230,11 +253,12 @@ class MapperNode(Node):
         self.declare_parameter("enable_text_query", True)
         self.declare_parameter("text_query_top_k", 500)
         self.declare_parameter("text_query_min_score", 0.05)
+        self.declare_parameter("max_publish_voxels", 100000)
 
         # Read parameters (image_height/width come from CameraInfo at runtime)
         self._vs = self.get_parameter("voxel_size").value
         self._esdf_vs = self.get_parameter("esdf_voxel_size").value
-        self._extent = list(self.get_parameter("extent_meters_xyz").value)
+        self._extent = list(self.get_parameter("grid_size_m").value)
         self._grid_center = list(self.get_parameter("grid_center_m").value)
         self._depth_min = self.get_parameter("depth_minimum_distance").value
         self._depth_max = self.get_parameter("depth_maximum_distance").value
@@ -255,10 +279,13 @@ class MapperNode(Node):
         rgb_image_topics = list(self.get_parameter("rgb_image_topics").value)
         self._tf_lookup_duration = self.get_parameter("tf_lookup_duration").value
         self._filter_depth_enabled = self.get_parameter("filter_depth").value
-        self._enable_feature_mapping = self.get_parameter("enable_feature_mapping").value
+        self._enable_feature_mapping = self.get_parameter(
+            "enable_feature_mapping"
+        ).value
         self._enable_text_query = self.get_parameter("enable_text_query").value
         self._text_query_top_k = self.get_parameter("text_query_top_k").value
         self._text_query_min_score = self.get_parameter("text_query_min_score").value
+        self._max_publish_voxels = self.get_parameter("max_publish_voxels").value
         integrate_rate = self.get_parameter("integrate_rate_hz").value
         esdf_service_name = self.get_parameter("esdf_service_name").value
         self._integrate_period = 1.0 / max(integrate_rate, 1.0)
@@ -292,6 +319,8 @@ class MapperNode(Node):
         self._feature_w: int = 0
         self._feature_dim: int = 0
         self._pca_basis: Optional[torch.Tensor] = None
+        self._cached_feat: Optional[torch.Tensor] = None
+        self._cached_feat_shape: Optional[tuple] = None
 
         # Subscriptions
         for i in range(self._num_cameras):
@@ -340,6 +369,11 @@ class MapperNode(Node):
             "/curobo_mapper/features_pca",
             1,
         )
+        self._feature_pca_image_pub = self.create_publisher(
+            Image,
+            "/curobo_mapper/feature_pca_image",
+            1,
+        )
         self._debug_voxel_pub = self.create_publisher(
             Marker,
             "/curobo_mapper/debug_voxels",
@@ -363,7 +397,9 @@ class MapperNode(Node):
             self._text_query_sub = self.create_subscription(
                 String, "/curobo_mapper/text_query", self._text_query_cb, 10
             )
-            self.get_logger().info("Text query enabled — subscribe to /curobo_mapper/text_query")
+            self.get_logger().info(
+                "Text query enabled — subscribe to /curobo_mapper/text_query"
+            )
 
         self.get_logger().info(
             f"cuRobo Mapper node started — {self._num_cameras} camera(s), "
@@ -523,10 +559,13 @@ class MapperNode(Node):
     # TF helper
     # ------------------------------------------------------------------
 
-    def _lookup_camera_pose(self, camera_index: int, camera_frame: str) -> Optional[CuPose]:
+    def _lookup_camera_pose(
+        self, camera_index: int, camera_frame: str
+    ) -> Optional[CuPose]:
         target_frame = (
             self._curobo_frames[camera_index]
-            if camera_index < len(self._curobo_frames) and self._curobo_frames[camera_index]
+            if camera_index < len(self._curobo_frames)
+            and self._curobo_frames[camera_index]
             else camera_frame
         )
         try:
@@ -596,8 +635,11 @@ class MapperNode(Node):
             else:
                 rgb_list.append(
                     torch.zeros(
-                        depths[i].shape[0], depths[i].shape[1], 3,
-                        dtype=torch.uint8, device=self._device,
+                        depths[i].shape[0],
+                        depths[i].shape[1],
+                        3,
+                        dtype=torch.uint8,
+                        device=self._device,
                     )
                 )
 
@@ -624,6 +666,9 @@ class MapperNode(Node):
         if self._feature_model is not None:
             with torch.autocast("cuda", dtype=torch.bfloat16):
                 feat = self._feature_model.extract_patch_features(rgb_batched[0])
+            self._cached_feat = feat
+            self._cached_feat_shape = rgb_batched[0].shape[:2]
+
             obs = CameraObservation(
                 name="mapper_camera",
                 depth_image=depth_batched,
@@ -746,6 +791,28 @@ class MapperNode(Node):
             self.get_logger().error(f"Text encoding failed: {e}")
             return
 
+        self.get_logger().info(
+            f"text_emb norm={text_emb[0].norm():.4f}, "
+            f"min={text_emb[0].min():.4f}, max={text_emb[0].max():.4f}"
+        )
+
+        # Quick per-image match diagnostic using cached features
+        feat = self._cached_feat
+        if feat is not None:
+            Hp, Wp, D = feat.shape
+            flat = feat.reshape(-1, D).float()
+            projected = self._feature_model.project_features(flat)
+            projected_norm = projected.norm(dim=1)
+            img_scores = projected @ text_emb[0]
+            self.get_logger().info(
+                f"Per-image scores: min={img_scores.min():.4f} "
+                f"max={img_scores.max():.4f} "
+                f"mean={img_scores.mean():.4f} "
+                f"std={img_scores.std():.4f} "
+                f"proj_norm min={projected_norm.min():.6f} "
+                f"proj_norm max={projected_norm.max():.6f}"
+            )
+
         try:
             matched = self._mapper.extract_matching_feature_voxels(
                 feature_vector=text_emb[0],
@@ -766,7 +833,7 @@ class MapperNode(Node):
         centers = matched.voxels.centers
 
         n = len(centers)
-        max_voxels = 100_000
+        max_voxels = self._max_publish_voxels
         if n > max_voxels:
             stride = int(np.ceil(n / max_voxels))
             centers = centers[::stride]
@@ -830,7 +897,7 @@ class MapperNode(Node):
         centers = voxels.centers
         colors_uint8 = voxels.colors_uint8()
 
-        max_voxels = 100_000
+        max_voxels = self._max_publish_voxels
         if len(centers) > max_voxels:
             stride = int(len(centers) / max_voxels)
             if stride > 1:
@@ -873,48 +940,79 @@ class MapperNode(Node):
         # Publish PCA-colored feature point cloud
         if self._feature_model is not None and self._feature_dim > 0:
             block_features = voxels.block_data.features_normalized()
-            colors_pca, self._pca_basis = pca_colorize_tensor(
-                block_features, prev_basis=self._pca_basis,
-            )
-            feat_centers = voxels.centers
-            feat_colors = colors_pca[voxels.block_idx_per_voxel]
-            if len(feat_centers) > max_voxels:
-                step_f = int(len(feat_centers) / max_voxels)
-                feat_centers = feat_centers[::step_f]
-                feat_colors = feat_colors[::step_f]
-            fcn = feat_centers.cpu().numpy()
-            fcl = feat_colors.cpu().numpy()
-            fn = len(fcn)
-            if fn > 0:
-                fcloud = PointCloud2()
-                fcloud.header = Header(frame_id=self._robot_base_frame)
-                fcloud.header.stamp = self.get_clock().now().to_msg()
-                fcloud.height = 1
-                fcloud.width = fn
-                fcloud.fields = [
-                    PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-                    PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-                    PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-                    PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
-                ]
-                fcloud.point_step = 16
-                fcloud.row_step = fn * 16
-                fcloud.is_bigendian = False
-                fcloud.is_dense = True
-                fpacked = np.zeros((fn, 4), dtype=np.float32)
-                fpacked[:, 0] = fcn[:, 0]
-                fpacked[:, 1] = fcn[:, 1]
-                fpacked[:, 2] = fcn[:, 2]
-                frgb_packed = (
-                    (fcl[:, 0].astype(np.uint32) << 16)
-                    | (fcl[:, 1].astype(np.uint32) << 8)
-                    | fcl[:, 2].astype(np.uint32)
+
+            # Fit PCA basis from per-image features (clean, dense) instead of
+            # block features (noisy per-block with small block_size).
+            feat = self._cached_feat
+            if feat is None:
+                with self._data_lock:
+                    rgb_cached = self._latest_rgb[0]
+                if rgb_cached is not None:
+                    with torch.autocast("cuda", dtype=torch.bfloat16):
+                        feat = self._feature_model.extract_patch_features(rgb_cached)
+            if feat is not None:
+                Hp, Wp, D = feat.shape
+                feat_flat = feat.reshape(-1, D).float()
+                image_colors, self._pca_basis = pca_colorize_tensor(
+                    feat_flat, prev_basis=self._pca_basis,
                 )
-                fpacked[:, 3] = frgb_packed.view(np.float32)
-                fcloud.data = fpacked.tobytes()
-                self._features_pca_pub.publish(fcloud)
+                H, W = self._cached_feat_shape or (Hp * 14, Wp * 14)
+                pca_img = image_colors.view(Hp, Wp, 3)
+                pca_img_t = pca_img.permute(2, 0, 1).unsqueeze(0).float() / 255.0
+                pca_img_up = F.interpolate(pca_img_t, size=(H, W), mode="bilinear", align_corners=False)
+                pca_img_up = (pca_img_up[0].permute(1, 2, 0) * 255.0).to(torch.uint8).cpu().numpy()
+                img_msg = Image()
+                img_msg.header = Header(frame_id=self._robot_base_frame)
+                img_msg.header.stamp = self.get_clock().now().to_msg()
+                img_msg.height = H
+                img_msg.width = W
+                img_msg.encoding = "rgb8"
+                img_msg.is_bigendian = False
+                img_msg.step = W * 3
+                img_msg.data = pca_img_up.tobytes()
+                self._feature_pca_image_pub.publish(img_msg)
 
-
+                # Project block features onto the same basis
+                colors_pca, _ = pca_colorize_tensor(
+                    block_features, prev_basis=self._pca_basis,
+                )
+                feat_centers = voxels.centers
+                feat_colors = colors_pca[voxels.block_idx_per_voxel]
+                if len(feat_centers) > max_voxels:
+                    step_f = int(len(feat_centers) / max_voxels)
+                    feat_centers = feat_centers[::step_f]
+                    feat_colors = feat_colors[::step_f]
+                fcn = feat_centers.cpu().numpy()
+                fcl = feat_colors.cpu().numpy()
+                fn = len(fcn)
+                if fn > 0:
+                    fcloud = PointCloud2()
+                    fcloud.header = Header(frame_id=self._robot_base_frame)
+                    fcloud.header.stamp = self.get_clock().now().to_msg()
+                    fcloud.height = 1
+                    fcloud.width = fn
+                    fcloud.fields = [
+                        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
+                        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
+                        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
+                        PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+                    ]
+                    fcloud.point_step = 16
+                    fcloud.row_step = fn * 16
+                    fcloud.is_bigendian = False
+                    fcloud.is_dense = True
+                    fpacked = np.zeros((fn, 4), dtype=np.float32)
+                    fpacked[:, 0] = fcn[:, 0]
+                    fpacked[:, 1] = fcn[:, 1]
+                    fpacked[:, 2] = fcn[:, 2]
+                    frgb_packed = (
+                        (fcl[:, 0].astype(np.uint32) << 16)
+                        | (fcl[:, 1].astype(np.uint32) << 8)
+                        | fcl[:, 2].astype(np.uint32)
+                    )
+                    fpacked[:, 3] = frgb_packed.view(np.float32)
+                    fcloud.data = fpacked.tobytes()
+                    self._features_pca_pub.publish(fcloud)
 
 
 def main(args=None):
