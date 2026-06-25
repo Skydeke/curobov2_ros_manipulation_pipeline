@@ -14,8 +14,9 @@
     collision_cache_cuboid: 20
     collision_cache_mesh: 20
     workspace_file_path: ''
+    max_batch_size: 4
     grid_size_m: [2.0, 2.0, 2.0]
-    voxel_size: 0.05
+    esdf_voxel_size: 0.05
     read_esdf_world: False
     publish_curobo_world_as_voxels: False
     add_ground_plane: False

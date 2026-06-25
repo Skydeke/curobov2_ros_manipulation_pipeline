@@ -12,6 +12,7 @@ from typing import Dict, List, Set, Tuple
 
 from curobo.scene import Cuboid, Cylinder, Mesh, Sphere
 from curobo.types import GoalToolPose, JointState as CuJointState, Pose
+from dataclasses import replace
 from geometry_msgs.msg import Pose as RosPose
 from isaac_ros_cumotion.cumotion_planner import CumotionActionServer
 from isaac_ros_cumotion_interfaces.action import MotionPlan

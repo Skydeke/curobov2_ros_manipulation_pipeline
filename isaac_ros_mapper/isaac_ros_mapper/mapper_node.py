@@ -212,7 +212,7 @@ class MapperNode(Node):
         super().__init__("curobo_mapper_node")
 
         # --- TSDF parameters ---
-        self.declare_parameter("voxel_size", 0.02)
+        self.declare_parameter("tsdf_voxel_size", 0.02)
         self.declare_parameter("esdf_voxel_size", 0.02)
         self.declare_parameter("grid_size_m", [5.0, 5.0, 5.0])
         self.declare_parameter("grid_center_m", [0.0, 0.0, 0.0])
@@ -256,7 +256,7 @@ class MapperNode(Node):
         self.declare_parameter("max_publish_voxels", 100000)
 
         # Read parameters (image_height/width come from CameraInfo at runtime)
-        self._vs = self.get_parameter("voxel_size").value
+        self._vs = self.get_parameter("tsdf_voxel_size").value
         self._esdf_vs = self.get_parameter("esdf_voxel_size").value
         self._extent = list(self.get_parameter("grid_size_m").value)
         self._grid_center = list(self.get_parameter("grid_center_m").value)
@@ -954,13 +954,21 @@ class MapperNode(Node):
                 Hp, Wp, D = feat.shape
                 feat_flat = feat.reshape(-1, D).float()
                 image_colors, self._pca_basis = pca_colorize_tensor(
-                    feat_flat, prev_basis=self._pca_basis,
+                    feat_flat,
+                    prev_basis=self._pca_basis,
                 )
                 H, W = self._cached_feat_shape or (Hp * 14, Wp * 14)
                 pca_img = image_colors.view(Hp, Wp, 3)
                 pca_img_t = pca_img.permute(2, 0, 1).unsqueeze(0).float() / 255.0
-                pca_img_up = F.interpolate(pca_img_t, size=(H, W), mode="bilinear", align_corners=False)
-                pca_img_up = (pca_img_up[0].permute(1, 2, 0) * 255.0).to(torch.uint8).cpu().numpy()
+                pca_img_up = F.interpolate(
+                    pca_img_t, size=(H, W), mode="bilinear", align_corners=False
+                )
+                pca_img_up = (
+                    (pca_img_up[0].permute(1, 2, 0) * 255.0)
+                    .to(torch.uint8)
+                    .cpu()
+                    .numpy()
+                )
                 img_msg = Image()
                 img_msg.header = Header(frame_id=self._robot_base_frame)
                 img_msg.header.stamp = self.get_clock().now().to_msg()
@@ -974,7 +982,8 @@ class MapperNode(Node):
 
                 # Project block features onto the same basis
                 colors_pca, _ = pca_colorize_tensor(
-                    block_features, prev_basis=self._pca_basis,
+                    block_features,
+                    prev_basis=self._pca_basis,
                 )
                 feat_centers = voxels.centers
                 feat_colors = colors_pca[voxels.block_idx_per_voxel]
@@ -992,10 +1001,18 @@ class MapperNode(Node):
                     fcloud.height = 1
                     fcloud.width = fn
                     fcloud.fields = [
-                        PointField(name="x", offset=0, datatype=PointField.FLOAT32, count=1),
-                        PointField(name="y", offset=4, datatype=PointField.FLOAT32, count=1),
-                        PointField(name="z", offset=8, datatype=PointField.FLOAT32, count=1),
-                        PointField(name="rgb", offset=12, datatype=PointField.FLOAT32, count=1),
+                        PointField(
+                            name="x", offset=0, datatype=PointField.FLOAT32, count=1
+                        ),
+                        PointField(
+                            name="y", offset=4, datatype=PointField.FLOAT32, count=1
+                        ),
+                        PointField(
+                            name="z", offset=8, datatype=PointField.FLOAT32, count=1
+                        ),
+                        PointField(
+                            name="rgb", offset=12, datatype=PointField.FLOAT32, count=1
+                        ),
                     ]
                     fcloud.point_step = 16
                     fcloud.row_step = fn * 16

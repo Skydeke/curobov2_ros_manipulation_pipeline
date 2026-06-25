@@ -27,11 +27,13 @@ import torch.nn.functional as F
 import yaml
 import yourdfpy
 from ament_index_python.packages import get_package_share_directory
-from geometry_msgs.msg import Point, Vector3
+from geometry_msgs.msg import Point, Pose as RosPose, Vector3
 from moveit_msgs.msg import CollisionObject, PlanningScene
+from isaac_ros_cumotion_interfaces.srv import BatchIK, GetEsdf
 from sensor_msgs.msg import CameraInfo, Image, JointState, PointCloud2
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import String
+from std_srvs.srv import Trigger
 from isaac_ros_cumotion_python_utils.utils import (
     get_grid_center,
     get_grid_min_corner,
@@ -39,7 +41,6 @@ from isaac_ros_cumotion_python_utils.utils import (
     is_grid_valid,
     load_grid_corners_from_workspace_file,
 )
-from isaac_ros_cumotion_interfaces.srv import GetEsdf
 import rclpy
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
@@ -231,6 +232,8 @@ def _extract_esdf_slice(
 
 class ESDFViserNode(Node):
 
+    _REACHABILITY_N = 22
+
     def __init__(self):
         super().__init__("esdf_viser_node")
         self.__obstacle_handles = {}
@@ -245,6 +248,18 @@ class ESDFViserNode(Node):
         self.__slice_image = None
         self.__slice_slider = None
         self.__origin_gizmo = None
+        self.__reachability_show = None
+        self.__reachability_gizmo = None
+        self.__reachability_extent_slider = None
+        self.__reachability_image = None
+        self.__reachability_image_handle = None
+        self.__reachability_bounds_handle = None
+        self.__reachability_updating = False
+        self.__reachability_pending = False
+        self.__reachability_grid = None
+        self.__reachability_future = None
+        self.__reachability_poll_timer = None
+        self.__latest_joint_state = None
 
         self.declare_parameter("workspace_file_path", "")
         self.declare_parameter("grid_center_m", [0.0, 0.0, 0.0])
@@ -330,11 +345,6 @@ class ESDFViserNode(Node):
         viser_init = (
             self.get_parameter("viser_initialize").get_parameter_value().bool_value
         )
-        viser_add_frames = (
-            self.get_parameter("viser_add_control_frames")
-            .get_parameter_value()
-            .bool_value
-        )
         viser_viz_spheres = (
             self.get_parameter("viser_visualize_robot_spheres")
             .get_parameter_value()
@@ -401,7 +411,7 @@ class ESDFViserNode(Node):
             connect_port=viser_port,
             add_robot_to_scene=viser_add_robot,
             initialize_viser=viser_init,
-            add_control_frames=viser_add_frames,
+            add_control_frames=False,
             visualize_robot_spheres=viser_viz_spheres,
             visualize_collision_meshes=viser_viz_meshes,
         )
@@ -412,19 +422,20 @@ class ESDFViserNode(Node):
         self.__draw_grid_box()
         self.__draw_origin_gizmo()
         self._setup_esdf_slice()
+        self.__batch_ik_client = self.create_client(BatchIK, "/cumotion/batch_ik")
+        self._setup_reachability_slice()
 
         self.__esdf_service_name = esdf_service_name
         self.__esdf_client = None
 
-        if viser_add_robot:
-            joint_states_topic = (
-                self.get_parameter("joint_states_topic")
-                .get_parameter_value()
-                .string_value
-            )
-            self.create_subscription(
-                JointState, joint_states_topic, self.__joint_state_cb, 10
-            )
+        joint_states_topic = (
+            self.get_parameter("joint_states_topic")
+            .get_parameter_value()
+            .string_value
+        )
+        self.create_subscription(
+            JointState, joint_states_topic, self.__joint_state_cb, 10
+        )
 
         planning_scene_topic = (
             self.get_parameter("planning_scene_topic")
@@ -599,6 +610,7 @@ class ESDFViserNode(Node):
                 float(self.__grid_center_m[1]),
                 float(self.__grid_center_m[2]),
             ),
+            visible=False,
         )
 
         self.__slice_image = server.scene.add_image(
@@ -618,6 +630,7 @@ class ESDFViserNode(Node):
         @self.__slice_show.on_update
         def _on_slice_toggle(_):
             self.__slice_image.visible = self.__slice_show.value
+            self.__slice_gizmo.visible = self.__slice_show.value
             if self.__slice_show.value:
                 self._update_esdf_slice()
 
@@ -654,7 +667,212 @@ class ESDFViserNode(Node):
         )
         self.__slice_image.image = slice_colors
 
+    def _setup_reachability_slice(self):
+        server = self.__viz._server
+        self.__reachability_show = server.gui.add_checkbox(
+            "Show Reachability", initial_value=False
+        )
+
+        max_extent = min(self.__grid_size_m[0], self.__grid_size_m[1]) / 2.0
+        self.__reachability_extent_slider = server.gui.add_slider(
+            "Reachability Extent",
+            min=0.05,
+            max=max_extent,
+            step=0.01,
+            initial_value=min(1.0, max_extent),
+        )
+
+        self.__reachability_gizmo = server.scene.add_transform_controls(
+            "/reachability_gizmo",
+            scale=0.2,
+            position=(
+                float(self.__grid_center_m[0]),
+                float(self.__grid_center_m[1]),
+                float(self.__grid_center_m[2]),
+            ),
+            visible=False,
+        )
+
+        self.__reachability_service = self.create_service(
+            Trigger, "cumotion/refresh_reachability", self._reachability_service_cb
+        )
+        self.__reachability_poll_timer = self.create_timer(
+            0.2, self._reachability_poll_cb
+        )
+
+        @self.__reachability_gizmo.on_update
+        def _on_reach_gizmo_update(_):
+            if self.__reachability_show.value:
+                self._trigger_reachability_update()
+
+        @self.__reachability_show.on_update
+        def _on_reach_toggle(_):
+            self.__reachability_gizmo.visible = self.__reachability_show.value
+            if self.__reachability_show.value:
+                self._trigger_reachability_update()
+            else:
+                if self.__reachability_image_handle is not None:
+                    self.__reachability_image_handle.visible = False
+                if self.__reachability_bounds_handle is not None:
+                    self.__reachability_bounds_handle.visible = False
+
+        @self.__reachability_extent_slider.on_update
+        def _on_reach_slider(_):
+            if self.__reachability_show.value:
+                self._trigger_reachability_update()
+
+    def _blacken_reachability_image(self):
+        if self.__reachability_image_handle is not None:
+            n = self._REACHABILITY_N
+            black = np.zeros((n, n, 3), dtype=np.uint8)
+            self.__reachability_image_handle.image = black
+
+    def _trigger_reachability_update(self):
+        if self.__reachability_updating:
+            self.__reachability_pending = True
+            return
+        self.__reachability_pending = False
+        self.__reachability_updating = True
+        self._blacken_reachability_image()
+        self._update_reachability_slice()
+
+    def _reachability_service_cb(self, request, response):
+        self.__reachability_pending = True
+        self._blacken_reachability_image()
+        if self.__reachability_show:
+            self.__reachability_show.value = True
+        if self.__reachability_gizmo:
+            self.__reachability_gizmo.visible = True
+        if not self.__reachability_updating:
+            self._trigger_reachability_update()
+        response.success = True
+        response.message = "Reachability update triggered"
+        return response
+
+    def _reachability_poll_cb(self):
+        if self.__reachability_future is None:
+            return
+        if not self.__reachability_future.done():
+            return
+        self._render_reachability(self.__reachability_future)
+        self.__reachability_future = None
+        self.__reachability_updating = False
+        if self.__reachability_pending:
+            self._trigger_reachability_update()
+
+    def _update_reachability_slice(self):
+        import trimesh
+
+        if self.__latest_joint_state is None:
+            self.get_logger().warn("No joint state available for reachability")
+            self.__reachability_updating = False
+            return
+
+        q = self.__reachability_gizmo.wxyz
+        gizmo_mat = trimesh.transformations.quaternion_matrix([q[0], q[1], q[2], q[3]])
+        gizmo_mat[:3, 3] = self.__reachability_gizmo.position
+
+        extent = self.__reachability_extent_slider.value
+        n_per_axis = self._REACHABILITY_N
+        hs = extent / 2.0
+
+        ros_poses = []
+        lin = np.linspace(-hs, hs, n_per_axis, dtype=np.float32)
+        for i in range(n_per_axis):
+            for j in range(n_per_axis):
+                local_p = np.array([lin[j], lin[i], 0.0, 1.0])
+                world_p = gizmo_mat @ local_p
+
+                pose = RosPose()
+                pose.position.x = float(world_p[0])
+                pose.position.y = float(world_p[1])
+                pose.position.z = float(world_p[2])
+                pose.orientation.w = float(q[0])
+                pose.orientation.x = float(q[1])
+                pose.orientation.y = float(q[2])
+                pose.orientation.z = float(q[3])
+                ros_poses.append(pose)
+
+        if not self.__batch_ik_client.service_is_ready():
+            self.__reachability_updating = False
+            return
+
+        req = BatchIK.Request()
+        req.goal_poses = ros_poses
+        req.seed_state = self.__latest_joint_state
+        req.num_solutions_to_return = 1
+
+        self.__reachability_future = self.__batch_ik_client.call_async(req)
+        self.get_logger().info(
+            f"Sent BatchIK request for {len(ros_poses)} poses"
+        )
+
+    def _render_reachability(self, fut):
+        import trimesh
+
+        try:
+            result = fut.result()
+        except Exception as e:
+            self.get_logger().error(f"BatchIK call failed: {e}")
+            return
+        if result is None:
+            self.get_logger().warn("BatchIK returned None")
+            return
+        server = self.__viz._server
+        n_per_axis = self._REACHABILITY_N
+        success_arr = np.array(result.success, dtype=bool).reshape(n_per_axis, n_per_axis)
+
+        n_ok = int(success_arr.sum())
+        self.get_logger().info(
+            f"Reachability: {n_ok}/{n_per_axis * n_per_axis} reachable"
+        )
+
+        img = np.zeros((n_per_axis, n_per_axis, 3), dtype=np.uint8)
+        img[success_arr] = [0, 200, 0]
+        img[~success_arr] = [200, 0, 0]
+
+        extent = self.__reachability_extent_slider.value
+        visible = self.__reachability_show.value
+        if self.__reachability_image_handle is not None:
+            self.__reachability_image_handle.remove()
+        self.__reachability_image_handle = server.scene.add_image(
+            "/reachability_gizmo/reachability_image",
+            image=img,
+            render_width=extent,
+            render_height=extent,
+            visible=visible,
+        )
+
+        half = extent / 2.0
+        gizmo_pos = self.__reachability_gizmo.position
+        rot = trimesh.transformations.quaternion_matrix(
+            list(self.__reachability_gizmo.wxyz)
+        )[:3, :3]
+        corners_local = np.array(
+            [[-half, -half, 0], [half, -half, 0],
+             [half, half, 0], [-half, half, 0]],
+            dtype=np.float32,
+        )
+        corners_world = (rot @ corners_local.T).T + gizmo_pos
+        edges = [(0, 1), (1, 2), (2, 3), (3, 0)]
+        lines = np.array(
+            [[corners_world[i], corners_world[j]] for i, j in edges],
+            dtype=np.float32,
+        )
+        yellow = np.array([255, 255, 0], dtype=np.uint8)
+        if self.__reachability_bounds_handle is not None:
+            self.__reachability_bounds_handle.remove()
+        self.__reachability_bounds_handle = server.scene.add_line_segments(
+            "/reachability_bounds",
+            points=lines,
+            colors=yellow,
+            line_width=3.0,
+        )
+        self.__reachability_bounds_handle.visible = visible
+
     def __joint_state_cb(self, msg: JointState):
+        self.__latest_joint_state = msg
+
         if not hasattr(self, "_ESDFViserNode__viz"):
             return
         names = [n for n in msg.name if n not in self.__locked_joint_names]

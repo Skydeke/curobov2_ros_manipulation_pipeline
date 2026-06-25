@@ -36,7 +36,7 @@ from moveit_msgs.msg import CollisionObject
 from moveit_msgs.msg import MoveItErrorCodes
 from moveit_msgs.msg import RobotTrajectory
 import numpy as np
-from isaac_ros_cumotion_interfaces.srv import GetEsdf
+from isaac_ros_cumotion_interfaces.srv import BatchIK, GetEsdf
 import rclpy
 from rclpy.action import ActionServer
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
@@ -70,12 +70,13 @@ class CumotionActionServer(Node):
         self.declare_parameter("trajopt_finetune_iters", 400)
         self.declare_parameter("interpolation_dt", 0.025)
         self.declare_parameter("max_goalset", 12)
+        self.declare_parameter("max_batch_size", 4)
         self.declare_parameter("ik_optimizer_config", "")
         self.declare_parameter("trajopt_optimizer_config", "")
         self.declare_parameter("enable_cuda_graph", True)
         self.declare_parameter("collision_cache_mesh", 20)
         self.declare_parameter("collision_cache_cuboid", 20)
-        self.declare_parameter("voxel_size", 0.05)
+        self.declare_parameter("esdf_voxel_size", 0.05)
         self.declare_parameter("read_esdf_world", False)
         self.declare_parameter("publish_curobo_world_as_voxels", False)
         self.declare_parameter("add_ground_plane", False)
@@ -185,6 +186,9 @@ class CumotionActionServer(Node):
         self.__max_goalset = (
             self.get_parameter("max_goalset").get_parameter_value().integer_value
         )
+        self.__max_batch_size = (
+            self.get_parameter("max_batch_size").get_parameter_value().integer_value
+        )
         self.__ik_optimizer_config = (
             self.get_parameter("ik_optimizer_config").get_parameter_value().string_value
         )
@@ -283,8 +287,8 @@ class CumotionActionServer(Node):
         self.__publish_voxel_size = (
             self.get_parameter("publish_voxel_size").get_parameter_value().double_value
         )
-        self.__voxel_size = (
-            self.get_parameter("voxel_size").get_parameter_value().double_value
+        self.__esdf_voxel_size = (
+            self.get_parameter("esdf_voxel_size").get_parameter_value().double_value
         )
         self._update_link_sphere_server = (
             self.get_parameter("update_link_sphere_server")
@@ -304,20 +308,20 @@ class CumotionActionServer(Node):
                 self.__workspace_file_path
             )
             self.__grid_size_m = get_grid_size(
-                min_corner, max_corner, self.__voxel_size
+                min_corner, max_corner, self.__esdf_voxel_size
             )
             self.__grid_center_m = get_grid_center(min_corner, self.__grid_size_m)
 
             self.get_logger().info(
                 f"Loaded grid dims: {self.__grid_size_m}, "
-                f"voxel size: {self.__voxel_size}"
+                f"voxel size: {self.__esdf_voxel_size}"
             )
         else:
             self.get_logger().info(
                 "Loading grid position and dims from grid_center_m and grid_size_m parameters."
             )
 
-        if is_grid_valid(self.__grid_size_m, self.__voxel_size):
+        if is_grid_valid(self.__grid_size_m, self.__esdf_voxel_size):
             self.get_logger().fatal(
                 "Number of voxels should be at least 1 in every dimension."
             )
@@ -378,6 +382,9 @@ class CumotionActionServer(Node):
         self._ik_action_server = ActionServer(
             self, IKSolution, "cumotion/ik", self.execute_callback_ik
         )
+        self._batch_ik_service = self.create_service(
+            BatchIK, "cumotion/batch_ik", self._batch_ik_callback
+        )
 
         self._tf_buffer = Buffer(cache_time=rclpy.duration.Duration(seconds=60.0))
         self._tf_listener = TransformListener(self._tf_buffer, self)
@@ -400,15 +407,17 @@ class CumotionActionServer(Node):
         if self.__read_esdf_grid or self.__publish_curobo_world_as_voxels:
             import math
 
-            raw_grid_shape = [round(d / self.__voxel_size) for d in self.__grid_size_m]
+            raw_grid_shape = [
+                round(d / self.__esdf_voxel_size) for d in self.__grid_size_m
+            ]
             grid_shape = [s + 1 for s in raw_grid_shape]
             num_voxels = math.prod(grid_shape)
             world_objects = {
                 "voxel": {
                     "world_voxel": {
-                        "dims": [s * self.__voxel_size for s in grid_shape],
+                        "dims": [s * self.__esdf_voxel_size for s in grid_shape],
                         "pose": [0, 0, 0, 1, 0, 0, 0],
-                        "voxel_size": self.__voxel_size,
+                        "voxel_size": self.__esdf_voxel_size,
                         "feature_dtype": torch.float16,
                         "feature_tensor": torch.zeros(
                             num_voxels, dtype=torch.float16, device="cuda"
@@ -433,6 +442,7 @@ class CumotionActionServer(Node):
             device_cfg=device_cfg,
             use_cuda_graph=self.__enable_cuda_graph,
             max_goalset=self.__max_goalset,
+            max_batch_size=self.__max_batch_size,
         )
 
         if self.__ik_optimizer_config:
@@ -454,7 +464,9 @@ class CumotionActionServer(Node):
 
         if self.__read_esdf_grid or self.__publish_curobo_world_as_voxels:
             self.__cumotion_grid_shape = None
-            raw_grid_shape = [round(d / self.__voxel_size) for d in self.__grid_size_m]
+            raw_grid_shape = [
+                round(d / self.__esdf_voxel_size) for d in self.__grid_size_m
+            ]
             self.__raw_grid_shape = raw_grid_shape
         else:
             self.__cumotion_grid_shape = None
@@ -530,7 +542,7 @@ class CumotionActionServer(Node):
             return False
         esdf_grid = self.get_esdf_voxel_grid(response)
         if torch.max(esdf_grid.feature_tensor) <= (
-            -1000.0 + 0.5 * self.__voxel_size + 1e-5
+            -1000.0 + 0.5 * self.__esdf_voxel_size + 1e-5
         ):
             self.get_logger().error("ESDF data is empty, try again after few seconds.")
             return False
@@ -585,9 +597,7 @@ class CumotionActionServer(Node):
             radii.append(float(spheres[i, 3].item()) + padding)
 
         if centers:
-            self.get_logger().info(
-                f"Clearing {len(centers)} robot spheres from ESDF"
-            )
+            self.get_logger().info(f"Clearing {len(centers)} robot spheres from ESDF")
 
         return centers, radii
 
@@ -614,10 +624,10 @@ class CumotionActionServer(Node):
 
     def get_esdf_voxel_grid(self, esdf_data):
         esdf_voxel_size = esdf_data.voxel_size_m
-        if abs(esdf_voxel_size - self.__voxel_size) > 1e-4:
+        if abs(esdf_voxel_size - self.__esdf_voxel_size) > 1e-4:
             self.get_logger().fatal(
                 "Voxel size of esdf array is not equal to requested voxel_size, "
-                f"{esdf_voxel_size} vs. {self.__voxel_size}"
+                f"{esdf_voxel_size} vs. {self.__esdf_voxel_size}"
             )
             raise SystemExit
 
@@ -656,7 +666,7 @@ class CumotionActionServer(Node):
 
         # nvblox adds one voxel of padding per dimension in the response,
         # so use the actual response dims, not the requested grid_size_m.
-        response_dims = [s * self.__voxel_size for s in array_shape]
+        response_dims = [s * self.__esdf_voxel_size for s in array_shape]
         grid_center_m = get_grid_center(grid_origin, response_dims)
 
         self.get_logger().info(
@@ -679,7 +689,7 @@ class CumotionActionServer(Node):
             name="world_voxel",
             dims=response_dims,
             pose=grid_center_m + [1, 0.0, 0.0, 0.0],
-            voxel_size=self.__voxel_size,
+            voxel_size=self.__esdf_voxel_size,
             feature_dtype=torch.float32,
             feature_tensor=array_data,
         )
@@ -819,8 +829,8 @@ class CumotionActionServer(Node):
         cylinder_list = []
         mesh_list = []
         for i, obj in enumerate(moveit_objects):
-            cumotion_objects, world_update_status = (
-                self.get_cumotion_collision_object(obj)
+            cumotion_objects, world_update_status = self.get_cumotion_collision_object(
+                obj
             )
             for cumotion_object in cumotion_objects:
                 if isinstance(cumotion_object, Cuboid):
@@ -1362,9 +1372,13 @@ class CumotionActionServer(Node):
         )
         seed_config = seed_config.unsqueeze(0).unsqueeze(0)
 
-        pose = self.get_cu_pose_from_ros_pose(goal_handle.request.goal_pose)
+        tool_frames = self.motion_gen.ik_solver.kinematics.tool_frames
+        cu_pose = self.get_cu_pose_from_ros_pose(goal_handle.request.goal_pose)
+        goal_tool_pose = GoalToolPose.from_poses(
+            {tool_frames[0]: cu_pose}, ordered_tool_frames=tool_frames
+        )
         ik_result = self.motion_gen.ik_solver.solve_pose(
-            pose, return_seeds=num_solutions_to_return, seed_config=seed_config
+            goal_tool_pose, return_seeds=num_solutions_to_return, seed_config=seed_config
         )
 
         result = IKSolution.Result()
@@ -1386,6 +1400,52 @@ class CumotionActionServer(Node):
         result.planning_time = solve_time
         result.error_code.val = MoveItErrorCodes.SUCCESS
         return result
+
+    def _batch_ik_callback(self, request, response):
+        num_poses = len(request.goal_poses)
+        ik_solver = self.motion_gen.ik_solver
+        max_batch = ik_solver.config.max_batch_size
+        tool_frames = ik_solver.kinematics.tool_frames
+
+        og_exit_early = ik_solver.config.exit_early
+        ik_solver.config.exit_early = False
+
+        pose_list = []
+        for ros_pose in request.goal_poses:
+            pose_list.append([
+                ros_pose.position.x,
+                ros_pose.position.y,
+                ros_pose.position.z,
+                ros_pose.orientation.w,
+                ros_pose.orientation.x,
+                ros_pose.orientation.y,
+                ros_pose.orientation.z,
+            ])
+
+        all_success = []
+        total_time = 0.0
+
+        for chunk_start in range(0, num_poses, max_batch):
+            chunk_end = min(chunk_start + max_batch, num_poses)
+            chunk_poses = pose_list[chunk_start:chunk_end]
+
+            cu_pose = Pose.from_batch_list(chunk_poses)
+            goal_tool_pose = GoalToolPose.from_poses(
+                {tool_frames[0]: cu_pose}, ordered_tool_frames=tool_frames
+            )
+            ik_result = ik_solver.solve_pose(
+                goal_tool_pose,
+                return_seeds=request.num_solutions_to_return,
+            )
+            all_success.extend(
+                bool(x) for x in ik_result.success.cpu().flatten().tolist()
+            )
+            total_time += float(ik_result.solve_time)
+
+        ik_solver.config.exit_early = og_exit_early
+        response.success = all_success
+        response.planning_time = total_time
+        return response
 
 
 def main(args=None):

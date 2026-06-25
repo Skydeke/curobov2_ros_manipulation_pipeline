@@ -1,7 +1,7 @@
 /curobo_mapper_node:
   ros__parameters:
     # TSDF voxel size (m)
-    voxel_size: 0.02
+    tsdf_voxel_size: 0.02
     # ESDF voxel size (m) — same as TSDF to match cumotion_params.yaml
     esdf_voxel_size: 0.02
     # Physical extent of the map volume (m) — matches grid_size_m in cumotion_params.yaml
