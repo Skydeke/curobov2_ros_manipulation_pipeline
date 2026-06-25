@@ -175,6 +175,11 @@ def generate_launch_description():
             description="Enable robot segmenter nodes",
         ),
         DeclareLaunchArgument(
+            "enable_viser",
+            default_value="true",
+            description="Enable Viser visualization node",
+        ),
+        DeclareLaunchArgument(
             "use_sim_time", default_value="false", description="Use simulation time"
         ),
         # cumotion_planner parameters forwarded to isaac_ros_cumotion.launch.py
@@ -556,6 +561,11 @@ def generate_launch_description():
         launch_arguments={
             "params_file": kortex_params,
         }.items(),
+    )
+
+    esdf_viser_launch = GroupAction(
+        actions=[esdf_viser_launch],
+        condition=IfCondition(LaunchConfiguration("enable_viser")),
     )
 
     # cuRobo Mapper for TSDF/ESDF

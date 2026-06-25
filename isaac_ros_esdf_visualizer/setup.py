@@ -30,7 +30,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
-            ['launch/esdf_viser.launch.py', 'launch/esdf_visualizer.launch.py']),
+            ['launch/esdf_viser.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -45,7 +45,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'esdf_visualizer = isaac_ros_esdf_visualizer.esdf_visualizer:main',
             'esdf_viser_node = isaac_ros_esdf_visualizer.esdf_viser_node:main',
         ],
     },
