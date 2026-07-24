@@ -106,16 +106,23 @@ class CuroboServerNode(Node):
         # ------------------------------------------------------------------
         # Depth-to-ESDF mapper (folded from mapper_node.py; own callback group)
         # ------------------------------------------------------------------
-        self._mapper_integration = MapperIntegration(
-            self, self._curobo_ctx, planner_cb_group=self._motion_planner_cb_group,
-        )
+        if self.get_parameter("enable_mapper").value:
+            self._mapper_integration = MapperIntegration(
+                self, self._curobo_ctx, planner_cb_group=self._motion_planner_cb_group,
+            )
+        else:
+            self._mapper_integration = None
+            self.get_logger().info("Mapper disabled (enable_mapper=false)")
 
         # ------------------------------------------------------------------
         # Robot segmentation (folded from robot_segmenter.py; own callback group)
         # ------------------------------------------------------------------
-        self._segmentation_integration = RobotSegmentationIntegration(
-            self, self._curobo_ctx, cb_group=self._motion_planner_cb_group,
-        )
+        if self.get_parameter("enable_segmenter").value:
+            self._segmentation_integration = RobotSegmentationIntegration(
+                self, self._curobo_ctx, cb_group=self._motion_planner_cb_group,
+            )
+        else:
+            self._segmentation_integration = None
 
         # ------------------------------------------------------------------
         # ROS wiring
@@ -264,6 +271,7 @@ class CuroboServerNode(Node):
         self.declare_parameter("moveit_collision_objects_scene_file", "")
 
         # Mapper parameters (from mapper_node.py)
+        self.declare_parameter("enable_mapper", True)
         self.declare_parameter("tsdf_voxel_size", 0.02)
         self.declare_parameter("depth_minimum_distance", 0.05)
         self.declare_parameter("depth_maximum_distance", 5.0)
@@ -294,6 +302,7 @@ class CuroboServerNode(Node):
         self.declare_parameter("publish_robot_spheres_hz", 30.0)
 
         # Robot segmentation parameters (from robot_segmenter.py)
+        self.declare_parameter("enable_segmenter", False)
         self.declare_parameter("cuda_device", 0)
         self.declare_parameter("distance_threshold", 0.2)
         self.declare_parameter("time_sync_slop", 0.1)

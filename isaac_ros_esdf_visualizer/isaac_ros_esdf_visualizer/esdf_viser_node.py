@@ -296,6 +296,7 @@ class ESDFViserNode(Node):
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("planning_scene_topic", "/planning_scene")
         self.declare_parameter("esdf_service_call_period_secs", 1.0)
+        self.declare_parameter("enable_mapper", True)
         self.declare_parameter("viser_host", "0.0.0.0")
         self.declare_parameter("viser_port", 8080)
         self.declare_parameter("viser_content_path", "")
@@ -344,6 +345,9 @@ class ESDFViserNode(Node):
             self.get_parameter("esdf_service_call_period_secs")
             .get_parameter_value()
             .double_value
+        )
+        self.__enable_mapper = (
+            self.get_parameter("enable_mapper").get_parameter_value().bool_value
         )
         viser_host = self.get_parameter("viser_host").get_parameter_value().string_value
         viser_port = (
@@ -1018,6 +1022,8 @@ class ESDFViserNode(Node):
             )
 
     def timer_callback(self):
+        if not self.__enable_mapper:
+            return
         if self.__esdf_client is None:
             self.__esdf_client = self.create_client(
                 GetEsdf, self.__esdf_service_name

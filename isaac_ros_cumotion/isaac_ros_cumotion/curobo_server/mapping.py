@@ -801,7 +801,7 @@ def handle_get_esdf(context: CuroboContext, request, response):
     node = context.node
     mapper_inst: Optional[MapperIntegration] = getattr(node, "_mapper_integration", None) if node else None
     if mapper_inst is None:
-        context.logger.error("handle_get_esdf: _mapper_integration attribute not found on node")
+        context.logger.info("handle_get_esdf: mapper disabled (enable_mapper=false); returning empty")
         response.success = False
         return response
     if mapper_inst._mapper is None:
