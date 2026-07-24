@@ -47,7 +47,19 @@ class MapperIntegration:
     by ``mapping_handler.handle_get_esdf()``.
     """
 
-    def __init__(self, node: Node, context: CuroboContext):
+    def __init__(self, node: Node, context: CuroboContext,
+                 planner_cb_group: Optional[MutuallyExclusiveCallbackGroup] = None):
+        """Initialise mapper integration.
+
+        Args:
+            node: ROS 2 node.
+            context: Shared curobo context.
+            planner_cb_group: If provided, CUDA-touching timers (integrate,
+                surface publishing) use this group to serialise with the
+                motion planner on the same default CUDA stream. Camera
+                subscriptions (data copy only, no CUDA) still use their own
+                group.
+        """
         self._node = node
         self._context = context
         self._data_lock = threading.Lock()
@@ -116,8 +128,11 @@ class MapperIntegration:
         self._cached_feat: Optional[torch.Tensor] = None
         self._cached_feat_shape: Optional[tuple] = None
 
-        # Own callback group for high-rate depth integration (does not block motion planning)
+        # Own callback group for camera subscriptions (data copy only, no CUDA)
         self._cb_group = MutuallyExclusiveCallbackGroup()
+        # Shared callback group for CUDA-touching timers, so mapper operations
+        # are serialised with motion planning on the same default CUDA stream.
+        self._cuda_cb_group = planner_cb_group or self._cb_group
 
         # Subscriptions
         for i in range(self._num_cameras):
@@ -163,13 +178,13 @@ class MapperIntegration:
         self._colored_surface_timer = node.create_timer(
             1.0 / max(debug_voxel_rate, 0.1),
             self._publish_colored_surface,
-            callback_group=self._cb_group,
+            callback_group=self._cuda_cb_group,
         )
         if self._publish_debug_voxels:
             self._debug_voxel_timer = node.create_timer(
                 1.0 / max(debug_voxel_rate, 0.1),
                 self._publish_debug_marker,
-                callback_group=self._cb_group,
+                callback_group=self._cuda_cb_group,
             )
         else:
             self._debug_voxel_timer = None
@@ -264,7 +279,7 @@ class MapperIntegration:
 
         self._integrate_timer = self._node.create_timer(
             self._integrate_period, self._integrate_frames,
-            callback_group=self._cb_group,
+            callback_group=self._cuda_cb_group,
         )
 
         self._node.get_logger().info(

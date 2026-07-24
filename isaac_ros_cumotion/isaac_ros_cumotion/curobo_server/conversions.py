@@ -79,6 +79,7 @@ def cu_solution_to_joint_trajectory(
     js: CuJointState,
     dt: float,
     joint_names: Optional[List[str]] = None,
+    time_scaling: float = 1.0,
 ) -> JointTrajectory:
     traj = JointTrajectory()
     q_traj = js.position.view(-1, js.position.shape[-1]).cpu().numpy()
@@ -88,11 +89,12 @@ def cu_solution_to_joint_trajectory(
         pt = JointTrajectoryPoint()
         pt.positions = q_traj[i].tolist()
         if vel is not None and i < len(vel):
-            pt.velocities = vel[i].tolist()
+            pt.velocities = (vel[i] * time_scaling).tolist()
         if acc is not None and i < len(acc):
-            pt.accelerations = acc[i].tolist()
-        pt.time_from_start.sec = int(i * dt)
-        pt.time_from_start.nanosec = int((i * dt - pt.time_from_start.sec) * 1e9)
+            pt.accelerations = (acc[i] * time_scaling).tolist()
+        t = i * dt / time_scaling
+        pt.time_from_start.sec = int(t)
+        pt.time_from_start.nanosec = int((t - pt.time_from_start.sec) * 1e9)
         traj.points.append(pt)
     traj.joint_names = joint_names if joint_names else (
         list(js.joint_names) if hasattr(js, "joint_names") and js.joint_names else []

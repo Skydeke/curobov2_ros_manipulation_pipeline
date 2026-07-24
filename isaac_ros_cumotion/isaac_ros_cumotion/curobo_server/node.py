@@ -42,6 +42,7 @@ from visualization_msgs.msg import MarkerArray
 import torch
 
 from isaac_ros_cumotion.util import get_spheres_marker
+from moveit_msgs.action import MoveGroup
 
 from .context import CuroboContext
 from . import motion as motion_handler
@@ -53,6 +54,7 @@ from . import attach as attach_handler
 from . import collision as collision_handler
 from . import fk as fk_handler
 from . import world as world_handler
+from . import moveit_bridge as moveit_bridge_handler
 from . import segmentation as segmentation_handler
 from .segmentation import RobotSegmentationIntegration
 from . import mapping as mapping_handler
@@ -104,7 +106,9 @@ class CuroboServerNode(Node):
         # ------------------------------------------------------------------
         # Depth-to-ESDF mapper (folded from mapper_node.py; own callback group)
         # ------------------------------------------------------------------
-        self._mapper_integration = MapperIntegration(self, self._curobo_ctx)
+        self._mapper_integration = MapperIntegration(
+            self, self._curobo_ctx, planner_cb_group=self._motion_planner_cb_group,
+        )
 
         # ------------------------------------------------------------------
         # Robot segmentation (folded from robot_segmenter.py; own callback group)
@@ -169,6 +173,13 @@ class CuroboServerNode(Node):
         self._retarget_motion_server = ActionServer(
             self, RetargetMotion, "cumotion/retarget_motion",
             self._on_retarget_motion, callback_group=self._motion_planner_cb_group,
+        )
+
+        # MoveIt compatibility: accept moveit_msgs::action::MoveGroup at
+        # cumotion/move_group (the C++ CumotionMoveGroupClient sends here)
+        self._move_group_server = ActionServer(
+            self, MoveGroup, "cumotion/move_group",
+            self._on_move_group, callback_group=self._motion_planner_cb_group,
         )
 
         # Service servers
@@ -454,6 +465,11 @@ class CuroboServerNode(Node):
     def _on_retarget_motion(self, goal_handle):
         return retargeter_handler.handle_retarget_motion(
             self._curobo_ctx, goal_handle, self._lock, self._motion_planner,
+        )
+
+    def _on_move_group(self, goal_handle):
+        return moveit_bridge_handler.handle_move_group_action(
+            self._curobo_ctx, goal_handle, self._js_buffer, self._lock,
         )
 
     def _on_compute_ik(self, request, response):
