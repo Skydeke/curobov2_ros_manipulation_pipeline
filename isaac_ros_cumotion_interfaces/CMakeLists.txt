@@ -34,22 +34,30 @@ ament_auto_find_build_dependencies()
 find_package(rosidl_default_generators REQUIRED)
 
 set(ACTION_FILES
+"action/PlanMotion.action"
+"action/PlanGrasp.action"
 "action/AttachObject.action"
-"action/MotionPlan.action"
-"action/UpdateLinkSpheres.action"
-"action/IKSolution.action"
+"action/OptimizeTrajectory.action"
+"action/ControlMPC.action"
+"action/RetargetMotion.action"
 )
 
 set(SRV_FILES
+"srv/ComputeFK.srv"
+"srv/ComputeIK.srv"
+"srv/CheckCollision.srv"
+"srv/UpdateWorld.srv"
 "srv/PublishStaticPlanningScene.srv"
 "srv/GetEsdf.srv"
-"srv/BatchIK.srv"
+"srv/UpdateMPCGoal.srv"
+"srv/StopMPC.srv"
+"srv/GetInteractiveTarget.srv"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   ${ACTION_FILES}
   ${SRV_FILES}
-  DEPENDENCIES geometry_msgs moveit_msgs sensor_msgs visualization_msgs
+  DEPENDENCIES geometry_msgs moveit_msgs sensor_msgs trajectory_msgs shape_msgs
 )
 ament_export_dependencies(rosidl_default_runtime)
 
@@ -59,8 +67,9 @@ if(BUILD_TESTING)
 endif()
 
 # Embed versioning information into installed files
-ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path isaac_ros_common)
-include("${ISAAC_ROS_COMMON_CMAKE_PATH}/isaac_ros_common-version-info.cmake")
-generate_version_info(${PROJECT_NAME})
+# TODO(agent): re-enable when isaac_ros_common is available in workspace
+# ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path isaac_ros_common)
+# include("${ISAAC_ROS_COMMON_CMAKE_PATH}/isaac_ros_common-version-info.cmake")
+# generate_version_info(${PROJECT_NAME})
 
 ament_auto_package()

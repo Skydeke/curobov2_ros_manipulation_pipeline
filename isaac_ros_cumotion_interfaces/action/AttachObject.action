@@ -1,17 +1,20 @@
-# Use this action to trigger the attachment or detachment of an object in the robot's kinematic model.
+# Attach or detach an object to/from the robot's kinematic + collision model.
+# When attach=true, exactly one of (sphere_centers/sphere_radii) or primitive must be given.
+# When attach=false, only object_id is required.
 
-# Goal:
-# Set to true to attach the object, false to detach it.
-bool attach_object
-# Configuration of object to be attached, including its shape (sphere, cuboid, mesh), pose and scale. 
-visualization_msgs/Marker object_config
-# Fallback sphere radius for approximating the collision geometry if automatic generation fails.
-float64 fallback_radius
+bool attach
+string object_id                         # caller-chosen unique id; reuse this id to detach later
+string parent_link                       # link the object rigidly follows (e.g. gripper tool frame)
+geometry_msgs/Pose pose_in_parent_link    # object pose relative to parent_link
+
+geometry_msgs/Point[] sphere_centers      # option A: exact collision spheres, in parent_link frame
+float32[] sphere_radii                    # same length as sphere_centers
+
+shape_msgs/SolidPrimitive primitive       # option B: primitive shape, server auto-fits spheres. type=0 means "not provided"
+float32 fallback_sphere_radius            # used only if auto-fit from `primitive` fails
 ---
-# Result:
-# Description of the final result (e.g., success or failure).
-string outcome
+bool success
+string message
+int32 num_spheres_attached
 ---
-# Feedback:
-# Real-time status update during the action's execution.
 string status

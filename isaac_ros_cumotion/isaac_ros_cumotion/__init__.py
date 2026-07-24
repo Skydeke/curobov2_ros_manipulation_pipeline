@@ -14,8 +14,3 @@
 # limitations under the License.
 #
 # SPDX-License-Identifier: Apache-2.0
-from .cumotion_goal_set_client import CumotionGoalSetClient
-
-__all__ = [
-    'CumotionGoalSetClient',
-]

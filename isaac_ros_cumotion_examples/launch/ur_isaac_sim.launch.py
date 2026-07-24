@@ -268,12 +268,12 @@ def launch_setup(context: LaunchContext, *args, **kwargs) -> List[Node]:
         remappings=[('/joint_states', '/isaac_joint_states')],
     )
 
-    # Add cumotion planner node
+    # Add cumotion server node
     cumotion_planner_node = Node(
-        name='cumotion_planner',
+        name='curobo_server',
         package='isaac_ros_cumotion',
         namespace='',
-        executable='cumotion_planner_node',
+        executable='curobo_server_node',
         parameters=[
             {
                 'robot': xrdf_path,

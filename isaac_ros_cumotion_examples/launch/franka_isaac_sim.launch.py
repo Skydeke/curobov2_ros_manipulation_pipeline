@@ -115,7 +115,7 @@ def generate_launch_description():
         arguments=['--ros-args', '--log-level', 'info'],
     )
 
-    # Add cumotion planner node
+    # Add cumotion server node
     xrdf_path = os.path.join(
         get_package_share_directory('isaac_ros_cumotion_robot_description'),
         'xrdf', 'franka.xrdf'
@@ -125,10 +125,10 @@ def generate_launch_description():
         'urdf', 'panda.urdf'
     )
     cumotion_planner_node = Node(
-        name='cumotion_planner',
+        name='curobo_server',
         package='isaac_ros_cumotion',
         namespace='',
-        executable='cumotion_planner_node',
+        executable='curobo_server_node',
         parameters=[
             {
                 'robot': xrdf_path,

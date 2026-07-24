@@ -1,0 +1,7 @@
+# Stop an active MPC control loop and retrieve final stats.
+---
+bool success
+string message
+int32 num_steps
+float32 total_control_time_s
+sensor_msgs/JointState final_state

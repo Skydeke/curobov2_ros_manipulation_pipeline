@@ -1,0 +1,14 @@
+# Retarget a sequence of tool poses into a joint trajectory.
+# Wraps MotionRetargeter.solve_sequence() for batch retargeting.
+
+sensor_msgs/JointState start_state
+geometry_msgs/Pose[] tool_pose_sequence   # flat list of per-frame tool poses
+int32 num_frames                          # number of timesteps in the sequence; total poses must be num_frames * len(tool_frames)
+string[] tool_frames                      # tool frame names; each tracked frame appears in the sequence
+---
+bool success
+string message
+trajectory_msgs/JointTrajectory trajectory
+float32 solve_time_s
+---
+string phase                              # "setup" | "solving" | "done"

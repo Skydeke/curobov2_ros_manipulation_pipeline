@@ -1,0 +1,13 @@
+# Solve IK for one or more Cartesian goal poses in a single GPU batch.
+# num_seeds and collision-awareness are NOT request fields -- these are
+# constructor properties of the shared IK solver instance.
+
+geometry_msgs/Pose[] goal_poses
+sensor_msgs/JointState seed_state         # empty = solver default seeding
+string tool_frame                         # empty = planner's default tool frame
+---
+bool[] success                            # one entry per goal_poses
+sensor_msgs/JointState[] solutions        # one entry per goal_poses, valid only where success[i] is true
+float32[] position_error                  # meters, one per goal_poses
+float32[] rotation_error                  # radians, one per goal_poses
+float32 solve_time_s

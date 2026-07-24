@@ -1,0 +1,12 @@
+uint8 ADD=0
+uint8 REPLACE=1
+uint8 REMOVE=2
+uint8 CLEAR_ALL=3
+
+uint8 operation
+moveit_msgs/CollisionObject[] objects     # used for ADD/REPLACE; ignored for REMOVE/CLEAR_ALL
+string[] remove_ids                       # used only for REMOVE
+---
+bool success
+string message
+int32 num_obstacles_in_world              # world size after the operation

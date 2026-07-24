@@ -29,7 +29,7 @@ import yourdfpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Point, Pose as RosPose, Vector3
 from moveit_msgs.msg import CollisionObject, PlanningScene
-from isaac_ros_cumotion_interfaces.srv import BatchIK, GetEsdf
+from isaac_ros_cumotion_interfaces.srv import ComputeIK, GetEsdf, GetInteractiveTarget
 from sensor_msgs.msg import CameraInfo, Image, JointState, PointCloud2
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import String
@@ -48,7 +48,28 @@ from tf2_ros import TransformException
 from tf2_ros.buffer import Buffer
 from tf2_ros.transform_listener import TransformListener
 
-from curobo.types import Pose as CuPose
+from dataclasses import dataclass
+from typing import List, Optional
+
+
+@dataclass
+class _CuPoseCompat:
+    """Minimal API-compatible Pose replacement so this file doesn't import curobo.
+
+    Matches ``curobo.types.Pose.from_list()`` and the attribute access pattern
+    used by ``ViserVisualizer.add_frame()``.
+    """
+    position: "torch.Tensor"
+    quaternion: "torch.Tensor"
+
+    @staticmethod
+    def from_list(values: List[float]) -> "_CuPoseCompat":
+        import torch
+        return _CuPoseCompat(
+            position=torch.tensor(values[:3], dtype=torch.float32),
+            quaternion=torch.tensor(values[3:7], dtype=torch.float32),
+        )
+
 
 
 def _resolve_package_paths_in_urdf(urdf_path: str) -> str:
@@ -355,6 +376,11 @@ class ESDFViserNode(Node):
             .get_parameter_value()
             .bool_value
         )
+        viser_add_control_frames = (
+            self.get_parameter("viser_add_control_frames")
+            .get_parameter_value()
+            .bool_value
+        )
 
         self.__viz_cameras_enabled = (
             self.get_parameter("visualize_cameras").get_parameter_value().bool_value
@@ -411,7 +437,7 @@ class ESDFViserNode(Node):
             connect_port=viser_port,
             add_robot_to_scene=viser_add_robot,
             initialize_viser=viser_init,
-            add_control_frames=False,
+            add_control_frames=viser_add_control_frames,
             visualize_robot_spheres=viser_viz_spheres,
             visualize_collision_meshes=viser_viz_meshes,
         )
@@ -422,7 +448,11 @@ class ESDFViserNode(Node):
         self.__draw_grid_box()
         self.__draw_origin_gizmo()
         self._setup_esdf_slice()
-        self.__batch_ik_client = self.create_client(BatchIK, "/cumotion/batch_ik")
+        self.__batch_ik_client = self.create_client(ComputeIK, "/cumotion/compute_ik")
+        self.__interactive_target_srv = self.create_service(
+            GetInteractiveTarget, "/cumotion/get_interactive_target",
+            self.__get_interactive_target_cb,
+        )
         self._setup_reachability_slice()
 
         self.__esdf_service_name = esdf_service_name
@@ -797,14 +827,13 @@ class ESDFViserNode(Node):
             self.__reachability_updating = False
             return
 
-        req = BatchIK.Request()
+        req = ComputeIK.Request()
         req.goal_poses = ros_poses
         req.seed_state = self.__latest_joint_state
-        req.num_solutions_to_return = 1
 
         self.__reachability_future = self.__batch_ik_client.call_async(req)
         self.get_logger().info(
-            f"Sent BatchIK request for {len(ros_poses)} poses"
+            f"Sent ComputeIK request for {len(ros_poses)} poses"
         )
 
     def _render_reachability(self, fut):
@@ -813,10 +842,10 @@ class ESDFViserNode(Node):
         try:
             result = fut.result()
         except Exception as e:
-            self.get_logger().error(f"BatchIK call failed: {e}")
+            self.get_logger().error(f"ComputeIK call failed: {e}")
             return
         if result is None:
-            self.get_logger().warn("BatchIK returned None")
+            self.get_logger().warn("ComputeIK returned None")
             return
         server = self.__viz._server
         n_per_axis = self._REACHABILITY_N
@@ -961,7 +990,7 @@ class ESDFViserNode(Node):
                 rclpy.time.Time(),
                 rclpy.duration.Duration(seconds=0.1),
             )
-            return CuPose.from_list([
+            return _CuPoseCompat.from_list([
                 t.transform.translation.x,
                 t.transform.translation.y,
                 t.transform.translation.z,
@@ -1024,8 +1053,41 @@ class ESDFViserNode(Node):
             response = future.result()
             if response.success:
                 self.__update_visualization(response)
+            else:
+                self.get_logger().warn("GetEsdf returned success=False")
+        except Exception as e:
+            self.get_logger().error(f"GetEsdf service call failed: {e}")
         finally:
             self.__esdf_future = None
+
+    def __get_interactive_target_cb(self, request, response):
+        try:
+            all_poses = self.__viz.get_control_frame_pose()
+        except Exception:
+            response.success = False
+            response.message = "No interactive control frames available"
+            return response
+        if request.frame_names:
+            names = request.frame_names
+        else:
+            names = list(all_poses.keys())
+        for name in names:
+            if name not in all_poses:
+                continue
+            pose = all_poses[name]
+            ros_pose = RosPose()
+            ros_pose.position.x = float(pose.position[0].cpu()) if hasattr(pose.position, 'cpu') else float(pose.position[0])
+            ros_pose.position.y = float(pose.position[1].cpu()) if hasattr(pose.position, 'cpu') else float(pose.position[1])
+            ros_pose.position.z = float(pose.position[2].cpu()) if hasattr(pose.position, 'cpu') else float(pose.position[2])
+            ros_pose.orientation.w = float(pose.quaternion[0].cpu()) if hasattr(pose.quaternion, 'cpu') else float(pose.quaternion[0])
+            ros_pose.orientation.x = float(pose.quaternion[1].cpu()) if hasattr(pose.quaternion, 'cpu') else float(pose.quaternion[1])
+            ros_pose.orientation.y = float(pose.quaternion[2].cpu()) if hasattr(pose.quaternion, 'cpu') else float(pose.quaternion[2])
+            ros_pose.orientation.z = float(pose.quaternion[3].cpu()) if hasattr(pose.quaternion, 'cpu') else float(pose.quaternion[3])
+            response.poses.append(ros_pose)
+            response.frame_names.append(name)
+        response.success = True
+        response.message = f"Returned {len(response.poses)} frame pose(s)"
+        return response
 
     def __update_visualization(self, esdf_data):
         esdf_array = esdf_data.esdf_and_gradients

@@ -56,10 +56,13 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'cumotion_planner_node = isaac_ros_cumotion.cumotion_planner:main',
-            'cumotion_goal_set_planner_node = isaac_ros_cumotion.cumotion_goal_set_planner:main',
-            'robot_segmenter_node = isaac_ros_cumotion.robot_segmenter:main',
+            'curobo_server_node = isaac_ros_cumotion.curobo_server.node:main',
             'static_planning_scene = isaac_ros_cumotion.static_planning_scene:main',
+            'ros_example_forward_kinematics = isaac_ros_cumotion.ros_examples.forward_kinematics:main',
+            'ros_example_inverse_kinematics = isaac_ros_cumotion.ros_examples.inverse_kinematics:main',
+            'ros_example_collision_checking = isaac_ros_cumotion.ros_examples.collision_checking:main',
+            'ros_example_motion_planning = isaac_ros_cumotion.ros_examples.motion_planning:main',
+            'ros_example_grasp_planning = isaac_ros_cumotion.ros_examples.grasp_planning:main',
         ],
     },
 )

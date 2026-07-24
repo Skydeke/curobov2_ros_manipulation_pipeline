@@ -1,7 +1,0 @@
-# Compute IK for multiple goal poses in a single GPU batch.
-geometry_msgs/Pose[] goal_poses
-sensor_msgs/JointState seed_state
-int32 num_solutions_to_return
----
-bool[] success
-float32 planning_time

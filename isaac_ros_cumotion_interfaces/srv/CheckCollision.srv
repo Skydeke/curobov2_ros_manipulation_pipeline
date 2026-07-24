@@ -1,0 +1,6 @@
+# Read-only query: does NOT plan or move anything.
+sensor_msgs/JointState[] joint_states     # one or more configurations to check
+---
+bool[] in_collision                       # one entry per joint_states
+float32[] world_collision_distance        # signed distance to nearest world obstacle; negative = penetrating
+float32[] self_collision_distance         # signed distance to nearest self-collision; negative = penetrating
