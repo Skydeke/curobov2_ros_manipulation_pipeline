@@ -26,9 +26,10 @@ def _find_benchmark_dir():
         d = os.path.join(ws, sub, 'curobo_core', 'curobo', 'benchmark')
         if os.path.isdir(d):
             return os.path.realpath(d)
+    ros_ws = os.environ.get('ROS_WS', 'unset')
     raise ImportError(
-        f"Cannot find curobo_core benchmark directory. "
-        f"Searched from {pkg_dir} up through parents and $ROS_WS={os.environ.get('ROS_WS', 'unset')}"
+        'Cannot find curobo_core benchmark directory. '
+        f'Searched from {pkg_dir} up through parents and $ROS_WS={ros_ws}'
     )
 
 
@@ -62,19 +63,19 @@ def run_core(dataset, warmup_iters=3, max_attempts=100, enable_graph_attempt=1):
         mg.warmup(enable_graph=True)
 
         for i, problem in enumerate(scene_problems, start=1):
-            if problem["collision_buffer_ik"] < 0.0:
+            if problem['collision_buffer_ik'] < 0.0:
                 continue
 
-            problem_name = f"{scene_key}_{i}"
+            problem_name = f'{scene_key}_{i}'
 
-            q_start = problem["start"]
+            q_start = problem['start']
             pose = (
-                problem["goal_pose"]["position_xyz"]
-                + problem["goal_pose"]["quaternion_wxyz"]
+                problem['goal_pose']['position_xyz']
+                + problem['goal_pose']['quaternion_wxyz']
             )
 
             world = SceneCfg.create(
-                deepcopy(problem["obstacles"])
+                deepcopy(problem['obstacles'])
             ).get_obb_world()
             mg.scene_collision_checker.clear_cache()
             mg.update_world(world)
@@ -118,11 +119,11 @@ def run_core(dataset, warmup_iters=3, max_attempts=100, enable_graph_attempt=1):
                 n_waypoints = 0
 
             all_results.append({
-                "problem_name": problem_name,
-                "scene_key": scene_key,
-                "success": success,
-                "time_s": planning_time_s,
-                "n_waypoints": n_waypoints,
+                'problem_name': problem_name,
+                'scene_key': scene_key,
+                'success': success,
+                'time_s': planning_time_s,
+                'n_waypoints': n_waypoints,
             })
 
         mg.destroy()
@@ -133,27 +134,27 @@ def run_core(dataset, warmup_iters=3, max_attempts=100, enable_graph_attempt=1):
 def main():
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="demo",
-                        choices=["demo", "motion_benchmaker", "mpinets"])
+    parser.add_argument('--dataset', default='demo',
+                        choices=['demo', 'motion_benchmaker', 'mpinets'])
     args = parser.parse_args()
 
     results = run_core(args.dataset)
 
-    successes = sum(1 for r in results if r["success"])
+    successes = sum(1 for r in results if r['success'])
     total = len(results)
-    total_time = sum(r["time_s"] for r in results)
-    print(f"Dataset: {args.dataset}")
-    print(f"Problems: {total}")
-    print(f"Successes: {successes}/{total} ({100*successes/total:.1f}%)")
-    print(f"Total planning time: {total_time:.3f}s")
+    total_time = sum(r['time_s'] for r in results)
+    print(f'Dataset: {args.dataset}')
+    print(f'Problems: {total}')
+    print(f'Successes: {successes}/{total} ({100*successes/total:.1f}%)')
+    print(f'Total planning time: {total_time:.3f}s')
     if successes:
-        avg_time = sum(r["time_s"] for r in results if r["success"]) / successes
-        print(f"Avg success time: {avg_time:.3f}s")
+        avg_time = sum(r['time_s'] for r in results if r['success']) / successes
+        print(f'Avg success time: {avg_time:.3f}s')
     for r in results:
-        status = "OK" if r["success"] else "FAIL"
-        print(f"  {r['problem_name']}: {status} "
-              f"({r['time_s']:.3f}s, {r['n_waypoints']} waypoints)")
+        status = 'OK' if r['success'] else 'FAIL'
+        print(f'  {r["problem_name"]}: {status} '
+              f'({r["time_s"]:.3f}s, {r["n_waypoints"]} waypoints)')
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

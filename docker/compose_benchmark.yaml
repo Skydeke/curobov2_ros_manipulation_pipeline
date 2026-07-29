@@ -61,5 +61,44 @@ services:
         echo "Waiting for cumotion/plan_motion..." &&
         while ! ros2 action list 2>/dev/null | grep -q cumotion/plan_motion; do sleep 1; done &&
         echo "Server ready, running benchmark..." &&
-        ros2 run isaac_ros_cumotion_benchmark curobo_benchmark all --dataset demo --output /tmp/benchmark_report.json
+        ros2 run isaac_ros_cumotion_benchmark curobo_benchmark all --dataset demo --output /tmp/benchmark_report.json &&
+        tail -f /dev/null
+
+  curobo_test:
+    container_name: curobo_test
+    image: isaac_ros_cumotion:benchmark
+    depends_on:
+      curobo_server:
+        condition: service_started
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: $DISPLAY
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -o pipefail &&
+        source /opt/ros/jazzy/setup.bash &&
+        source /root/ros2_ws/install/setup.bash &&
+        echo "Waiting for cumotion/plan_motion..." &&
+        while ! ros2 action list 2>/dev/null | grep -q cumotion/plan_motion; do sleep 1; done &&
+        echo "Server ready, running tests..." &&
+        python3 -m pytest /root/ros2_ws/src/isaac_ros_cumotion_benchmark/test/ \
+          -v --tb=short -x -p no:cacheprovider \
+          -p no:launch_testing -p no:launch_ros \
+          -W ignore::pytest.PytestUnknownMarkWarning --no-header 2>&1 |
+          tee /tmp/test_results.log;
+        echo "--- Test exit code: $? ---" &&
         tail -f /dev/null

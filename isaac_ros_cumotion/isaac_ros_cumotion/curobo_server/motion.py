@@ -140,7 +140,7 @@ def handle_plan_motion(context: CuroboContext, goal_handle, js_buffer, lock, mot
                     goal_handle.publish_feedback(feedback)
                     motion_gen_result = context.motion_planner.plan_pose(
                         goal_tool_poses, start_state,
-                        enable_graph=True,
+                        enable_graph_attempt=1,
                     )
 
             # Determine which goal was matched

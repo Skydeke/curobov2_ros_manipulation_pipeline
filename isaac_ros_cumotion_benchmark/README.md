@@ -130,11 +130,14 @@ Or plain pytest (from the package root):
 python3 -m pytest test/
 ```
 
-**What a pass looks like:** the parity test (`test_benchmark_parity.py`) is
-currently skipped with a clear reason because it requires both a CUDA-capable
-GPU and a live `curobo_server_node`. When those are available, remove the
-`@pytest.mark.skip` decorator and run again. A pass means zero
-`core.success != ros.success` mismatches across all demo problems.
+**What a pass looks like:** most classes in `test_benchmark_parity.py` are
+decorated `@pytest.mark.skipif(not HAS_CUDA, ...)` — they run automatically
+whenever a CUDA-capable GPU is present (as in the `curobo_test` Docker
+service) and are skipped with a clear reason otherwise. A pass means zero
+`core.success != ros.success` mismatches across all demo problems. One class,
+`TestRosRunnerConnectivity`, is unconditionally skipped pending a way to
+launch (rather than just connect to) a `curobo_server_node` from within the
+test itself.
 
 ---
 
