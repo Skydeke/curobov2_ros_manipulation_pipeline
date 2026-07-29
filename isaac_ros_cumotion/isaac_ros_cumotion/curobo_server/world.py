@@ -10,7 +10,7 @@ from moveit_msgs.msg import CollisionObject as MoveItCollisionObject
 from moveit_msgs.msg import MoveItErrorCodes
 
 from isaac_ros_cumotion_interfaces.srv import UpdateWorld
-from isaac_ros_cumotion_python_utils.moveit_scene_file_parser import MoveItSceneFileReader
+from isaac_ros_cumotion.curobo_server.moveit_scene_file_parser import MoveItSceneFileReader
 
 from .context import CuroboContext
 from .conversions import collision_object_to_scene_objects

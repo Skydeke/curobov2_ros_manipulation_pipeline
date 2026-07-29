@@ -10,7 +10,7 @@
 import os
 
 from isaac_ros_cumotion_interfaces.srv import PublishStaticPlanningScene
-from isaac_ros_cumotion_python_utils.moveit_scene_file_parser import MoveItSceneFileReader
+from isaac_ros_cumotion.curobo_server.moveit_scene_file_parser import MoveItSceneFileReader
 from moveit_msgs.msg import PlanningScene
 import rclpy
 from rclpy.node import Node

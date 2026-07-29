@@ -29,7 +29,7 @@ from rclpy.node import Node
 from isaac_ros_cumotion.update_kinematics import get_robot_config
 from isaac_ros_cumotion_interfaces.action import AttachObject, ControlMPC, OptimizeTrajectory, PlanGrasp, PlanMotion, RetargetMotion
 from isaac_ros_cumotion_interfaces.srv import CheckCollision, ComputeFK, ComputeIK, GetEsdf, PublishStaticPlanningScene, UpdateWorld
-from isaac_ros_cumotion_python_utils.utils import (
+from isaac_ros_cumotion.curobo_server.utils import (
     get_grid_center,
     get_grid_min_corner,
     get_grid_size,

@@ -9,7 +9,6 @@
   <build_depend>isaac_ros_common</build_depend>
 
   <exec_depend>curobo_core</exec_depend>
-  <exec_depend>isaac_ros_cumotion_python_utils</exec_depend>
   <exec_depend>nvblox_msgs</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
