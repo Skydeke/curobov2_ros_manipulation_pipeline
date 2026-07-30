@@ -33,15 +33,16 @@ jobs:
       - name: Bake submodule git dirs for Docker COPY
         run: |
           for sub in curobo_core; do
-            gitfile="$sub/.git"
-            if [ -f "$gitfile" ]; then
-              # Fetch tags so setuptools-scm can determine version
-              git -C "$sub" fetch --tags --unshallow origin 2>/dev/null || true
-              # Replace .git file with a real directory so Docker COPY picks it up
-              gitdir=$(head -1 "$gitfile" | cut -d' ' -f2)
-              rm -f "$gitfile"
-              cp -a "$gitdir" "$sub/.git"
-            fi
+            (
+              cd "$sub"
+              gitfile=".git"
+              if [ -f "$gitfile" ]; then
+                git fetch --tags --unshallow origin 2>/dev/null || true
+                gitdir=$(head -1 "$gitfile" | cut -d' ' -f2)
+                rm -f "$gitfile"
+                cp -a "$gitdir" ".git"
+              fi
+            )
           done
 
       - name: Log in to GitHub Container Registry
