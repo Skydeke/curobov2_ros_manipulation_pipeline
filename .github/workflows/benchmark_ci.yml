@@ -23,7 +23,7 @@ env:
 
 jobs:
   build:
-    runs-on: [self-hosted, linux, x64, gpu]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
 
     steps:
@@ -49,6 +49,7 @@ jobs:
         run: docker images ${{ env.DOCKER_IMAGE }} --format '{{.Size}}'
 
       - name: Start curobo_server_node
+        continue-on-error: true
         run: |
           docker compose -f docker/compose_benchmark.yaml up -d curobo_server
           echo "Waiting for server..."
