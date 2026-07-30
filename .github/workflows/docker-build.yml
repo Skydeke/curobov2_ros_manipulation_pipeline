@@ -1,0 +1,58 @@
+name: Build and publish Docker image
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'docker/Dockerfile.cumotion'
+      - 'isaac_ros_cumotion/**'
+      - 'isaac_ros_cumotion_interfaces/**'
+      - 'isaac_ros_cumotion_robot_description/**'
+      - 'isaac_ros_cumotion_moveit/**'
+      - 'curobo_core/**'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: isaac-ros-cumotion
+
+jobs:
+  build-and-push:
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=sha,prefix=sha-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: docker/Dockerfile.cumotion
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          network: host

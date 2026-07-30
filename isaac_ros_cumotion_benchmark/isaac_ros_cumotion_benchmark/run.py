@@ -4,15 +4,39 @@ import sys
 
 
 def cmd_core(args):
-    from isaac_ros_cumotion_benchmark.core_runner import run_core
-    results = run_core(args.dataset)
+    from isaac_ros_cumotion_benchmark import core_runner
+    if args.capability == 'planning':
+        results = core_runner.run_core(args.dataset)
+    elif args.capability == 'ik':
+        results = core_runner.run_core_ik(args.dataset)
+    elif args.capability == 'fk':
+        results = core_runner.run_core_fk(args.dataset)
+    elif args.capability == 'collision':
+        results = core_runner.run_core_collision(args.dataset)
+    elif args.capability == 'all':
+        results = (core_runner.run_core(args.dataset)
+                   + core_runner.run_core_ik(args.dataset)
+                   + core_runner.run_core_fk(args.dataset)
+                   + core_runner.run_core_collision(args.dataset))
     _dump_results(results, args.output)
     _print_summary(results, 'core')
 
 
 def cmd_ros(args):
-    from isaac_ros_cumotion_benchmark.ros_runner import run_ros
-    results = run_ros(args.dataset, args.time_dilation_factor)
+    from isaac_ros_cumotion_benchmark import ros_runner
+    if args.capability == 'planning':
+        results = ros_runner.run_ros(args.dataset, args.time_dilation_factor)
+    elif args.capability == 'ik':
+        results = ros_runner.run_ros_ik(args.dataset)
+    elif args.capability == 'fk':
+        results = ros_runner.run_ros_fk(args.dataset)
+    elif args.capability == 'collision':
+        results = ros_runner.run_ros_collision(args.dataset)
+    elif args.capability == 'all':
+        results = (ros_runner.run_ros(args.dataset, args.time_dilation_factor)
+                   + ros_runner.run_ros_ik(args.dataset)
+                   + ros_runner.run_ros_fk(args.dataset)
+                   + ros_runner.run_ros_collision(args.dataset))
     _dump_results(results, args.output)
     _print_summary(results, 'ros')
 
@@ -71,12 +95,18 @@ def main():
     p_core = subparsers.add_parser('core', help='Run benchmark directly against cuRobo')
     p_core.add_argument('--dataset', default='demo',
                         choices=['demo', 'motion_benchmaker', 'mpinets'])
+    p_core.add_argument('--capability', default='planning',
+                        choices=['planning', 'ik', 'fk', 'collision', 'all'],
+                        help='Which capability to benchmark')
     p_core.add_argument('--output', '-o', help='Save results to JSON file')
     p_core.set_defaults(func=cmd_core)
 
     p_ros = subparsers.add_parser('ros', help='Run benchmark through curobo_server_node')
     p_ros.add_argument('--dataset', default='demo',
                        choices=['demo', 'motion_benchmaker', 'mpinets'])
+    p_ros.add_argument('--capability', default='planning',
+                       choices=['planning', 'ik', 'fk', 'collision', 'all'],
+                       help='Which capability to benchmark')
     p_ros.add_argument('--time_dilation_factor', type=float, default=1.0)
     p_ros.add_argument('--output', '-o', help='Save results to JSON file')
     p_ros.set_defaults(func=cmd_ros)

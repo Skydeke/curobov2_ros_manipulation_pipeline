@@ -13,6 +13,7 @@ from moveit_msgs.msg import MoveItErrorCodes
 
 from .context import CuroboContext
 from .conversions import cu_solution_to_joint_trajectory
+from .world import sync_world
 
 
 def _get_start_state(context, goal, js_buffer):
@@ -49,6 +50,8 @@ def handle_plan_motion(context: CuroboContext, goal_handle, js_buffer, lock, mot
     feedback = PlanMotion.Feedback()
 
     try:
+        sync_world(context)
+
         time_dilation_factor = goal.time_dilation_factor
         if time_dilation_factor == 0.0:
             time_dilation_factor = 0.1
@@ -106,50 +109,74 @@ def handle_plan_motion(context: CuroboContext, goal_handle, js_buffer, lock, mot
                  p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
                 for p in goal.goal_poses
             ]
-            if num_goalset == 1:
-                # Single pose — from_list returns [3] for position, view to [1,3]
-                goal_pose = Pose.from_list(pose_list[0])
-                goal_pose.position = goal_pose.position.view(1, -1)
-                goal_pose.quaternion = goal_pose.quaternion.view(1, -1)
-            else:
-                # Goal set — from_batch_list returns [N,3]; pass flat so
-                # GoalToolPose.from_poses can compute batch=N/num_goalset.
-                bp = Pose.from_batch_list(pose_list)
-                goal_pose = Pose(
-                    position=bp.position.contiguous(),
-                    quaternion=bp.quaternion.contiguous(),
-                )
 
             tool_frame = goal.tool_frame if goal.tool_frame else context.motion_planner.tool_frames[0]
-            goal_tool_poses = GoalToolPose.from_poses(
-                {tool_frame: goal_pose},
-                ordered_tool_frames=[tool_frame],
-                num_goalset=num_goalset,
+            max_attempts_val = (
+                context.node.get_parameter('max_attempts').get_parameter_value().integer_value
+                if context.node is not None and context.node.has_parameter('max_attempts')
+                else 100
             )
 
-            with lock:
-                feedback.phase = "seeding"
-                goal_handle.publish_feedback(feedback)
-                motion_gen_result = context.motion_planner.plan_pose(
-                    goal_tool_poses,
-                    start_state,
-                )
+            motion_gen_result = None
+            matched_goal_offset = 0
+            max_goalset = (
+                int(context.node.get_parameter('max_goalset').value)
+                if context.node is not None and context.node.has_parameter('max_goalset')
+                else 12
+            )
+            chunk_size = 1 if num_goalset == 1 else min(num_goalset, max_goalset)
 
-                if (motion_gen_result is None or not motion_gen_result.success.any().item()) and goal.enable_graph_search:
-                    feedback.phase = "graph_search"
-                    goal_handle.publish_feedback(feedback)
-                    motion_gen_result = context.motion_planner.plan_pose(
-                        goal_tool_poses, start_state,
-                        enable_graph_attempt=1,
+            for chunk_start in range(0, num_goalset, chunk_size):
+                chunk_end = min(chunk_start + chunk_size, num_goalset)
+                chunk_poses = pose_list[chunk_start:chunk_end]
+                n_chunk = chunk_end - chunk_start
+
+                if n_chunk == 1:
+                    goal_pose = Pose.from_list(chunk_poses[0])
+                    goal_pose.position = goal_pose.position.view(1, -1)
+                    goal_pose.quaternion = goal_pose.quaternion.view(1, -1)
+                else:
+                    bp = Pose.from_batch_list(chunk_poses)
+                    goal_pose = Pose(
+                        position=bp.position.contiguous(),
+                        quaternion=bp.quaternion.contiguous(),
                     )
 
-            # Determine which goal was matched
-            if motion_gen_result is not None and motion_gen_result.success is not None and motion_gen_result.success.any().item():
-                if hasattr(motion_gen_result, "goalset_index") and motion_gen_result.goalset_index is not None:
-                    result.matched_goal_index = int(motion_gen_result.goalset_index.item())
-                else:
-                    result.matched_goal_index = 0
-            else:
+                goal_tool_poses = GoalToolPose.from_poses(
+                    {tool_frame: goal_pose},
+                    ordered_tool_frames=[tool_frame],
+                    num_goalset=n_chunk,
+                )
+
+                with lock:
+                    feedback.phase = "seeding"
+                    goal_handle.publish_feedback(feedback)
+                    context.motion_planner.reset_seed()
+                    if goal.enable_graph_search:
+                        result_chunk = context.motion_planner.plan_pose(
+                            goal_tool_poses, start_state,
+                            max_attempts=max_attempts_val,
+                            enable_graph_attempt=1,
+                        )
+                    else:
+                        result_chunk = context.motion_planner.plan_pose(
+                            goal_tool_poses, start_state,
+                            max_attempts=max_attempts_val,
+                        )
+
+                if (result_chunk is not None
+                        and result_chunk.success is not None
+                        and result_chunk.success.any().item()):
+                    motion_gen_result = result_chunk
+                    if hasattr(result_chunk, "goalset_index") and result_chunk.goalset_index is not None:
+                        result.matched_goal_index = int(result_chunk.goalset_index.item()) + matched_goal_offset
+                    else:
+                        result.matched_goal_index = matched_goal_offset
+                    break
+
+                matched_goal_offset += n_chunk
+
+            if motion_gen_result is None:
                 result.matched_goal_index = -1
 
         feedback.phase = "done"

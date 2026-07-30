@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from curobo.scene import Cuboid, Cylinder, Mesh, Scene, Sphere
 from moveit_msgs.msg import CollisionObject as MoveItCollisionObject
@@ -16,8 +16,10 @@ from .context import CuroboContext
 from .conversions import collision_object_to_scene_objects
 
 
-def _rebuild_world(context: CuroboContext) -> bool:
-    """Rebuild the full world model from ``context.world_objects`` and push to cuRobo."""
+def sync_world(context: CuroboContext) -> bool:
+    if not context.world_objects:
+        return False
+
     cuboid_list: List[Cuboid] = []
     sphere_list: List[Sphere] = []
     cylinder_list: List[Cylinder] = []
@@ -35,14 +37,26 @@ def _rebuild_world(context: CuroboContext) -> bool:
             elif isinstance(cu_obj, Mesh):
                 mesh_list.append(cu_obj)
 
-    world_model = Scene(
+    checker = context.motion_planner.scene_collision_checker
+    checker.clear_cache()
+
+    scene = Scene(
         cuboid=cuboid_list,
         cylinder=cylinder_list,
         sphere=sphere_list,
         mesh=mesh_list,
     )
-    context.motion_planner.update_world(world_model)
+
+    if context.esdf_voxel_grid is not None:
+        scene.voxel = [context.esdf_voxel_grid]
+
+    checker.load_collision_model(scene)
     return True
+
+
+def _rebuild_world(context: CuroboContext) -> bool:
+    """Alias kept for backward compat; prefer :func:`sync_world`."""
+    return sync_world(context)
 
 
 def handle_update_world(context: CuroboContext, request: UpdateWorld.Request,

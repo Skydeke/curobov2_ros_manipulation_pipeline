@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Dict, Optional
 
 from curobo.motion_planner import MotionPlanner
 from curobo.perception import Mapper
+from curobo.scene import Scene, VoxelGrid as CuVoxelGrid
 from moveit_msgs.msg import CollisionObject
 
 if TYPE_CHECKING:
@@ -24,6 +25,9 @@ class CuroboContext:
     mapper: Optional[Mapper] = None
     world_objects: Dict[str, CollisionObject] = field(default_factory=dict)
     attached_objects: Dict[str, CollisionObject] = field(default_factory=dict)
+    esdf_scene: Optional[Scene] = None
+    esdf_voxel_grid: Optional[CuVoxelGrid] = None
     device: str = "cuda:0"
     logger: Optional[Node] = None
     node: Optional[Node] = None
+    _world_seq: int = 0

@@ -10,12 +10,16 @@ def _parse(argv):
     p_core = subparsers.add_parser('core')
     p_core.add_argument('--dataset', default='demo',
                         choices=['demo', 'motion_benchmaker', 'mpinets'])
+    p_core.add_argument('--capability', default='planning',
+                        choices=['planning', 'ik', 'fk', 'collision', 'all'])
     p_core.add_argument('--output', '-o')
     p_core.set_defaults(func=lambda args: None)
 
     p_ros = subparsers.add_parser('ros')
     p_ros.add_argument('--dataset', default='demo',
                        choices=['demo', 'motion_benchmaker', 'mpinets'])
+    p_ros.add_argument('--capability', default='planning',
+                       choices=['planning', 'ik', 'fk', 'collision', 'all'])
     p_ros.add_argument('--time_dilation_factor', type=float, default=1.0)
     p_ros.add_argument('--output', '-o')
     p_ros.set_defaults(func=lambda args: None)
@@ -44,18 +48,30 @@ class TestSubcommands:
         args = _parse(['core'])
         assert args.command == 'core'
         assert args.dataset == 'demo'
+        assert args.capability == 'planning'
         assert args.output is None
 
     def test_core_explicit(self):
-        args = _parse(['core', '--dataset', 'motion_benchmaker', '-o', 'out.json'])
+        args = _parse(['core', '--dataset', 'motion_benchmaker',
+                       '--capability', 'ik', '-o', 'out.json'])
         assert args.dataset == 'motion_benchmaker'
+        assert args.capability == 'ik'
         assert args.output == 'out.json'
+
+    def test_core_all_capability(self):
+        args = _parse(['core', '--capability', 'all'])
+        assert args.capability == 'all'
 
     def test_ros_defaults(self):
         args = _parse(['ros'])
         assert args.command == 'ros'
         assert args.dataset == 'demo'
+        assert args.capability == 'planning'
         assert args.time_dilation_factor == 1.0
+
+    def test_ros_explicit_capability(self):
+        args = _parse(['ros', '--capability', 'collision'])
+        assert args.capability == 'collision'
 
     def test_ros_explicit_time_dilation(self):
         args = _parse(['ros', '--time_dilation_factor', '0.5'])
@@ -107,5 +123,5 @@ class TestDispatch:
     def test_cmd_core_dispatches(self):
         from isaac_ros_cumotion_benchmark.run import cmd_core
 
-        args = argparse.Namespace(dataset='demo', output=None)
+        args = argparse.Namespace(dataset='demo', capability='planning', output=None)
         cmd_core(args)

@@ -11,9 +11,15 @@ problems two ways and reports where they disagree:
 The disagreement is the deliverable: it surfaces bugs in the ROS wrapping
 layer that a single "does it plan?" smoke test would never catch.
 
-**This is not a CI job, not a regression gate.** It runs when a human (or a
-future agent) runs it, the same way `motion_plan_benchmark.py` already does
-today. No pipeline runs this automatically.
+**This is primarily a local tool** — it runs when a human (or an agent) runs
+it, the same way `motion_plan_benchmark.py` already does today. A CI workflow
+(see `.github/workflows/benchmark_ci.yml`) also runs these benchmarks on
+every push/PR to catch regressions early.
+
+> **2026 update:** CI now runs on GPU-equipped self-hosted runners. The
+> workflow builds the Docker image, starts a `curobo_server_node`, runs all
+> capability benchmarks (planning, IK, FK, collision) via both `core` and `ros`
+> paths, compares them, and runs the full pytest suite.
 
 ---
 
@@ -81,6 +87,7 @@ ros2 run isaac_ros_cumotion_benchmark curobo_benchmark core --dataset demo
 ```
 
 Optional: `--output results.json` to save per-problem results.
+Optional: `--capability {planning,ik,fk,collision,all}` (default: `planning`).
 
 Datasets: `demo` (5 problems, fast), `motion_benchmaker` (800 problems),
 `mpinets` (1800 problems).
@@ -93,8 +100,18 @@ ros2 run isaac_ros_cumotion_benchmark curobo_benchmark ros --dataset demo
 
 Make sure a `curobo_server_node` is running first (see above).
 
-Optional flags: `--time_dilation_factor 1.0` (default, matches core's
-implicit scaling; set to `0.0` to trigger the node's fallback to 0.1).
+Optional flags:
+- `--capability {planning,ik,fk,collision,all}` — which ROS capability to test
+- `--time_dilation_factor 1.0` (default, matches core's implicit scaling;
+   set to `0.0` to trigger the node's fallback to 0.1)
+
+**Capabilities tested:**
+| Capability  | ROS path                      | Service/Action          |
+|-------------|-------------------------------|-------------------------|
+| `planning`  | `cumotion/plan_motion`        | Action (pose goals)     |
+| `ik`        | `cumotion/compute_ik`         | Service                 |
+| `fk`        | `cumotion/compute_fk`         | Service                 |
+| `collision` | `cumotion/check_collision`    | Service                 |
 
 ### `compare` — diff core vs ros results
 
@@ -127,17 +144,21 @@ colcon test --packages-select isaac_ros_cumotion_benchmark
 Or plain pytest (from the package root):
 
 ```bash
-python3 -m pytest test/
+python3 -m pytest test/ -v
 ```
 
-**What a pass looks like:** most classes in `test_benchmark_parity.py` are
-decorated `@pytest.mark.skipif(not HAS_CUDA, ...)` — they run automatically
-whenever a CUDA-capable GPU is present (as in the `curobo_test` Docker
-service) and are skipped with a clear reason otherwise. A pass means zero
-`core.success != ros.success` mismatches across all demo problems. One class,
-`TestRosRunnerConnectivity`, is unconditionally skipped pending a way to
-launch (rather than just connect to) a `curobo_server_node` from within the
-test itself.
+**What a pass looks like:**
+
+| Test class | What it checks | Node needed? |
+|---|---|---|
+| `TestCoreRunnerStandalone` | Planning, IK, FK, collision all succeed directly | No |
+| `TestBenchmarkParity` | Zero `core.success != ros.success` across demo planning problems | Yes |
+| `TestRosCapabilities` | IK/FK/collision services respond and match core | Yes |
+| `TestRosRunnerConnectivity` | Action client connects to server | Yes |
+
+Classes that require CUDA are auto-skipped with a clear reason. Classes that
+require a running `curobo_server_node` are decorated with a
+`NEEDS_SERVER` marker that checks `ros2 action list` at import time.
 
 ---
 

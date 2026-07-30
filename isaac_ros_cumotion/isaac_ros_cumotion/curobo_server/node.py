@@ -76,7 +76,7 @@ class CuroboServerNode(Node):
         # ------------------------------------------------------------------
         # Build the one MotionPlanner instance
         # ------------------------------------------------------------------
-        motion_planner, grid_size_m, esdf_voxel_size, raw_grid_shape = (
+        motion_planner, grid_size_m, esdf_voxel_size, raw_grid_shape, esdf_scene = (
             self._build_motion_planner()
         )
         self._motion_planner = motion_planner
@@ -91,6 +91,7 @@ class CuroboServerNode(Node):
         # Node._context (rclpy's internal rcl context handle).
         self._curobo_ctx = CuroboContext(
             motion_planner=motion_planner,
+            esdf_scene=esdf_scene,
             device=str(motion_planner.device_cfg.device),
             logger=self.get_logger(),
             node=self,
@@ -230,17 +231,23 @@ class CuroboServerNode(Node):
 
         # Motion planning
         self.declare_parameter("time_dilation_factor", 0.5)
-        self.declare_parameter("max_attempts", 10)
-        self.declare_parameter("num_graph_seeds", 6)
-        self.declare_parameter("num_trajopt_seeds", 6)
+        self.declare_parameter("max_attempts", 100)
+        self.declare_parameter("num_graph_seeds", 32)
+        self.declare_parameter("num_trajopt_seeds", 4)
         self.declare_parameter("include_trajopt_retract_seed", True)
         self.declare_parameter("num_trajopt_time_steps", 32)
         self.declare_parameter("num_trajopt_noisy_seeds", 2)
         self.declare_parameter("trajopt_seed_ratio", '{"linear": 0.5, "bias": 0.5}')
         self.declare_parameter("trajopt_finetune_iters", 400)
         self.declare_parameter("interpolation_dt", 0.025)
+        # max_goalset = number of alternative goal poses for the same problem.
+        #   The solver tries each and picks the best.  Shapes [..., N, ...]
+        #   nested inside the batch dim.
         self.declare_parameter("max_goalset", 12)
-        self.declare_parameter("max_batch_size", 4)
+        # max_batch_size = number of independent problems (different start/goal
+        #   pairs) solved in parallel on GPU.  Shapes [batch, ...].
+        #   batch=1 → SolveMode.SINGLE, batch>1 → SolveMode.BATCH.
+        self.declare_parameter("max_batch_size", 1)
         self.declare_parameter("ik_optimizer_config", "")
         self.declare_parameter("trajopt_optimizer_config", "")
         self.declare_parameter("enable_cuda_graph", True)
@@ -402,7 +409,7 @@ class CuroboServerNode(Node):
         motion_planner.warmup(enable_graph=True)
         self.get_logger().info("MotionPlanner warmup complete")
 
-        return motion_planner, grid_size_m, esdf_vs, raw_grid_shape
+        return motion_planner, grid_size_m, esdf_vs, raw_grid_shape, world_file
 
     # ------------------------------------------------------------------
     # Joint state buffer (used by multiple handlers)

@@ -29,7 +29,8 @@ services:
         ros2 run isaac_ros_cumotion curobo_server_node \
           --ros-args \
           -p robot:=/root/ros2_ws/src/isaac_ros_cumotion_robot_description/xrdf/franka.xrdf \
-           -p urdf_path:=/opt/ros/jazzy/share/moveit_resources_panda_description/urdf/panda.urdf
+          -p urdf_path:=/opt/ros/jazzy/share/moveit_resources_panda_description/urdf/panda.urdf \
+          -p num_graph_seeds:=32 -p num_trajopt_seeds:=4 -p max_attempts:=100
 
   curobo_benchmark:
     container_name: curobo_benchmark

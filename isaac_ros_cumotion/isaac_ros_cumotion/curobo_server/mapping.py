@@ -12,6 +12,7 @@ import time
 from typing import List, Optional, Tuple
 
 from curobo.perception import FilterDepth, Mapper, MapperCfg
+from curobo.scene import Scene, VoxelGrid as CuVoxelGrid
 from curobo.types import CameraObservation
 from curobo.types import Pose as CuPose
 from geometry_msgs.msg import Point
@@ -37,6 +38,7 @@ import torch.nn.functional as F
 from visualization_msgs.msg import Marker
 
 from .context import CuroboContext
+from .conversions import collision_object_to_scene_objects
 
 
 class MapperIntegration:
@@ -446,6 +448,45 @@ class MapperIntegration:
             self._mapper.integrate(obs)
         except Exception as e:
             self._node.get_logger().error(f"Integrate failed: {e}")
+            return
+
+        try:
+            vg = self._mapper.compute_esdf()
+            self._push_esdf_to_planner(vg)
+        except Exception as e:
+            self._node.get_logger().warn(f"ESDF push failed: {e}")
+
+    def _push_esdf_to_planner(self, vg: CuVoxelGrid):
+        mp = self._context.motion_planner
+
+        from curobo.scene import Cuboid, Cylinder, Mesh, Sphere
+
+        cuboid_list, cyl_list, sph_list, mesh_list = [], [], [], []
+        for obj in self._context.world_objects.values():
+            cu_objs, ok = collision_object_to_scene_objects(obj)
+            for cu_obj in cu_objs:
+                if isinstance(cu_obj, Cuboid):
+                    cuboid_list.append(cu_obj)
+                elif isinstance(cu_obj, Cylinder):
+                    cyl_list.append(cu_obj)
+                elif isinstance(cu_obj, Sphere):
+                    sph_list.append(cu_obj)
+                elif isinstance(cu_obj, Mesh):
+                    mesh_list.append(cu_obj)
+
+        world_model = Scene(
+            cuboid=cuboid_list,
+            cylinder=cyl_list,
+            sphere=sph_list,
+            mesh=mesh_list,
+        )
+        world_model.voxel = [vg]
+
+        checker = mp.scene_collision_checker
+        checker.clear_cache()
+        checker.load_collision_model(world_model)
+
+        self._context.esdf_voxel_grid = vg
 
     # ------------------------------------------------------------------
     # ESDF service callback

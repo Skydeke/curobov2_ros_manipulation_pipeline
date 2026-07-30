@@ -833,7 +833,7 @@ class ESDFViserNode(Node):
 
         req = ComputeIK.Request()
         req.goal_poses = ros_poses
-        req.seed_state = self.__latest_joint_state
+        req.seed_states = [self.__latest_joint_state]
 
         self.__reachability_future = self.__batch_ik_client.call_async(req)
         self.get_logger().info(

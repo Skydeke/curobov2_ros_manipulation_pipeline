@@ -13,9 +13,11 @@ import torch
 from isaac_ros_cumotion_interfaces.srv import ComputeFK
 
 from .context import CuroboContext
+from .world import sync_world
 
 
 def handle_compute_fk(context: CuroboContext, request, response, lock):
+    sync_world(context)
     try:
         num_configs = len(request.joint_states)
         if num_configs == 0:

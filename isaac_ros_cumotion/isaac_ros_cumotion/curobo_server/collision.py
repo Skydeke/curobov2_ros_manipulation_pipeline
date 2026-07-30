@@ -1,8 +1,10 @@
 """Collision-checking handler for CheckCollision service.
 
-Uses ``MotionPlanner.scene_collision_checker`` (the shared
-``RobotCollisionChecker`` built inside ``MotionPlanner``) to evaluate
-world- and self-collision distances for one or more joint configurations.
+Uses ``MotionPlanner.scene_collision_checker.get_sphere_distance`` (the
+real cuRobo API) to evaluate world-collision distances for one or more
+joint configurations.  Self-collision is not directly exposed through
+``SceneCollision`` so it is reported as 0.0 (use the planning-based path
+if you need self-collision awareness).
 """
 
 from __future__ import annotations
@@ -10,13 +12,16 @@ from __future__ import annotations
 import torch
 
 from curobo.types import JointState as CuJointState
+from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 
 from isaac_ros_cumotion_interfaces.srv import CheckCollision
 
 from .context import CuroboContext
+from .world import sync_world
 
 
 def handle_check_collision(context: CuroboContext, request, response):
+    sync_world(context)
     try:
         num_states = len(request.joint_states)
         response.in_collision = [False] * num_states
@@ -28,6 +33,7 @@ def handle_check_collision(context: CuroboContext, request, response):
 
         collision_checker = context.motion_planner.scene_collision_checker
         kinematics = context.motion_planner.kinematics
+        device_cfg = context.motion_planner.device_cfg
 
         for i, js in enumerate(request.joint_states):
             if len(js.position) == 0:
@@ -35,22 +41,28 @@ def handle_check_collision(context: CuroboContext, request, response):
                 continue
 
             cu_js = CuJointState.from_position(
-                position=context.motion_planner.device_cfg.to_device(
+                position=device_cfg.to_device(
                     list(js.position)
                 ).unsqueeze(0),
                 joint_names=list(js.name),
             )
             active = kinematics.get_active_js(cu_js)
 
-            # Collision checking
-            cd = collision_checker.compute_collision_distance(active)
+            kin_state = kinematics.compute_kinematics(active)
+            b, h, num_spheres = kin_state.robot_spheres.shape[0], kin_state.robot_spheres.shape[1], kin_state.robot_spheres.shape[2]
 
-            response.in_collision[i] = bool(cd.in_collision.item()) if cd.in_collision is not None else False
+            collision_buffer = CollisionBuffer.from_shape(
+                (b, h, num_spheres, 4), device_cfg
+            )
+            weight = device_cfg.to_device([1.0])
+            activation_distance = device_cfg.to_device([0.0])
 
-            if cd.world_collision_distance is not None:
-                response.world_collision_distance[i] = float(cd.world_collision_distance.item())
-            if cd.self_collision_distance is not None:
-                response.self_collision_distance[i] = float(cd.self_collision_distance.item())
+            dist = collision_checker.get_sphere_collision(
+                kin_state, collision_buffer, weight, activation_distance
+            )
+
+            response.in_collision[i] = bool((dist > 0).any().item())
+            response.world_collision_distance[i] = float(dist.max().item())
 
         return response
 

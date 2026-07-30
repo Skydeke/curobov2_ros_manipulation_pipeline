@@ -7,7 +7,7 @@ from geometry_msgs.msg import Pose as RosPose
 from sensor_msgs.msg import JointState as RosJointState
 
 from isaac_ros_cumotion_interfaces.action import PlanMotion
-from isaac_ros_cumotion_interfaces.srv import UpdateWorld
+from isaac_ros_cumotion_interfaces.srv import CheckCollision, ComputeFK, ComputeIK, UpdateWorld
 
 from isaac_ros_cumotion_benchmark.obstacle_convert import obstacles_dict_to_collision_objects
 
@@ -143,30 +143,215 @@ def run_ros(dataset, time_dilation_factor=1.0):
     return all_results
 
 
+def run_ros_ik(dataset='demo'):
+    from isaac_ros_cumotion_benchmark.problems import load_problems
+    problems = load_problems(dataset)
+
+    rclpy.init()
+    runner = RosBenchmarkRunner()
+    results = []
+
+    for scene_key, scene_problems in problems.items():
+        for i, problem in enumerate(scene_problems, start=1):
+            if problem['collision_buffer_ik'] < 0.0:
+                continue
+            problem_name = f'{scene_key}_ik_{i}'
+            q_start = problem['start']
+
+            runner._clear_world()
+            runner._add_obstacles(problem['obstacles'])
+
+            js = RosJointState()
+            js.name = FRANKA_JOINT_NAMES
+            js.position = q_start
+
+            req = ComputeIK.Request()
+            pose = problem['goal_pose']
+            ros_pose = RosPose()
+            ros_pose.position.x = float(pose['position_xyz'][0])
+            ros_pose.position.y = float(pose['position_xyz'][1])
+            ros_pose.position.z = float(pose['position_xyz'][2])
+            ros_pose.orientation.w = float(pose['quaternion_wxyz'][0])
+            ros_pose.orientation.x = float(pose['quaternion_wxyz'][1])
+            ros_pose.orientation.y = float(pose['quaternion_wxyz'][2])
+            ros_pose.orientation.z = float(pose['quaternion_wxyz'][3])
+            req.goal_poses = [ros_pose]
+            req.seed_states = [js]
+
+            ik_client = runner.create_client(ComputeIK, 'cumotion/compute_ik')
+            if not ik_client.wait_for_service(timeout_sec=5.0):
+                results.append({
+                    'problem_name': problem_name, 'capability': 'ik',
+                    'success': False, 'time_s': 0.0,
+                    'position_error': -1.0, 'rotation_error': -1.0,
+                })
+                continue
+
+            t0 = time.perf_counter()
+            future = ik_client.call_async(req)
+            rclpy.spin_until_future_complete(runner, future, timeout_sec=30.0)
+            dt = time.perf_counter() - t0
+            resp = future.result()
+
+            if resp is not None and len(resp.success) > 0 and resp.success[0]:
+                results.append({
+                    'problem_name': problem_name, 'capability': 'ik',
+                    'success': True, 'time_s': dt,
+                    'position_error': float(resp.position_error[0] * 1000.0) if resp.position_error else -1.0,
+                    'rotation_error': float(resp.rotation_error[0] * 180.0 / 3.14159) if resp.rotation_error else -1.0,
+                })
+            else:
+                results.append({
+                    'problem_name': problem_name, 'capability': 'ik',
+                    'success': False, 'time_s': dt,
+                    'position_error': -1.0, 'rotation_error': -1.0,
+                })
+
+    runner.destroy_node()
+    rclpy.shutdown()
+    return results
+
+
+def run_ros_fk(dataset='demo'):
+    from isaac_ros_cumotion_benchmark.problems import load_problems
+    problems = load_problems(dataset)
+
+    rclpy.init()
+    runner = RosBenchmarkRunner()
+    results = []
+
+    for scene_key, scene_problems in problems.items():
+        for i, problem in enumerate(scene_problems[:3], start=1):
+            if problem['collision_buffer_ik'] < 0.0:
+                continue
+            problem_name = f'{scene_key}_fk_{i}'
+            q_start = problem['start']
+
+            js = RosJointState()
+            js.name = FRANKA_JOINT_NAMES
+            js.position = q_start
+
+            req = ComputeFK.Request()
+            req.joint_states = [js]
+
+            fk_client = runner.create_client(ComputeFK, 'cumotion/compute_fk')
+            if not fk_client.wait_for_service(timeout_sec=5.0):
+                results.append({
+                    'problem_name': problem_name, 'capability': 'fk',
+                    'success': False, 'time_s': 0.0,
+                })
+                continue
+
+            t0 = time.perf_counter()
+            future = fk_client.call_async(req)
+            rclpy.spin_until_future_complete(runner, future, timeout_sec=30.0)
+            dt = time.perf_counter() - t0
+            resp = future.result()
+
+            results.append({
+                'problem_name': problem_name, 'capability': 'fk',
+                'success': resp is not None and resp.success,
+                'time_s': dt,
+                'num_poses': len(resp.tool_poses) if resp is not None else 0,
+            })
+
+    runner.destroy_node()
+    rclpy.shutdown()
+    return results
+
+
+def run_ros_collision(dataset='demo'):
+    from isaac_ros_cumotion_benchmark.problems import load_problems
+    problems = load_problems(dataset)
+
+    rclpy.init()
+    runner = RosBenchmarkRunner()
+    results = []
+
+    for scene_key, scene_problems in problems.items():
+        for i, problem in enumerate(scene_problems[:3], start=1):
+            if problem['collision_buffer_ik'] < 0.0:
+                continue
+            problem_name = f'{scene_key}_collision_{i}'
+            q_start = problem['start']
+
+            runner._clear_world()
+            runner._add_obstacles(problem['obstacles'])
+
+            js = RosJointState()
+            js.name = FRANKA_JOINT_NAMES
+            js.position = q_start
+
+            req = CheckCollision.Request()
+            req.joint_states = [js]
+
+            col_client = runner.create_client(CheckCollision, 'cumotion/check_collision')
+            if not col_client.wait_for_service(timeout_sec=5.0):
+                results.append({
+                    'problem_name': problem_name, 'capability': 'collision',
+                    'success': False, 'time_s': 0.0,
+                })
+                continue
+
+            t0 = time.perf_counter()
+            future = col_client.call_async(req)
+            rclpy.spin_until_future_complete(runner, future, timeout_sec=30.0)
+            dt = time.perf_counter() - t0
+            resp = future.result()
+
+            results.append({
+                'problem_name': problem_name, 'capability': 'collision',
+                'success': resp is not None,
+                'time_s': dt,
+                'in_collision': resp.in_collision[0] if resp is not None else True,
+                'world_distance': float(resp.world_collision_distance[0]) if resp is not None else 0.0,
+                'self_distance': float(resp.self_collision_distance[0]) if resp is not None else 0.0,
+            })
+
+    runner.destroy_node()
+    rclpy.shutdown()
+    return results
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument('--dataset', default='demo',
                         choices=['demo', 'motion_benchmaker', 'mpinets'])
     parser.add_argument('--time_dilation_factor', type=float, default=1.0)
+    parser.add_argument('--capability', default='planning',
+                        choices=['planning', 'ik', 'fk', 'collision', 'all'])
     args = parser.parse_args()
 
-    results = run_ros(args.dataset, args.time_dilation_factor)
+    if args.capability == 'planning':
+        results = run_ros(args.dataset, args.time_dilation_factor)
+    elif args.capability == 'ik':
+        results = run_ros_ik(args.dataset)
+    elif args.capability == 'fk':
+        results = run_ros_fk(args.dataset)
+    elif args.capability == 'collision':
+        results = run_ros_collision(args.dataset)
+    elif args.capability == 'all':
+        results = (run_ros(args.dataset, args.time_dilation_factor)
+                   + run_ros_ik(args.dataset)
+                   + run_ros_fk(args.dataset)
+                   + run_ros_collision(args.dataset))
 
     successes = sum(1 for r in results if r['success'])
     total = len(results)
     total_time = sum(r['time_s'] for r in results)
     print(f'Dataset: {args.dataset}')
+    print(f'Capability: {args.capability}')
     print(f'Problems: {total}')
     print(f'Successes: {successes}/{total} ({100*successes/total:.1f}%)')
-    print(f'Total planning time: {total_time:.3f}s')
+    print(f'Total time: {total_time:.3f}s')
     if successes:
         avg_time = sum(r['time_s'] for r in results if r['success']) / successes
         print(f'Avg success time: {avg_time:.3f}s')
     for r in results:
         status = 'OK' if r['success'] else 'FAIL'
         print(f'  {r["problem_name"]}: {status} '
-              f'({r["time_s"]:.3f}s, {r["n_waypoints"]} waypoints)')
+              f'({r["time_s"]:.3f}s)')
 
 
 if __name__ == '__main__':

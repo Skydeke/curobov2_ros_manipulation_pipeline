@@ -1,10 +1,27 @@
 # Solve IK for one or more Cartesian goal poses in a single GPU batch.
 # num_seeds and collision-awareness are NOT request fields -- these are
 # constructor properties of the shared IK solver instance.
+#
+# Goal layout (row-major):
+#   num_goalset > 0  → batch_size = len(goal_poses) / num_goalset
+#                       goal_poses[b * num_goalset + g] = g-th alternative for problem b
+#   num_goalset == 0 → legacy: governed by use_goalset flag
+#                       use_goalset=False → batch=N, goalset=1
+#                       use_goalset=True  → batch=1, goalset=N
+#
+# seed_states: 1 entry (shared across all batch problems) or batch_size entries.
+#
+# Example — 3 problems each with 3 alternative goals:
+#   num_goalset = 3
+#   goal_poses   = [A1, A2, A3, B1, B2, B3, C1, C2, C3]   # row-major
+#   seed_states  = [start_A, start_B, start_C]              # one per problem
+#   → solver shape: batch=3, goalset=3
 
 geometry_msgs/Pose[] goal_poses
-sensor_msgs/JointState seed_state         # empty = solver default seeding
-string tool_frame                         # empty = planner's default tool frame
+sensor_msgs/JointState[] seed_states
+string tool_frame
+bool use_goalset                           # only when num_goalset==0; default false
+uint32 num_goalset                         # 0 = use use_goalset heuristic
 ---
 bool[] success                            # one entry per goal_poses
 sensor_msgs/JointState[] solutions        # one entry per goal_poses, valid only where success[i] is true
