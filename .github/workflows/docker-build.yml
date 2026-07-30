@@ -35,7 +35,8 @@ jobs:
           for sub in curobo_core; do
             gitfile="$sub/.git"
             if [ -f "$gitfile" ]; then
-              gitdir=$(cut -d' ' -f2 < "$gitfile")
+              gitdir=$(head -1 "$gitfile" | cut -d' ' -f2)
+              rm -f "$gitfile"
               cp -a "$gitdir" "$sub/.git"
             fi
           done
