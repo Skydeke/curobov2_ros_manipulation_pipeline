@@ -38,6 +38,7 @@ from isaac_ros_cumotion.curobo_server.utils import (
 )
 
 from sensor_msgs.msg import JointState
+from moveit_msgs.msg import CollisionObject, PlanningScene
 from visualization_msgs.msg import MarkerArray
 import torch
 
@@ -207,6 +208,14 @@ class CuroboServerNode(Node):
             UpdateWorld, "cumotion/update_world",
             self._on_update_world, callback_group=self._motion_planner_cb_group,
         )
+
+        planning_scene_topic = (
+            self.get_parameter("planning_scene_topic").get_parameter_value().string_value
+        )
+        self._planning_scene_sub = self.create_subscription(
+            PlanningScene, planning_scene_topic, self._on_planning_scene,
+            10, callback_group=self._motion_planner_cb_group,
+        )
         self._get_esdf_srv = self.create_service(
             GetEsdf, "cumotion/update_esdf",
             self._on_get_esdf, callback_group=self._motion_planner_cb_group,
@@ -276,6 +285,7 @@ class CuroboServerNode(Node):
 
         # Static planning scene
         self.declare_parameter("moveit_collision_objects_scene_file", "")
+        self.declare_parameter("planning_scene_topic", "/planning_scene")
 
         # Mapper parameters (from mapper_node.py)
         self.declare_parameter("enable_mapper", True)
@@ -507,6 +517,35 @@ class CuroboServerNode(Node):
         return world_handler.handle_update_world(
             self._curobo_ctx, request, response,
         )
+
+    def _on_planning_scene(self, msg: PlanningScene):
+        changed = False
+        if msg.is_diff:
+            for obj in msg.world.collision_objects:
+                if obj.operation == CollisionObject.REMOVE:
+                    if obj.id in self._curobo_ctx.world_objects:
+                        del self._curobo_ctx.world_objects[obj.id]
+                        changed = True
+                else:
+                    self._curobo_ctx.world_objects[obj.id] = obj
+                    changed = True
+            for aco in msg.robot_state.attached_collision_objects:
+                changed = True
+                if aco.detach_posture:
+                    self._curobo_ctx.attached_objects.pop(aco.object.id, None)
+                else:
+                    self._curobo_ctx.attached_objects[aco.object.id] = aco.object
+        else:
+            self._curobo_ctx.world_objects.clear()
+            for obj in msg.world.collision_objects:
+                self._curobo_ctx.world_objects[obj.id] = obj
+            self._curobo_ctx.attached_objects.clear()
+            for aco in msg.robot_state.attached_collision_objects:
+                self._curobo_ctx.attached_objects[aco.object.id] = aco.object
+            changed = True
+
+        if changed:
+            world_handler.sync_world(self._curobo_ctx)
 
     def _on_get_esdf(self, request, response):
         return mapping_handler.handle_get_esdf(

@@ -13,6 +13,7 @@ Each test compares direct-cuRobo results against ROS-service results.
 import os
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -235,3 +236,119 @@ class TestRosRunnerConnectivity:
             runner.destroy_node()
         finally:
             rclpy.shutdown()
+
+
+@NEEDS_SERVER
+class TestPlanningSceneObstacles:
+    """Verify obstacles published to /planning_scene affect collision checking.
+
+    Publishes a large blocking obstacle via ``PlanningScene``, asserts that
+    ``PlanMotion`` fails, then removes the obstacle and asserts it succeeds.
+    """
+
+    @pytest.fixture(scope='class')
+    def runner(self):
+        import rclpy
+        rclpy.init()
+        from isaac_ros_cumotion_benchmark.ros_runner import RosBenchmarkRunner
+        r = RosBenchmarkRunner(time_dilation_factor=1.0)
+        yield r
+        r.destroy_node()
+        rclpy.shutdown()
+
+    @pytest.fixture(scope='class')
+    def problem(self):
+        """First demo problem that is valid (collision_buffer_ik >= 0)."""
+        from isaac_ros_cumotion_benchmark.problems import load_problems
+        scene_problems = load_problems('demo')
+        for problems in scene_problems.values():
+            for p in problems:
+                if p.get('collision_buffer_ik', 0.0) >= 0.0:
+                    return p
+        pytest.skip('No valid demo problem found')
+
+    def _publish_planning_scene(self, runner, collision_objects, is_diff=True):
+        from moveit_msgs.msg import PlanningScene, CollisionObject
+        pub = runner.create_publisher(PlanningScene, '/planning_scene', 1)
+        msg = PlanningScene()
+        msg.is_diff = is_diff
+        msg.world.collision_objects = collision_objects
+        pub.publish(msg)
+        runner.get_logger().info(
+            f'Published {len(collision_objects)} object(s) to /planning_scene'
+        )
+
+    def _make_blocking_box(self, runner, position, size=1.0):
+        from moveit_msgs.msg import CollisionObject
+        from shape_msgs.msg import SolidPrimitive
+        from geometry_msgs.msg import Pose as RosPose
+        obj = CollisionObject()
+        obj.id = 'test_blocking_box'
+        obj.operation = CollisionObject.ADD
+        prim = SolidPrimitive()
+        prim.type = SolidPrimitive.BOX
+        prim.dimensions = [size, size, size]
+        pose = RosPose()
+        pose.position.x = float(position[0])
+        pose.position.y = float(position[1])
+        pose.position.z = float(position[2])
+        pose.orientation.w = 1.0
+        obj.primitives = [prim]
+        obj.primitive_poses = [pose]
+        return obj
+
+    def test_motion_planning_blocked_by_obstacle(self, runner, problem):
+        t0 = time.time()
+        start_q = problem['start']
+        gp = problem['goal_pose']
+        pose_flat = gp['position_xyz'] + gp['quaternion_wxyz']
+
+        # 1. Plan without obstacles — should succeed
+        result_clean = runner._plan_motion(start_q, pose_flat)
+        runner.get_logger().info(
+            f'Clean plan: success={result_clean["success"]} '
+            f'time={result_clean["time_s"]:.3f}s'
+        )
+
+        # 2. Publish a large obstacle at the goal via /planning_scene
+        blocking_pos = gp['position_xyz']
+        box = self._make_blocking_box(runner, blocking_pos, size=0.4)
+        self._publish_planning_scene(runner, [box])
+        time.sleep(0.5)
+
+        # 3. Same plan with obstacle — should fail
+        result_blocked = runner._plan_motion(start_q, pose_flat)
+        runner.get_logger().info(
+            f'Blocked plan: success={result_blocked["success"]} '
+            f'time={result_blocked["time_s"]:.3f}s'
+        )
+
+        # 4. Remove the obstacle via /planning_scene
+        from moveit_msgs.msg import CollisionObject
+        remove_msg = box
+        remove_msg.operation = CollisionObject.REMOVE
+        self._publish_planning_scene(runner, [remove_msg])
+        time.sleep(0.5)
+
+        # 5. Plan again — should succeed again
+        result_restored = runner._plan_motion(start_q, pose_flat)
+        runner.get_logger().info(
+            f'Restored plan: success={result_restored["success"]} '
+            f'time={result_restored["time_s"]:.3f}s'
+        )
+        dt = time.time() - t0
+        runner.get_logger().info(f'Test completed in {dt:.1f}s')
+
+        # Clean up any leftover obstacle
+        self._publish_planning_scene(runner, [remove_msg])
+
+        assert result_clean['success'], (
+            'Clean plan (no obstacles) should succeed'
+        )
+        assert not result_blocked['success'], (
+            f'Plan blocked by obstacle at {blocking_pos} should fail '
+            f'but got success={result_blocked["success"]}'
+        )
+        assert result_restored['success'], (
+            'Plan after removing obstacle should succeed again'
+        )

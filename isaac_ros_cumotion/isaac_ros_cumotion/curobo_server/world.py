@@ -17,9 +17,6 @@ from .conversions import collision_object_to_scene_objects
 
 
 def sync_world(context: CuroboContext) -> bool:
-    if not context.world_objects:
-        return False
-
     cuboid_list: List[Cuboid] = []
     sphere_list: List[Sphere] = []
     cylinder_list: List[Cylinder] = []

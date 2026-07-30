@@ -1,10 +1,11 @@
 # Isaac ROS cuMotion
 
 > **Fork notice:** This repository is a fork of NVIDIA's `isaac_ros_cumotion`
-> and related packages. It retains NVIDIA's original licensing terms
-> (see `LICENSE` files in each submodule). The code merged here is built
-> on top of NVIDIA's cuRobo library and Isaac ROS framework — respect the
-> original copyrights and license obligations when distributing or modifying.
+> and related packages, forked because NVIDIA did not ship a ROS-ready version
+> of cuRobo v2. It retains NVIDIA's original licensing terms (see `LICENSE`
+> files in each submodule). The code merged here is built on top of NVIDIA's
+> cuRobo library and Isaac ROS framework — respect the original copyrights and
+> license obligations when distributing or modifying.
 
 NVIDIA cuRobo v2 wrapped as a single GPU-accelerated ROS 2 node for arm motion
 planning, IK/FK, collision checking, world management, depth-to-ESDF mapping,
