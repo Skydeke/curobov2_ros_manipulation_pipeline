@@ -275,8 +275,6 @@ class CuroboServerNode(Node):
         self.declare_parameter("grid_size_m", [2.0, 2.0, 2.0])
         self.declare_parameter("update_esdf_on_request", True)
         self.declare_parameter("use_aabb_on_request", True)
-        self.declare_parameter("clear_robot_spheres_from_esdf", True)
-        self.declare_parameter("robot_esdf_clearing_padding", 0.0)
 
         # ROS wiring
         self.declare_parameter("joint_states_topic", "/joint_states")
