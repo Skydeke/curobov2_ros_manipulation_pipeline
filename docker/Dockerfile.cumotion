@@ -83,7 +83,12 @@ RUN apt-get update && apt-get install -y --reinstall \
   ros-jazzy-builtin-interfaces && \
   rm -rf /var/lib/apt/lists/*
 
-RUN pip install -e "${ROS_WS}/src/curobo_core/curobo[benchmark]"
+# curobo_core/curobo is a nested git repo (gitfile pointing into the outer
+# workspace's .git/modules), so its .git metadata is not present in this build
+# context and setuptools-scm can't derive a version. Pin the version it would
+# otherwise compute from the vendored repo's v0.8.0 tag.
+RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=0.8.0 \
+  pip install -e "${ROS_WS}/src/curobo_core/curobo[benchmark]"
 
 RUN add-apt-repository -y universe && \
   if [ ! -f /usr/share/keyrings/nvidia-isaac-ros.gpg ]; then \
