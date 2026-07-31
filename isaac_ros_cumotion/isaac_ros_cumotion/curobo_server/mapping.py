@@ -50,7 +50,8 @@ class MapperIntegration:
     """
 
     def __init__(self, node: Node, context: CuroboContext,
-                 planner_cb_group: Optional[MutuallyExclusiveCallbackGroup] = None):
+                 planner_cb_group: Optional[MutuallyExclusiveCallbackGroup] = None,
+                 lock: Optional[threading.Lock] = None):
         """Initialise mapper integration.
 
         Args:
@@ -61,10 +62,20 @@ class MapperIntegration:
                 motion planner on the same default CUDA stream. Camera
                 subscriptions (data copy only, no CUDA) still use their own
                 group.
+            lock: Shared threading.Lock also held by the motion
+                planner/MPC integration around CUDA-graph-capturing calls
+                (e.g. MPCSolver.setup()). callback_group scheduling alone
+                is not a hard guarantee against a CUDA kernel launch racing
+                an in-progress CUDA graph capture on the same stream — that
+                races and crashes the whole process ("operation not
+                permitted when stream is capturing"). Passing the same
+                lock here makes the serialisation an explicit mutex.
+                Defaults to a private lock if not provided.
         """
         self._node = node
         self._context = context
         self._data_lock = threading.Lock()
+        self._gpu_lock = lock if lock is not None else threading.Lock()
 
         # --- Read mapper parameters ---
         self._vs = float(node.get_parameter("tsdf_voxel_size").value)
@@ -315,7 +326,7 @@ class MapperIntegration:
         else:
             self._node.get_logger().warn(f"Unsupported depth encoding: {msg.encoding}")
             return
-        with self._data_lock:
+        with self._gpu_lock:
             self._latest_depth[idx] = torch.from_numpy(np.ascontiguousarray(depth)).to(
                 device=self._device, dtype=torch.float32,
             )
@@ -332,7 +343,7 @@ class MapperIntegration:
         else:
             self._node.get_logger().warn(f"Unsupported RGB encoding: {msg.encoding}")
             return
-        with self._data_lock:
+        with self._gpu_lock:
             self._latest_rgb[idx] = torch.from_numpy(np.ascontiguousarray(rgb)).to(
                 device=self._device, dtype=torch.uint8,
             )
@@ -366,6 +377,10 @@ class MapperIntegration:
     # ------------------------------------------------------------------
 
     def _integrate_frames(self):
+        with self._gpu_lock:
+            self._integrate_frames_impl()
+
+    def _integrate_frames_impl(self):
         if self._mapper is None:
             return
 
@@ -493,7 +508,7 @@ class MapperIntegration:
     # ------------------------------------------------------------------
 
     def handle_get_esdf(self, request, response):
-        with self._data_lock:
+        with self._data_lock, self._gpu_lock:
             if self._mapper is None:
                 response.success = False
                 return response
@@ -677,6 +692,10 @@ class MapperIntegration:
         return cloud
 
     def _publish_colored_surface(self):
+        with self._gpu_lock:
+            self._publish_colored_surface_impl()
+
+    def _publish_colored_surface_impl(self):
         if self._mapper is None:
             return
         voxels = self._mapper.extract_occupied_voxels(surface_only=True)
@@ -695,6 +714,10 @@ class MapperIntegration:
         )
 
     def _publish_debug_marker(self):
+        with self._gpu_lock:
+            self._publish_debug_marker_impl()
+
+    def _publish_debug_marker_impl(self):
         if self._mapper is None:
             return
 

@@ -10,7 +10,8 @@ from __future__ import annotations
 from typing import List
 
 from curobo.scene import Cuboid, Cylinder, Mesh, Sphere
-from geometry_msgs.msg import Point
+from geometry_msgs.msg import Point, Pose
+from moveit_msgs.msg import CollisionObject as MoveItCollisionObject
 
 import torch
 
@@ -112,6 +113,70 @@ def _fit_spheres_from_primitive(
         surface_radius=0.01,
     )
     return [[s.pose[0], s.pose[1], s.pose[2], s.radius] for s in cu_spheres]
+
+
+def _transform_spheres(
+    spheres: List[List[float]],
+    pose: Pose,
+) -> List[List[float]]:
+    """Apply a geometry_msgs/Pose offset to [x, y, z, r] sphere lists.
+
+    Rotation is applied to the centre before the translation; radii are
+    unaffected (uniform-scale assumption, matching cuRobo's Sphere type).
+    """
+    q = [
+        pose.orientation.w,
+        pose.orientation.x,
+        pose.orientation.y,
+        pose.orientation.z,
+    ]
+    norm = (q[0] ** 2 + q[1] ** 2 + q[2] ** 2 + q[3] ** 2) ** 0.5
+    if norm > 0.0:
+        q = [v / norm for v in q]
+    w, x, y, z = q
+    tx, ty, tz = pose.position.x, pose.position.y, pose.position.z
+
+    out = []
+    for s in spheres:
+        px, py, pz, r = s
+        # Rotate (row-vector convention: v' = R^T @ v with this R).
+        rx = (1 - 2 * (y * y + z * z)) * px + (2 * (x * y - z * w)) * py + (2 * (x * z + y * w)) * pz
+        ry = (2 * (x * y + z * w)) * px + (1 - 2 * (x * x + z * z)) * py + (2 * (y * z - x * w)) * pz
+        rz = (2 * (x * z - y * w)) * px + (2 * (y * z + x * w)) * py + (1 - 2 * (x * x + y * y)) * pz
+        out.append([rx + tx, ry + ty, rz + tz, r])
+    return out
+
+
+def attach_collision_object(
+    context: CuroboContext,
+    object_id: str,
+    parent_link: str,
+    collision_object: MoveItCollisionObject,
+    lock=None,
+) -> int:
+    """Attach a MoveIt CollisionObject (primitives + poses) to a link as spheres.
+
+    Used by the planning-scene attach path (AttachedCollisionObject). Returns the
+    number of spheres attached, or 0 if no supported geometry was found.
+    """
+    spheres: List[List[float]] = []
+    for i, prim in enumerate(collision_object.primitives):
+        fitted = _fit_spheres_from_primitive(context, prim, f"{object_id}_prim_{i}")
+        if not fitted:
+            continue
+        if i < len(collision_object.primitive_poses):
+            fitted = _transform_spheres(fitted, collision_object.primitive_poses[i])
+        spheres.extend(fitted)
+
+    if not spheres:
+        return 0
+
+    if lock is not None:
+        with lock:
+            _attach_spheres_to_link(context, object_id, parent_link, spheres)
+    else:
+        _attach_spheres_to_link(context, object_id, parent_link, spheres)
+    return len(spheres)
 
 
 def handle_attach_object(context: CuroboContext, goal_handle, js_buffer, lock):

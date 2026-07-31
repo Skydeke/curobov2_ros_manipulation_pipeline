@@ -38,7 +38,7 @@ from isaac_ros_cumotion.curobo_server.utils import (
 )
 
 from sensor_msgs.msg import JointState
-from moveit_msgs.msg import CollisionObject, PlanningScene
+from moveit_msgs.msg import AttachedCollisionObject, CollisionObject, PlanningScene
 from visualization_msgs.msg import MarkerArray
 import torch
 
@@ -110,7 +110,9 @@ class CuroboServerNode(Node):
         # ------------------------------------------------------------------
         if self.get_parameter("enable_mapper").value:
             self._mapper_integration = MapperIntegration(
-                self, self._curobo_ctx, planner_cb_group=self._motion_planner_cb_group,
+                self, self._curobo_ctx,
+                planner_cb_group=self._motion_planner_cb_group,
+                lock=self._lock,
             )
         else:
             self._mapper_integration = None
@@ -529,21 +531,61 @@ class CuroboServerNode(Node):
                     changed = True
             for aco in msg.robot_state.attached_collision_objects:
                 changed = True
-                if aco.detach_posture:
-                    self._curobo_ctx.attached_objects.pop(aco.object.id, None)
+                if aco.object.operation == CollisionObject.REMOVE:
+                    self._detach_attached_object(aco)
                 else:
-                    self._curobo_ctx.attached_objects[aco.object.id] = aco.object
+                    self._attach_attached_object(aco)
         else:
             self._curobo_ctx.world_objects.clear()
             for obj in msg.world.collision_objects:
                 self._curobo_ctx.world_objects[obj.id] = obj
+            for aco in list(self._curobo_ctx.attached_objects.values()):
+                self._detach_attached_object(aco)
             self._curobo_ctx.attached_objects.clear()
             for aco in msg.robot_state.attached_collision_objects:
-                self._curobo_ctx.attached_objects[aco.object.id] = aco.object
+                self._attach_attached_object(aco)
             changed = True
 
         if changed:
             world_handler.sync_world(self._curobo_ctx)
+
+    def _attach_attached_object(self, aco: AttachedCollisionObject):
+        """Attach a planning-scene AttachedCollisionObject to the kin model."""
+        if aco.object.id in self._curobo_ctx.attached_objects:
+            self._detach_attached_object(aco)
+        n = attach_handler.attach_collision_object(
+            self._curobo_ctx,
+            aco.object.id,
+            aco.link_name,
+            aco.object,
+            self._lock,
+        )
+        self._curobo_ctx.attached_objects[aco.object.id] = aco
+        self.get_logger().info(
+            f"Attached '{aco.object.id}' to '{aco.link_name}' "
+            f"with {n} collision spheres"
+        )
+
+    def _detach_attached_object(self, aco):
+        """Detach a planning-scene AttachedCollisionObject from the kin model.
+
+        ``context.attached_objects`` may also hold ``AttachObject.Goal``
+        objects (from the action-based path), which carry ``parent_link``
+        instead of ``link_name`` and ``object_id`` instead of ``object.id``.
+        """
+        if isinstance(aco, AttachedCollisionObject):
+            link_name = aco.link_name
+            object_id = aco.object.id
+        else:
+            goal = aco  # AttachObject.Goal from the action-based path
+            link_name = goal.parent_link
+            object_id = goal.object_id
+        with self._lock:
+            attach_handler._detach_from_link(self._curobo_ctx, link_name)
+        self._curobo_ctx.attached_objects.pop(object_id, None)
+        self.get_logger().info(
+            f"Detached '{object_id}' from '{link_name}'"
+        )
 
     def _on_get_esdf(self, request, response):
         return mapping_handler.handle_get_esdf(
