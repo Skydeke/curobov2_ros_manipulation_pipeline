@@ -1,7 +1,7 @@
 services:
   curobo_server:
     container_name: curobo_benchmark_server
-    image: isaac_ros_cumotion:benchmark
+    image: ${CUROBO_IMAGE:-isaac_ros_cumotion:benchmark}
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -34,7 +34,7 @@ services:
 
   curobo_benchmark:
     container_name: curobo_benchmark
-    image: isaac_ros_cumotion:benchmark
+    image: ${CUROBO_IMAGE:-isaac_ros_cumotion:benchmark}
     depends_on:
       curobo_server:
         condition: service_started
@@ -62,12 +62,12 @@ services:
         echo "Waiting for cumotion/plan_motion..." &&
         while ! ros2 action list 2>/dev/null | grep -q cumotion/plan_motion; do sleep 1; done &&
         echo "Server ready, running benchmark..." &&
-        ros2 run isaac_ros_cumotion_benchmark curobo_benchmark all --dataset demo --output /tmp/benchmark_report.json &&
+        ros2 run isaac_ros_cumotion_benchmark curobo_benchmark all --dataset demo --capability all --output /tmp/benchmark_report.json &&
         tail -f /dev/null
 
   curobo_test:
     container_name: curobo_test
-    image: isaac_ros_cumotion:benchmark
+    image: ${CUROBO_IMAGE:-isaac_ros_cumotion:benchmark}
     depends_on:
       curobo_server:
         condition: service_started

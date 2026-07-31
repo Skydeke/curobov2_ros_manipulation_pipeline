@@ -5,6 +5,18 @@ def _make_lookup(results):
     return {r['problem_name']: r for r in results}
 
 
+CAPABILITY_FIELDS = (
+    'n_waypoints',
+    'position_error',
+    'rotation_error',
+    'in_collision',
+    'world_distance',
+    'self_distance',
+    'num_frames',
+    'frame_names',
+)
+
+
 def compare(core_results, ros_results, tolerance=1e-6):
     core_lookup = _make_lookup(core_results)
     ros_lookup = _make_lookup(ros_results)
@@ -20,13 +32,17 @@ def compare(core_results, ros_results, tolerance=1e-6):
 
         entry = {
             'problem_name': name,
+            'capability': (c or r or {}).get('capability', 'planning'),
             'core_success': c['success'] if c else None,
             'ros_success': r['success'] if r else None,
             'core_time_s': c['time_s'] if c else None,
             'ros_time_s': r['time_s'] if r else None,
-            'core_n_waypoints': c['n_waypoints'] if c else None,
-            'ros_n_waypoints': r['n_waypoints'] if r else None,
         }
+
+        for field in CAPABILITY_FIELDS:
+            if (c and field in c) or (r and field in r):
+                entry[f'core_{field}'] = c.get(field) if c else None
+                entry[f'ros_{field}'] = r.get(field) if r else None
 
         if c is None or r is None:
             entry['diff_type'] = 'missing'
@@ -70,17 +86,18 @@ def print_report(report, show_all=False):
         for m in report['details']['mismatches']:
             dt = m.get('diff_type', '?')
             name = m['problem_name']
+            cap = m.get('capability', 'planning')
             c_s = m['core_success']
             r_s = m['ros_success']
             c_t = m['core_time_s']
             r_t = m['ros_time_s']
             if dt == 'missing':
-                print(f'    {name}: only in {"core" if c_s is not None else "ros"}')
+                print(f'    {name} [{cap}]: only in {"core" if c_s is not None else "ros"}')
             elif dt == 'success_mismatch':
-                print(f'    {name}: core.success={c_s} != ros.success={r_s}'
+                print(f'    {name} [{cap}]: core.success={c_s} != ros.success={r_s}'
                       f'  (core={c_t:.3f}s, ros={r_t:.3f}s)')
             elif dt == 'time_mismatch':
-                print(f'    {name}: time diff {m.get("time_diff", 0):.3f}s'
+                print(f'    {name} [{cap}]: time diff {m.get("time_diff", 0):.3f}s'
                       f'  (core={c_t:.3f}s, ros={r_t:.3f}s)')
 
     if show_all and report['details']['matches']:

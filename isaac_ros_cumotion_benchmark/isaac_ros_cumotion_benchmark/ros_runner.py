@@ -132,6 +132,7 @@ def run_ros(dataset, time_dilation_factor=1.0):
 
             plan_result['problem_name'] = problem_name
             plan_result['scene_key'] = scene_key
+            plan_result['capability'] = 'planning'
             if plan_result['time_s'] == 0.0:
                 plan_result['time_s'] = t_end - t_start
 
@@ -252,7 +253,8 @@ def run_ros_fk(dataset='demo'):
                 'problem_name': problem_name, 'capability': 'fk',
                 'success': resp is not None and resp.success,
                 'time_s': dt,
-                'num_poses': len(resp.tool_poses) if resp is not None else 0,
+                'num_frames': resp.num_frames if resp is not None else 0,
+                'frame_names': list(resp.resolved_frame_names) if resp is not None else [],
             })
 
     runner.destroy_node()

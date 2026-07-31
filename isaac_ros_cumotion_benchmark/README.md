@@ -17,9 +17,12 @@ it, the same way `motion_plan_benchmark.py` already does today. A CI workflow
 every push/PR to catch regressions early.
 
 > **2026 update:** CI now runs on GPU-equipped self-hosted runners. The
-> workflow builds the Docker image, starts a `curobo_server_node`, runs all
-> capability benchmarks (planning, IK, FK, collision) via both `core` and `ros`
-> paths, compares them, and runs the full pytest suite.
+> workflow pulls the pre-built image
+> `ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest` (published by
+> the `docker-build.yml` workflow) instead of building it, starts a
+> `curobo_server_node`, runs all capability benchmarks (planning, IK, FK,
+> collision) via both `core` and `ros` paths, compares them, and runs the full
+> pytest suite.
 
 ---
 
@@ -130,7 +133,11 @@ ros2 run isaac_ros_cumotion_benchmark curobo_benchmark all --dataset demo \
     --output report.json --save-all
 ```
 
-Runs both runners sequentially, then prints the comparison report.
+Runs both runners on **all capabilities** (planning, IK, FK, collision —
+i.e. all benchmarks documented in curobo_core's `docs/reference/benchmarks.rst`)
+sequentially, then prints the comparison report. Use `--capability
+{planning,ik,fk,collision}` to run only a single capability instead.
+
 With `--save-all`, saves `*_core.json`, `*_ros.json`, and `report.json`.
 
 ---

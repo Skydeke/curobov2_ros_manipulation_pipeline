@@ -123,6 +123,7 @@ def run_core(dataset, warmup_iters=3, max_attempts=100, enable_graph_attempt=1):
             all_results.append({
                 'problem_name': problem_name,
                 'scene_key': scene_key,
+                'capability': 'planning',
                 'success': success,
                 'time_s': planning_time_s,
                 'n_waypoints': n_waypoints,
@@ -150,14 +151,16 @@ def run_core_ik_single(dataset='demo', max_problems=None):
     total_time = 0.0
 
     for scene_key, scene_problems in problems.items():
-        valid_problems = [
-            p for p in scene_problems
-            if p['collision_buffer_ik'] >= 0.0
-        ]
         if max_problems is not None:
-            valid_problems = valid_problems[:max_problems]
-        if not valid_problems:
-            continue
+            valid_problems = [
+                p for p in scene_problems
+                if p['collision_buffer_ik'] >= 0.0
+            ][:max_problems]
+            if not valid_problems:
+                continue
+        else:
+            if not any(p['collision_buffer_ik'] >= 0.0 for p in scene_problems):
+                continue
 
         n_cubes = check_problems(scene_problems)
         args = argparse.Namespace(
@@ -171,9 +174,15 @@ def run_core_ik_single(dataset='demo', max_problems=None):
         mg.trajopt_solver.config.max_batch_size = 1
         mg.warmup(enable_graph=True)
 
-        for i, problem in enumerate(valid_problems, start=1):
+        n_seen = 0
+        for i, problem in enumerate(scene_problems, start=1):
+            if problem['collision_buffer_ik'] < 0.0:
+                continue
+            if max_problems is not None and n_seen >= max_problems:
+                break
+            n_seen += 1
             q_start = problem['start']
-            problem_name = f'{scene_key}_ik_single_{i}'
+            problem_name = f'{scene_key}_ik_{i}'
 
             start_state = JointState.from_position(
                 mg.device_cfg.to_device([q_start])
@@ -189,7 +198,7 @@ def run_core_ik_single(dataset='demo', max_problems=None):
             success = (ik_result.success is not None and ik_result.success.any().item())
             results.append({
                 'problem_name': problem_name,
-                'capability': 'ik_single',
+                'capability': 'ik',
                 'success': success,
                 'time_s': float(ik_result.solve_time) if success else dt,
                 'position_error': float(ik_result.position_error.max().item() * 1000.0) if success else -1.0,

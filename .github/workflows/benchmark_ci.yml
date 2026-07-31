@@ -2,7 +2,7 @@ name: cuRobo benchmark CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [curobo_v2]
     paths:
       - 'isaac_ros_cumotion_benchmark/**'
       - 'isaac_ros_cumotion/**'
@@ -19,12 +19,14 @@ on:
   workflow_dispatch:
 
 env:
-  DOCKER_IMAGE: isaac_ros_cumotion:ci
+  DOCKER_IMAGE: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    env:
+      CUROBO_IMAGE: ${{ env.DOCKER_IMAGE }}
 
     steps:
       - name: Checkout
@@ -37,16 +39,8 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/hostedtoolcache
           df -h
 
-      - name: Build Docker image
-        run: |
-          docker build \
-            -t ${{ env.DOCKER_IMAGE }} \
-            -f docker/Dockerfile.cumotion \
-            --network host \
-            .
-
-      - name: Check image size
-        run: docker images ${{ env.DOCKER_IMAGE }} --format '{{.Size}}'
+      - name: Pull Docker image
+        run: docker pull ${{ env.DOCKER_IMAGE }}
 
       - name: Start curobo_server_node
         continue-on-error: true

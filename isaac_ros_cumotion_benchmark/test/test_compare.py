@@ -3,14 +3,18 @@ import json
 from isaac_ros_cumotion_benchmark.compare import compare, print_report, save_report
 
 
-def _result(name, success=True, time_s=0.1, n_waypoints=10):
-    return {
+def _result(name, success=True, time_s=0.1, n_waypoints=10, capability='planning', **extra):
+    result = {
         'problem_name': name,
         'scene_key': 'test_scene',
+        'capability': capability,
         'success': success,
         'time_s': time_s,
-        'n_waypoints': n_waypoints,
     }
+    if n_waypoints is not None:
+        result['n_waypoints'] = n_waypoints
+    result.update(extra)
+    return result
 
 
 class TestCompare:
@@ -85,6 +89,41 @@ class TestCompare:
         assert report['matches'] == 1
         assert report['core_only'] == 1
         assert report['ros_only'] == 1
+
+    def test_capability_results_without_waypoints(self):
+        core = [{
+            'problem_name': 's_ik_1', 'capability': 'ik',
+            'success': True, 'time_s': 0.05,
+            'position_error': 0.1, 'rotation_error': 0.2,
+        }]
+        ros = [{
+            'problem_name': 's_ik_1', 'capability': 'ik',
+            'success': True, 'time_s': 0.05,
+            'position_error': 0.1, 'rotation_error': 0.2,
+        }]
+        report = compare(core, ros)
+        assert report['matches'] == 1
+        entry = report['details']['matches'][0]
+        assert entry['capability'] == 'ik'
+        assert 'core_n_waypoints' not in entry
+        assert entry['core_position_error'] == 0.1
+        assert entry['ros_rotation_error'] == 0.2
+
+    def test_capability_field_mismatch_recorded(self):
+        core = [{
+            'problem_name': 's_ik_1', 'capability': 'ik',
+            'success': True, 'time_s': 0.05,
+            'position_error': 0.1, 'rotation_error': 0.2,
+        }]
+        ros = [{
+            'problem_name': 's_ik_1', 'capability': 'ik',
+            'success': True, 'time_s': 0.05,
+            'position_error': 5.0, 'rotation_error': 0.9,
+        }]
+        report = compare(core, ros)
+        entry = report['details']['matches'][0]
+        assert entry['core_position_error'] == 0.1
+        assert entry['ros_position_error'] == 5.0
 
     def test_report_structure(self):
         core = [_result('a')]

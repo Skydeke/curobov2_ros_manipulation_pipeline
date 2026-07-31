@@ -2,41 +2,55 @@ import argparse
 import json
 import sys
 
+CAPABILITIES = ('planning', 'ik', 'fk', 'collision')
+
+
+def _run_core_capabilities(capability, dataset):
+    from isaac_ros_cumotion_benchmark import core_runner
+    if capability == 'planning':
+        return core_runner.run_core(dataset)
+    if capability == 'ik':
+        return core_runner.run_core_ik(dataset)
+    if capability == 'fk':
+        return core_runner.run_core_fk(dataset)
+    if capability == 'collision':
+        return core_runner.run_core_collision(dataset)
+    if capability == 'all':
+        results = []
+        for cap in CAPABILITIES:
+            results.extend(_run_core_capabilities(cap, dataset))
+        return results
+    raise ValueError(f'Unknown capability: {capability}')
+
+
+def _run_ros_capabilities(capability, dataset, time_dilation_factor):
+    from isaac_ros_cumotion_benchmark import ros_runner
+    if capability == 'planning':
+        return ros_runner.run_ros(dataset, time_dilation_factor)
+    if capability == 'ik':
+        return ros_runner.run_ros_ik(dataset)
+    if capability == 'fk':
+        return ros_runner.run_ros_fk(dataset)
+    if capability == 'collision':
+        return ros_runner.run_ros_collision(dataset)
+    if capability == 'all':
+        results = []
+        for cap in CAPABILITIES:
+            results.extend(_run_ros_capabilities(cap, dataset, time_dilation_factor))
+        return results
+    raise ValueError(f'Unknown capability: {capability}')
+
 
 def cmd_core(args):
-    from isaac_ros_cumotion_benchmark import core_runner
-    if args.capability == 'planning':
-        results = core_runner.run_core(args.dataset)
-    elif args.capability == 'ik':
-        results = core_runner.run_core_ik(args.dataset)
-    elif args.capability == 'fk':
-        results = core_runner.run_core_fk(args.dataset)
-    elif args.capability == 'collision':
-        results = core_runner.run_core_collision(args.dataset)
-    elif args.capability == 'all':
-        results = (core_runner.run_core(args.dataset)
-                   + core_runner.run_core_ik(args.dataset)
-                   + core_runner.run_core_fk(args.dataset)
-                   + core_runner.run_core_collision(args.dataset))
+    results = _run_core_capabilities(args.capability, args.dataset)
     _dump_results(results, args.output)
     _print_summary(results, 'core')
 
 
 def cmd_ros(args):
-    from isaac_ros_cumotion_benchmark import ros_runner
-    if args.capability == 'planning':
-        results = ros_runner.run_ros(args.dataset, args.time_dilation_factor)
-    elif args.capability == 'ik':
-        results = ros_runner.run_ros_ik(args.dataset)
-    elif args.capability == 'fk':
-        results = ros_runner.run_ros_fk(args.dataset)
-    elif args.capability == 'collision':
-        results = ros_runner.run_ros_collision(args.dataset)
-    elif args.capability == 'all':
-        results = (ros_runner.run_ros(args.dataset, args.time_dilation_factor)
-                   + ros_runner.run_ros_ik(args.dataset)
-                   + ros_runner.run_ros_fk(args.dataset)
-                   + ros_runner.run_ros_collision(args.dataset))
+    results = _run_ros_capabilities(
+        args.capability, args.dataset, args.time_dilation_factor
+    )
     _dump_results(results, args.output)
     _print_summary(results, 'ros')
 
@@ -55,12 +69,12 @@ def cmd_compare(args):
 
 
 def cmd_all(args):
-    from isaac_ros_cumotion_benchmark.core_runner import run_core
-    from isaac_ros_cumotion_benchmark.ros_runner import run_ros
     from isaac_ros_cumotion_benchmark.compare import compare, print_report, save_report
 
-    core_results = run_core(args.dataset)
-    ros_results = run_ros(args.dataset, args.time_dilation_factor)
+    core_results = _run_core_capabilities(args.capability, args.dataset)
+    ros_results = _run_ros_capabilities(
+        args.capability, args.dataset, args.time_dilation_factor
+    )
 
     report = compare(core_results, ros_results)
     print_report(report, show_all=args.show_all)
@@ -122,6 +136,9 @@ def main():
     p_all = subparsers.add_parser('all', help='Run core then ros then compare')
     p_all.add_argument('--dataset', default='demo',
                        choices=['demo', 'motion_benchmaker', 'mpinets'])
+    p_all.add_argument('--capability', default='all',
+                       choices=['planning', 'ik', 'fk', 'collision', 'all'],
+                       help='Which capability to benchmark (default: all)')
     p_all.add_argument('--time_dilation_factor', type=float, default=1.0)
     p_all.add_argument('--output', '-o', help='Save comparison report to JSON')
     p_all.add_argument('--save-all', action='store_true',

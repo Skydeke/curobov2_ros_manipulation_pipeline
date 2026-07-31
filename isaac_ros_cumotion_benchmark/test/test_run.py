@@ -34,6 +34,8 @@ def _parse(argv):
     p_all = subparsers.add_parser('all')
     p_all.add_argument('--dataset', default='demo',
                        choices=['demo', 'motion_benchmaker', 'mpinets'])
+    p_all.add_argument('--capability', default='all',
+                       choices=['planning', 'ik', 'fk', 'collision', 'all'])
     p_all.add_argument('--time_dilation_factor', type=float, default=1.0)
     p_all.add_argument('--output', '-o')
     p_all.add_argument('--save-all', action='store_true')
@@ -96,6 +98,7 @@ class TestSubcommands:
         args = _parse(['all'])
         assert args.command == 'all'
         assert args.dataset == 'demo'
+        assert args.capability == 'all'
         assert args.time_dilation_factor == 1.0
         assert not args.save_all
         assert not args.show_all
@@ -109,6 +112,10 @@ class TestSubcommands:
         assert args.save_all
         assert args.show_all
         assert args.output == 'r.json'
+
+    def test_all_explicit_capability(self):
+        args = _parse(['all', '--capability', 'ik'])
+        assert args.capability == 'ik'
 
     def test_invalid_dataset_rejected(self):
         with pytest.raises(SystemExit):
