@@ -2,14 +2,19 @@ name: Build and publish Docker image
 
 on:
   push:
-    branches: [main, master]
+    branches: [curobo_v2]
     paths:
-      - 'docker/Dockerfile.cumotion'
-      - 'isaac_ros_cumotion/**'
-      - 'isaac_ros_cumotion_interfaces/**'
-      - 'isaac_ros_cumotion_robot_description/**'
-      - 'isaac_ros_cumotion_moveit/**'
-      - 'curobo_core/**'
+      - docker/Dockerfile.cumotion
+      - isaac_ros_cumotion/**
+      - isaac_ros_cumotion_interfaces/**
+      - isaac_ros_goal_setter_interfaces/**
+      - isaac_ros_cumotion_robot_description/**
+      - isaac_ros_cumotion_moveit/**
+      - isaac_ros_moveit_goal_setter/**
+      - isaac_ros_esdf_visualizer/**
+      - isaac_ros_cumotion_examples/**
+      - isaac_ros_cumotion_benchmark/**
+      - curobo_core/**
   workflow_dispatch:
 
 env:
@@ -20,30 +25,50 @@ jobs:
   build-and-push:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+
     permissions:
       contents: read
       packages: write
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
 
-      - name: Bake submodule git dirs for Docker COPY
+      - name: Prepare submodule git metadata for Docker
+        shell: bash
         run: |
+          set -euxo pipefail
+
           for sub in curobo_core; do
             (
               cd "$sub"
-              gitfile=".git"
-              if [ -f "$gitfile" ]; then
-                git fetch --tags --unshallow origin 2>/dev/null || true
-                gitdir=$(head -1 "$gitfile" | cut -d' ' -f2)
-                rm -f "$gitfile"
-                cp -a "$gitdir" ".git"
+
+              git fetch --force --tags origin || true
+
+              if [ -f .git ]; then
+                gitdir=$(sed 's/^gitdir: //' .git)
+                rm .git
+                cp -a "$gitdir" .git
               fi
             )
           done
+
+      - name: Verify curobo git metadata
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd curobo_core
+
+          pwd
+          ls -la
+          git rev-parse --is-inside-work-tree
+          git rev-parse HEAD
+          git describe --tags || true
+          git status
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -52,7 +77,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -68,6 +93,6 @@ jobs:
           context: .
           file: docker/Dockerfile.cumotion
           push: true
+          network: host
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          network: host
