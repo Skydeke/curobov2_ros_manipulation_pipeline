@@ -1,0 +1,48 @@
+# Goal — target for the unified "generate + execute" action.
+# Mirrors TrajectoryGeneration.srv so the action can plan if no cached plan is
+# reused. The active planner decides which field(s) it consumes.
+sensor_msgs/JointState start_pose
+geometry_msgs/Pose target_pose
+geometry_msgs/Pose[] target_poses
+float64[] target_joint_positions
+bool allow_cached true   # reuse a matching, non-expired pre-planned trajectory
+---
+bool success
+string message
+---
+# Feedback — status carried ONLY by the action feedback (no status topic).
+string state              # PLANNING | EXECUTING | TRACKING | ON_TARGET | FAILED
+float32 step_progression  # open-loop progress [0..1]
+float64 position_error    # current Cartesian error (m), reactive
+# Signed per-axis component of position_error (m), base frame: ee - target.
+# position_error itself is their norm. -1e9 sentinel (not -1.0, a valid
+# signed error) when no target is set or FK failed -- mirrors the -1.0
+# sentinel used by the scalar error fields above, offset out of any
+# realistic error range for a signed value.
+float64 position_error_x
+float64 position_error_y
+float64 position_error_z
+bool on_target            # true when the arm is on the target (reactive: keeps servoing)
+sensor_msgs/JointState joint_command
+# Angular error (rad) between the tool and the goal orientation, FK-measured.
+# on_target gates on BOTH this and position_error: a reactive goal that reaches
+# its xyz with the tool mis-aimed is not on target. Open-loop planners leave it
+# at 0.0 — they never publish on_target=true either.
+float64 orientation_error
+# Consecutive steps with BOTH errors inside tolerance. Resets to 0 the moment
+# either leaves. on_target requires it to reach convergence_hold_steps, so a
+# trajectory that touches the goal and drifts back out never reports success.
+int32 hold_count
+# The controller's INSTANTANEOUS error: FK error between the very first point
+# of the controller's current plan (its estimate of where the arm will be
+# right after this solve) and the goal, as opposed to position_error/
+# orientation_error above which are FK-measured against the real/fed-back
+# robot state (i.e. one control step behind). NOT MPCSolverResult's own
+# position_error/rotation_error — that is a horizon-END convergence metric
+# (how close the plan gets to the goal by the end of its planning horizon)
+# that stays near zero from the very first solve regardless of how far the
+# real state is, so it is not usable as a "right now" error. -1.0 when the
+# active planner does not expose this (default; only LBFGS currently fills it
+# in).
+float64 controller_position_error
+float64 controller_orientation_error

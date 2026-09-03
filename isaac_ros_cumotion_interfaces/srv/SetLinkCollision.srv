@@ -1,0 +1,13 @@
+# Enable or disable collision spheres for one or more robot links.
+# All solvers share the same KinematicsTensorConfig, so one call updates all.
+# The state persists until an explicit call with the opposite enabled value.
+
+string[] link_names   # Links to enable or disable
+bool enabled          # true = enable, false = disable
+
+---
+
+bool success
+string message
+string[] applied_links   # Links successfully modified
+string[] unknown_links   # Links not found in kinematics config

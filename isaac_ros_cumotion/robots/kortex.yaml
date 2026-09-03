@@ -1,0 +1,10 @@
+name: kortex
+display_name: "Kinova Kortex Gen3"
+
+curobo_config: package://iki_kortex_moveit_config/config/kortex.xrdf
+
+base_link: "base_link"
+
+strategy: joint_speed
+strategy_params:
+  joint_states_topic: /joint_states

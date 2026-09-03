@@ -1,0 +1,20 @@
+# Possible mask shape types (match AddObject.srv / obstacle_manager conventions)
+int8 CUBOID=0
+int8 SPHERE=1
+int8 CAPSULE=2
+int8 CYLINDER=3
+int8 MESH=4
+
+# Request fields
+int8 type
+string name
+# TF frame the pose is expressed in; "" => robot base frame (static mask)
+string frame_id ""
+# Only used for mesh masks, file path must be absolute
+string mesh_file_path ""
+geometry_msgs/Pose pose
+geometry_msgs/Vector3 dimensions
+---
+# Response fields
+bool success
+string message

@@ -117,6 +117,32 @@ time-optimal, collision-free joint trajectories.
 - `PlanMotion.action`: Cartesian or joint-space goal, returns joint trajectory.
 - `PlanGrasp.action`: approach → grasp → lift chained in one call.
 
+### Camera frame correction (`camera_correction_frame` / `curobo_frame`)
+
+Depth cameras are integrated into the ESDF mapper at the pose resolved by a TF
+lookup from the node's base frame to the camera's integration frame. Some rigs
+need a small mount offset/rotation applied to the raw optical frame before the
+point cloud is mapped correctly. Instead of editing the camera `frame_id` (and
+moving every consumer), the per-camera **correction frame** is configured via
+`camera_correction_frame`. Each depth camera may list a target frame that the
+mapper should look up **instead of** the raw camera frame:
+
+```yaml
+camera_correction_frame: ["curobo_frame"]
+```
+
+The convention for a wrist-mounted Gen3 camera is a fixed `curobo_frame` link
+mounted on `camera_color_optical_frame` (see `gen3_macro.xacro`) carrying the
+`rpy="0 ${PI/2} ${PI/2}"` transform that realigns the depth cloud to the world.
+
+> **NPE / empty-frame guard:** if a camera has no correction frame configured the
+> mapper falls back to the raw camera `frame_id`. In that path a TF lookup that
+> fails to resolve the frame no longer crashes the depth callback — previously an
+> unresolved `curobo_frame` raised a `TransformException` (or dereferenced a
+> missing transform as `None`) and took the whole mapper down with a
+> `NullPointerException`. The required behaviour now is: log a throttled warning,
+> drop this depth frame, and retry on the next one — never fail the node.
+
 ## Workflow: Plan, Smooth, Execute
 
 ### 1. Configure the world

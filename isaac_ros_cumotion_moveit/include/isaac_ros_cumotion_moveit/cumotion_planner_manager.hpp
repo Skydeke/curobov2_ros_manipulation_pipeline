@@ -26,6 +26,7 @@
 #include "moveit/planning_scene/planning_scene.hpp"
 
 #include "isaac_ros_cumotion_moveit/cumotion_planning_context.hpp"
+#include "isaac_ros_cumotion_moveit/cumotion_planner_ids.hpp"
 
 namespace nvidia
 {
@@ -36,8 +37,6 @@ namespace manipulation
 
 class CumotionPlannerManager : public planning_interface::PlannerManager
 {
-  inline static constexpr char kCumotionPlannerId[] = "cuMotion";
-
 public:
   CumotionPlannerManager()
   {
@@ -50,7 +49,13 @@ public:
 
   bool canServiceRequest(const planning_interface::MotionPlanRequest & req) const override
   {
-    return req.planner_id == kCumotionPlannerId;
+    // Accept the auto ID or any explicitly advertised cuRobo planner ID.
+    for (const std::string & id : plannerIds()) {
+      if (req.planner_id == id) {
+        return true;
+      }
+    }
+    return req.planner_id.empty();
   }
 
   std::string getDescription() const override;

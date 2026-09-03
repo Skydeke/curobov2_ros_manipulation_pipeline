@@ -1,0 +1,7 @@
+# Service to retrieve the list of available trajectory planners
+---
+string[] planner_names      # Human-readable display names (e.g. "Classic", "MPC")
+uint8[] planner_ids         # Corresponding SetPlanner enum IDs
+string current_planner_name # Display name of the currently active planner
+uint8 current_planner_id    # Enum ID of the currently active planner
+bool success

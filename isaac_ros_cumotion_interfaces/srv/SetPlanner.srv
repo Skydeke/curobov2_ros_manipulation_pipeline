@@ -1,0 +1,21 @@
+# Service to switch the active trajectory planner
+#
+# Constants for planner types
+uint8 CLASSIC = 0
+uint8 MPC = 1
+uint8 BATCH = 2
+uint8 MULTIPOINT = 4
+uint8 JOINT_SPACE = 5
+uint8 RETARGET = 6
+
+
+
+# Request: desired planner type
+uint8 planner_type
+
+---
+# Response
+bool success                 # True if switch was successful
+string message              # Human-readable status message
+string previous_planner     # Name of the previous planner
+string current_planner      # Name of the new planner

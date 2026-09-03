@@ -1,0 +1,5 @@
+# Service to retrieve the list of available control strategies
+---
+string[] strategy_names      # Control-strategy keys (e.g. "emulator", "joint_speed", "joint_pose")
+string current_strategy_name # Key of the currently active strategy
+bool success

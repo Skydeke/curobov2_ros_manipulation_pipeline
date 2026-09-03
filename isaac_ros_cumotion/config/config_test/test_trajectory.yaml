@@ -1,0 +1,80 @@
+# Test trajectory generation for Doosan M1013
+
+package: isaac_ros_cumotion
+environment:
+  launch:
+      - package: isaac_ros_cumotion
+        executable: gen_traj_test.launch.py
+        name: gen_traj
+  # Readiness is probed, not guessed: the planner node blocks its executor for
+  # 25-35s building cuRobo solvers inside __init__ (it serves nothing until the
+  # constructor returns), so the former `startup_delay: 30.0` was racing it --
+  # measured margin ranged from +0.9s to -4.5s, which is exactly why `colcon
+  # test` failed on a different subset of suites every run.
+  # Waited for by *advertisement*, never called: the node creates this service
+  # only after _warmup_initial_planner returns (unified_planner_node.py), so its
+  # appearance in the graph is the readiness signal. There is deliberately no
+  # readiness service to call: the node exposes its state as the
+  # `node_is_available` parameter.
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+
+tests:
+  - name: "01 Set planner joint space"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data:
+      planner_type: 5
+    expect:
+      success: True
+
+  - name: "02 Generate trajectory joint space"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        position: [0.1, 0.2, 0.3, 0.0, 0.0, 0.0]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      target_joint_positions: [0.5, -0.5, 0.5, -0.5, 0.5, -0.5]
+    expect:
+      success: True
+
+  - name: "03 Set planner classic"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data:
+      planner_type: 0
+    expect:
+      success: True
+
+  - name: "04 Generate trajectory cartesian"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      target_pose:
+        position: {x: 0.5, y: 0.0, z: 0.5}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    expect:
+      success: True
+
+  - name: "05 Generate trajectory invalid target"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      target_pose:
+        position: {x: 10.0, y: 10.0, z: 10.0}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    expect:
+      success: False

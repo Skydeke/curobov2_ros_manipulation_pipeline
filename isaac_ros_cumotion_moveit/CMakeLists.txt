@@ -16,10 +16,25 @@ find_package(moveit_core REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
+find_package(isaac_ros_cumotion_interfaces REQUIRED)
+find_package(moveit_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(shape_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
+
+find_package(geometric_shapes REQUIRED)
 
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_components
   moveit_core
+  isaac_ros_cumotion_interfaces
+  moveit_msgs
+  sensor_msgs
+  geometry_msgs
+  shape_msgs
+  trajectory_msgs
+  geometric_shapes
 )
 
 include_directories(include)
@@ -32,11 +47,12 @@ add_library(${MOVEIT_LIB_NAME}
   src/cumotion_planner_manager.cpp
   src/cumotion_interface.cpp
   src/cumotion_planning_context.cpp
-  src/cumotion_move_group_client.cpp)
+  src/cumotion_service_client.cpp)
 
 set_target_properties(${MOVEIT_LIB_NAME} PROPERTIES VERSION "${${PROJECT_NAME}_VERSION}")
 
 ament_target_dependencies(${MOVEIT_LIB_NAME} ${THIS_PACKAGE_INCLUDE_DEPENDS})
+target_include_directories(${MOVEIT_LIB_NAME} PRIVATE ${geometric_shapes_INCLUDE_DIRS})
 
 
 #############

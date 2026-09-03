@@ -52,8 +52,7 @@ std::string CumotionPlannerManager::getDescription() const
 
 void CumotionPlannerManager::getPlanningAlgorithms(std::vector<std::string> & algs) const
 {
-  algs.clear();
-  algs.push_back(kCumotionPlannerId);
+  algs = plannerIds();
 }
 
 planning_interface::PlanningContextPtr CumotionPlannerManager::getPlanningContext(
@@ -75,11 +74,19 @@ planning_interface::PlanningContextPtr CumotionPlannerManager::getPlanningContex
     return planning_interface::PlanningContextPtr();
   }
 
-  if (req.planner_id != kCumotionPlannerId) {
+  // Accept the auto ID or any explicitly advertised cuRobo planner ID.
+  bool known_id = req.planner_id.empty();
+  for (const std::string & id : plannerIds()) {
+    if (req.planner_id == id) {
+      known_id = true;
+      break;
+    }
+  }
+  if (!known_id) {
     RCLCPP_ERROR(
       node_->get_logger(),
-      "Requested planner '%s' is not supported by cuMotion. Expected '%s'.",
-      req.planner_id.c_str(), kCumotionPlannerId);
+      "Requested planner '%s' is not supported by cuMotion.",
+      req.planner_id.c_str());
     error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
     return planning_interface::PlanningContextPtr();
   }

@@ -1,0 +1,227 @@
+import hashlib
+import os
+
+import torch
+import yaml
+from ament_index_python.packages import get_package_share_directory
+
+from curobo.types import DeviceCfg
+from curobo.scene import Scene
+from curobo.config_io import load_yaml
+from curobo._src.robot.loader.util import load_robot_yaml
+from curobo._src.types.content_path import ContentPath
+
+from isaac_ros_cumotion.robot.robot_description import load_robot_description
+
+
+class ConfigManager:
+    """
+    Manages configuration loading for robot and world.
+    Responsible for:
+    - Loading ROS parameters
+    - Loading INITIAL Scene from YAML (passed to ObstacleManager)
+    - Loading robot configuration path/dict
+
+    Note: the Scene is loaded here but ownership transfers to ObstacleManager.
+          Use obstacle_manager.get_scene() to access the authoritative version.
+
+    v2 notes:
+    - WorldConfig → Scene (curobo.scene)
+    - TensorDeviceType → DeviceCfg (curobo.types)
+    - RobotConfig no longer built here: v2 factories accept a YAML path or
+      dict via the `robot=` kwarg of MotionPlannerCfg.create(...).
+    """
+
+    def __init__(self, node):
+        self.node = node
+
+        # Scene parameters
+        self.scene = None
+        self.world_pose = [0, 0, 0, 1, 0, 0, 0]
+
+        # ROS parameters
+        self.base_link = None
+        self.world_file = None
+        self.robot_config_file = None
+        self.robot_cfg_dict = None
+        self.robot_description = None
+
+        # Load configurations in order (robot descriptor first: it supplies the
+        # default base_link and the resolved robot config path).
+        self._load_robot_description()
+        self._load_ros_parameters()
+        self._load_scene()
+        self._load_robot_config()
+
+    def _load_robot_description(self):
+        """Load the selected robot descriptor (robots/<robot>.yaml or a path)."""
+        if not self.node.has_parameter('robot'):
+            self.node.declare_parameter('robot', 'kortex')
+        robot = self.node.get_parameter('robot').get_parameter_value().string_value or 'kortex'
+        self.robot_description = load_robot_description(robot)
+        self.node.get_logger().info(
+            f"ConfigManager loaded robot descriptor: {self.robot_description.display_name} "
+            f"({self.robot_description.name})")
+
+    def _load_ros_parameters(self):
+        """Declare and load ROS parameters"""
+        # base_link default comes from the descriptor (robot-specific), overridable.
+        if not self.node.has_parameter('base_link'):
+            self.node.declare_parameter('base_link', self.robot_description.base_link or 'base_0')
+        if not self.node.has_parameter('world_file'):
+            self.node.declare_parameter('world_file', '')
+        # urdf_path: only meaningful for xrdf configs (injected into the config
+        # before building kinematics). Declared with an empty default so passing
+        # it at launch is always accepted.
+        if not self.node.has_parameter('urdf_path'):
+            self.node.declare_parameter('urdf_path', '')
+        # asset_root_path: mesh root for xrdf configs (URDF meshes referenced as
+        # package://<pkg>/...). Empty default => auto-detect the ROS install share.
+        if not self.node.has_parameter('asset_root_path'):
+            self.node.declare_parameter('asset_root_path', '')
+
+        self.base_link = self.node.get_parameter('base_link').get_parameter_value().string_value
+        self.world_file = self.node.get_parameter('world_file').get_parameter_value().string_value
+
+        self.node.get_logger().info(f'ConfigManager using base_link: {self.base_link}')
+
+    def _load_scene(self):
+        """Load Scene from world_file parameter or use an empty default."""
+        if self.world_file:
+            self.scene = Scene.create(load_yaml(self.world_file))
+            self.node.get_logger().info(f'Loaded scene from: {self.world_file}')
+        else:
+            self.scene = Scene()
+            self.node.get_logger().info('Using empty scene (obstacles will be added at runtime)')
+
+    def _translate_xrdf(self, xrdf_path: str) -> str:
+        """Translate an xrdf config into cuRobo's ``robot_cfg.kinematics`` form.
+
+        The xrdf is the canonical robot definition (format: xrdf). cuRobo's v2
+        factories (``MotionPlannerCfg.create``, ``KinematicsCfg.from_robot_yaml_file``)
+        load robot files via a raw ``yaml.load`` and therefore cannot consume the
+        xrdf schema directly — they expect ``robot_cfg.kinematics``. We hand the
+        xrdf to cuRobo's own translator (``load_robot_yaml`` /
+        ``convert_xrdf_to_curobo``), which requires the URDF (to derive actuated
+        joints, locked joints and base link) plus a mesh asset root, and write the
+        resulting ``robot_cfg`` dict to a resolved copy on disk so the rest of the
+        code (which passes a plain file path everywhere) keeps working unchanged.
+
+        ``urdf_path`` comes from the ROS parameter (generated by the launch, e.g.
+        ``/tmp/kortex.urdf``). ``asset_root_path`` defaults to the auto-detected ROS
+        install ``share/`` directory (``UrdfRobotParser`` strips ``package://`` and
+        joins it onto the mesh path) and can be overridden via the ROS parameter.
+        """
+        urdf_path = ''
+        if self.node.has_parameter('urdf_path'):
+            urdf_path = self.node.get_parameter('urdf_path').get_parameter_value().string_value
+        if not urdf_path or not os.path.isfile(urdf_path):
+            raise RuntimeError(
+                "xrdf robot config requires a valid 'urdf_path' ROS parameter "
+                f"(pointing at the generated URDF). Got: {urdf_path!r}")
+
+        asset_root = ''
+        if self.node.has_parameter('asset_root_path'):
+            asset_root = self.node.get_parameter('asset_root_path').get_parameter_value().string_value
+        if not asset_root:
+            asset_root = self._detect_asset_root()
+        if not asset_root or not os.path.isdir(asset_root):
+            self.node.get_logger().warn(
+                f"asset_root_path {asset_root!r} does not exist; meshes may fail to resolve")
+
+        content = ContentPath(
+            robot_xrdf_absolute_path=os.path.abspath(xrdf_path),
+            robot_urdf_absolute_path=os.path.abspath(urdf_path),
+            robot_asset_absolute_path=os.path.abspath(asset_root) if asset_root else None,
+        )
+        translated = load_robot_yaml(content)
+
+        digest = hashlib.sha1(os.path.abspath(xrdf_path).encode()).hexdigest()[:10]
+        resolved_dir = '/tmp/isaac_ros_cumotion_resolved'
+        os.makedirs(resolved_dir, exist_ok=True)
+        resolved_path = os.path.join(resolved_dir, f'xrdf-{digest}.yml')
+        with open(resolved_path, 'w') as f:
+            yaml.safe_dump(translated, f, default_flow_style=None, sort_keys=False)
+        self.node.get_logger().info(
+            f'Translated xrdf {xrdf_path} -> {resolved_path} (urdf={urdf_path}, asset_root={asset_root})')
+        return resolved_path
+
+    def _detect_asset_root(self) -> str:
+        """Best-effort mesh root: the ROS install ``share/`` directory.
+
+        URDF meshes are referenced as ``package://<pkg>/...``; ``UrdfRobotParser``
+        strips the ``package://`` and joins the remainder onto this root, so the
+        root must be the directory that contains each package's ``share/<pkg>``
+        tree. The parent of any built package's share dir is exactly that.
+        """
+        try:
+            share = get_package_share_directory('kortex_description')
+        except Exception:
+            return ''
+        return os.path.dirname(os.path.abspath(share))
+
+    def _load_robot_config(self):
+        """Resolve the robot config path and cache its dict form.
+
+        Default = the descriptor's resolved cuRobo config (portable, paths already
+        made absolute). ``robot_config_file`` stays as an explicit override.
+
+        For xrdf configs, the config is translated to cuRobo's ``robot_cfg`` form
+        via :meth:`_translate_xrdf` (still sourced entirely from the xrdf), and a
+        resolved copy is written to /tmp so the original stays untouched.
+        """
+        # Default tensor args (kept for backward-compat consumers)
+        self.tensor_args = DeviceCfg(device='cuda', dtype=torch.float32)
+
+        default_robot_config = self.robot_description.curobo_config_path
+        if not self.node.has_parameter('robot_config_file'):
+            self.node.declare_parameter('robot_config_file', default_robot_config)
+
+        robot_config_file = self.node.get_parameter('robot_config_file').get_parameter_value().string_value
+        if not robot_config_file:
+            robot_config_file = default_robot_config
+
+        config_file = load_yaml(robot_config_file)
+
+        # --- xrdf support: translate via cuRobo's native loader ---
+        is_xrdf = config_file.get('format') == 'xrdf'
+        if is_xrdf:
+            robot_config_file = self._translate_xrdf(robot_config_file)
+
+        self.robot_config_file = robot_config_file
+
+        # For xrdf, config_file holds the raw xrdf; the translated robot_cfg lives
+        # in the resolved file. Reload so robot_cfg_dict reflects what the factory
+        # actually consumes. For yml configs this is a no-op (same file).
+        robot_cfg_dict = load_yaml(robot_config_file).get('robot_cfg', load_yaml(robot_config_file))
+        robot_cfg_dict = dict(robot_cfg_dict)
+        robot_cfg_dict.pop('cspace', None)
+        self.robot_cfg_dict = robot_cfg_dict
+
+        self.node.get_logger().info(f'Loaded robot config from: {robot_config_file}')
+
+    def get_robot_description(self):
+        """Return the loaded RobotDescription (canonical robot metadata)."""
+        return self.robot_description
+
+    # ---- Getters ----
+
+    def get_scene(self) -> Scene:
+        """
+        Return the initial Scene loaded from file/defaults.
+
+        IMPORTANT: For the authoritative Scene with runtime obstacles, use
+        obstacle_manager.get_scene() instead.
+        """
+        return self.scene
+
+    def get_robot_config_file(self) -> str:
+        """Return the resolved robot YAML path — v2 Cfg factories accept this directly."""
+        return self.robot_config_file
+
+    def get_robot_config_dict(self) -> dict:
+        """Return the parsed robot config dict."""
+        return self.robot_cfg_dict
+
+    def get_base_link(self) -> str:
+        return self.base_link

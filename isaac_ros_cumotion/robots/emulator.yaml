@@ -1,0 +1,12 @@
+# Robot descriptor — RViz emulator (no hardware). Points to the Kortex model;
+# replays planned JointStates for visualization.
+name: emulator
+display_name: "Emulator (RViz)"
+
+curobo_config: package://iki_kortex_moveit_config/config/kortex.xrdf
+
+base_link: "base_link"
+
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states

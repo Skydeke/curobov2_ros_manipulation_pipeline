@@ -1,75 +1,74 @@
-# SPDX-FileCopyrightText: NVIDIA CORPORATION & AFFILIATES
-# Copyright (c) 2021-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-# SPDX-License-Identifier: Apache-2.0
-
-cmake_minimum_required(VERSION 3.22.1)
-project(isaac_ros_cumotion_interfaces LANGUAGES C CXX)
+cmake_minimum_required(VERSION 3.8)
+project(isaac_ros_cumotion_interfaces)
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
 
-# The FindPythonInterp and FindPythonLibs modules are removed
-if(POLICY CMP0148)
-  cmake_policy(SET CMP0148 OLD)
-endif()
-
-find_package(ament_cmake_auto REQUIRED)
-ament_auto_find_build_dependencies()
-
-# Prepare custom goal setter interfaces
+# find dependencies
+find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
-
-set(ACTION_FILES
-"action/PlanMotion.action"
-"action/PlanGrasp.action"
-"action/AttachObject.action"
-"action/OptimizeTrajectory.action"
-"action/ControlMPC.action"
-"action/RetargetMotion.action"
-)
-
-set(SRV_FILES
-"srv/ComputeFK.srv"
-"srv/ComputeIK.srv"
-"srv/CheckCollision.srv"
-"srv/UpdateWorld.srv"
-"srv/PublishStaticPlanningScene.srv"
-"srv/GetEsdf.srv"
-"srv/UpdateMPCGoal.srv"
-"srv/StopMPC.srv"
-"srv/GetInteractiveTarget.srv"
-)
-
-rosidl_generate_interfaces(${PROJECT_NAME}
-  ${ACTION_FILES}
-  ${SRV_FILES}
-  DEPENDENCIES geometry_msgs moveit_msgs sensor_msgs trajectory_msgs shape_msgs
-)
-ament_export_dependencies(rosidl_default_runtime)
+find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav2_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
+find_package(moveit_msgs REQUIRED)
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
+  set(ament_cmake_copyright_FOUND TRUE)
+  set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
 endif()
 
-# Embed versioning information into installed files
-# TODO(agent): re-enable when isaac_ros_common is available in workspace
-# ament_index_get_resource(ISAAC_ROS_COMMON_CMAKE_PATH isaac_ros_common_cmake_path isaac_ros_common)
-# include("${ISAAC_ROS_COMMON_CMAKE_PATH}/isaac_ros_common-version-info.cmake")
-# generate_version_info(${PROJECT_NAME})
+rosidl_generate_interfaces(${PROJECT_NAME}
+  "srv/Ik.srv"
+  "srv/IkBatch.srv"
+  "srv/Fk.srv"
+  "srv/FkBatch.srv"
+  "srv/Collisions.srv"
+  "srv/AddObject.srv"
+  "srv/AttachObject.srv"
+  "srv/RemoveObject.srv"
+  "srv/SetMask.srv"
+  "msg/ObjectParameters.msg"
+  "msg/SparseVoxelGrid.msg"
+  "msg/GpuVoxelTensor.msg"
+  "srv/GenerateRM.srv"
+  "action/DataGeneration.action"
+  "action/SendTrajectory.action"
+  "srv/TrajectoryGeneration.srv"
+  "srv/GetVoxelGrid.srv"
+  "srv/GetCollisionDistance.srv"
+  "srv/SceneGenerator.srv"
+  "srv/SetPlanner.srv"
+  "srv/SetLinkCollision.srv"
+  "srv/GetPlanners.srv"
+  "srv/SetCollisionCache.srv"
+  "srv/SetRobotStrategy.srv"
+  "srv/GetRobotStrategies.srv"
+  "srv/WarmupIK.srv"
+  "srv/WarmupFK.srv"
+  "msg/ReachabilityMetrics.msg"
+  "msg/MpcCosts.msg"
+  "msg/MpcStepDiagnostics.msg"
+  "action/PlanMotion.action"
+  "action/PlanGrasp.action"
+  "action/OptimizeTrajectory.action"
+  "action/ControlMPC.action"
+  "action/RetargetMotion.action"
+  "srv/ComputeFK.srv"
+  "srv/ComputeIK.srv"
+  "srv/CheckCollision.srv"
+  "srv/UpdateWorld.srv"
+  "srv/PublishStaticPlanningScene.srv"
+  "srv/GetEsdf.srv"
+  "srv/UpdateMPCGoal.srv"
+  "srv/StopMPC.srv"
+  "srv/GetInteractiveTarget.srv"
+  "srv/DetachObject.srv"
+  DEPENDENCIES geometry_msgs nav2_msgs sensor_msgs std_msgs trajectory_msgs moveit_msgs
+)
 
-ament_auto_package()
+ament_package()

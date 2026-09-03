@@ -1,0 +1,10 @@
+# Bounding box of the voxel grid in robot base frame (metres).
+# Typical workspace: min=-1.52, max=1.52
+float64 bbox_min_x
+float64 bbox_min_y
+float64 bbox_min_z
+float64 bbox_max_x
+float64 bbox_max_y
+float64 bbox_max_z
+---
+nav2_msgs/VoxelGrid voxel_grid

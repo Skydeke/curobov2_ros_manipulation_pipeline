@@ -1,0 +1,13 @@
+# Service to switch the active joint-command control strategy.
+# robot_strategy is a control-strategy KEY (e.g. "emulator", "joint_speed",
+# "joint_pose"); the valid keys are what GetRobotStrategies returns.
+
+# Request: desired control-strategy key
+string robot_strategy
+
+---
+# Response
+bool success                        # True if switch was successful
+string message                      # Human-readable status message
+string previous_robot_strategy      # Key of the previous strategy
+string current_robot_strategy       # Key of the new strategy

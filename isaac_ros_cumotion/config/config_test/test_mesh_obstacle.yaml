@@ -1,0 +1,92 @@
+# Test mesh obstacle integration
+# Sequence:
+#   1. Set collision cache large enough for the voxelized duck (136 cuboids + 1 mesh)
+#   2. Reload MotionGen with new cache
+#   3. Add the Rubber Duck mesh at origin
+#   4. Verify the world state via response message
+#   5. Generate a trajectory that must fail (duck blocks the path)
+
+package: isaac_ros_cumotion
+environment:
+  launch:
+    - package: isaac_ros_cumotion
+      executable: gen_traj_test.launch.py
+      name: gen_traj
+  # Readiness is probed, not guessed: the planner node blocks its executor for
+  # 25-35s building cuRobo solvers inside __init__ (it serves nothing until the
+  # constructor returns), so the former `startup_delay: 30.0` was racing it --
+  # measured margin ranged from +0.9s to -4.5s, which is exactly why `colcon
+  # test` failed on a different subset of suites every run.
+  # Waited for by *advertisement*, never called: the node creates this service
+  # only after _warmup_initial_planner returns (unified_planner_node.py), so its
+  # appearance in the graph is the readiness signal. There is deliberately no
+  # readiness service to call: the node exposes its state as the
+  # `node_is_available` parameter.
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+  
+tests:
+  - name: "01 set collision cache"
+    service: "/unified_planner/set_collision_cache"
+    type: isaac_ros_cumotion_interfaces/srv/SetCollisionCache
+    # timeout=90: obb/mesh actually change here, triggering a synchronous
+    # solver rebuild+warmup (see rebuild_solvers_for_cache_change). ~25s on an
+    # idle Orin, ~37s once the SoC throttles under sustained GPU load.
+    timeout: 90.0
+    data:
+      obb: 136
+      mesh: 1
+      blox: -1
+    # v2: the response echoes the per-type cache values we just set
+    # (cuboid=obb, mesh=mesh, voxel=blox).
+    expect:
+      success: True
+      obb_cache: 136
+      mesh_cache: 1
+      blox_cache: 1
+
+  - name: "02 reload MotionGen with new cache"
+    service: "/unified_planner/update_motion_gen_config"
+    type: std_srvs/srv/Trigger
+    # timeout=90: always rebuilds + warms up the MotionPlanner (~25s idle,
+    # ~37s throttled).
+    timeout: 90.0
+    data: {}
+    expect:
+      success: True
+
+  - name: "03 add Rubber Duck mesh at origin"
+    service: "/unified_planner/add_object"
+    type: isaac_ros_cumotion_interfaces/srv/AddObject
+    # timeout=90: mesh rasterization/warmup on the collision-cache path
+    # (~25s idle, ~37s throttled).
+    timeout: 90.0
+    data:
+      type: 4
+      name: "rubber_duck"
+      mesh_file_path: "/home/ros2_ws/src/isaac_ros_cumotion/config/config_test/Rubber_Duck.stl"
+      pose:
+        position: {x: 0.0, y: 0.0, z: 0.0}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      dimensions: {x: 0.01, y: 0.01, z: 0.01}
+      color: {r: 1.0, g: 0.8, b: 0.0, a: 1.0}
+    expect:
+      success: True
+      message: "Object 'rubber_duck' added (0 cuboids, 1 meshes)"
+
+  - name: "04 trajectory blocked by duck"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # Deliberately NOT raised to 90 like the rebuild calls above: this is a pure
+    # plan (~0.2s measured) whose expected outcome is failure. Stretching the
+    # budget of a test that expects False only delays detecting a real hang.
+    timeout: 30.0
+    data:
+      target_pose:
+        position: {x: 0.1, y: 0.0, z: 0.1}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    expect:
+      success: False

@@ -1,0 +1,167 @@
+# Test planner management + unified generate/execute action
+#
+# Covers:
+# - planner switching (multipoint / classic / MPC)
+# - open-loop "preview" cache: generate_trajectory caches a plan, the execute
+#   action reuses it (matching target), and clear_trajectory drops it
+# - reactive (MPC): the execute action servos CONTINUOUSLY (does not self-
+#   terminate); it streams feedback and ends only on cancel (cancel_after)
+
+package: isaac_ros_cumotion
+environment:
+  launch:
+    - package: isaac_ros_cumotion
+      executable: gen_traj_test.launch.py
+      name: gen_traj
+  # Readiness is probed, not guessed: the planner node blocks its executor for
+  # 25-35s building cuRobo solvers inside __init__ (it serves nothing until the
+  # constructor returns), so the former `startup_delay: 30.0` was racing it --
+  # measured margin ranged from +0.9s to -4.5s, which is exactly why `colcon
+  # test` failed on a different subset of suites every run.
+  # Waited for by *advertisement*, never called: the node creates this service
+  # only after _warmup_initial_planner returns (unified_planner_node.py), so its
+  # appearance in the graph is the readiness signal. There is deliberately no
+  # readiness service to call: the node exposes its state as the
+  # `node_is_available` parameter.
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+  
+tests:
+  - name: "01 Get planners"
+    service: "/unified_planner/get_planners"
+    type: isaac_ros_cumotion_interfaces/srv/GetPlanners
+    data: {}
+    expect: {success: True}
+
+  - name: "02 Set planner multipoint"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 4}
+    expect: {success: True}
+
+  - name: "03 Generate trajectory multipoint"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+        position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      target_poses:
+        - position: {x: 0.5, y: 0.0, z: 0.5}
+          orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+        - position: {x: 0.3, y: 0.3, z: 0.6}
+          orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    expect:
+      success: True
+
+  - name: "04 Set robot strategy emulator"
+    service: "/unified_planner/set_robot_strategy"
+    type: isaac_ros_cumotion_interfaces/srv/SetRobotStrategy
+    # Emulator follows joint commands so open-loop execution completes and the
+    # MPC servo loop actually drives the arm.
+    data: {robot_strategy: "emulator"}
+    expect: {success: True}
+
+  - name: "05 Set planner classic"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 0}
+    expect: {success: True}
+
+  # ---- Open-loop preview cache: generate (cache) -> execute (reuse) -> clear ----
+
+  - name: "06 Generate trajectory classic preview"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # Computes + caches the trajectory (start defaults to the robot's pose).
+    data:
+      target_pose:
+        position: {x: 0.5, y: 0.0, z: 0.5}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    expect: {success: True}
+
+  - name: "07 Execute classic cached"
+    action: "/unified_planner/execute_trajectory"
+    type: isaac_ros_cumotion_interfaces/action/SendTrajectory
+    # Same target as the preview -> the node REUSES the cached plan (no recompute)
+    # and the open-loop action terminates on its own.
+    data:
+      target_pose:
+        position: {x: 0.5, y: 0.0, z: 0.5}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    timeout: 90.0
+    expect: {success: True}
+
+  - name: "08 Clear trajectory"
+    service: "/unified_planner/clear_trajectory"
+    type: std_srvs/srv/Trigger
+    data: {}
+    expect: {success: True}
+
+  # ---- Reactive (MPC): continuous servoing, ends only on cancel ----
+
+  - name: "09 Set planner MPC"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 1}
+    expect: {success: True,
+             current_planner: "Model Predictive Control (MPC)"}
+
+  - name: "10 Execute MPC reactive"
+    action: "/unified_planner/execute_trajectory"
+    type: isaac_ros_cumotion_interfaces/action/SendTrajectory
+    # Target = the pose that used to fail the MPC's 1-seed IK (reachable per the
+    # node's robust IK). With run_ik=False (pure pose tracking) the arm must
+    # servo toward it. The action servos CONTINUOUSLY: we let it run, then cancel;
+    # the generator asserts feedback was streamed (the servo loop ran).
+    data:
+      target_pose:
+        position: {x: 0.627, y: -0.005, z: 0.751}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    cancel_after: 6.0
+    timeout: 90.0
+    expect: {success: False}   # canceled (reactive never self-completes)
+
+  - name: "11 Set planner classic"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 0}
+    expect: {success: True}
+
+  - name: "12 Generate trajectory with constraint"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # Lock rotation about Z along the path (ToolPoseCriteria) — exercises the
+    # constraint code path; must still plan successfully and reset afterwards.
+    data:
+      target_pose:
+        position: {x: 0.5, y: 0.0, z: 0.5}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      trajectory_constraints: [0, 0, 1, 0, 0, 0]
+    expect: {success: True}
+
+  # ---- Reactive (Motion Retargeting / teleop): continuous, ends only on cancel ----
+
+  - name: "14 Set planner retarget"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 6}
+    expect: {success: True,
+             current_planner: "Motion Retargeting (Teleop)"}
+
+  - name: "15 Execute retarget reactive"
+    action: "/unified_planner/execute_trajectory"
+    type: isaac_ros_cumotion_interfaces/action/SendTrajectory
+    # Same pose that defeats the MPC's 1-seed IK — the retargeter's 64-seed global
+    # IK reaches it. Reactive servoing is continuous: run, then cancel.
+    data:
+      target_pose:
+        position: {x: 0.627, y: -0.005, z: 0.751}
+        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    cancel_after: 6.0
+    timeout: 90.0
+    expect: {success: False}   # canceled (reactive never self-completes)

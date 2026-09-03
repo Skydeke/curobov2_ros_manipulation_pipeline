@@ -23,7 +23,7 @@
 #include "moveit/planning_interface/planning_interface.hpp"
 #include "rclcpp/rclcpp.hpp"
 
-#include "isaac_ros_cumotion_moveit/cumotion_move_group_client.hpp"
+#include "isaac_ros_cumotion_moveit/cumotion_service_client.hpp"
 
 namespace nvidia
 {
@@ -35,9 +35,9 @@ namespace manipulation
 class CumotionInterface
 {
 public:
-  CumotionInterface(const rclcpp::Node::SharedPtr & node)
+  explicit CumotionInterface(const rclcpp::Node::SharedPtr & node)
   : node_(node),
-    action_client_(std::make_shared<CumotionMoveGroupClient>(node))
+    service_client_(std::make_shared<CumotionServiceClient>(node))
   {
   }
 
@@ -50,7 +50,7 @@ public:
 
 private:
   std::shared_ptr<rclcpp::Node> node_;
-  std::shared_ptr<CumotionMoveGroupClient> action_client_;
+  std::shared_ptr<CumotionServiceClient> service_client_;
 };
 
 }  // namespace manipulation

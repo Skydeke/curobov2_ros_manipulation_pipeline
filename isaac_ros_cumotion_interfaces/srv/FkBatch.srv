@@ -1,0 +1,12 @@
+sensor_msgs/JointState[] joint_states
+
+---
+
+geometry_msgs/Pose[] poses
+# True per joint_states[i] if that configuration is free of self-collision,
+# free of scene/obstacle collision, AND within joint limits -- see
+# RobotCollisionChecker.validate() in fk_services.py for exactly what this
+# folds together.
+std_msgs/Bool[] poses_valid
+std_msgs/String error_msg
+bool success

@@ -45,34 +45,25 @@ RUN if [ ! -f /opt/ros/jazzy/setup.bash ]; then \
   rosdep update; \
   fi
 
-# --- isaac_ros_cumotion packages ---
-COPY isaac_ros_cumotion_interfaces ${ROS_WS}/src/isaac_ros_cumotion_interfaces
-COPY isaac_ros_goal_setter_interfaces ${ROS_WS}/src/isaac_ros_goal_setter_interfaces
-COPY isaac_ros_cumotion_robot_description ${ROS_WS}/src/isaac_ros_cumotion_robot_description
-COPY isaac_ros_cumotion ${ROS_WS}/src/isaac_ros_cumotion
-COPY isaac_ros_cumotion_moveit ${ROS_WS}/src/isaac_ros_cumotion_moveit
-COPY isaac_ros_moveit_goal_setter ${ROS_WS}/src/isaac_ros_moveit_goal_setter
-COPY isaac_ros_esdf_visualizer ${ROS_WS}/src/isaac_ros_esdf_visualizer
-COPY isaac_ros_cumotion_examples ${ROS_WS}/src/isaac_ros_cumotion_examples
-COPY isaac_ros_cumotion_benchmark ${ROS_WS}/src/isaac_ros_cumotion_benchmark
-
-# --- cuRobo v2 ---
-COPY curobo_core ${ROS_WS}/src/curobo_core
-
-WORKDIR ${ROS_WS}
-
-RUN pip install --ignore-installed \
+# Core numerical stack
+RUN python3 -m pip install --ignore-installed \
   "numpy<2" \
   "cuda-python<13" \
   "cuda-bindings~=12.9" \
   "cuda-core[cu12]" \
   "cupy-cuda12x<14" \
+  "timm" \
+  einops \
   hdbscan \
-  viser \
-  timm \
-  transformers \
-  torchvision \
-  einops
+  "viser>=1" \
+  torchvision
+
+# Someone is misusing pinning, for no good damn reason
+RUN git clone https://github.com/nitesh-subedi/ros2_numpy.git /tmp/ros2_numpy && \
+  sed -i 's/numpy==1\.24\.2/numpy>=1.26.4,<2/' \
+  /tmp/ros2_numpy/setup.py \
+  /tmp/ros2_numpy/requirements.txt 2>/dev/null || true && \
+  python3 -m pip install --ignore-installed /tmp/ros2_numpy
 
 RUN apt-get update && apt-get install -y --reinstall \
   ros-jazzy-rosidl-generator-type-description \
@@ -80,38 +71,29 @@ RUN apt-get update && apt-get install -y --reinstall \
   ros-jazzy-visualization-msgs \
   ros-jazzy-geometry-msgs \
   ros-jazzy-std-msgs \
-  ros-jazzy-builtin-interfaces && \
+  ros-jazzy-builtin-interfaces \
+  ros-jazzy-trajectory-msgs \
+  ros-jazzy-nav2-msgs \
+  ros-jazzy-moveit-msgs && \
   rm -rf /var/lib/apt/lists/*
 
+# --- isaac_ros_cumotion packages ---
+COPY isaac_ros_cumotion ${ROS_WS}/src/isaac_ros_cumotion
+COPY isaac_ros_cumotion_interfaces ${ROS_WS}/src/isaac_ros_cumotion_interfaces
+COPY isaac_ros_cumotion_moveit ${ROS_WS}/src/isaac_ros_cumotion_moveit
+COPY isaac_ros_cumotion_rviz ${ROS_WS}/src/isaac_ros_cumotion_rviz
+COPY isaac_ros_esdf_visualizer ${ROS_WS}/src/isaac_ros_esdf_visualizer
+
+# --- cuRobo v2 ---
+COPY curobo_core ${ROS_WS}/src/curobo_core
+
+WORKDIR ${ROS_WS}
 # curobo_core/curobo is a nested git repo (gitfile pointing into the outer
 # workspace's .git/modules), so its .git metadata is not present in this build
 # context and setuptools-scm can't derive a version. Pin the version it would
 # otherwise compute from the vendored repo's v0.8.0 tag.
 RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=0.8.0 \
   pip install -e "${ROS_WS}/src/curobo_core/curobo[benchmark]"
-
-RUN add-apt-repository -y universe && \
-  if [ ! -f /usr/share/keyrings/nvidia-isaac-ros.gpg ]; then \
-  curl -fsSL https://isaac.download.nvidia.com/isaac-ros/repos.key \
-  | gpg --batch --no-tty --dearmor -o /usr/share/keyrings/nvidia-isaac-ros.gpg; \
-  fi && \
-  if [ ! -f /etc/apt/sources.list.d/nvidia-isaac-ros.list ]; then \
-  echo "deb [signed-by=/usr/share/keyrings/nvidia-isaac-ros.gpg] \
-  https://isaac.download.nvidia.com/isaac-ros/release-4.3 noble main" \
-  > /etc/apt/sources.list.d/nvidia-isaac-ros.list; \
-  fi && \
-  if [ ! -f /usr/share/keyrings/nvidia-jetson.gpg ]; then \
-  curl -fsSL https://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
-  | gpg --batch --no-tty --dearmor -o /usr/share/keyrings/nvidia-jetson.gpg; \
-  fi && \
-  if [ ! -f /etc/apt/sources.list.d/nvidia-jetson.list ]; then \
-  echo "deb [signed-by=/usr/share/keyrings/nvidia-jetson.gpg] \
-  https://repo.download.nvidia.com/jetson/x86_64/noble r38.4 main" \
-  > /etc/apt/sources.list.d/nvidia-jetson.list; \
-  fi && \
-  apt-get update && \
-  apt-get install -y --no-install-recommends ros-jazzy-isaac-ros-common && \
-  rm -rf /var/lib/apt/lists/*
 
 RUN source /opt/ros/jazzy/setup.bash && \
   apt-get update && \
@@ -125,10 +107,7 @@ RUN pip install "setuptools<70"
 RUN source /opt/ros/jazzy/setup.bash && \
   colcon build --symlink-install \
   --packages-select \
-  curobo_core isaac_ros_cumotion_interfaces isaac_ros_goal_setter_interfaces \
-  isaac_ros_cumotion_robot_description \
-  isaac_ros_cumotion \
-  isaac_ros_cumotion_moveit isaac_ros_moveit_goal_setter isaac_ros_esdf_visualizer \
-  isaac_ros_cumotion_examples \
-  isaac_ros_cumotion_benchmark \
-  --cmake-args -DCMAKE_BUILD_TYPE=Release
+  curobo_core isaac_ros_cumotion_interfaces \
+  isaac_ros_cumotion isaac_ros_cumotion_moveit \
+  isaac_ros_cumotion_rviz \
+  isaac_ros_esdf_visualizer

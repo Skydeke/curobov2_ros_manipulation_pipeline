@@ -29,10 +29,7 @@ import yourdfpy
 from ament_index_python.packages import get_package_share_directory
 from geometry_msgs.msg import Point, Pose as RosPose, Vector3
 from moveit_msgs.msg import CollisionObject, PlanningScene
-from isaac_ros_cumotion_interfaces.action import ControlMPC
-from isaac_ros_cumotion_interfaces.srv import (
-    ComputeIK, GetEsdf, GetInteractiveTarget, StopMPC, UpdateMPCGoal,
-)
+from isaac_ros_cumotion_interfaces.srv import ComputeIK, GetEsdf, GetInteractiveTarget
 from sensor_msgs.msg import CameraInfo, Image, JointState, PointCloud2
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import String
@@ -45,7 +42,6 @@ from isaac_ros_cumotion.curobo_server.utils import (
     load_grid_corners_from_workspace_file,
 )
 import rclpy
-from rclpy.action import ActionClient
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from rclpy.node import Node
 from tf2_ros import TransformException
@@ -285,12 +281,6 @@ class ESDFViserNode(Node):
         self.__reachability_future = None
         self.__reachability_poll_timer = None
         self.__latest_joint_state = None
-        self.__mpc_show = None
-        self.__mpc_gizmo = None
-        self.__mpc_active = False
-        self.__mpc_updating_goal = False
-        self.__mpc_goal_handle = None
-        self.__mpc_tool_frame = ""
 
         self.declare_parameter("workspace_file_path", "")
         self.declare_parameter("grid_center_m", [0.0, 0.0, 0.0])
@@ -303,7 +293,6 @@ class ESDFViserNode(Node):
             "esdf_service_name", "/nvblox_node/get_esdf_and_gradient"
         )
         self.declare_parameter("robot_base_frame", "base_link")
-        self.declare_parameter("mpc_tool_frame", "grasping_frame")
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("planning_scene_topic", "/planning_scene")
         self.declare_parameter("esdf_service_call_period_secs", 1.0)
@@ -469,7 +458,6 @@ class ESDFViserNode(Node):
             self.__get_interactive_target_cb,
         )
         self._setup_reachability_slice()
-        self._setup_mpc_control()
 
         self.__esdf_service_name = esdf_service_name
         self.__esdf_client = None
@@ -766,159 +754,6 @@ class ESDFViserNode(Node):
         def _on_reach_slider(_):
             if self.__reachability_show.value:
                 self._trigger_reachability_update()
-
-    def _setup_mpc_control(self):
-        """Checkbox + drag gizmo that drives reactive control (MPC) over ROS.
-
-        Mirrors curobo's ``reactive_control.py --visualize`` example, but the
-        MPC solve itself runs on the shared curobo node
-        (``curobo_server/mpc.py``) via ``ControlMPC``/``UpdateMPCGoal``/
-        ``StopMPC`` — this node only drags a target gizmo and talks to it.
-        """
-        server = self.__viz._server
-        self.__mpc_tool_frame = (
-            self.get_parameter("mpc_tool_frame").get_parameter_value().string_value
-        )
-
-        self.__mpc_show = server.gui.add_checkbox(
-            "Reactive Control (MPC)", initial_value=False
-        )
-        self.__mpc_gizmo = server.scene.add_transform_controls(
-            "/mpc_target_gizmo",
-            scale=0.2,
-            position=(
-                float(self.__grid_center_m[0]),
-                float(self.__grid_center_m[1]),
-                float(self.__grid_center_m[2]),
-            ),
-            visible=False,
-        )
-
-        self.__mpc_action_client = ActionClient(self, ControlMPC, "cumotion/mpc/control")
-        self.__mpc_update_goal_client = self.create_client(
-            UpdateMPCGoal, "cumotion/mpc/update_goal"
-        )
-        self.__mpc_stop_client = self.create_client(StopMPC, "cumotion/mpc/stop")
-
-        @self.__mpc_show.on_update
-        def _on_mpc_toggle(_):
-            if self.__mpc_show.value:
-                self.__start_mpc()
-            else:
-                self.__stop_mpc()
-
-        @self.__mpc_gizmo.on_update
-        def _on_mpc_gizmo_update(_):
-            self.__update_mpc_goal()
-
-    def __gizmo_to_ros_pose(self, gizmo) -> RosPose:
-        pos = gizmo.position
-        q = gizmo.wxyz
-        pose = RosPose()
-        pose.position.x = float(pos[0])
-        pose.position.y = float(pos[1])
-        pose.position.z = float(pos[2])
-        pose.orientation.w = float(q[0])
-        pose.orientation.x = float(q[1])
-        pose.orientation.y = float(q[2])
-        pose.orientation.z = float(q[3])
-        return pose
-
-    def __start_mpc(self):
-        if self.__mpc_active:
-            return
-        if not self.__mpc_action_client.server_is_ready():
-            self.get_logger().warn("ControlMPC action server not available")
-            self.__mpc_show.value = False
-            return
-        if self.__latest_joint_state is None:
-            self.get_logger().warn("No joint state available to seed MPC")
-            self.__mpc_show.value = False
-            return
-
-        self.__mpc_gizmo.visible = True
-
-        goal = ControlMPC.Goal()
-        goal.start_state = self.__latest_joint_state
-        goal.goal_poses = [self.__gizmo_to_ros_pose(self.__mpc_gizmo)]
-        goal.tool_frame = self.__mpc_tool_frame
-        goal.optimization_dt = 0.0
-        goal.interpolation_steps = 0
-
-        self.__mpc_active = True
-        send_future = self.__mpc_action_client.send_goal_async(
-            goal, feedback_callback=self.__mpc_feedback_cb
-        )
-        send_future.add_done_callback(self.__mpc_goal_response_cb)
-
-    def __mpc_goal_response_cb(self, future):
-        try:
-            goal_handle = future.result()
-        except Exception as e:
-            self.get_logger().error(f"ControlMPC send_goal failed: {e}")
-            self.__mpc_active = False
-            self.__mpc_show.value = False
-            return
-
-        if not goal_handle.accepted:
-            self.get_logger().warn("ControlMPC goal rejected")
-            self.__mpc_active = False
-            self.__mpc_show.value = False
-            return
-
-        self.__mpc_goal_handle = goal_handle
-        self.get_logger().info("Reactive control (MPC) started")
-        goal_handle.get_result_async().add_done_callback(self.__mpc_result_cb)
-
-    def __mpc_feedback_cb(self, feedback_handle):
-        fb = feedback_handle.feedback
-        self.get_logger().debug(
-            f"MPC[{fb.phase}] pos_err={fb.tracking_position_error:.4f} "
-            f"rot_err={fb.tracking_rotation_error:.4f}"
-        )
-
-    def __mpc_result_cb(self, future):
-        try:
-            result = future.result().result
-            self.get_logger().info(
-                f"MPC stopped: {result.message} ({result.num_steps} steps)"
-            )
-        except Exception as e:
-            self.get_logger().error(f"ControlMPC result failed: {e}")
-        self.__mpc_active = False
-        self.__mpc_goal_handle = None
-
-    def __update_mpc_goal(self):
-        if not self.__mpc_active or self.__mpc_updating_goal:
-            return
-        if not self.__mpc_update_goal_client.service_is_ready():
-            return
-
-        req = UpdateMPCGoal.Request()
-        req.goal_poses = [self.__gizmo_to_ros_pose(self.__mpc_gizmo)]
-        req.tool_frame = self.__mpc_tool_frame
-
-        self.__mpc_updating_goal = True
-        future = self.__mpc_update_goal_client.call_async(req)
-        future.add_done_callback(self.__mpc_update_goal_done_cb)
-
-    def __mpc_update_goal_done_cb(self, future):
-        self.__mpc_updating_goal = False
-        try:
-            response = future.result()
-            if not response.success:
-                self.get_logger().warn(f"UpdateMPCGoal failed: {response.message}")
-        except Exception as e:
-            self.get_logger().error(f"UpdateMPCGoal call failed: {e}")
-
-    def __stop_mpc(self):
-        self.__mpc_gizmo.visible = False
-        if not self.__mpc_active:
-            return
-        if not self.__mpc_stop_client.service_is_ready():
-            self.get_logger().warn("StopMPC service not available")
-            return
-        self.__mpc_stop_client.call_async(StopMPC.Request())
 
     def _blacken_reachability_image(self):
         if self.__reachability_image_handle is not None:
