@@ -16,7 +16,6 @@ robot segmentation, trajectory optimization, and model-predictive control.
 | Node | Executable | Package | Purpose |
 |---|---|---|---|
 | `curobo_server` | `curobo_server_node` | `isaac_ros_cumotion` | **The one node.** Loads `MotionPlanner` once in `__init__` (which owns kinematics, IK solver, collision checker, trajopt solver). Every capability — planning, grasping, IK, FK, collision checking, world updates, attach/detach, mapping, segmentation, trajectory optimization, MPC, motion retargeting — runs in this process and shares the same GPU model. |
-| `esdf_viser_node` | `esdf_viser_node` | `isaac_ros_esdf_visualizer` | **Separate visualizer.** Renders ESDF slices, robot model, camera frustums, and draggable goal frames in a Viser web UI (`http://localhost:8080`). Does not construct any cuRobo GPU model — purely a viewer. |
 | `pose_to_pose_node` | `pose_to_pose_node` | `isaac_ros_moveit_goal_setter` | MoveIt 2 integration: converts MoveIt motion planning requests into calls to the unified node's action/service interfaces. |
 | `goal_initializer_node` | `goal_initializer_node` | `isaac_ros_moveit_goal_setter` | MoveIt 2 integration: provides goal initialization GUI and goal validation for MoveIt's planning pipeline. |
 | `builder` | `builder` | `isaac_ros_cumotion_robot_description` | Offline CLI tool. Generates cuRobo robot configs (collision spheres, self-collision matrix) from URDF+XACRO. See [Creating a Robot Description](#creating-a-robot-description). |
@@ -27,14 +26,11 @@ Run them with `ros2 run isaac_ros_cumotion <example_name>`.
 
 ## Launch
 
-### Main server + Viser viewer
+### Main server
 
 ```bash
 # Terminal 1: cuRobo server
 ros2 launch isaac_ros_cumotion isaac_ros_cumotion.launch.py
-
-# Terminal 2: 3D visualizer (Viser, http://localhost:8080)
-ros2 launch isaac_ros_esdf_visualizer esdf_viser.launch.py params_file:=/path/to/params.yaml
 ```
 
 The server reads parameters from `isaac_ros_cumotion/params/isaac_ros_cumotion_params.yaml`.
@@ -259,21 +255,6 @@ the control rate.
 | `PublishStaticPlanningScene` | `/cumotion/publish_static_scene` | Publish the static planning scene as a MoveIt PlanningScene msg |
 | `UpdateMPCGoal` | `/cumotion/mpc/update_goal` | Update MPC target while a `ControlMPC` action is running |
 | `StopMPC` | `/cumotion/mpc/stop` | Stop an active MPC run and return tracking statistics |
-| `GetInteractiveTarget` | `/cumotion/get_interactive_target` | **(Served by `esdf_viser_node`)** Read current pose of draggable Viser goal frames |
-
-### Why `GetInteractiveTarget` exists
-
-The Viser viewer (`http://localhost:8080`) renders the robot, world, and
-interactive **control frames** — draggable 3D gizmo handles that you can grab
-with the mouse and position anywhere in the scene. `GetInteractiveTarget.srv`
-lets external code read back those manipulated poses. Typical use case:
-
-1. User drags a goal frame to a desired position in the Viser UI
-2. A planning node or script calls `GetInteractiveTarget` to fetch the pose
-3. The pose is fed into `PlanMotion` or `ComputeIK` to generate a trajectory
-
-This separates interactive visualization (the Viser viewer process) from
-planning (the unified server) while still allowing data flow between them.
 
 ## Creating a Robot Description
 
@@ -400,17 +381,6 @@ note bottom of MODS
   (mapping, segmentation)
 end note
 
-rectangle "esdf_viser_node (separate process)" as VIS {
-  note right
-    ESDF slice visualization
-    Robot model rendering
-    Draggable goal frames
-    GetInteractiveTarget.srv
-    Camera visualization
-  end note
-}
-
-curobo_server_node ..> VIS : Services / Actions / Topics
 @enduml
 ```
 

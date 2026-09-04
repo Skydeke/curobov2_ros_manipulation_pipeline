@@ -593,6 +593,7 @@ class ReactiveController(TrajectoryPlanner):
             if pos.dim() == 3:
                 pos = pos[:, -1, :]  # full-horizon action: report the last (current-target) point
             fb.joint_command.position = (pos[0] if pos.dim() > 1 else pos).cpu().tolist()
+            fb.joint_command.name = list(getattr(self.solver, 'joint_names', []))
         except Exception:
             pass
         goal_handle.publish_feedback(fb)

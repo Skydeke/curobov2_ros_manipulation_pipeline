@@ -82,7 +82,7 @@ COPY isaac_ros_cumotion ${ROS_WS}/src/isaac_ros_cumotion
 COPY isaac_ros_cumotion_interfaces ${ROS_WS}/src/isaac_ros_cumotion_interfaces
 COPY isaac_ros_cumotion_moveit ${ROS_WS}/src/isaac_ros_cumotion_moveit
 COPY isaac_ros_cumotion_rviz ${ROS_WS}/src/isaac_ros_cumotion_rviz
-COPY isaac_ros_esdf_visualizer ${ROS_WS}/src/isaac_ros_esdf_visualizer
+COPY isaac_ros_cumotion_extra ${ROS_WS}/src/isaac_ros_cumotion_extra
 
 # --- cuRobo v2 ---
 COPY curobo_core ${ROS_WS}/src/curobo_core
@@ -110,4 +110,4 @@ RUN source /opt/ros/jazzy/setup.bash && \
   curobo_core isaac_ros_cumotion_interfaces \
   isaac_ros_cumotion isaac_ros_cumotion_moveit \
   isaac_ros_cumotion_rviz \
-  isaac_ros_esdf_visualizer
+  isaac_ros_cumotion_extra

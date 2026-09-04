@@ -29,7 +29,7 @@ def generate_launch_description():
             description='Path to cumotion_params.yaml',
         ),
         Node(
-            package='isaac_ros_esdf_visualizer',
+            package='isaac_ros_cumotion_extra',
             executable='esdf_viser_node',
             name='esdf_viser_node',
             parameters=[LaunchConfiguration('params_file')],

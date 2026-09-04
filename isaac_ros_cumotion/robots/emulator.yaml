@@ -3,7 +3,7 @@
 name: emulator
 display_name: "Emulator (RViz)"
 
-curobo_config: package://iki_kortex_moveit_config/config/kortex.xrdf
+curobo_config: package://iki_kortex_moveit_config/config/kortex.curobo.yml
 
 base_link: "base_link"
 

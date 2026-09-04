@@ -86,6 +86,13 @@ class MultiPointPlanner(SinglePlanner):
                     max_attempts=max_attempts,
                 )
 
+                # v2: plan_pose() returns None when no solution is found.
+                if result is None:
+                    self.node.get_logger().error(
+                        f"Failed to plan to waypoint {i}: no solution found (plan_pose returned None)"
+                    )
+                    return None
+
                 if not result.success.item():
                     self.node.get_logger().error(
                         f"Failed to plan to waypoint {i}: {result.status}"

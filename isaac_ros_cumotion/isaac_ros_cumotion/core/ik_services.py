@@ -166,6 +166,7 @@ class IKServices:
             self_collision_check=True,
             collision_cache=self._config.collision_cache,
             use_cuda_graph=False,
+            max_batch_size=max(1, batch_size),
         )
         self._ik_solver = InverseKinematics(cfg)
         self._ik_batch_size = batch_size

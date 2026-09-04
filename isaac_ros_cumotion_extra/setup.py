@@ -19,7 +19,7 @@ import os
 
 from setuptools import find_packages, setup
 
-package_name = 'isaac_ros_esdf_visualizer'
+package_name = 'isaac_ros_cumotion_extra'
 
 setup(
     name=package_name,
@@ -30,13 +30,14 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
-            ['launch/esdf_viser.launch.py']),
+            ['launch/esdf_viser.launch.py',
+             'launch/getting_started_viser.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='Isaac ROS Maintainers',
     maintainer_email='isaac-ros-maintainers@nvidia.com',
-    description='Package for ESDF Voxel visualizer.',
+    description='Extra tools for isaac_ros_cumotion: ESDF/Viser visualizer and cuRobo config generator.',
     license='Apache-2.0',
     extras_require={
         'test': [
@@ -45,7 +46,16 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'esdf_viser_node = isaac_ros_esdf_visualizer.esdf_viser_node:main',
+            'esdf_viser_node = isaac_ros_cumotion_extra.esdf_viser_node:main',
+            'build_curobo_config = isaac_ros_cumotion_extra.build_curobo_config:main',
+            'fk_viser_node = isaac_ros_cumotion_extra.fk_viser_node:main',
+            'ik_viser_node = isaac_ros_cumotion_extra.ik_viser_node:main',
+            'mp_viser_node = isaac_ros_cumotion_extra.mp_viser_node:main',
+            'mpc_viser_node = isaac_ros_cumotion_extra.mpc_viser_node:main',
+            'volumetric_viser_node = isaac_ros_cumotion_extra.volumetric_viser_node:main',
+            'feature_viser_node = isaac_ros_cumotion_extra.feature_viser_node:main',
+            'robot_model_viser_node = isaac_ros_cumotion_extra.robot_model_viser_node:main',
+            'retarget_viser_node = isaac_ros_cumotion_extra.retarget_viser_node:main',
         ],
     },
 )

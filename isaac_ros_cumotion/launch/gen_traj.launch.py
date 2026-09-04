@@ -76,11 +76,9 @@ def launch_setup(context, *args, **kwargs):
         except Exception as e:
             print(f"[gen_traj.launch] Warning: could not load descriptor '{robot_name}': {e}")
 
-    # Fallback urdf_path
-    default_urdf_path = os.path.join(
-        get_package_share_directory('iki_kortex_moveit_config'),
-        'config', 'kortex.xrdf'
-    )
+    # Fallback urdf_path — the generated URDF lives at a well-known temp
+    # location (see iki_kortex launch or the README build instructions).
+    default_urdf_path = '/tmp/kortex.urdf'
 
     # urdf_path defaults to the empty string: unset means "read it from
     # robot_config_file", an explicit value wins.
