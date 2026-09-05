@@ -28,6 +28,7 @@ Keeps the ROS2 service architecture (IK is computed on ``curobo_server`` via the
 """
 
 import math
+import time
 
 import numpy as np
 import rclpy
@@ -115,6 +116,14 @@ class IkViserNode(Node):
         self._reachability_enabled = False
         self._reachability_busy = False
         self._reachability_needs_update = True
+        self._reachability_pending = False
+        self._reachability_gen = 0
+        self._reachability_settle_tol = 2e-3
+        self._reachability_settle_time = 0.45
+        self._reachability_last_moved = time.monotonic()
+        self._reachability_prev_pos = None
+        self._reachability_prev_wxyz = None
+        self._reachability_prev_extent = None
         self._prev_gizmo_pos = None
         self._prev_gizmo_wxyz = None
         self._prev_grid_extent = None
@@ -164,6 +173,14 @@ class IkViserNode(Node):
         self.get_logger().info(f'Reachability toggle: {value}')
         self._reachability_enabled = value
         self._reachability_needs_update = True
+        # Clear previous solve/settle state so the first solve runs promptly.
+        self._prev_gizmo_pos = None
+        self._prev_gizmo_wxyz = None
+        self._prev_grid_extent = None
+        self._reachability_prev_pos = None
+        self._reachability_prev_wxyz = None
+        self._reachability_prev_extent = None
+        self._reachability_last_moved = time.monotonic()
         if self._gui_grid_extent_slider is not None:
             self._gui_grid_extent_slider.visible = value
         if not self._reachability_enabled:
@@ -191,6 +208,27 @@ class IkViserNode(Node):
         """Quaternion (w, x, y, z) for a rotation about Y by ``pitch_deg``."""
         half = math.radians(pitch_deg) / 2.0
         return [math.cos(half), 0.0, math.sin(half), 0.0]
+
+    def _blacken_reachability_image(self, pos, wxyz, extent):
+        """Show a black slice plane while a reachability solve is in progress."""
+        server = getattr(self._viz, '_server', None)
+        if server is None:
+            return
+        n = self._n_per_axis
+        black = np.zeros((n, n, 3), dtype=np.uint8)
+        if self._gui_reachability_slice is not None:
+            self._gui_reachability_slice.position = tuple(pos)
+            self._gui_reachability_slice.wxyz = tuple(wxyz)
+            self._gui_reachability_slice.image = black
+            return
+        self._gui_reachability_slice = server.scene.add_image(
+            name='/reachability_bounds/slice_image',
+            image=black,
+            render_width=extent,
+            render_height=extent,
+            wxyz=tuple(wxyz),
+            position=tuple(pos),
+        )
 
     def _set_status(self, text, ok=None):
         try:
@@ -313,8 +351,6 @@ class IkViserNode(Node):
     def _reachability_tick(self):
         if not self._reachability_enabled or not self._ik_ready:
             return
-        if self._reachability_busy:
-            return
 
         if not self._ik_batch_client.service_is_ready():
             self.get_logger().warn('IkBatch service not ready')
@@ -326,22 +362,66 @@ class IkViserNode(Node):
         cur_pos, cur_wxyz = gp
         cur_extent = self._gui_grid_extent_slider.value
 
-        if (
+        moved_since_last_tick = (
+            self._reachability_prev_pos is None
+            or not np.allclose(cur_pos, self._reachability_prev_pos, atol=self._reachability_settle_tol)
+            or not np.allclose(cur_wxyz, self._reachability_prev_wxyz, atol=self._reachability_settle_tol)
+            or cur_extent != self._reachability_prev_extent
+        )
+        self._reachability_prev_pos = cur_pos.copy()
+        self._reachability_prev_wxyz = cur_wxyz.copy()
+        self._reachability_prev_extent = cur_extent
+
+        changed_since_solve = not (
             self._prev_gizmo_pos is not None
             and self._prev_gizmo_wxyz is not None
             and self._prev_grid_extent is not None
-            and np.allclose(cur_pos, self._prev_gizmo_pos, atol=1e-4)
-            and np.allclose(cur_wxyz, self._prev_gizmo_wxyz, atol=1e-4)
+            and np.allclose(cur_pos, self._prev_gizmo_pos, atol=self._reachability_settle_tol)
+            and np.allclose(cur_wxyz, self._prev_gizmo_wxyz, atol=self._reachability_settle_tol)
             and cur_extent == self._prev_grid_extent
             and not self._reachability_needs_update
-        ):
+        )
+
+        now = time.monotonic()
+        if moved_since_last_tick:
+            # Anchor the settle timer on the most recent gizmo movement.
+            self._reachability_last_moved = now
+            if self._reachability_busy:
+                # Invalidate the in-flight solve so its result is discarded,
+                # keep the map black, and queue a re-run after the user lets go.
+                self._reachability_gen += 1
+                self._reachability_pending = True
+                self._blacken_reachability_image(cur_pos, cur_wxyz, cur_extent)
             return
 
+        # Gizmo is not moving right now.
+        if changed_since_solve and now - self._reachability_last_moved < self._reachability_settle_time:
+            # Not yet settled after the last change: keep the map black.
+            self._blacken_reachability_image(cur_pos, cur_wxyz, cur_extent)
+            return
+
+        if self._reachability_busy:
+            # Single solve in flight: wait for it to finish.
+            if self._reachability_pending:
+                self._blacken_reachability_image(cur_pos, cur_wxyz, cur_extent)
+            return
+
+        if not changed_since_solve and not self._reachability_pending:
+            # Nothing new to solve.
+            return
+
+        # A change settled long enough (user let go), or a pending re-run after a
+        # busy solve finished. Snapshot and solve.
         self._prev_gizmo_pos = cur_pos.copy()
         self._prev_gizmo_wxyz = cur_wxyz.copy()
         self._prev_grid_extent = cur_extent
         self._reachability_needs_update = False
+        self._reachability_pending = False
 
+        self._reachability_gen += 1
+        gen = self._reachability_gen
+
+        self._blacken_reachability_image(cur_pos, cur_wxyz, cur_extent)
         self._reachability_busy = True
         self._set_status('Reachability: solving...')
 
@@ -363,6 +443,8 @@ class IkViserNode(Node):
                               np.ones(n * n, dtype=np.float32)], axis=-1)
         grid_world = (pose_matrix @ local_pts.T).T[:, :3]
 
+        # Every grid cell uses the gizmo's exact orientation (position varies,
+        # orientation = gizmo's), matching the esdf_viser reachability mode.
         orientations = np.tile(cur_wxyz, (n * n, 1))
 
         req = IkBatch.Request()
@@ -378,10 +460,17 @@ class IkViserNode(Node):
             req.poses.append(p)
 
         fut = self._ik_batch_client.call_async(req)
-        fut.add_done_callback(self._on_reachability_done)
+        fut.add_done_callback(lambda f, g=gen: self._on_reachability_done(f, g))
 
-    def _on_reachability_done(self, future: Future):
+    def _on_reachability_done(self, future: Future, gen: int):
         self._reachability_busy = False
+        if not self._reachability_enabled:
+            return
+        if gen != self._reachability_gen:
+            self.get_logger().info(
+                f'Reachability: discarding stale solve (gen {gen} != {self._reachability_gen})'
+            )
+            return
         resp = future.result()
         if not resp.success:
             self._set_status('Reachability: batch IK failed', ok=False)
@@ -403,11 +492,11 @@ class IkViserNode(Node):
         if server is None:
             return
 
-        gp = self._gizmo_pose()
-        if gp is None:
+        cur_pos = self._prev_gizmo_pos
+        cur_wxyz = self._prev_gizmo_wxyz
+        cur_extent = self._prev_grid_extent
+        if cur_pos is None or cur_wxyz is None or cur_extent is None:
             return
-        cur_pos, cur_wxyz = gp
-        cur_extent = self._gui_grid_extent_slider.value
         half = cur_extent / 2.0
 
         import viser.transforms as vtf

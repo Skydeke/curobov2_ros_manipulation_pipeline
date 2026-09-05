@@ -1,8 +1,0 @@
-# Read the current pose(s) of interactive Viser drag handles (control frames).
-# frame_names: empty = return all frames
-string[] frame_names
----
-bool success
-string message
-geometry_msgs/Pose[] poses                # one per requested frame
-string[] frame_names                      # names corresponding to each pose

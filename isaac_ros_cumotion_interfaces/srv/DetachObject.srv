@@ -1,4 +1,0 @@
-# Detach the currently attached obstacle from the robot.
----
-bool success
-string message

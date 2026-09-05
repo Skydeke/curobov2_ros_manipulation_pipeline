@@ -1,6 +1,0 @@
-# Update the goal poses of an active MPC control loop.
-geometry_msgs/Pose[] goal_poses
-string tool_frame                         # empty = keep current tool frame
----
-bool success
-string message

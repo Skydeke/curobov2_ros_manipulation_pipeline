@@ -1,0 +1,47 @@
+# Interfaces used by isaac_ros_cumotion code / supported by curobo_server
+
+This file lists which action/srv/msg files in this folder are actually referenced
+by the code in this repository (Python clients/servers, RViz plugin, moveit plugin,
+tests, and launch configs).
+
+## Actions (used: 1 / 2)
+- [x] SendTrajectory.action   -- unified_planner_node, single_planner, reactive_controller, isaac_ros_cumotion_rviz, mpc_viser_node, test_test_planners
+- [ ] DataGeneration.action   -- NOT used anywhere
+
+## Messages (used: 3 / 6)
+- [x] ObjectParameters.msg    -- isaac_ros_cumotion_rviz (add_objects_display/panel)
+- [x] SparseVoxelGrid.msg     -- obstacle_manager, ros_service_manager, isaac_ros_cumotion_rviz (sparse_voxel_grid_display)
+- [x] MpcCosts.msg            -- mpc_planner (publisher)
+- [ ] GpuVoxelTensor.msg      -- NOT used anywhere
+- [ ] MpcStepDiagnostics.msg  -- NOT used anywhere
+- [ ] ReachabilityMetrics.msg -- NOT used anywhere
+
+## Services (used: 18 / 22)
+- [x] AddObject.srv           -- obstacle_manager, ros_service_manager, cumotion_service_client, rviz add_objects
+- [x] AttachObject.srv        -- attachment_services, test_test_object
+- [x] Fk.srv                  -- fk_services, fk_viser_node
+- [x] GetCollisionDistance.srv-- config_wrapper, config_wrapper_motion, ros_service_manager
+- [x] GetPlanners.srv         -- unified_planner_node, planner_factory, reactive_controller
+- [x] GetRobotStrategies.srv  -- ros_service_manager, robot_context, rviz
+- [x] GetVoxelGrid.srv        -- obstacle_manager, ros_service_manager, benchmark_voxel_grid, rviz, viser nodes
+- [x] Ik.srv                  -- ik_services, ik_viser_node
+- [x] IkBatch.srv             -- ik_services, ik_viser_node
+- [x] RemoveObject.srv        -- obstacle_manager, robot_segmentation, ros_service_manager, cumotion_service_client, rviz
+- [x] SetCollisionCache.srv   -- obstacle_manager, ros_service_manager, unified_planner_node
+- [x] SetLinkCollision.srv    -- robot_model_manager, ros_service_manager
+- [x] SetMask.srv             -- robot_segmentation
+- [x] SetPlanner.srv          -- unified_planner_node, planner_factory, reactive_controller, cumotion_service_client, rviz
+- [x] SetRobotStrategy.srv    -- robot_context, rviz
+- [x] TrajectoryGeneration.srv-- unified_planner_node, classic_planner, single_planner, trajectory_planner, cumotion_interface, rviz
+- [x] WarmupFK.srv            -- fk_services, fk_viser_node
+- [x] WarmupIK.srv            -- ik_services, ik_viser_node
+- [ ] Collisions.srv          -- NOT used anywhere
+- [ ] FkBatch.srv             -- NOT used anywhere
+- [ ] GenerateRM.srv          -- NOT used anywhere (reachability-map feature not wired in)
+- [ ] SceneGenerator.srv      -- NOT used anywhere
+
+## Summary
+- Used: 1 action, 3 messages, 18 services (22 total)
+- Unused: 1 action, 3 messages, 4 services (8 total)
+    DataGeneration, GpuVoxelTensor, MpcStepDiagnostics, ReachabilityMetrics,
+    Collisions, FkBatch, GenerateRM, SceneGenerator
