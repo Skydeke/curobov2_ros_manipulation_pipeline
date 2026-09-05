@@ -26,6 +26,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/Ik.srv"
   "srv/IkBatch.srv"
   "srv/Fk.srv"
+  "srv/FkBatch.srv"
   "srv/AddObject.srv"
   "srv/AttachObject.srv"
   "srv/RemoveObject.srv"
@@ -45,9 +46,6 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/WarmupIK.srv"
   "srv/WarmupFK.srv"
   "msg/MpcCosts.msg"
-  "srv/ComputeIK.srv"
-  "srv/GetEsdf.srv"
-  "srv/GetInteractiveTarget.srv"
   DEPENDENCIES geometry_msgs nav2_msgs sensor_msgs std_msgs trajectory_msgs moveit_msgs
 )
 

@@ -30,8 +30,7 @@ setup(
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'),
-            ['launch/esdf_viser.launch.py',
-             'launch/getting_started_viser.launch.py']),
+            ['launch/getting_started_viser.launch.py']),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -46,7 +45,6 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'esdf_viser_node = isaac_ros_cumotion_extra.esdf_viser_node:main',
             'build_curobo_config = isaac_ros_cumotion_extra.build_curobo_config:main',
             'fk_viser_node = isaac_ros_cumotion_extra.fk_viser_node:main',
             'ik_viser_node = isaac_ros_cumotion_extra.ik_viser_node:main',

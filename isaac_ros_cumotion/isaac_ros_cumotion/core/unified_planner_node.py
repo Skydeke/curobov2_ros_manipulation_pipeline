@@ -233,10 +233,9 @@ class UnifiedPlannerNode(Node):
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_motion)
 
-        # FK — depends only on robot YAML (no scene).
-        self.fk_services = FKServices(
-            self, self.config_wrapper_motion.robot_config_file
-        )
+        # FK — needs the robot YAML (geometry) and the shared Scene (batch
+        # collision validation for FkBatch).
+        self.fk_services = FKServices(self, self.config_wrapper_motion)
 
         self.planner_manager = PlannerManager(self, self.config_wrapper_motion)
 
@@ -411,6 +410,7 @@ class UnifiedPlannerNode(Node):
             self.planner_manager.get_planner('retarget').update_world(scene)
 
         self.ik_services.update_world()
+        self.fk_services.update_world()
 
     def refresh_perception_world(self):
         """Recompute the perception ESDF and push it to all solvers.

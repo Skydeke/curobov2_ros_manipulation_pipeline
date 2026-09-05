@@ -47,21 +47,25 @@ class IKServices:
         self._ik_batch_size: int = 0  # 0 = not yet warmed up
 
         # Device / dtype resolved from config_wrapper (set by RobotModelManager).
-        self._device = getattr(config_wrapper, '_device', torch.device('cuda'))
-        self._dtype = getattr(config_wrapper, '_ops_dtype', torch.float32)
+        self._device = getattr(config_wrapper, "_device", torch.device("cuda"))
+        self._dtype = getattr(config_wrapper, "_ops_dtype", torch.float32)
 
         name = node.get_name()
-        node.create_service(WarmupIK, f'{name}/warmup_ik', self._warmup_ik_callback)
-        node.create_service(Ik,       f'{name}/ik',        self._ik_callback)
-        node.create_service(IkBatch,  f'{name}/ik_batch',  self._ik_batch_callback)
+        node.create_service(WarmupIK, f"{name}/warmup_ik", self._warmup_ik_callback)
+        node.create_service(Ik, f"{name}/ik", self._ik_callback)
+        node.create_service(IkBatch, f"{name}/ik_batch", self._ik_batch_callback)
 
-        node.get_logger().info("IKServices registered (not yet initialized - call warmup_ik)")
+        node.get_logger().info(
+            "IKServices registered (not yet initialized - call warmup_ik)"
+        )
 
     # ------------------------------------------------------------------
     # Warmup
     # ------------------------------------------------------------------
 
-    def _warmup_ik_callback(self, request: WarmupIK.Request, response: WarmupIK.Response):
+    def _warmup_ik_callback(
+        self, request: WarmupIK.Request, response: WarmupIK.Response
+    ):
         batch_size = max(1, request.batch_size)
         try:
             self._init(batch_size)
@@ -155,7 +159,9 @@ class IKServices:
         scene = self._config.obstacle_manager.primitives_only_scene()
         robot_yml = self._config.robot_config_file
 
-        self._node.get_logger().info(f"Initializing IK solver (batch_size={batch_size})...")
+        self._node.get_logger().info(
+            f"Initializing IK solver (batch_size={batch_size})..."
+        )
 
         cfg = InverseKinematicsCfg.create(
             robot=robot_yml,
@@ -198,18 +204,24 @@ class IKServices:
             try:
                 self._init(n)
             except Exception as e:
-                self._node.get_logger().error(f"IK reinit for batch_size={n} failed: {e}")
+                self._node.get_logger().error(
+                    f"IK reinit for batch_size={n} failed: {e}"
+                )
                 self._ik_batch_size = 0
                 return False, None
 
         # v2 Pose quaternion is wxyz; ROS geometry_msgs is xyzw.
         positions = [[p.position.x, p.position.y, p.position.z] for p in poses]
-        orientations = [[p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
-                        for p in poses]
+        orientations = [
+            [p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
+            for p in poses
+        ]
 
         pose2d = CuroboPose(
             position=torch.tensor(positions, dtype=self._dtype, device=self._device),
-            quaternion=torch.tensor(orientations, dtype=self._dtype, device=self._device),
+            quaternion=torch.tensor(
+                orientations, dtype=self._dtype, device=self._device
+            ),
         )
         tool_frame = self._ik_solver.kinematics.tool_frames[0]
         goal = GoalToolPose.from_poses({tool_frame: pose2d})

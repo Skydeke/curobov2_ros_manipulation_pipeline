@@ -20,6 +20,7 @@ tests, and launch configs).
 - [x] AddObject.srv           -- obstacle_manager, ros_service_manager, cumotion_service_client, rviz add_objects
 - [x] AttachObject.srv        -- attachment_services, test_test_object
 - [x] Fk.srv                  -- fk_services, fk_viser_node
+- [x] FkBatch.srv             -- fk_services
 - [x] GetCollisionDistance.srv-- config_wrapper, config_wrapper_motion, ros_service_manager
 - [x] GetPlanners.srv         -- unified_planner_node, planner_factory, reactive_controller
 - [x] GetRobotStrategies.srv  -- ros_service_manager, robot_context, rviz
@@ -36,12 +37,11 @@ tests, and launch configs).
 - [x] WarmupFK.srv            -- fk_services, fk_viser_node
 - [x] WarmupIK.srv            -- ik_services, ik_viser_node
 - [ ] Collisions.srv          -- NOT used anywhere
-- [ ] FkBatch.srv             -- NOT used anywhere
 - [ ] GenerateRM.srv          -- NOT used anywhere (reachability-map feature not wired in)
 - [ ] SceneGenerator.srv      -- NOT used anywhere
 
 ## Summary
-- Used: 1 action, 3 messages, 18 services (22 total)
-- Unused: 1 action, 3 messages, 4 services (8 total)
+- Used: 1 action, 3 messages, 19 services (23 total)
+- Unused: 1 action, 3 messages, 3 services (7 total)
     DataGeneration, GpuVoxelTensor, MpcStepDiagnostics, ReachabilityMetrics,
-    Collisions, FkBatch, GenerateRM, SceneGenerator
+    Collisions, GenerateRM, SceneGenerator
