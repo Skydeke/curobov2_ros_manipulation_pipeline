@@ -38,6 +38,7 @@ from geometry_msgs.msg import Pose
 from sensor_msgs.msg import JointState
 
 from isaac_ros_cumotion_interfaces.srv import SetPlanner, TrajectoryGeneration
+from isaac_ros_cumotion_interfaces.msg import Goalset
 
 from ._viser_helpers import (
     _start_positions,
@@ -232,7 +233,7 @@ class MpViserNode(Node):
         def build():
             req = TrajectoryGeneration.Request()
             req.start_pose = self._build_start()
-            req.target_pose = self._build_pose(pos, quat)
+            req.goalsets = [Goalset(poses=[self._build_pose(pos, quat)])]
             return req
         return build
 
@@ -250,10 +251,10 @@ class MpViserNode(Node):
         def build():
             req = TrajectoryGeneration.Request()
             req.start_pose = self._build_start()
-            req.target_poses = [
-                self._build_pose(approach, quat),
-                self._build_pose(pos, quat),
-                self._build_pose(lift, quat),
+            req.goalsets = [
+                Goalset(poses=[self._build_pose(approach, quat)]),
+                Goalset(poses=[self._build_pose(pos, quat)]),
+                Goalset(poses=[self._build_pose(lift, quat)]),
             ]
             return req
         return build

@@ -59,7 +59,7 @@ Execution always goes through the action ([Tutorial 1](01-first-trajectory.md), 
 
 ```bash
 ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{target_pose: {position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}" --feedback
+  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
 ```
 
 Feedback carries `state`, `step_progression`, and the streamed `joint_command`. Cancel the goal to stop; the strategy's `stop_robot()` halts streaming.

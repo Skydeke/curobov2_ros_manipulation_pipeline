@@ -135,6 +135,12 @@ class UnifiedPlannerNode(Node):
         # the MPC->Classic re-warmup in _setup_planner). Override at runtime with
         # the CUROBO_USE_CUDA_GRAPH env var (0 disables) for A/B testing.
         self.declare_parameter('use_cuda_graph', True)
+        # Per-segment candidate-set cap for the open-loop planners (a goalset is
+        # "N acceptable poses, planner picks the best"). The cap sizes solver
+        # buffers at build time and is baked into the CUDA graph, so changing
+        # it at runtime requires a rebuild via update_motion_gen_config (same
+        # caveat as max_batch_size). Read by ConfigWrapperMotion.
+        self.declare_parameter('max_goalset', 16)
         # Diagnostic toggle (see update_all_solvers_world): set false to withhold
         # the perception ESDF from the solvers. Leave true for normal operation —
         # false disables camera-based collision avoidance.
@@ -501,6 +507,14 @@ class UnifiedPlannerNode(Node):
                 response.message = "No planner selected"
                 return response
 
+            ok, reason = self._check_goal_request(planner, request)
+            if not ok:
+                response.success = False
+                response.message = reason
+                response.trajectory = []
+                response.dt = 0.0
+                return response
+
             _, start_state = self._resolve_start_state(request)
 
             config = self._get_planner_config(planner)
@@ -520,6 +534,12 @@ class UnifiedPlannerNode(Node):
 
             response.success = result.success
             response.message = result.message
+
+            # Goalset winners ride back via metadata: one int per `goalsets`
+            # entry (the resolved candidate index in that segment; -1 marks a
+            # failed/empty segment so the response stays aligned with the request).
+            sel = (result.metadata or {}).get('selected_goal_index')
+            response.selected_goal_index = [int(x) for x in sel] if sel is not None else []
 
             # Preview workflow: cache a successful open-loop trajectory so the
             # execute action can reuse it (matching target) without recomputing.
@@ -619,6 +639,14 @@ class UnifiedPlannerNode(Node):
 
     def _execute_goal(self, goal_handle, goal, planner, result_msg):
         try:
+            ok, reason = self._check_goal_request(planner, goal)
+            if not ok:
+                self.get_logger().error(f"Invalid execution goal: {reason}")
+                result_msg.success = False
+                result_msg.message = f"Invalid goal: {reason}"
+                goal_handle.abort()
+                return result_msg
+
             _, start_state = self._resolve_start_state(goal)
             config = self._get_planner_config(planner)
             self._setup_planner(planner)
@@ -774,6 +802,59 @@ class UnifiedPlannerNode(Node):
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _check_goal_request(self, planner, request):
+        """Validate a goal request against the active planner's rules.
+
+        Enforced here (shared by the generate_trajectory srv and the execute
+        action) so invalid requests never reach MotionGen:
+
+        - All Cartesian planners read `goalsets`. An empty request is only legal
+          for the joint-space planner (target_joint_positions).
+        - Every `goalsets[i]` must hold >= 1 pose (a zero-pose set would break
+          winner/segment index alignment).
+        - Reactive controllers (MPC / retarget) track a single pose: exactly one
+          set of one pose.
+        - Open-loop planners cap per-set candidates at `max_goalset`: the goalset
+          buffer is sized at solver build, and larger sets 100% abort in cuRobo.
+
+        Returns (ok, reason).
+        """
+        planner_name = planner.get_planner_name()
+        goalsets = list(getattr(request, 'goalsets', None) or [])
+        sizes = [len(getattr(g, 'poses', [])) for g in goalsets]
+
+        if not goalsets:
+            if not getattr(request, 'target_joint_positions', None):
+                return False, (
+                    f"{planner_name}: request must provide `goalsets` "
+                    f"(or `target_joint_positions` for joint-space planning)"
+                )
+            return True, None
+
+        if any(n == 0 for n in sizes):
+            return False, (
+                f"{planner_name}: every goalset entry must hold >= 1 pose "
+                f"(got sizes {sizes})"
+            )
+
+        if not planner.is_open_loop():
+            if len(goalsets) != 1 or sizes != [1]:
+                return False, (
+                    f"{planner_name}: requires exactly one goalset entry with a "
+                    f"single pose, got {len(goalsets)} set(s) of sizes {sizes}"
+                )
+            return True, None
+
+        max_goalset = self.get_parameter(
+            'max_goalset').get_parameter_value().integer_value
+        if any(n > max_goalset for n in sizes):
+            return False, (
+                f"{planner_name}: goalset of {max(sizes)} poses exceeds "
+                f"max_goalset={max_goalset} (per-segment cap; the goalset buffer "
+                f"is sized at solver build)"
+            )
+        return True, None
 
     def _setup_planner(self, planner):
         # Held under gpu_lock, same invariant as every other graph-capturing path
@@ -1006,12 +1087,13 @@ class UnifiedPlannerNode(Node):
 
     def _target_signature(self, start_state, req) -> dict:
         start = [float(x) for x in start_state.position[0].cpu().tolist()]
-        tp = getattr(req, 'target_pose', None)
-        poses = getattr(req, 'target_poses', None)
+        goalsets = [
+            [self._pose_tuple(p) for p in g.poses]
+            for g in (getattr(req, 'goalsets', None) or [])
+        ]
         return {
             'start': start,
-            'target_pose': self._pose_tuple(tp) if tp is not None else None,
-            'target_poses': [self._pose_tuple(p) for p in poses] if poses else None,
+            'goalsets': goalsets,
             'target_joints': [float(x) for x in (getattr(req, 'target_joint_positions', []) or [])],
         }
 
@@ -1033,15 +1115,14 @@ class UnifiedPlannerNode(Node):
         aj, bj = a['target_joints'], b['target_joints']
         if len(aj) != len(bj) or any(abs(x - y) > joint_tol for x, y in zip(aj, bj)):
             return False
-        if not self._poses_match(a['target_pose'], b['target_pose'], pos_tol, ori_tol):
+        ag, bg = a['goalsets'], b['goalsets']
+        if len(ag) != len(bg):
             return False
-        ap, bp = a['target_poses'], b['target_poses']
-        if (ap is None) != (bp is None):
-            return False
-        if ap is not None:
-            if len(ap) != len(bp):
+        for gset_a, gset_b in zip(ag, bg):
+            if len(gset_a) != len(gset_b):
                 return False
-            if any(not self._poses_match(x, y, pos_tol, ori_tol) for x, y in zip(ap, bp)):
+            if any(not self._poses_match(x, y, pos_tol, ori_tol)
+                   for x, y in zip(gset_a, gset_b)):
                 return False
         return True
 

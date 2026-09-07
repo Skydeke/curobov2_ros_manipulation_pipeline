@@ -42,7 +42,7 @@ Orientation is a quaternion in the base frame. `{x: 0, y: 1, z: 0, w: 0}` points
 
 ```bash
 ros2 service call /unified_planner/generate_trajectory curobo_msgs/srv/TrajectoryGeneration \
-  "{target_pose: {position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}"
+  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}"
 ```
 
 A successful response looks like:
@@ -67,7 +67,7 @@ Planning and execution are separate. Execution goes through the `execute_traject
 
 ```bash
 ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{target_pose: {position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}" --feedback
+  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
 ```
 
 Because the goal matches the plan you just generated (and `allow_cached` defaults to `true`), the action reuses the cached trajectory instead of re-planning, then streams it. Feedback shows `state: EXECUTING` and `step_progression` climbing from 0 to 1; the main RViz robot follows.

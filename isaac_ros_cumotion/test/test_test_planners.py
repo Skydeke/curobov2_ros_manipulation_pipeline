@@ -189,7 +189,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'joint_7'], 'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_poses': [{'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, {'position': {'x': 0.3, 'y': 0.3, 'z': 0.6}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]})
+        set_message_fields(request, {'start_pose': {'name': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'joint_7'], 'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}, {'poses': [{'position': {'x': 0.3, 'y': 0.3, 'z': 0.6}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
 
         # Call service
         future = client.call_async(request)
@@ -294,7 +294,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'target_pose': {'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
+        set_message_fields(request, {'goalsets': [{'poses': [{'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
 
         # Call service
         future = client.call_async(request)
@@ -335,7 +335,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create and send the goal
         goal = SendTrajectory.Goal()
-        set_message_fields(goal, {'target_pose': {'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
+        set_message_fields(goal, {'goalsets': [{'poses': [{'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
 
         send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)
@@ -456,7 +456,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create and send the goal
         goal = SendTrajectory.Goal()
-        set_message_fields(goal, {'target_pose': {'position': {'x': 0.627, 'y': -0.005, 'z': 0.751}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
+        set_message_fields(goal, {'goalsets': [{'poses': [{'position': {'x': 0.627, 'y': -0.005, 'z': 0.751}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
 
         send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)
@@ -544,7 +544,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'target_pose': {'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}, 'trajectory_constraints': [0, 0, 1, 0, 0, 0]})
+        set_message_fields(request, {'goalsets': [{'poses': [{'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}], 'trajectory_constraints': [0, 0, 1, 0, 0, 0]})
 
         # Call service
         future = client.call_async(request)
@@ -626,7 +626,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create and send the goal
         goal = SendTrajectory.Goal()
-        set_message_fields(goal, {'target_pose': {'position': {'x': 0.627, 'y': -0.005, 'z': 0.751}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
+        set_message_fields(goal, {'goalsets': [{'poses': [{'position': {'x': 0.627, 'y': -0.005, 'z': 0.751}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
 
         send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)

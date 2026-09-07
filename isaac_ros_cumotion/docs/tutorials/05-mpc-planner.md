@@ -28,7 +28,7 @@ MPC parameters are read when the solver is built; if you want to change them (e.
 
 ```bash
 ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{target_pose: {position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}" --feedback
+  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
 ```
 
 Watch the feedback: `state` goes `PLANNING` → `TRACKING`, `position_error` shrinks, and when it drops under `convergence_threshold` (default 1 cm) you get `on_target: true` with state `ON_TARGET`. Unlike the open-loop planners, **the action does not finish there** — the controller keeps servoing on the target until you cancel the goal (Ctrl-C on the CLI, or `stop robot` in RViz).

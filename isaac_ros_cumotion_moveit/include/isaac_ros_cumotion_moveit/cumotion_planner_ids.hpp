@@ -36,9 +36,9 @@ namespace manipulation
  *
  * Only the Joint Space planner is exposed: it is the only one that honours a
  * MoveIt joint-space goal (`target_joint_positions`). The pose planners
- * (Classic/Multipoint) consume a Cartesian `target_pose`/`target_poses` and are
- * hidden to avoid silently planning toward an empty goal when a joint goal is
- * sent. Closed-loop planners (MPC, retargeting) are excluded too.
+ * (Classic/Multipoint) consume Cartesian `goalsets` (a goal-set per segment)
+ * and are hidden to avoid silently planning toward an empty goal when a joint
+ * goal is sent. Closed-loop planners (MPC, retargeting) are excluded too.
  *
  * `kAutoPlannerId` selects the Joint Space planner (the only available one).
  */

@@ -22,8 +22,7 @@ Request:
 | Field | Type | Used by |
 |---|---|---|
 | `start_pose` | `sensor_msgs/JointState` | All planners. Empty = current robot state |
-| `target_pose` | `geometry_msgs/Pose` | Classic planner (single Cartesian goal) |
-| `target_poses` | `geometry_msgs/Pose[]` | Multi-point planner (sequence of waypoints) |
+| `goalsets` | `Goalset[]` | Cartesian planners. One entry per segment; `Goalset.poses` is a candidate set (Classic resolves `poses` inside one solve, Multi-point uses one per waypoint) |
 | `target_joint_positions` | `float64[]` | Joint-space planner |
 | `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags for the single goal |
 | `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo) |
@@ -36,12 +35,13 @@ Response:
 | `message` | `string` | Human-readable status |
 | `trajectory` | `sensor_msgs/JointState[]` | Waypoints with position and velocity |
 | `dt` | `float64` | Time step between waypoints (seconds) |
+| `selected_goal_index` | `int16[]` | Winner per `goalsets[i]` (empty when `goalsets` is empty; `-1` for a failed/empty segment) |
 
-The active planner decides which target field it consumes: sending `target_pose` while the joint-space planner is active will not do what you expect. Switch planners first with `set_planner`.
+`Goalset` is a `geometry_msgs/Pose[]` wrapper: a set of `1` is a fixed waypoint, a set of `N > 1` candidate poses is resolved by cuRobo inside a single plan (capped by the `max_goalset` parameter). Sending `goalsets` while the joint-space planner is active will not do what you expect. Switch planners first with `set_planner`.
 
 ```bash
 ros2 service call /unified_planner/generate_trajectory curobo_msgs/srv/TrajectoryGeneration \
-  "{target_pose: {position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}"
+  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}"
 ```
 
 ### `/unified_planner/set_planner`
@@ -212,8 +212,7 @@ Goal (mirrors `TrajectoryGeneration`; the active planner decides which fields it
 | Field | Type | Notes |
 |---|---|---|
 | `start_pose` | `sensor_msgs/JointState` | Empty = current state |
-| `target_pose` | `geometry_msgs/Pose` | Classic / MPC / Retarget |
-| `target_poses` | `geometry_msgs/Pose[]` | Multi-point |
+| `goalsets` | `Goalset[]` | Cartesian: one segment per waypoint; `poses` = candidate set (Classic resolves, Multi-point loops, MPC/Retarget require exactly one pose) |
 | `target_joint_positions` | `float64[]` | Joint-space |
 | `allow_cached` | `bool` (default `true`) | Reuse a matching, non-expired trajectory from a previous `generate_trajectory` call |
 
@@ -233,7 +232,7 @@ With an **open-loop** planner (classic, multi-point, joint-space) the action pla
 
 ```bash
 ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{target_pose: {position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}" --feedback
+  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
 ```
 
 ## Topics

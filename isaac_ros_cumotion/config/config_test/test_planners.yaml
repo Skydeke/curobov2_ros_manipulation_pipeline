@@ -50,11 +50,13 @@ tests:
         name: ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'joint_7']
         position: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
         velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      target_poses:
-        - position: {x: 0.5, y: 0.0, z: 0.5}
-          orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
-        - position: {x: 0.3, y: 0.3, z: 0.6}
-          orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.5, y: 0.0, z: 0.5}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+        - poses:
+            - position: {x: 0.3, y: 0.3, z: 0.6}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     expect:
       success: True
 
@@ -79,9 +81,10 @@ tests:
     type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
     # Computes + caches the trajectory (start defaults to the robot's pose).
     data:
-      target_pose:
-        position: {x: 0.5, y: 0.0, z: 0.5}
-        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.5, y: 0.0, z: 0.5}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     expect: {success: True}
 
   - name: "07 Execute classic cached"
@@ -90,9 +93,10 @@ tests:
     # Same target as the preview -> the node REUSES the cached plan (no recompute)
     # and the open-loop action terminates on its own.
     data:
-      target_pose:
-        position: {x: 0.5, y: 0.0, z: 0.5}
-        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.5, y: 0.0, z: 0.5}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     timeout: 90.0
     expect: {success: True}
 
@@ -119,9 +123,10 @@ tests:
     # servo toward it. The action servos CONTINUOUSLY: we let it run, then cancel;
     # the generator asserts feedback was streamed (the servo loop ran).
     data:
-      target_pose:
-        position: {x: 0.627, y: -0.005, z: 0.751}
-        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.627, y: -0.005, z: 0.751}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     cancel_after: 6.0
     timeout: 90.0
     expect: {success: False}   # canceled (reactive never self-completes)
@@ -138,9 +143,10 @@ tests:
     # Lock rotation about Z along the path (ToolPoseCriteria) — exercises the
     # constraint code path; must still plan successfully and reset afterwards.
     data:
-      target_pose:
-        position: {x: 0.5, y: 0.0, z: 0.5}
-        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.5, y: 0.0, z: 0.5}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
       trajectory_constraints: [0, 0, 1, 0, 0, 0]
     expect: {success: True}
 
@@ -159,9 +165,10 @@ tests:
     # Same pose that defeats the MPC's 1-seed IK — the retargeter's 64-seed global
     # IK reaches it. Reactive servoing is continuous: run, then cancel.
     data:
-      target_pose:
-        position: {x: 0.627, y: -0.005, z: 0.751}
-        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.627, y: -0.005, z: 0.751}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     cancel_after: 6.0
     timeout: 90.0
     expect: {success: False}   # canceled (reactive never self-completes)

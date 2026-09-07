@@ -33,6 +33,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetMask.srv"
   "msg/ObjectParameters.msg"
   "msg/SparseVoxelGrid.msg"
+  "msg/Goalset.msg"
   "action/SendTrajectory.action"
   "srv/TrajectoryGeneration.srv"
   "srv/GetVoxelGrid.srv"

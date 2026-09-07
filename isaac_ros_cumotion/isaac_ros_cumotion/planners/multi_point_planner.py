@@ -12,8 +12,6 @@ v2 notes:
   v2 users that need smoother blending can switch to a single goalset call.
 """
 
-from typing import List
-
 from curobo.types import JointState, Pose, GoalToolPose
 
 from .single_planner import SinglePlanner
@@ -36,21 +34,15 @@ class MultiPointPlanner(SinglePlanner):
         goal_request,
         config: dict,
     ):
-        # Extract waypoints from request (MultiPointPlanner uses target_poses).
-        # v2 Pose.from_list expects [x, y, z, qw, qx, qy, qz] (wxyz).
-        tool_frame = self.motion_planner.tool_frames[0]
-        waypoints: List[GoalToolPose] = []
-        for pose_msg in goal_request.target_poses:
-            p = Pose.from_list([
-                pose_msg.position.x,
-                pose_msg.position.y,
-                pose_msg.position.z,
-                pose_msg.orientation.w,
-                pose_msg.orientation.x,
-                pose_msg.orientation.y,
-                pose_msg.orientation.z,
-            ])
-            waypoints.append(GoalToolPose.from_poses({tool_frame: p}))
+        # Waypoint segments come from `goalsets`: entry i is the candidate set
+        # (one GoalToolPose; N poses => goalset solve, 1 pose => fixed waypoint)
+        # for the i-th segment. Node validation guarantees >= 1 non-empty entry.
+        waypoints = self._build_goal_segments(goal_request)
+        if not waypoints:
+            self.node.get_logger().warn(
+                "MultiPointPlanner: goalsets is empty - nothing to plan to"
+            )
+            return None
 
         max_attempts = config.get('max_attempts', 1)
         connect_waypoints = config.get('connect_waypoints', False)
@@ -69,6 +61,7 @@ class MultiPointPlanner(SinglePlanner):
         # Hold the requested Cartesian axes along every segment; reset after
         # (the MotionPlanner is shared across planners).
         applied = self._apply_pose_constraints(goal_request)
+        selected = []
         try:
             current_state = start_state.clone()
             combined_trajectory = None
@@ -85,15 +78,20 @@ class MultiPointPlanner(SinglePlanner):
                     current_state.clone(),
                     max_attempts=max_attempts,
                 )
+                # Per-segment winner index: -1 on a failed/absent solve keeps the
+                # response aligned with goalsets (index of the segment itself).
+                selected.append(self._select_goal_index(result))
 
                 # v2: plan_pose() returns None when no solution is found.
                 if result is None:
+                    self._selected_goal_indexes = selected
                     self.node.get_logger().error(
                         f"Failed to plan to waypoint {i}: no solution found (plan_pose returned None)"
                     )
                     return None
 
                 if not result.success.item():
+                    self._selected_goal_indexes = selected
                     self.node.get_logger().error(
                         f"Failed to plan to waypoint {i}: {result.status}"
                     )
@@ -138,6 +136,7 @@ class MultiPointPlanner(SinglePlanner):
                     )
                 last_result = result
 
+            self._selected_goal_indexes = selected
             self._combined_trajectory = combined_trajectory
             return last_result
         finally:

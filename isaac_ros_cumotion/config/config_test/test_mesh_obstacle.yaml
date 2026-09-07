@@ -85,8 +85,9 @@ tests:
     # budget of a test that expects False only delays detecting a real hang.
     timeout: 30.0
     data:
-      target_pose:
-        position: {x: 0.1, y: 0.0, z: 0.1}
-        orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      goalsets:
+        - poses:
+            - position: {x: 0.1, y: 0.0, z: 0.1}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     expect:
       success: False

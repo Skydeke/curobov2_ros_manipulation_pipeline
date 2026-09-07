@@ -60,7 +60,7 @@ class ConfigWrapperMotion(ConfigWrapper):
         self.orientation_tolerance = 0.05
         self.max_batch_size = 1
         self.multi_env = False
-        self.max_goalset = 1
+        self.max_goalset = self._resolve_max_goalset(node)
 
         self.motion_gen_srv = node.create_service(
             Trigger,
@@ -69,6 +69,19 @@ class ConfigWrapperMotion(ConfigWrapper):
         )
 
         self.init_services(node)
+
+    def _resolve_max_goalset(self, node) -> int:
+        """Per-segment candidate-set cap, read from the node's ROS param.
+
+        Default 16 (the core hard-errors when a goalset exceeds
+        ``config.max_goalset``, and the solver buffer is sized from it at build
+        time). Specified via launch parameters and re-read on every
+        ``update_motion_gen_config`` so a runtime change takes effect on
+        rebuild.
+        """
+        if node.has_parameter('max_goalset'):
+            return int(node.get_parameter('max_goalset').get_parameter_value().integer_value)
+        return 16
 
     def set_motion_gen_config(self, node, _, response):
         """
@@ -98,7 +111,7 @@ class ConfigWrapperMotion(ConfigWrapper):
             optimizer_collision_activation_distance=collision_activation_distance,
             max_batch_size=self.max_batch_size,
             multi_env=self.multi_env,
-            max_goalset=self.max_goalset,
+            max_goalset=self._resolve_max_goalset(node),
         )
 
         node.motion_planner = MotionPlanner(cfg)

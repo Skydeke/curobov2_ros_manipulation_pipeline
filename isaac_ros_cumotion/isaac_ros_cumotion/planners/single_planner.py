@@ -30,7 +30,7 @@ from rclpy.qos import (
     HistoryPolicy,
 )
 
-from curobo.types import JointState
+from curobo.types import JointState, Pose, GoalToolPose
 from curobo.motion_planner import MotionPlanner
 # v2: PoseCostMetric is gone; Cartesian axis constraints use ToolPoseCriteria.
 # Not re-exported publicly yet, so import from _src (same pattern as Mapper).
@@ -365,6 +365,82 @@ class SinglePlanner(TrajectoryPlanner):
         tool_frame = self.motion_planner.tool_frames[0]
         self.motion_planner.update_tool_pose_criteria({tool_frame: ToolPoseCriteria()})
 
+    # ------------------------------------------------------------------
+    # Goalset support (per-waypoint candidate sets, open-loop planners)
+    # ------------------------------------------------------------------
+
+    def _build_goal_segments(self, goal_request):
+        """One GoalToolPose per ``goalsets[i]``; ``[]`` when `goalsets` is empty.
+
+        A segment with N candidate poses becomes a goalset solve
+        (``GoalToolPose ... num_goalset=N``): cuRobo resolves the set inside
+        that single ``plan_pose()`` call and reports the winner via
+        ``result.goalset_index``. ``N == 1`` degenerates to a fixed waypoint —
+        today's single-goal plan. ``None`` entries would break index alignment,
+        so ``goalsets[i]`` with zero poses is skipped from the segment list;
+        the node's validation rejects such requests before planning.
+        """
+        sets = list(getattr(goal_request, 'goalsets', None) or [])
+        if not sets:
+            return []
+        tool_frame = self.motion_planner.tool_frames[0]
+        segments = []
+        for gset in sets:
+            poses = [
+                [p.position.x, p.position.y, p.position.z,
+                 p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
+                for p in gset.poses
+            ]
+            if not poses:
+                continue
+            pose = Pose.from_batch_list(poses)
+            segments.append(
+                GoalToolPose.from_poses({tool_frame: pose}, num_goalset=len(poses))
+            )
+        return segments
+
+    @staticmethod
+    def _select_goal_index(result) -> int:
+        """Winner candidate index of a plan_pose goalset solve.
+
+        ``result.goalset_index`` is a ``[batch, num_seeds]`` int tensor (the
+        core reads it with ``.view(-1)[0].item()``, motion_planner.py). Single-
+        candidate solves leave it ``None``, and the winner is trivially
+        candidate 0. ``-1`` signals a failed/absent solve.
+        """
+        if result is None or not getattr(result, 'success', False):
+            return -1
+        succ = getattr(result, 'success', False)
+        if hasattr(succ, 'item') and not bool(succ.item()):
+            return -1
+        idx = getattr(result, 'goalset_index', None)
+        if idx is None:
+            return 0
+        try:
+            flat = idx.view(-1) if hasattr(idx, 'view') else idx
+            return int(flat[0].item())
+        except (TypeError, ValueError, IndexError):
+            return -1
+
+    def _result_metadata(self, result=None, num_wp=None) -> dict:
+        """Metadata block for PlannerResult; includes per-segment goalset winners.
+
+        ``selected_goal_index`` rides here (a plain int list) so the node can
+        copy it straight into the service response, and is shaped by the child
+        planner in ``_plan_trajectory`` (one entry per ``goalsets[i]`` segment).
+        """
+        metadata = {
+            'planner_type': self.get_planner_name(),
+        }
+        if num_wp is not None:
+            metadata['num_waypoints'] = num_wp
+        if result is not None:
+            metadata['planning_time'] = getattr(result, 'solve_time', 0.0)
+        sel = getattr(self, '_selected_goal_indexes', None)
+        if sel is not None:
+            metadata['selected_goal_index'] = [int(x) for x in sel]
+        return metadata
+
     def cancel(self):
         """
         Cancel the current trajectory execution.
@@ -394,7 +470,7 @@ class SinglePlanner(TrajectoryPlanner):
         Args:
             start_state: Initial joint configuration
             goal_request: TrajectoryGeneration request containing goal specification
-                         Child classes extract what they need (target_pose or target_poses)
+                         Child classes extract what they need (goalsets or target_joint_positions)
             config: Dictionary with planner-specific parameters
                    Common parameters:
                    - max_attempts: Number of planning attempts
@@ -420,6 +496,10 @@ class SinglePlanner(TrajectoryPlanner):
         # set_command() (robot_context is not None). A stale epoch from a
         # PREVIOUS plan() call must not silently guard this one's execute().
         self._command_epoch = None
+        # Reset per-segment goalset winners — children (ClassicPlanner /
+        # MultiPointPlanner) set this in _plan_trajectory; plan() reports it as
+        # metadata['selected_goal_index'] so the node can fill the response.
+        self._selected_goal_indexes = None
 
         try:
             # Let child class generate the trajectory using MotionGen
@@ -431,6 +511,7 @@ class SinglePlanner(TrajectoryPlanner):
                 return PlannerResult(
                     success=False,
                     message="Planning failed: no solution found (plan_pose returned None)",
+                    metadata=self._result_metadata(result=None, num_wp=None),
                 )
 
             success_val = result.success
@@ -440,7 +521,7 @@ class SinglePlanner(TrajectoryPlanner):
                 return PlannerResult(
                     success=False,
                     message=f"Planning failed: {getattr(result, 'status', 'unknown')}",
-                    metadata={'result': result}
+                    metadata=self._result_metadata(result=result)
                 )
 
             # Get interpolated trajectory
@@ -512,11 +593,7 @@ class SinglePlanner(TrajectoryPlanner):
                 success=True,
                 message="Trajectory planned successfully",
                 trajectory=self.planned_trajectory,
-                metadata={
-                    'num_waypoints': num_wp,
-                    'planning_time': getattr(result, 'solve_time', 0.0),
-                    'planner_type': self.get_planner_name(),
-                }
+                metadata=self._result_metadata(result=result, num_wp=num_wp),
             )
 
         except Exception as e:
@@ -539,8 +616,8 @@ class SinglePlanner(TrajectoryPlanner):
         Generate trajectory using MotionPlanner.plan_pose() (v2).
 
         Child planners extract different data from goal_request:
-        - ClassicPlanner: goal_request.target_pose  → single GoalToolPose
-        - MultiPointPlanner: goal_request.target_poses → goalset GoalToolPose
+        - ClassicPlanner: goalsets[0]  → single GoalToolPose (goal-set resolve when N>1)
+        - MultiPointPlanner: goalsets[i] → per-waypoint GoalToolPose
         - JointSpacePlanner: goal_request.target_joints → joint goal
 
         Args:

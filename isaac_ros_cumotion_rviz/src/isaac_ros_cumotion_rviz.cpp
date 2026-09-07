@@ -1,4 +1,5 @@
 #include "isaac_ros_cumotion_rviz/isaac_ros_cumotion_rviz.hpp"
+#include "isaac_ros_cumotion_interfaces/msg/goalset.hpp"
 #include <cmath>
 
 namespace isaac_ros_cumotion_rviz
@@ -400,12 +401,12 @@ namespace isaac_ros_cumotion_rviz
         RCLCPP_INFO(node_->get_logger(), "Published goal pose once for execution");
 
         // REQUIRED for the open-loop path, and it used to be missing: the goal
-        // went out default-constructed, i.e. target_pose = (0,0,0) with identity
-        // orientation -- the dsr01/world origin, inside the robot's own base.
+        // went out default-constructed, i.e. an empty goalsets entry -- the
+        // dsr01/world origin, inside the robot's own base.
         //
         // The panel relied on the server reusing the plan the "generate" button
         // had just cached (allow_cached defaults to true). But that reuse is
-        // gated by _pending_plan_matches(), whose signature INCLUDES target_pose
+        // gated by _pending_plan_matches(), whose signature INCLUDES goalsets
         // and compares positions to 1 mm (unified_planner_node.py
         // _target_signature/_poses_match). Cached signature = the real marker
         // pose, incoming goal = the origin -> guaranteed mismatch, so the server
@@ -415,9 +416,11 @@ namespace isaac_ros_cumotion_rviz
         //
         // MPC never showed this because the reactive path gets its target from
         // mpc_goal_pub_ (republished at 10 Hz by mpc_goal_publisher_timer_),
-        // which overrides the empty target_pose. The open-loop path has no such
+        // which overrides the empty goalset. The open-loop path has no such
         // second source -- the cache was its only route, and it was unreachable.
-        goal_request.target_pose = marker_pose;
+        isaac_ros_cumotion_interfaces::msg::Goalset gset;
+        gset.poses.push_back(marker_pose);
+        goal_request.goalsets.push_back(gset);
       } else {
         RCLCPP_WARN(node_->get_logger(),
                     "Arrow marker not available - goal sent WITHOUT a target pose "
@@ -501,7 +504,9 @@ namespace isaac_ros_cumotion_rviz
       }
 
       auto goal_request = std::make_shared<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request>();
-      goal_request->target_pose = this->arrow_interaction_->get_pose();
+      isaac_ros_cumotion_interfaces::msg::Goalset gset;
+      gset.poses.push_back(this->arrow_interaction_->get_pose());
+      goal_request->goalsets.push_back(gset);
 
       trajectory_generation_client_->async_send_request(goal_request,
         [this, on_done](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedFuture future) {
@@ -542,7 +547,9 @@ namespace isaac_ros_cumotion_rviz
         }
 
         auto gen_request = std::make_shared<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request>();
-        gen_request->target_pose = arrow_interaction_->get_pose();
+        isaac_ros_cumotion_interfaces::msg::Goalset gset;
+        gset.poses.push_back(arrow_interaction_->get_pose());
+        gen_request->goalsets.push_back(gset);
 
         trajectory_generation_client_->async_send_request(gen_request,
           [this](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedFuture future) {

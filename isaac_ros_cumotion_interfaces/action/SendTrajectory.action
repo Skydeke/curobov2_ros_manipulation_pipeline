@@ -2,8 +2,9 @@
 # Mirrors TrajectoryGeneration.srv so the action can plan if no cached plan is
 # reused. The active planner decides which field(s) it consumes.
 sensor_msgs/JointState start_pose
-geometry_msgs/Pose target_pose
-geometry_msgs/Pose[] target_poses
+Goalset[] goalsets       # the Cartesian goal path (one entry per segment) —
+                         #   len(poses)==1 -> fixed waypoint
+                         #   len(poses)==N -> candidate set, planner picks best
 float64[] target_joint_positions
 bool allow_cached true   # reuse a matching, non-expired pre-planned trajectory
 ---

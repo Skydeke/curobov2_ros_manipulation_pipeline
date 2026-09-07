@@ -8,7 +8,8 @@ tests, and launch configs).
 - [x] SendTrajectory.action   -- unified_planner_node, single_planner, reactive_controller, isaac_ros_cumotion_rviz, mpc_viser_node, test_test_planners
 - [ ] DataGeneration.action   -- NOT used anywhere
 
-## Messages (used: 3 / 6)
+## Messages (used: 4 / 7)
+- [x] Goalset.msg             -- TrajectoryGeneration.srv / SendTrajectory.action, mp_viser_node, mpc_viser_node, grasp_orchestrator, cumotion_service_client, isaac_ros_cumotion_rviz
 - [x] ObjectParameters.msg    -- isaac_ros_cumotion_rviz (add_objects_display/panel)
 - [x] SparseVoxelGrid.msg     -- obstacle_manager, ros_service_manager, isaac_ros_cumotion_rviz (sparse_voxel_grid_display)
 - [x] MpcCosts.msg            -- mpc_planner (publisher)
@@ -16,7 +17,7 @@ tests, and launch configs).
 - [ ] MpcStepDiagnostics.msg  -- NOT used anywhere
 - [ ] ReachabilityMetrics.msg -- NOT used anywhere
 
-## Services (used: 18 / 22)
+## Services (used: 19 / 22)
 - [x] AddObject.srv           -- obstacle_manager, ros_service_manager, cumotion_service_client, rviz add_objects
 - [x] AttachObject.srv        -- attachment_services, test_test_object
 - [x] Fk.srv                  -- fk_services, fk_viser_node
@@ -41,7 +42,7 @@ tests, and launch configs).
 - [ ] SceneGenerator.srv      -- NOT used anywhere
 
 ## Summary
-- Used: 1 action, 3 messages, 19 services (23 total)
+- Used: 1 action, 4 messages, 19 services (24 total)
 - Unused: 1 action, 3 messages, 3 services (7 total)
     DataGeneration, GpuVoxelTensor, MpcStepDiagnostics, ReachabilityMetrics,
     Collisions, GenerateRM, SceneGenerator

@@ -176,7 +176,7 @@ bool CumotionServiceClient::plan(
       return false;
     }
     // A joint-space goal can only be planned by the JOINT_SPACE planner; the
-    // pose planners (Classic/Multipoint) consume target_pose/target_poses, not
+    // pose planners (Classic/Multipoint) consume `goalsets`, not
     // target_joint_positions, and would silently plan toward an empty goal.
     // Force JointSpace regardless of the requested planner_id.
     if (!auto_planner) {
@@ -192,11 +192,10 @@ bool CumotionServiceClient::plan(
     req.target_joint_positions = std::move(joint_positions);
   } else if (!constraint.position_constraints.empty() || !constraint.orientation_constraints.empty()) {
     // POSE goal -> classic (Cartesian) planner by default.
-    // Populate both the single target_pose (used by Classic/JointSpace) and the
-    // target_poses waypoint list (used by Multipoint), each extracted from the
-    // position constraints the way MoveIt's poseFromConstraint does: the goal
-    // position lives in the constraint-region primitive pose plus the
-    // target_point_offset.
+    // Collect waypoints from the position constraints the way MoveIt's
+    // poseFromConstraint does: the goal position lives in the constraint-region
+    // primitive pose plus the target_point_offset. Each waypoint becomes a
+    // single-pose goalset segment (one candidate); Classic uses the first one.
     const auto extract_pose = [](const auto & pc) {
       geometry_msgs::msg::Pose p;
       p.position.x = pc.target_point_offset.x;
@@ -211,24 +210,25 @@ bool CumotionServiceClient::plan(
       }
       return p;
     };
+    std::vector<geometry_msgs::msg::Pose> waypoints;
     for (const auto & pc : constraint.position_constraints) {
-      req.target_poses.push_back(extract_pose(pc));
+      waypoints.push_back(extract_pose(pc));
     }
-    if (req.target_poses.empty() && !constraint.orientation_constraints.empty()) {
+    if (waypoints.empty() && !constraint.orientation_constraints.empty()) {
       // Orientation-only goal.
       geometry_msgs::msg::Pose p;
       p.orientation = constraint.orientation_constraints.front().orientation;
-      req.target_poses.push_back(p);
+      waypoints.push_back(p);
     }
     // Classic uses the first waypoint as its single target pose.
-    geometry_msgs::msg::Pose pose = req.target_poses.empty() ? geometry_msgs::msg::Pose()
-      : req.target_poses.front();
+    geometry_msgs::msg::Pose pose = waypoints.empty() ? geometry_msgs::msg::Pose()
+      : waypoints.front();
     if (!constraint.orientation_constraints.empty() &&
       pose.orientation == geometry_msgs::msg::Quaternion())
     {
       pose.orientation = constraint.orientation_constraints.front().orientation;
-      if (!req.target_poses.empty()) {
-        req.target_poses.front().orientation = pose.orientation;
+      if (!waypoints.empty()) {
+        waypoints.front().orientation = pose.orientation;
       }
     }
     if (auto_planner) {
@@ -237,14 +237,18 @@ bool CumotionServiceClient::plan(
     RCLCPP_INFO_STREAM(node_->get_logger(),
       "Pose goal: link=" << (constraint.position_constraints.empty()
         ? std::string("(none)") : constraint.position_constraints.front().link_name)
-      << " waypoints=" << req.target_poses.size()
-      << " target_pose=[x=" << pose.position.x << " y=" << pose.position.y
+      << " waypoints=" << waypoints.size()
+      << " goal=[x=" << pose.position.x << " y=" << pose.position.y
       << " z=" << pose.position.z << "]");
+    for (const auto & wp : waypoints) {
+      isaac_ros_cumotion_interfaces::msg::Goalset gset;
+      gset.poses.push_back(wp);
+      req.goalsets.push_back(gset);
+    }
     if (!setPlanner(planner_type, planner_msg)) {
       RCLCPP_ERROR_STREAM(node_->get_logger(), "setPlanner failed: " << planner_msg);
       return false;
     }
-    req.target_pose = pose;
   } else {
     RCLCPP_ERROR(node_->get_logger(), "Unsupported goal constraint type");
     return false;

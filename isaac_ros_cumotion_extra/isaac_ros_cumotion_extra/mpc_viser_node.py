@@ -40,6 +40,7 @@ from sensor_msgs.msg import JointState
 
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
 from isaac_ros_cumotion_interfaces.srv import SetPlanner
+from isaac_ros_cumotion_interfaces.msg import Goalset
 
 from ._viser_helpers import (
     _start_positions,
@@ -262,14 +263,15 @@ class MpcViserNode(Node):
         start_js.name = list(self._joint_names)
         start_js.position = _start_positions(self._content, self._joint_names, self._js)
         goal.start_pose = start_js
-        goal.target_pose = Pose()
-        goal.target_pose.position.x = float(pos[0])
-        goal.target_pose.position.y = float(pos[1])
-        goal.target_pose.position.z = float(pos[2])
-        goal.target_pose.orientation.w = float(quat[0])
-        goal.target_pose.orientation.x = float(quat[1])
-        goal.target_pose.orientation.y = float(quat[2])
-        goal.target_pose.orientation.z = float(quat[3])
+        p = Pose()
+        p.position.x = float(pos[0])
+        p.position.y = float(pos[1])
+        p.position.z = float(pos[2])
+        p.orientation.w = float(quat[0])
+        p.orientation.x = float(quat[1])
+        p.orientation.y = float(quat[2])
+        p.orientation.z = float(quat[3])
+        goal.goalsets = [Goalset(poses=[p])]
         goal.allow_cached = False
 
         self._set_status('Starting MPC...')

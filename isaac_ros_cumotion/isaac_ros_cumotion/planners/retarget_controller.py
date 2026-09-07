@@ -76,7 +76,15 @@ class RetargetController(ReactiveController):
         return solver
 
     def setup(self, start_state: JointState, goal_request: Any) -> bool:
-        p = goal_request.target_pose
+        gset = list(getattr(goal_request, 'goalsets', None) or [])
+        if not (len(gset) == 1 and len(gset[0].poses) == 1):
+            self.node.get_logger().error(
+                f"Retarget requires exactly one goalset entry with a single pose "
+                f"(got {len(gset)} sets, "
+                f"poses_per_set={[len(g.poses) for g in gset]})"
+            )
+            return False
+        p = gset[0].poses[0]
         raw = [
             p.position.x, p.position.y, p.position.z,
             p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z,
