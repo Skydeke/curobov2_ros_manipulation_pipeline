@@ -46,10 +46,10 @@ tests:
     type: isaac_ros_cumotion_interfaces/srv/AddObject
     # 4 cm cube: this is the object case 05 attaches, so it has to be both a
     # plausible grasped payload and small enough to fit the attach link's
-    # sphere budget (extra_collision_spheres.attached_object = 4 in m1013.yml,
-    # ~= a 4 cm cube). A larger cube would be attached as a coarse truncated
-    # approximation, making case 05 pass on a model that does not represent
-    # the real geometry.
+    # sphere budget (extra_collision_spheres.attached_object = 4 in the robot
+    # model supplied at launch, ~= a 4 cm cube). A larger cube would be attached
+    # as a coarse truncated approximation, making case 05 pass on a model that
+    # does not represent the real geometry.
     data: {type: 0,
             name: "cube2",
             mesh_file_path: "",

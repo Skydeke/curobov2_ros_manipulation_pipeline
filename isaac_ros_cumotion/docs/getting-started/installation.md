@@ -117,7 +117,7 @@ ros2 launch curobo_ros gen_traj.launch.py robot:=emulator
 
 RViz opens, then the planner warms up its GPU solvers — **expect 25–35 seconds** before the panels react. When `ros2 param get /unified_planner node_is_available` returns `true`, you are ready for [Tutorial 1: Your First Trajectory](../tutorials/01-first-trajectory.md).
 
-`robot:=emulator` runs without hardware. Omit it (default `robot:=doosan_m1013`) only when the Doosan bridge is up — see [Tutorial 4](../tutorials/04-robot-execution.md).
+`robot:=emulator` runs without hardware. The default is `robot:=emulator`; to run a real robot, select its descriptor and model at launch — a deployment repo (e.g. a Kortex package) supplies `robot`, `robot_config_file` and `urdf_path` (see [Tutorial 4](../tutorials/04-robot-execution.md)).
 
 ## Daily workflow
 

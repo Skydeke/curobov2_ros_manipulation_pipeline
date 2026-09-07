@@ -1,0 +1,35 @@
+<library path="isaac_ros_cumotion_rviz">
+
+  <class name="isaac_ros_cumotion_rviz/RvizArgsPanel"
+        type="isaac_ros_cumotion_rviz::RvizArgsPanel"
+        base_class_type="rviz_common::Panel">
+    <description>Curobo Rviz Panel</description>
+  </class>
+
+  <class name="add_objects_panel/AddObjectsPanel"
+          type="add_objects_panel::AddObjectsPanel"
+          base_class_type="rviz_common::Panel">
+      <description>Add Objects Panel</description>
+      <message_type>isaac_ros_cumotion_interfaces/msg/ObjectParameters</message_type>
+  </class>
+
+  <class name="add_objects_display/AddObjectsDisplay"
+        type="add_objects_display::AddObjectsDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Add Objects Display</description>
+  </class>
+
+  <class name="isaac_ros_cumotion_rviz/ArrowInteractionDisplay"
+        type="isaac_ros_cumotion_rviz::ArrowInteractionDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Interactive 6-DOF Arrow Marker for Target Pose</description>
+  </class>
+
+  <class name="isaac_ros_cumotion_rviz/SparseVoxelGridDisplay"
+        type="isaac_ros_cumotion_rviz::SparseVoxelGridDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Display the cuRobo mapper's occupied voxels from the SparseVoxelGrid topic.</description>
+    <message_type>isaac_ros_cumotion_interfaces/msg/SparseVoxelGrid</message_type>
+  </class>
+
+</library>

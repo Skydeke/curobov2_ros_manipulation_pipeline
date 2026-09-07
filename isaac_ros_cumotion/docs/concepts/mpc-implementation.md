@@ -86,8 +86,8 @@ mpc.update_world(scene)                           # dynamic obstacles (driven by
 `mpc_solver_type` selects how the underlying optimizer is configured:
 
 - **`mppi_acceleration`** (default) — a hand-tuned MPPI configuration in
-  ACCELERATION control space (`_build_mppi_optimizer_config`), validated on the
-  real Doosan M1013 (2026-07). Tuned companions: `mpc_warm_start_iters: 5`,
+  ACCELERATION control space (`_build_mppi_optimizer_config`), validated on a
+  real 7-DOF deployment robot (2026-07). Tuned companions: `mpc_warm_start_iters: 5`,
   `mpc_cold_start_iters: 10`, `mpc_mppi_num_particles: 400`.
 - **`lbfgs_bspline`** — cuRobo's stock L-BFGS + B-spline MPC config. If you use
   it, iteration counts must be multiples of 25 (e.g. 25/100).

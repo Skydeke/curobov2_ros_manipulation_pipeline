@@ -9,10 +9,10 @@ You will plan a motion from the command line, read the response, preview it in R
 In the container:
 
 ```bash
-ros2 launch curobo_ros gen_traj.launch.py robot:=emulator world_file:=$(ros2 pkg prefix curobo_ros)/share/curobo_ros/config/floor_world.yml
+ros2 launch curobo_ros gen_traj.launch.py robot:=emulator robot_config_file:=<path-to-your-robot-curobo.yml> world_file:=$(ros2 pkg prefix curobo_ros)/share/curobo_ros/config/floor_world.yml
 ```
 
-`robot:=emulator` runs the Doosan M1013 kinematics without hardware. The `world_file` adds a floor — without it the world is completely empty and the planner will happily swing the arm below the base.
+`robot:=emulator` runs the no-hardware emulator strategy. This package ships no robot model, so supply the cuRobo config via `robot_config_file` (deployments such as a Kortex package pass their own model here). The `world_file` adds a floor — without it the world is completely empty and the planner will happily swing the arm below the base.
 
 Wait for warmup (25–35 s). The node is ready when:
 
@@ -30,7 +30,7 @@ source /home/ros2_ws/install/setup.bash
 
 ## 2. Know your workspace
 
-The default robot is a **Doosan M1013**: 6 DOF, ~1.3 m reach, base frame `base_0`. A comfortable target zone for this tutorial:
+The robot model (supplied via `robot_config_file`) defines your workspace: joint limits, reach, and base frame. Use targets inside the arm's comfortable reach — for a ~1.3 m-reach tabletop arm a good start zone is roughly:
 
 - x: 0.3 to 0.9 m (in front of the robot)
 - y: −0.5 to 0.5 m

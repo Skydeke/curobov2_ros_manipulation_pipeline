@@ -250,7 +250,7 @@ ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/Sen
 | `/mpc_goal_marker` | `visualization_msgs/Marker` | MPC active | Current MPC goal |
 | `/mpc_costs` | `curobo_msgs/msg/MpcCosts` | MPC active | Per-step cost and constraint breakdown |
 
-The active control strategy adds its own topics, configured in the robot descriptor (`robots/<name>.yaml`). With the default Doosan setup: `/leeloo/execute_trajectory` (`trajectory_msgs/JointTrajectory`, published), `/leeloo/trajectory_state` (`std_msgs/Float32`, subscribed), `/dsr01/joint_states` (`sensor_msgs/JointState`, subscribed). The emulator strategy publishes `/emulator/joint_states` (`sensor_msgs/JointState`).
+The active control strategy adds its own topics, configured in the robot descriptor (`robots/<name>.yaml`). A deployment repo wires its own driver topics (e.g. a Kortex package: `/joint_trajectory_controller/joint_trajectory` published, `/joint_states` subscribed). The emulator strategy publishes `/emulator/joint_states` (`sensor_msgs/JointState`).
 
 ### Subscribed by `unified_planner`
 

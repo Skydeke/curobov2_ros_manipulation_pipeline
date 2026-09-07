@@ -41,6 +41,7 @@
 
   <depend>geometry_msgs</depend>
   <depend>isaac_ros_cumotion_interfaces</depend>
+  <depend>curobo_core</depend>
 
   <!--
     Not declared as rosdep exec_depends: `torch` and `curobo` (cuRobo v0.8.x).

@@ -2,13 +2,13 @@
 
 **Difficulty**: Intermediate · **Time**: ~30 min · **Prerequisites**: [Tutorial 1](01-first-trajectory.md)
 
-curobo_ros separates *planning* from *execution*, and separates **which robot** you plan for from **how commands reach it**. This tutorial explains the two axes, the built-in emulator, and how the real Doosan M1013 is wired.
+curobo_ros separates *planning* from *execution*, and separates **which robot** you plan for from **how commands reach it**. This tutorial explains the two axes, the built-in emulator, and how a real robot is wired.
 
 ## Two orthogonal axes
 
 | Axis | Parameter | Values | Selects |
 |---|---|---|---|
-| Which robot | `robot` (launch arg) | `doosan_m1013`, `emulator`, your own | The descriptor `robots/<name>.yaml`: URDF, cuRobo config, driver topics |
+| Which robot | `robot` (launch arg) | a deploy-repo descriptor (e.g. one from a Kortex package), the shipped `emulator`, or your own | The descriptor `robots/<name>.yaml` (or an absolute path to it): URDF, cuRobo config, driver topics |
 | How to command it | `control_strategy` | `emulator`, `joint_speed`, `joint_pose` | The `JointCommandStrategy` implementation |
 
 The descriptor sets the *default* strategy (`strategy:` key), and you can switch strategies at runtime without restarting.
@@ -19,15 +19,15 @@ The descriptor sets the *default* strategy (`strategy:` key), and you can switch
 
 Simulates execution: replays the planned trajectory on a thread and publishes `/emulator/joint_states` (`sensor_msgs/JointState`), which the launch file feeds into `robot_state_publisher` — the RViz robot moves as if real. Always start here.
 
-### `joint_speed` — velocity streaming (the real M1013 path)
+### `joint_speed` — velocity streaming
 
-Streams `trajectory_msgs/JointTrajectory` chunks *with velocities* to a driver bridge, applies a hard acceleration clamp, and reads back real joint states and progress. Topics come from the descriptor's `strategy_params` — for the lab's M1013 (robot name `leeloo`):
+Streams `trajectory_msgs/JointTrajectory` chunks *with velocities* to a driver bridge, applies a hard acceleration clamp, and reads back real joint states and progress. Topics come from the descriptor's `strategy_params`. As an example, a lab robot wired `strategy: joint_speed` might declare:
 
 | Topic | Type | Direction |
 |---|---|---|
-| `/leeloo/execute_trajectory` | `trajectory_msgs/JointTrajectory` | → driver bridge |
-| `/leeloo/trajectory_state` | `std_msgs/Float32` (progress 0→1) | ← driver bridge |
-| `/dsr01/joint_states` | `sensor_msgs/JointState` | ← Doosan driver |
+| `/joint_trajectory_controller/joint_trajectory` | `trajectory_msgs/JointTrajectory` | → driver bridge |
+| `/joint_trajectory_controller/trajectory_state` | `std_msgs/Float32` (progress 0→1) | ← driver bridge |
+| `/joint_states` | `sensor_msgs/JointState` | ← robot driver |
 
 This is also the strategy used by closed-loop planners (MPC/retarget) on the real robot.
 
@@ -82,7 +82,7 @@ Safety notes for hardware:
      joint_states_topic: /my_robot/joint_states
    ```
 
-2. Your driver side must consume `JointTrajectory` chunks and report progress as a `Float32` (0→1) — the `leeloo` bridge is the reference implementation.
+2. Your driver side must consume `JointTrajectory` chunks and report progress as a `Float32` (0→1) — a deployment repo's bridge is the reference implementation.
 3. Joint *ordering* between your driver and the cuRobo cspace must match; remap in your bridge if the driver uses a different order.
 4. Validate on `emulator` first, then dry-run `joint_speed` with the arm in free space.
 

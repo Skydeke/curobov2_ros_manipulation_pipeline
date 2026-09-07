@@ -150,8 +150,20 @@ def load_robot_description(name_or_path: str) -> RobotDescription:
     strategy_params = desc.get('strategy_params', {}) or {}
 
     curobo_uri = desc.get('curobo_config')
+    # Robot-abstract: a descriptor MAY omit curobo_config (e.g. the shipped
+    # model-less emulator). Consumers that need a real robot model resolve it
+    # via the robot_config_file override (supplied by the robot's own repo), not
+    # the descriptor. When present we resolve it exactly as before.
     if not curobo_uri:
-        raise ValueError(f"Descriptor {desc_path} is missing required 'curobo_config'")
+        return RobotDescription(
+            name=name,
+            display_name=display_name,
+            curobo_config_path='',
+            robot_cfg_dict={},
+            base_link=desc.get('base_link'),
+            strategy_key=strategy_key,
+            strategy_params=strategy_params,
+        )
     curobo_path = _resolve_uri(curobo_uri, os.path.dirname(desc_path))
 
     # Resolve the two portability-sensitive paths (urdf_path/asset_root_path)

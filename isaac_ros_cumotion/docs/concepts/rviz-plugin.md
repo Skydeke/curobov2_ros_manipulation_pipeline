@@ -29,7 +29,7 @@ The plugin registers four components (`rviz2_plugin.xml`):
 
 ### Target pose — the interactive arrow
 
-`ArrowInteractionDisplay` shows a draggable 6-DOF arrow in the 3D view. The `RvizArgsPanel` pose spin boxes (X/Y/Z, Roll/Pitch/Yaw) stay synchronized with the arrow in both directions: drag the arrow or type coordinates, whichever is easier. The pose is expressed in the robot base frame (`base_0` for the Doosan M1013).
+`ArrowInteractionDisplay` shows a draggable 6-DOF arrow in the 3D view. The `RvizArgsPanel` pose spin boxes (X/Y/Z, Roll/Pitch/Yaw) stay synchronized with the arrow in both directions: drag the arrow or type coordinates, whichever is easier. The pose is expressed in the robot base frame (from the robot descriptor / model).
 
 ### Main panel (`RvizArgsPanel`)
 

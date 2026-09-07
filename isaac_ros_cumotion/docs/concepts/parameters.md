@@ -20,7 +20,7 @@ These are the launch arguments that actually configure the system:
 
 | Argument | Default | Description |
 |---|---|---|
-| `robot` | `doosan_m1013` | Robot descriptor name — loads `robots/<name>.yaml` (e.g. `doosan_m1013`, `emulator`) |
+| `robot` | `emulator` | Robot descriptor name (loads `robots/<name>.yaml`) or path. Robot-abstract: no robot is hardcoded; concrete robots (e.g. Kortex) provide their own descriptor and model at launch |
 | `robot_config_file` | `''` (auto) | cuRobo robot YAML; empty = resolved from the robot descriptor |
 | `urdf_path` | `''` (auto) | URDF for `robot_state_publisher`; empty = read from the robot descriptor |
 | `cameras_config_file` | `''` | Camera configuration YAML (see [Tutorial 7](../tutorials/07-pointcloud-detection.md)); empty = no cameras |
@@ -71,7 +71,7 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `mpc_solver_type` | `'mppi_acceleration'` | Solver recipe: `mppi_acceleration` (MPPI in acceleration space, validated on the real M1013) or `lbfgs_bspline` (cuRobo's L-BFGS/B-spline config) |
+| `mpc_solver_type` | `'mppi_acceleration'` | Solver recipe: `mppi_acceleration` (MPPI in acceleration space, validated on a real deployment robot) or `lbfgs_bspline` (cuRobo's L-BFGS/B-spline config) |
 | `mpc_step_dt` | `0.03` | Optimization time step (s) |
 | `mpc_horizon_steps` | `30` | Receding horizon length |
 | `mpc_warm_start_iters` | `5` | Iterations per solve after the first (L-BFGS values must be multiples of 25) |
@@ -95,11 +95,11 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `robot` | `'doosan_m1013'` | Robot descriptor (`robots/<name>.yaml`) |
+| `robot` | `'emulator'` | Robot descriptor (`robots/<name>.yaml`) or path |
 | `control_strategy` | from descriptor | How commands reach the robot: `emulator`, `joint_speed`, `joint_pose` — switch at runtime with `set_robot_strategy` |
-| `base_link` | from descriptor (`'base_0'` for the M1013) | Robot base frame |
+| `base_link` | from descriptor | Robot base frame (defaults to `base_0` if the descriptor/model does not specify one) |
 | `world_file` | `''` | Static world YAML |
-| `robot_config_file` | from descriptor | Resolved cuRobo robot YAML |
+| `robot_config_file` | from descriptor | Resolved cuRobo robot YAML; required when the descriptor ships model-less (e.g. the default `emulator`) |
 | `cameras_config_file` | `''` | Camera configuration YAML |
 | `node_is_available` | `false` | Read-only status: flips to `true` once warmup completes |
 
@@ -115,7 +115,7 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 
 ## Robot YAML configuration
 
-The cuRobo robot configuration (for the Doosan M1013: `curobo_doosan/src/m1013/m1013.yml`) defines kinematics (`urdf_path`, `base_link`, `ee_link`), the cspace with joint limits (position/velocity/acceleration/jerk), and the collision spheres. This is also where the robot's *speed* is set — scale the cspace velocity/acceleration/jerk limits and rebuild with `update_motion_gen_config`.
+The cuRobo robot configuration (provided by each robot's own repo, e.g. a Kortex package supplies `config/kortex.curobo.yml`) defines kinematics (`urdf_path`, `base_link`, `ee_link`), the cspace with joint limits (position/velocity/acceleration/jerk), and the collision spheres. This is also where the robot's *speed* is set — scale the cspace velocity/acceleration/jerk limits and rebuild with `update_motion_gen_config`.
 
 See [Tutorial 2: Adding Your Robot](../tutorials/02-adding-your-robot.md) for the full anatomy.
 

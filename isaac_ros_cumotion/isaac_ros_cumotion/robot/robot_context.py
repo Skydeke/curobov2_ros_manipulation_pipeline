@@ -69,10 +69,12 @@ class RobotContext:
         self.dt = resolve_interpolation_dt(node, dt)
         self.strategy_lock = threading.Lock()
 
-        # Which robot (model + driver topics + default strategy).
+        # Which robot (model + driver topics + default strategy). Robot-abstract:
+        # no robot is hardcoded; 'emulator' is a no-hardware control mode and any
+        # concrete robot (e.g. Kortex) is supplied at launch by its own repo.
         if not node.has_parameter('robot'):
-            node.declare_parameter('robot', 'kortex')
-        robot = node.get_parameter('robot').get_parameter_value().string_value or 'kortex'
+            node.declare_parameter('robot', 'emulator')
+        robot = node.get_parameter('robot').get_parameter_value().string_value or 'emulator'
         self.description = load_robot_description(robot)
 
         # Which control strategy (default = descriptor's, overridable).

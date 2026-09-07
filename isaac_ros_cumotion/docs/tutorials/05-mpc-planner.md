@@ -14,7 +14,8 @@ The open-loop planners compute a trajectory once and replay it. **MPC (Model Pre
 ## 1. Start and switch to MPC
 
 ```bash
-ros2 launch curobo_ros gen_traj.launch.py robot:=emulator
+# Supply a robot model (robot_config_file) — deploy repos provide theirs
+ros2 launch curobo_ros gen_traj.launch.py robot:=emulator robot_config_file:=<path-to-your-robot-curobo.yml>
 # wait for node_is_available == True, then:
 ros2 service call /unified_planner/set_planner curobo_msgs/srv/SetPlanner "{planner_type: 1}"
 ```

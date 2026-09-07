@@ -71,6 +71,13 @@ class DepthMapRobotSegmentation(Node):
         if not robot_config_file:
             robot_config_file = default_robot_config
 
+        if not robot_config_file:
+            raise RuntimeError(
+                "No robot model configured: the selected robot descriptor "
+                f"('{self.robot_context.description.name}') ships without a "
+                "curobo_config, and no 'robot_config_file' parameter was provided. "
+                "Supply the robot's cuRobo config (and URDF) at launch.")
+
         # An explicit robot_config_file override bypasses load_robot_description's
         # own path resolution — resolve urdf_path/asset_root_path here too, or a
         # package://-relative/custom-relative path silently falls back to cuRobo's

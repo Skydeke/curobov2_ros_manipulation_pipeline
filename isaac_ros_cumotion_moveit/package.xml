@@ -24,11 +24,13 @@
   <depend>shape_msgs</depend>
   <depend>trajectory_msgs</depend>
   <depend>geometric_shapes</depend>
+  <depend>curobo_core</depend>
 
   <exec_depend>ros2launch</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
+  
 
   <export>
     <build_type>ament_cmake</build_type>

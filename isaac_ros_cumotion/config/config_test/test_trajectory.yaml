@@ -1,4 +1,6 @@
-# Test trajectory generation for the Kortex Gen3 (7-DOF)
+# Test trajectory generation. Joint names in this file are those of the robot
+# model supplied at launch (gen_traj_test.launch.py defaults `robot_config_file`
+# to the Kortex model from the kortex repo).
 
 package: isaac_ros_cumotion
 environment:

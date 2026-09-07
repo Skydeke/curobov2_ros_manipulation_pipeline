@@ -48,7 +48,7 @@ Multiple cameras: add more list entries. Their rates sum for the decay computati
 ## 2. Launch with the camera
 
 ```bash
-ros2 launch curobo_ros gen_traj.launch.py robot:=emulator \
+ros2 launch curobo_ros gen_traj.launch.py robot:=emulator robot_config_file:=<path-to-your-robot-curobo.yml> \
   cameras_config_file:=$(ros2 pkg prefix curobo_ros)/share/curobo_ros/config/cameras.yaml
 ```
 

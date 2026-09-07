@@ -2,39 +2,42 @@
 
 **Difficulty**: Intermediate · **Time**: ~45 min · **Prerequisites**: [Tutorial 1](01-first-trajectory.md)
 
-Integrating a robot into curobo_ros takes two files:
+`curobo_ros` is **robot-abstract**: it ships no robot model or hardware driver wiring. Each robot — its cuRobo kinematic configuration and its ROS driver topics — lives in its own repository (a "deploy repo", e.g. a Kortex package) and is selected at launch with the `robot` argument.
+
+Integrating your robot therefore takes two files, both owned by your deploy repo:
 
 1. A **cuRobo robot configuration YAML** — kinematics (URDF), joint limits, and collision spheres. This is what the GPU solvers consume.
-2. A **robot descriptor** — a small YAML in `robots/` that tells curobo_ros where the cuRobo config is and how to *command* the robot (topics, control strategy).
-
-The Doosan M1013 shipped with the package is the working example throughout.
+2. A **robot descriptor** — a small YAML that tells curobo_ros where the cuRobo config is and how to *command* the robot (topics, control strategy).
 
 ## 1. The robot descriptor (`robots/<name>.yaml`)
 
-The `robot` launch argument selects a descriptor by name: `robot:=doosan_m1013` loads `robots/doosan_m1013.yaml`. The shipped one:
+The `robot` launch argument selects a descriptor either **by name** (resolved against `robots/<name>.yaml` inside the installed package that ships it) or by an **absolute path**. `load_robot_description` accepts both.
+
+A deploy repo ships its descriptor alongside its cuRobo config, e.g. `iki_kortex_moveit_config/robots/kortex.yaml`:
 
 ```yaml
-name: doosan_m1013
-display_name: "Doosan M1013"
+name: kortex
+display_name: "Kinova Kortex Gen3"
 
 # cuRobo robot config; package:// and relative paths are resolved automatically
-curobo_config: package://curobo_ros/curobo_doosan/src/m1013/m1013.yml
+curobo_config: package://iki_kortex_moveit_config/config/kortex.curobo.yml
+
+base_link: "base_link"
 
 # How to command the robot (see Tutorial 4): emulator | joint_speed | joint_pose
 strategy: joint_speed
 strategy_params:
-  command_topic: /leeloo/execute_trajectory
-  state_topic: /leeloo/trajectory_state
-  joint_states_topic: /dsr01/joint_states
+  command_topic: /joint_trajectory_controller/joint_trajectory
+  joint_states_topic: /joint_states
 ```
 
-`base_link`, joint names, and DOF are **not** duplicated here — they come from the cuRobo config. `strategy_params` describes only the robot driver interface. The shipped `robots/emulator.yaml` shows the minimal hardware-free variant (`strategy: emulator`, one published topic).
+`base_link`, joint names, and DOF are **not** duplicated here — they come from the cuRobo config. `strategy_params` describes only the robot driver interface. The shipped `robots/emulator.yaml` shows the minimal hardware-free variant (`strategy: emulator`, one published topic) — it intentionally ships **without** `curobo_config`, so running the emulator against a concrete robot requires supplying the model via the `robot_config_file` parameter.
 
-To add *your* robot: drop `robots/my_robot.yaml` next to the existing ones, point `curobo_config` at your cuRobo YAML, pick a strategy, rebuild the workspace, and launch with `robot:=my_robot`.
+To add *your* robot to a deploy repo: drop `robots/my_robot.yaml` there, point `curobo_config` at your cuRobo YAML, pick a strategy, and pass the descriptor at launch — `robot:=<absolute path to robots/my_robot.yaml>` or `robot:=my_robot` if the descriptor is installed where the name lookup finds it.
 
 ## 2. The cuRobo robot configuration
 
-The reference example is `curobo_doosan/src/m1013/m1013.yml`. The essential structure:
+The cuRobo config in your deploy repo is the reference model. The essential structure:
 
 ```yaml
 robot_cfg:
@@ -62,7 +65,7 @@ cuRobo approximates the robot volume with spheres attached to links — this is 
 - Cover the real volume conservatively: a missed wrist cover becomes a real collision.
 - Include the tool/gripper if it is part of the URDF.
 
-The [`curobo_robot_setup`](https://github.com/Lab-CORO/curobo_robot_setup) companion package provides an RViz-based editor for this step: load your URDF, place or auto-generate spheres interactively (backed by cuRobo's mesh sphere-fitting), and export the YAML. See its README for usage. You can also write the spheres by hand for a simple arm — the M1013 file is a good template.
+The [`curobo_robot_setup`](https://github.com/Lab-CORO/curobo_robot_setup) companion package provides an RViz-based editor for this step: load your URDF, place or auto-generate spheres interactively (backed by cuRobo's mesh sphere-fitting), and export the YAML. See its README for usage. You can also write the spheres by hand for a simple arm.
 
 To inspect the result at runtime: enable the sphere markers and look at them in RViz —
 
@@ -75,7 +78,7 @@ ros2 service call /unified_planner/set_collision_spheres_enabled std_srvs/srv/Se
 Start with the emulator strategy so nothing physical moves — either temporarily set `strategy: emulator` in your descriptor, or switch at runtime:
 
 ```bash
-ros2 launch curobo_ros gen_traj.launch.py robot:=my_robot
+ros2 launch curobo_ros gen_traj.launch.py robot:=<path to your descriptor> robot_config_file:=<path to your curobo.yml>
 ros2 service call /unified_planner/set_robot_strategy curobo_msgs/srv/SetRobotStrategy "{robot_strategy: 'emulator'}"
 ```
 
@@ -93,7 +96,7 @@ Then connect the real driver via the descriptor's `strategy_params` — see [Tut
 | Symptom | Likely cause |
 |---|---|
 | Node crashes at startup parsing the config | Wrong indentation or missing `kinematics` keys in the cuRobo YAML |
-| `Descriptor ... is missing required 'curobo_config'` | The descriptor YAML lacks the `curobo_config` key |
+| `No robot model configured` | The descriptor ships without `curobo_config` and no `robot_config_file` was provided at launch — supply the model |
 | Plans collide with the real robot body | Sphere coverage too sparse — add/enlarge spheres |
 | IK always fails | `ee_link` name doesn't match the URDF, or joint limits are wrong |
 

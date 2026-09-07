@@ -67,13 +67,13 @@ ros2 service call /unified_planner/attach_object curobo_msgs/srv/AttachObject "{
 ros2 service call /unified_planner/detach_object std_srvs/srv/Trigger
 ```
 
-This requires the robot configuration to define an attachable link — the shipped M1013 config (`curobo_doosan/src/m1013/m1013.yml`) already does:
+This requires the robot configuration (from your deploy repo) to define an attachable link, e.g. as an `extra_links.attached_object` block on the flange:
 
 ```yaml
 kinematics:
   extra_links:
     attached_object:          # fixed joint on the flange
-      parent_link_name: dsr01/link6
+      parent_link_name: <flange-link>
       ...
   collision_link_names: [..., attached_object]
   extra_collision_spheres: {attached_object: 4}
@@ -87,7 +87,7 @@ When the gripper must contact the part it grasps, disable collision for those li
 
 ```bash
 ros2 service call /unified_planner/set_link_collision curobo_msgs/srv/SetLinkCollision \
-  "{link_names: ['dsr01/link6'], enabled: false}"
+  "{link_names: ['<your-ee-link>'], enabled: false}"
 ```
 
 The response reports `applied_links` / `unknown_links`. The state applies to **all** solvers and persists until the opposite call re-enables it.

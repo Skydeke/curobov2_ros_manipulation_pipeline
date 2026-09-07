@@ -117,7 +117,7 @@ classDiagram
 ```
 
 - `EmulatorStrategy` — simulates the robot, publishes `/emulator/joint_states`.
-- `JointSpeedStrategy` — streams `JointTrajectory` with velocities to a real robot bridge (used for the Doosan M1013 via the `leeloo` topics), with a hard acceleration clamp and real velocity feedback.
+- `JointSpeedStrategy` — streams `JointTrajectory` with velocities to a real robot bridge (topics from the deployment repo's descriptor), with a hard acceleration clamp and real velocity feedback.
 - `JointPoseStrategy` — streams positions only.
 - `GhostStrategy` — not switchable; always publishes the planned trajectory on `/trajectory` for the RViz preview robot (namespace `preview/`).
 
@@ -148,7 +148,7 @@ curobo_ros/
 ├── robot/          # RobotContext, control strategies, robot descriptors
 ├── cameras/        # camera strategies (depth_camera)
 ├── launch/         # gen_traj.launch.py and helpers
-├── robots/         # robot descriptors (doosan_m1013.yaml, emulator.yaml)
+├── robots/         # robot descriptors (emulator.yaml); concrete robots come from deploy repos
 └── config/         # cameras.yaml, floor_world.yml, test specs
 ```
 

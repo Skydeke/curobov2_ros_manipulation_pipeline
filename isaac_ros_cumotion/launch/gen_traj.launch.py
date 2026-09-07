@@ -68,7 +68,7 @@ def launch_setup(context, *args, **kwargs):
             descriptor_base_link = _desc.base_link
             # Topic the robot publishes its real JointStates on, and the single
             # source of truth for it: the emulator uses /emulator/joint_states,
-            # a real robot its own (M1013: /dsr01/joint_states).
+            # a real robot its own driver topic.
             descriptor_joint_states_topic = _desc.strategy_params.get('joint_states_topic')
             if not robot_config_file:
                 robot_config_file = _desc.curobo_config_path
@@ -76,9 +76,11 @@ def launch_setup(context, *args, **kwargs):
         except Exception as e:
             print(f"[gen_traj.launch] Warning: could not load descriptor '{robot_name}': {e}")
 
-    # Fallback urdf_path — the generated URDF lives at a well-known temp
-    # location (see iki_kortex launch or the README build instructions).
-    default_urdf_path = '/tmp/kortex.urdf'
+    # Fallback urdf_path — if the robot config carries no urdf_path and none was
+    # passed, point at this well-known generated location and let the node's own
+    # validation surface the error if it is missing. Robot-abstract: no specific
+    # robot is assumed (the robot repo supplies its URDF/config at launch).
+    default_urdf_path = '/tmp/generated_robot.urdf'
 
     # urdf_path defaults to the empty string: unset means "read it from
     # robot_config_file", an explicit value wins.
@@ -249,7 +251,7 @@ def generate_launch_description():
     # the base_link and the default control strategy.
     declare_robot = DeclareLaunchArgument(
         'robot',
-        default_value='kortex',
+        default_value='emulator',
         description='Robot descriptor name (robots/<robot>.yaml) or path'
     )
     # Explicit override of the cuRobo YAML (empty = derived from the descriptor)
