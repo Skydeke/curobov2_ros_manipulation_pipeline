@@ -22,6 +22,13 @@ import time
 
 from nav_msgs.msg import Path
 from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import Image as ImageMsg
+from rclpy.qos import (
+    QoSProfile,
+    ReliabilityPolicy,
+    DurabilityPolicy,
+    HistoryPolicy,
+)
 
 from curobo.types import JointState
 from curobo.motion_planner import MotionPlanner
@@ -30,6 +37,7 @@ from curobo.motion_planner import MotionPlanner
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
 from .trajectory_planner import TrajectoryPlanner, PlannerResult, ExecutionMode
+from .plan_plot import render_plan_plot
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
 
 import traceback
@@ -110,6 +118,106 @@ class SinglePlanner(TrajectoryPlanner):
         # even if the node hasn't declared it yet).
         self._path_pub = None
         self._path_frame = getattr(config_wrapper, 'base_link', None)
+
+        # Motion-plan debug image (joint-trajectory plot as an RGB Image).
+        # Lazy publisher; only active in curobo debug mode. See
+        # _publish_plan_image().
+        self._debug_img_pub = None
+
+    def _debug_mode_enabled(self) -> bool:
+        """Whether the owning node is running in curobo debug mode.
+
+        Publish-side knob: the motion-plan debug image is only produced while
+        ``enable_curobo_debug_mode`` is true. Off by default if the node has not
+        declared the param, matching the node's own default (False).
+        """
+        if not getattr(self.node, 'has_parameter', None):
+            return False
+        if not self.node.has_parameter('enable_curobo_debug_mode'):
+            return False
+        return bool(self.node.get_parameter('enable_curobo_debug_mode').value)
+
+    def _publish_plan_image(self):
+        """Publish the planned trajectory's debug plot as a latched Image.
+
+        Only runs while the node's ``enable_curobo_debug_mode`` param is true.
+        Publishes once per NEW plan (this is called from ``plan()`` on every
+        successful plan) on ``/<node>/motion_plan_debug`` with a transient_local
+        depth-1 QoS: the latest frame is latched for late subscribers and at
+        most one frame is buffered, so bandwidth stays flat.
+        """
+        if not self._debug_mode_enabled():
+            return
+        if self.planned_trajectory is None:
+            return
+        try:
+            traj = self.planned_trajectory
+
+            def _squeeze(arr):
+                while arr.ndim > 2:
+                    arr = arr[0]
+                if arr.ndim == 1:
+                    arr = arr.unsqueeze(0)
+                return arr
+
+            position = _squeeze(traj.position).cpu().numpy()
+            velocity = (
+                _squeeze(traj.velocity).cpu().numpy()
+                if getattr(traj, 'velocity', None) is not None
+                else None
+            )
+            acceleration = (
+                _squeeze(traj.acceleration).cpu().numpy()
+                if getattr(traj, 'acceleration', None) is not None
+                else None
+            )
+            names = list(getattr(traj, 'joint_names', None) or [])
+            dt = 0.025
+            if getattr(self.node, 'has_parameter', None) and self.node.has_parameter(
+                'interpolation_dt'
+            ):
+                dt = float(self.node.get_parameter('interpolation_dt').value)
+            if dt <= 0:
+                dt = 0.025
+
+            img = render_plan_plot(
+                position,
+                names,
+                float(dt),
+                velocity=velocity,
+                acceleration=acceleration,
+                title=f"{self.get_planner_name()} plan",
+            )
+
+            if self._debug_img_pub is None:
+                self._debug_img_pub = self.node.create_publisher(
+                    ImageMsg,
+                    self.node.get_name() + '/motion_plan_debug',
+                    QoSProfile(
+                        depth=1,
+                        reliability=ReliabilityPolicy.RELIABLE,
+                        durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                        history=HistoryPolicy.KEEP_LAST,
+                    ),
+                )
+
+            h, w = img.shape[:2]
+            im = ImageMsg()
+            im.header.stamp = self.node.get_clock().now().to_msg()
+            im.header.frame_id = self._path_frame or ''
+            im.height = h
+            im.width = w
+            im.encoding = 'rgb8'
+            im.is_bigendian = False
+            im.step = w * 3
+            im.data = img.astype('uint8').tobytes()
+            self._debug_img_pub.publish(im)
+        except Exception as e:
+            self.node.get_logger().warn(
+                f"{self.get_planner_name()}: failed to publish motion-plan debug "
+                f"image: {e}",
+                throttle_duration_sec=5.0,
+            )
 
     def _publish_plan_path(self):
         """Publish the planned trajectory's end-effector path as nav_msgs/Path.
@@ -355,6 +463,9 @@ class SinglePlanner(TrajectoryPlanner):
 
             # Publish the planned EE trajectory path for RViz (gated by publish_path).
             self._publish_plan_path()
+
+            # Publish the motion-plan debug image (only in curobo debug mode).
+            self._publish_plan_image()
 
             # Send trajectory to robot context for visualization
             if robot_context is not None:
