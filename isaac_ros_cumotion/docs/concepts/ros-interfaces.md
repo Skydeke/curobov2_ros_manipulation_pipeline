@@ -145,6 +145,16 @@ Type: `curobo_msgs/srv/GetVoxelGrid`. Rasterizes the current collision world int
 
 Request: bounding box in the robot base frame (metres): `bbox_min_x/y/z`, `bbox_max_x/y/z` (typical workspace: −1.52 to 1.52). Response: `voxel_grid` (`nav2_msgs/VoxelGrid`).
 
+### `/unified_planner/clear_voxel_map`
+
+Type: `std_srvs/srv/Trigger`. Clears **only the dynamic (depth-derived) voxel channel** — everything the cameras have observed. Statically added objects (boxes, spheres, capsules, cylinders, meshes via `add_object`) are stored outside the TSDF in the scene's cuboid/mesh buffers and always stay. The mapper's dynamic blocks are cleared in place over the full configured extent (they remain allocated; the next camera frames refill them), the perception ESDF is recomputed, and the world is pushed to all solvers before the service returns — the next plan / servoing step already sees the cleared map.
+
+Response: `success`, `message` (e.g. `Cleared dynamic voxel channel (12 block(s))`; `success: false` when perception is disabled).
+
+```bash
+ros2 service call /unified_planner/clear_voxel_map std_srvs/srv/Trigger "{}"
+```
+
 ### `/unified_planner/get_collision_distance`
 
 Type: `curobo_msgs/srv/GetCollisionDistance` (empty request). Returns the collision distance of each robot sphere at the current joint state: `data` (`float32[]`) and `nb_sphere` (`int8`).

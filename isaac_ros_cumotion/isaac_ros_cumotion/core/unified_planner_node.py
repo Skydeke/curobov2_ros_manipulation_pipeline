@@ -292,6 +292,12 @@ class UnifiedPlannerNode(Node):
             self.clear_trajectory_callback,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
+        self.clear_voxel_map_srv = self.create_service(
+            Trigger,
+            f'{self.get_name()}/clear_voxel_map',
+            self.clear_voxel_map_callback,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
 
         # Reentrant group so cancel_callback can run while a long-running
         # reactive execute_callback is still servoing (MultiThreadedExecutor).
@@ -1132,6 +1138,36 @@ class UnifiedPlannerNode(Node):
         self._pending_plan = None
         response.success = True
         response.message = "Cached trajectory cleared" if had else "No cached trajectory"
+        self.get_logger().info(response.message)
+        return response
+
+    def clear_voxel_map_callback(self, request, response):
+        """Clear ONLY the dynamic (depth-derived) voxel channel.
+
+        Analytic collision objects (boxes, spheres, capsules, cylinders, meshes
+        added via ``add_object``) are stored outside the TSDF in the Scene's
+        cuboid/mesh buffers, so they always stay. The mapper's dynamic blocks
+        are cleared in place, the perception ESDF is recomputed, and the world
+        is pushed to all solvers — all under ``gpu_lock`` — so the next plan
+        and every servoing step already sees the cleared map.
+        """
+        obs = self.config_wrapper_motion.obstacle_manager
+        with self.gpu_lock:
+            try:
+                n_blocks = obs.clear_dynamic_voxels(self)
+            except Exception as e:
+                response.success = False
+                response.message = f"clear_voxel_map failed: {e}"
+                self.get_logger().error(response.message)
+                return response
+            refreshed = obs.refresh_esdf()
+            if refreshed:
+                self.update_all_solvers_world(obs.get_scene())
+        response.success = True
+        response.message = (
+            f"Cleared dynamic voxel channel ({n_blocks} block(s))"
+            + ("" if refreshed else "; WARNING: perception ESDF not refreshed")
+        )
         self.get_logger().info(response.message)
         return response
 

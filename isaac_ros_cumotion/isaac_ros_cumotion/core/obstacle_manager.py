@@ -320,6 +320,33 @@ class ObstacleManager:
         self._esdf_voxel_name = vg.name
         return True
 
+    def clear_dynamic_voxels(self, node) -> int:
+        """Clear the Mapper's dynamic (depth-derived) TSDF channel.
+
+        Blocks are cleared in place over the full configured mapper extent
+        (``mapper_grid_center`` +/- ``mapper_extent_xyz``/2) and remain
+        allocated so the camera can refill them. Analytic obstacles (cuboids,
+        spheres, capsules, cylinders, meshes added via ``add_object``) never
+        live in the TSDF — they are stored as Scene collision buffers — so
+        they are untouched by definition.
+
+        Call ``refresh_esdf()`` and push the world afterwards so the solvers
+        see the cleared map. Returns the number of cleared blocks.
+        """
+        if self.mapper is None:
+            raise RuntimeError(
+                "No perception mapper (use_mapper=False) - nothing to clear"
+            )
+        center = np.array(self._mapper_grid_center, dtype=np.float32)
+        half = np.array(self._mapper_extent_xyz, dtype=np.float32) / 2.0
+        bounds_min = torch.from_numpy(center - half)
+        bounds_max = torch.from_numpy(center + half)
+        node.get_logger().info(
+            f"Clearing dynamic voxel channel over "
+            f"[{bounds_min.tolist()}, {bounds_max.tolist()}]"
+        )
+        return self.mapper.clear_region(bounds_min, bounds_max)
+
     def _inspect_esdf(self, vg) -> bool:
         """Validate a perception ESDF voxel grid before it is pushed to the
         collision solvers.
