@@ -111,15 +111,31 @@ class MultiPointPlanner(SinglePlanner):
 
                 # Build the next start state from the final waypoint of the segment.
                 # segment.position is [B, T, D]; plan_pose requires a 2D [B, D]
-                # current_state, so slice out the last timestep and reuse the
-                # start_state's joint_names for the new JointState.
+                # current_state, so slice out the last timestep.
+                #
+                # The interpolated plan is in FULL joint space: when the robot
+                # config locks a joint (e.g. a gripper `finger_joint`), cuRobo
+                # augments the trajectory with the locked joints via
+                # get_full_dof_from_solution(), so D can exceed the active DOF
+                # that plan_pose()/the IK seed solver expects. Project the last
+                # step back onto the active joints by name (get_active_js) so the
+                # next waypoint's seed matches the solver's action dims — feeding
+                # the full-DOF state into the seed IK fails with
+                # "Sizes of tensors must match ... Expected size 8 but got size 7".
                 last_pos = segment.position[..., -1, :]
                 while last_pos.ndim > 2:
                     last_pos = last_pos[0]
-                current_state = JointState.from_position(
-                    last_pos.clone(),
-                    joint_names=start_state.joint_names,
-                )
+                if segment.joint_names is not None:
+                    segment_end_js = JointState.from_position(
+                        last_pos.clone(),
+                        joint_names=segment.joint_names,
+                    )
+                    current_state = self.motion_planner.kinematics.get_active_js(segment_end_js)
+                else:
+                    current_state = JointState.from_position(
+                        last_pos.clone(),
+                        joint_names=start_state.joint_names,
+                    )
                 last_result = result
 
             self._combined_trajectory = combined_trajectory
