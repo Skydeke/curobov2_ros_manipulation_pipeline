@@ -145,7 +145,10 @@ class ConfigWrapperMotion(ConfigWrapper):
 
     def update_world_config(self, node):
         """Push the current Scene into all active solvers."""
-        scene = self.obstacle_manager.get_scene()
+        # Sphere/cylinder/capsule obstacles must be converted to a solver-
+        # supported collision type (cuboid/mesh) or they are silently dropped
+        # from collision checking. See collision_world_scene().
+        scene = self.obstacle_manager.collision_world_scene()
         if getattr(node, 'motion_planner', None) is not None:
             node.motion_planner.update_world(scene)
         if getattr(node, 'mpc', None) is not None:

@@ -374,8 +374,11 @@ class UnifiedPlannerNode(Node):
 
     def update_all_solvers_world(self, scene=None):
         """Propagate scene updates to all initialized solvers."""
-        scene = scene if scene is not None else self.shared_scene
         obstacle_manager = self.config_wrapper_motion.obstacle_manager
+        # Normalize whatever scene we're handed to the solver-supported types
+        # (sphere/cylinder/capsule -> mesh), or they're silently dropped from
+        # collision. See obstacle_manager.collision_world_scene().
+        scene = self._solver_bound_scene(scene, obstacle_manager)
 
         # DIAGNOSTIC (default off => normal behaviour). Withholds the perception
         # ESDF voxel layer from the solvers so only analytic primitives remain,
@@ -411,6 +414,18 @@ class UnifiedPlannerNode(Node):
 
         self.ik_services.update_world()
         self.fk_services.update_world()
+
+    def _solver_bound_scene(self, scene, obstacle_manager):
+        """Resolve/normalize a scene before it is pushed to the solvers.
+
+        Sphere/cylinder/capsule obstacles are converted to a solver-supported
+        collision type (cuboid/mesh); without this they render in RViz but never
+        collide. See obstacle_manager.collision_world_scene()."""
+        if scene is None:
+            scene = self.shared_scene
+        # Round-trip through the collision-supported scene so non-cuboid
+        # primitives become meshes.
+        return obstacle_manager.collision_world_scene_from(scene)
 
     def refresh_perception_world(self):
         """Recompute the perception ESDF and push it to all solvers.

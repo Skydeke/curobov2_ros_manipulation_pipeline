@@ -9,6 +9,7 @@ from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from geometry_msgs.msg import Vector3
 
 from curobo.scene import Scene, Cuboid, Capsule, Cylinder, Sphere, Mesh
+from curobo._src.geom.types import SceneCfg
 from curobo.perception import Mapper, MapperCfg
 from curobo._src.geom.collision.collision_scene import SceneCollisionCfg, SceneCollision
 from curobo._src.geom.collision.buffer_collision import CollisionBuffer
@@ -774,7 +775,9 @@ class ObstacleManager:
         return int(occ_mask.sum())
 
     def primitives_only_scene(self) -> Scene:
-        """The current Scene minus the perception ESDF voxel layer.
+        """The current Scene minus the perception ESDF voxel layer, with all
+        obstacles converted to the collision types CuRobo's GPU solver supports
+        (cuboid / mesh).
 
         Scene.objects is assembled from every bucket *including* `voxel`, so
         handing self.scene to a SceneCollision query also queries the nvblox ESDF
@@ -807,13 +810,56 @@ class ObstacleManager:
 
         Cheap: the lists are shared by reference, only the container is new.
         """
-        return Scene(
+        return self._collision_supported(Scene(
             cuboid=self.scene.cuboid,
             sphere=self.scene.sphere,
             capsule=self.scene.capsule,
             cylinder=self.scene.cylinder,
             mesh=self.scene.mesh,
-        )
+        ))
+
+    def collision_world_scene(self) -> Scene:
+        """The current Scene (including the perception ESDF voxel layer) with all
+        analytic primitives converted to the collision types CuRobo's GPU solver
+        supports (cuboid / mesh).
+
+        This is the scene to push to the solvers at runtime (via update_world),
+        where the perception ESDF layer is wanted. It differs from
+        primitives_only_scene() only in that the voxel layer is retained; see
+        `_collision_supported` for why the primitive conversion is needed.
+        """
+        return self._collision_supported(self.scene)
+
+    def collision_world_scene_from(self, scene: Scene) -> Scene:
+        """Like collision_world_scene(), but normalizes an arbitrary caller-
+        supplied Scene (e.g. shared_scene) instead of the manager's own."""
+        return self._collision_supported(scene)
+
+    def _collision_supported(self, scene: Scene) -> Scene:
+        """Convert an analytic Scene to the collision types the CuRobo v2 GPU
+        solvers actually support (cuboid / mesh / voxel).
+
+        The Scene container happily stores `sphere`, `cylinder` and `capsule`
+        obstacles, which render in RViz (scene_obstacles) — but SceneData /
+        load_from_scene_cfg only ever reads the `cuboid`, `mesh` and `voxel`
+        buckets. Sphere/cylinder/capsule obstacles are therefore SILENTLY
+        dropped from solver collision checking and from the voxel grid
+        rasterization. CuRobo provides `SceneCfg.create_collision_support_world`,
+        which keeps cuboids as cuboids/voxels as voxels and approximates
+        sphere/cylinder/capsule as trimesh meshes (accurate, via the mesh SDF
+        path). Apply it to every solver-bound Scene so all primitive types
+        actually collide and appear in the voxel map.
+        """
+        if scene.mesh is None:  # create_collision_support_world concatenates it
+            scene = SceneCfg(
+                sphere=scene.sphere,
+                cuboid=scene.cuboid,
+                capsule=scene.capsule,
+                cylinder=scene.cylinder,
+                mesh=scene.mesh or [],
+                voxel=scene.voxel,
+            )
+        return SceneCfg.create_collision_support_world(scene)
 
     def set_collision_cache(
         self,

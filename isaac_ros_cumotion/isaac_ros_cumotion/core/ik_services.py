@@ -132,7 +132,9 @@ class IKServices:
         """Propagate obstacle changes to the IK solver. No-op if not initialized."""
         if self._ik_solver is None:
             return
-        scene = self._config.obstacle_manager.get_scene()
+        # Normalize primitives to solver-supported collision types
+        # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
+        scene = self._config.obstacle_manager.collision_world_scene()
         self._ik_solver.update_world(scene)
         self._node.get_logger().info("IKServices: world updated")
 

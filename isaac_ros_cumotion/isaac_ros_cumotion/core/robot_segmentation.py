@@ -633,8 +633,12 @@ class DepthMapRobotSegmentation(Node):
             marker.scale.y = sphere[3] * 2
             marker.scale.z = sphere[3] * 2
             marker.color.a = 0.5  # Transparency
-            marker.color.r = 1.0
-            marker.color.g = 0.0
+            # This node is a depth-masking helper and does not run the world
+            # scene-collision checker, so spheres are shown collision-free
+            # (green) by default. The planner node recolors them red on actual
+            # collision via /<planner>/collision_spheres.
+            marker.color.r = 0.0
+            marker.color.g = 1.0
             marker.color.b = 0.0
             marker_array.markers.append(marker)
 

@@ -170,7 +170,9 @@ class FKServices:
         the validator was never initialized."""
         if self._collision_checker is None:
             return
-        scene = self._obstacle_manager.get_scene()
+        # Normalize primitives to solver-supported collision types
+        # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
+        scene = self._obstacle_manager.collision_world_scene()
         self._collision_checker.update_world(scene)
         self._node.get_logger().info("FKServices: world updated")
 
