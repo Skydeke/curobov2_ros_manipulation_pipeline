@@ -7,6 +7,7 @@ from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetLinkCollision
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
+from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 
 
@@ -61,6 +62,16 @@ class RosServiceManager:
         # Sparse voxel grid topic publisher + timer (initialized in init_services)
         self.sparse_voxel_pub = None
         self.sparse_voxel_timer = None
+
+        # Mapper workspace marker (wireframe TSDF/ESDF extent box for RViz).
+        # On by default so the mapper's sensing/collision volume is visible;
+        # disable at launch via the publish_workspace_visualisation param.
+        # Published once (latched) at startup — the geometry is static.
+        self.workspace_viz_pub = None
+        self.workspace_viz_enabled = True
+        if node is not None and node.has_parameter('publish_workspace_visualisation'):
+            self.workspace_viz_enabled = bool(
+                node.get_parameter('publish_workspace_visualisation').value)
 
     def init_services(self):
         """Create all ROS services, publishers, and timers"""
@@ -158,6 +169,23 @@ class RosServiceManager:
             0.5,
             partial(self.publish_scene_obstacles, self.node)
         )
+
+        # Mapper workspace marker: wireframe box of the mapper TSDF/ESDF extent
+        # (mapper_extent_xyz centered at mapper_grid_center) in the base frame.
+        # Transient-local so a late-joining RViz immediately sees the latched
+        # frame. Published ONCE at startup — the workspace geometry is static and
+        # never changes at runtime, so there is no periodic timer. Gated by the
+        # publish_workspace_visualisation param.
+        self.workspace_viz_pub = self.node.create_publisher(
+            Marker,
+            self.node.get_name() + '/mapper_workspace',
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            )
+        )
+        self.publish_mapper_workspace(self.node)
 
         # Sparse voxel grid topic publisher (occupied linear indices only).
         # Published periodically so the U-Net consumer gets a steady stream.
@@ -265,6 +293,54 @@ class RosServiceManager:
                 marker_array.markers.append(m)
 
         self.scene_obstacle_pub.publish(marker_array)
+
+    def publish_mapper_workspace(self, node):
+        """Publish the Mapper workspace as a wireframe box marker for RViz.
+
+        Renders the TSDF/ESDF voxel grid bounds: a box of `mapper_extent_xyz`
+        centered at `mapper_grid_center`, expressed in the base frame. Purely
+        diagnostic — it does not affect planning. Gated by the
+        `publish_workspace_visualisation` param (see __init__). Reads the
+        mapper params fresh each cycle so a live override is reflected.
+        """
+        if not self.workspace_viz_enabled:
+            return
+        try:
+            extent = [float(v) for v in node.get_parameter('mapper_extent_xyz').value]
+            center = [float(v) for v in node.get_parameter('mapper_grid_center').value]
+        except Exception as e:
+            node.get_logger().warn(
+                f"Could not build mapper workspace marker from params: {e}",
+                throttle_duration_sec=5.0)
+            return
+
+        half = [e / 2.0 for e in extent]
+        corners = [
+            [center[0] + sx * half[0], center[1] + sy * half[1], center[2] + sz * half[2]]
+            for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)
+        ]
+        # 12 box edges as corner-index pairs (enumeration below matches the
+        # lexicographic corner order above).
+        edges = [
+            (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
+            (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+        ]
+
+        m = Marker()
+        m.header.frame_id = self.config_manager.base_link
+        m.header.stamp = node.get_clock().now().to_msg()
+        m.ns = 'mapper_workspace'
+        m.id = 0
+        m.type = Marker.LINE_LIST
+        m.action = Marker.ADD
+        m.scale.x = 0.01  # line width (m)
+        m.color.r, m.color.g, m.color.b, m.color.a = 0.0, 1.0, 1.0, 1.0
+        for i, j in edges:
+            for c in (corners[i], corners[j]):
+                p = Point()
+                p.x, p.y, p.z = c[0], c[1], c[2]
+                m.points.append(p)
+        self.workspace_viz_pub.publish(m)
 
     def _callback_add_object(self, node, request: AddObject, response):
         """Delegate add_object to ObstacleManager.

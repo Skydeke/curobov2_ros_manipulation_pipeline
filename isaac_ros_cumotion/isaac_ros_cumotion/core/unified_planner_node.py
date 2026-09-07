@@ -117,6 +117,11 @@ class UnifiedPlannerNode(Node):
         # (nav_msgs/Path on /planned_path) for RViz. Mirrors MPC's
         # mpc_predicted_path for the open-loop planners.
         self.declare_parameter('publish_path', True)
+        # Publish a wireframe box of the Mapper's TSDF/ESDF workspace extent
+        # (mapper_extent_xyz centered at mapper_grid_center) on
+        # /<node>/mapper_workspace for RViz. Disable at launch if the marker
+        # traffic is unwanted (e.g. during CUDA-graph profiling).
+        self.declare_parameter('publish_workspace_visualisation', True)
         # NOTE: the TSDF decay knob is `decay_half_life_s` (seconds), declared by
         # ObstacleManager._load_perception_params. The raw per-integrate
         # `decay_factor` is no longer exposed: it is derived from the half-life
