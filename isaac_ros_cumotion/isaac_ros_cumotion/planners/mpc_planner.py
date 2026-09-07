@@ -239,13 +239,17 @@ class MPCController(ReactiveController):
         solver = ModelPredictiveControl(cfg)
 
         node.mpc = solver
+        # Namespace under the owning node (e.g. /curobo_server/mpc_predicted_path)
+        # so multiple planners don't clobber each other on the global topic,
+        # matching ros_service_manager's collision_spheres/scene_obstacles.
+        pub_prefix = node.get_name() + '/'
         # Predicted end-effector path (current MPC horizon), for RViz (nav_msgs/Path
         # renders natively, no custom plugin needed).
-        self._path_pub = node.create_publisher(Path, 'mpc_predicted_path', 10)
-        self._goal_marker_pub = node.create_publisher(Marker, 'mpc_goal_marker', 10)
+        self._path_pub = node.create_publisher(Path, pub_prefix + 'mpc_predicted_path', 10)
+        self._goal_marker_pub = node.create_publisher(Marker, pub_prefix + 'mpc_goal_marker', 10)
         # Cost/constraint breakdown, for live inspection via rqt_plot (each
         # named field is individually plottable). See _cost_breakdown().
-        self._cost_pub = node.create_publisher(MpcCosts, 'mpc_costs', 10)
+        self._cost_pub = node.create_publisher(MpcCosts, pub_prefix + 'mpc_costs', 10)
         self._path_frame = cw.base_link
         node.get_logger().info(
             f"MPC solver built: solver_type={solver_type}, optimization_dt={step_dt}s, "

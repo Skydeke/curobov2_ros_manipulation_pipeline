@@ -113,6 +113,10 @@ class UnifiedPlannerNode(Node):
         # default. Disable at launch if a live CUDA-graph capture is wanted with
         # no competing visualization traffic.
         self.declare_parameter('publish_collision_spheres', True)
+        # Publish the planned open-loop trajectory's end-effector path
+        # (nav_msgs/Path on /planned_path) for RViz. Mirrors MPC's
+        # mpc_predicted_path for the open-loop planners.
+        self.declare_parameter('publish_path', True)
         # NOTE: the TSDF decay knob is `decay_half_life_s` (seconds), declared by
         # ObstacleManager._load_perception_params. The raw per-integrate
         # `decay_factor` is no longer exposed: it is derived from the half-life

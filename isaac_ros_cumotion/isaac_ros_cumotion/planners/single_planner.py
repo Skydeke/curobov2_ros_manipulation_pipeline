@@ -20,6 +20,9 @@ from abc import abstractmethod
 from typing import Optional, Any
 import time
 
+from nav_msgs.msg import Path
+from geometry_msgs.msg import PoseStamped
+
 from curobo.types import JointState
 from curobo.motion_planner import MotionPlanner
 # v2: PoseCostMetric is gone; Cartesian axis constraints use ToolPoseCriteria.
@@ -100,6 +103,75 @@ class SinglePlanner(TrajectoryPlanner):
 
         # Cancellation flag
         self._cancelled = False
+
+        # End-effector trajectory path visualization (RViz). Publishes the
+        # planned open-loop trajectory's EE path as a nav_msgs/Path. Gated by the
+        # node's `publish_path` ROS param (read lazily so a default always holds
+        # even if the node hasn't declared it yet).
+        self._path_pub = None
+        self._path_frame = getattr(config_wrapper, 'base_link', None)
+
+    def _publish_plan_path(self):
+        """Publish the planned trajectory's end-effector path as nav_msgs/Path.
+
+        FK's every waypoint of ``self.planned_trajectory`` via the shared
+        MotionPlanner and publishes the EE tool-frame positions so the planned
+        motion can be overlaid in RViz (mirrors MPC's ``mpc_predicted_path``).
+        Gated by the node's ``publish_path`` ROS param (default True).
+        """
+        if getattr(self.node, 'has_parameter', None) and self.node.has_parameter('publish_path'):
+            if not self.node.get_parameter('publish_path').value:
+                return
+        if self.motion_planner is None or self.planned_trajectory is None:
+            return
+        try:
+            if self._path_pub is None:
+                # Namespace under the owning node (e.g. /curobo_server/planned_path)
+                # so multiple planners don't clobber each other on the global topic,
+                # matching ros_service_manager's collision_spheres/scene_obstacles.
+                self._path_pub = self.node.create_publisher(
+                    Path, self.node.get_name() + '/planned_path', 10)
+                if self._path_frame is None:
+                    self._path_frame = getattr(self.node, 'base_link', None) or 'world'
+
+            traj = self.planned_trajectory
+            # traj.position is [B, T, D]; collapse to [T, D] (one row per waypoint).
+            q = traj.position
+            while q.ndim > 2:
+                q = q[0]
+            joint_names = getattr(traj, 'joint_names', None)
+            if q.ndim == 1:
+                q = q.unsqueeze(0)
+            js = JointState.from_position(q.clone(), joint_names=joint_names)
+
+            # The interpolated plan is in FULL joint space — when the config locks
+            # a joint (e.g. a gripper finger_joint), cuRobo augments the trajectory
+            # via get_full_dof_from_solution(), so D can exceed the model's active
+            # DOF. Project back onto active joints by name before FK, matching the
+            # multi-point planner's current_state handling.
+            js = self.motion_planner.kinematics.get_active_js(js)
+
+            # FK all waypoints in one batched call; tool_poses: [T, 1, L, 3].
+            kin = self.motion_planner.compute_kinematics(js)
+            ee_pos = kin.tool_poses.position[:, 0, 0, :].cpu().tolist()
+
+            path = Path()
+            path.header.frame_id = self._path_frame
+            path.header.stamp = self.node.get_clock().now().to_msg()
+            for x, y, z in ee_pos:
+                ps = PoseStamped()
+                ps.header = path.header
+                ps.pose.position.x = float(x)
+                ps.pose.position.y = float(y)
+                ps.pose.position.z = float(z)
+                ps.pose.orientation.w = 1.0
+                path.poses.append(ps)
+            self._path_pub.publish(path)
+        except Exception as e:
+            self.node.get_logger().warn(
+                f"{self.get_planner_name()}: failed to publish planned path: {e}",
+                throttle_duration_sec=5.0,
+            )
 
     def _get_execution_mode(self) -> ExecutionMode:
         """
@@ -280,6 +352,9 @@ class SinglePlanner(TrajectoryPlanner):
                 f"{self.get_planner_name()}: Successfully planned trajectory "
                 f"with {num_wp} waypoints"
             )
+
+            # Publish the planned EE trajectory path for RViz (gated by publish_path).
+            self._publish_plan_path()
 
             # Send trajectory to robot context for visualization
             if robot_context is not None:
