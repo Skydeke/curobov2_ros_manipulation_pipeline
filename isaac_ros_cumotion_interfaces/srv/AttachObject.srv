@@ -1,22 +1,5 @@
-# Possible payload shape types (match AddObject.srv / SetMask.srv conventions)
-int8 CUBOID=0
-int8 SPHERE=1
-int8 CAPSULE=2
-int8 CYLINDER=3
-int8 MESH=4
-
-# Request fields
-int8 type
-# header.frame_id: TF frame `pose` is expressed in; "" => robot base frame.
-# Typically the gripper link, so the pose is a property of the grasp and does
-# not depend on where the arm currently is.
-# header.stamp is IGNORED: the transform is taken at call time, to match the
-# joint configuration the attachment is computed from.
-std_msgs/Header header
-# Only used for mesh payloads, file path must be absolute
-string mesh_file_path ""
-geometry_msgs/Pose pose
-geometry_msgs/Vector3 dimensions
+# Request: name of an existing scene obstacle to attach to the robot flange.
+string object_name
 ---
 # Response fields
 bool success

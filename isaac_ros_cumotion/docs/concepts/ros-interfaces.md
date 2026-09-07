@@ -129,7 +129,7 @@ Type: `std_srvs/srv/Trigger`. Response `message` lists the current obstacle name
 
 ### `/unified_planner/attach_object` / `/unified_planner/detach_object`
 
-Types: `curobo_msgs/srv/AttachObject` (request: `object_name`) and `std_srvs/srv/Trigger`. Attaches an existing scene obstacle to the robot flange so it moves with the arm and is collision-checked, then releases it. Requires the robot configuration to define an `attached_object` extra link — see [Tutorial 3](../tutorials/03-collision-objects.md).
+Types: `isaac_ros_cumotion_interfaces/srv/AttachObject` (request: `object_name`) and `std_srvs/srv/Trigger`. Attaches an existing scene obstacle to the robot flange so it moves with the arm and is collision-checked, then releases it. Requires the robot configuration to define an `attached_object` extra link — see [Tutorial 3](../tutorials/03-collision-objects.md).
 
 ### `/unified_planner/set_link_collision`
 
