@@ -172,8 +172,8 @@ class GeneratedTestSuite(unittest.TestCase):
             f"Field 'success' doesn't match expected value"
         )
 
-    def test_03_set_strategy_doosan(self):
-        """03 Set strategy doosan"""
+    def test_03_set_strategy_joint_speed(self):
+        """03 Set strategy joint_speed"""
 
         # Create service client
         client = self.node.create_client(SetRobotStrategy, '/unified_planner/set_robot_strategy')

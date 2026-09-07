@@ -310,7 +310,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = SetLinkCollision.Request()
-        set_message_fields(request, {'link_names': ['dsr01/link6'], 'enabled': False})
+        set_message_fields(request, {'link_names': ['forearm_link'], 'enabled': False})
 
         # Call service
         future = client.call_async(request)
@@ -345,7 +345,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = SetLinkCollision.Request()
-        set_message_fields(request, {'link_names': ['dsr01/link6'], 'enabled': True})
+        set_message_fields(request, {'link_names': ['forearm_link'], 'enabled': True})
 
         # Call service
         future = client.call_async(request)

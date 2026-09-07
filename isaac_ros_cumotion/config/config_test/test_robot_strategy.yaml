@@ -35,7 +35,7 @@ tests:
     data: {robot_strategy: "emulator"}
     expect: {success: True}
 
-  - name: "03 Set strategy doosan"
+  - name: "03 Set strategy joint_speed"
     service: "/unified_planner/set_robot_strategy"
     type: isaac_ros_cumotion_interfaces/srv/SetRobotStrategy
     data: {robot_strategy: "joint_speed"}

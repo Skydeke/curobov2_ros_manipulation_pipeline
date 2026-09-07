@@ -150,7 +150,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'], 'position': [0.1, 0.2, 0.3, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_joint_positions': [0.5, -0.5, 0.5, -0.5, 0.5, -0.5]})
+        set_message_fields(request, {'start_pose': {'name': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'joint_7'], 'position': [0.1, 0.2, 0.3, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_joint_positions': [0.5, -0.5, 0.5, -0.5, 0.5, -0.5, 0.0]})
 
         # Call service
         future = client.call_async(request)
@@ -220,7 +220,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'], 'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_pose': {'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
+        set_message_fields(request, {'start_pose': {'name': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'joint_7'], 'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_pose': {'position': {'x': 0.5, 'y': 0.0, 'z': 0.5}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
 
         # Call service
         future = client.call_async(request)
@@ -255,7 +255,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'], 'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_pose': {'position': {'x': 10.0, 'y': 10.0, 'z': 10.0}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
+        set_message_fields(request, {'start_pose': {'name': ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6', 'joint_7'], 'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_pose': {'position': {'x': 10.0, 'y': 10.0, 'z': 10.0}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}})
 
         # Call service
         future = client.call_async(request)

@@ -250,7 +250,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = Fk.Request()
-        set_message_fields(request, {'joint_states': [{'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]})
+        set_message_fields(request, {'joint_states': [{'position': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}]})
 
         # Call service
         future = client.call_async(request)

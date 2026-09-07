@@ -69,7 +69,7 @@ tests:
     service: "/unified_planner/set_link_collision"
     type: isaac_ros_cumotion_interfaces/srv/SetLinkCollision
     data:
-      link_names: ['dsr01/link6']
+      link_names: ['forearm_link']
       enabled: false
     expect: {success: True}
 
@@ -77,6 +77,6 @@ tests:
     service: "/unified_planner/set_link_collision"
     type: isaac_ros_cumotion_interfaces/srv/SetLinkCollision
     data:
-      link_names: ['dsr01/link6']
+      link_names: ['forearm_link']
       enabled: true
     expect: {success: True}
