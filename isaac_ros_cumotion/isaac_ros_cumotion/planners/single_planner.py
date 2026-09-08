@@ -598,8 +598,22 @@ class SinglePlanner(TrajectoryPlanner):
                 if acc_list is None:
                     acc_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
 
+                # Interpolated plans are in FULL joint space: cuRobo augments
+                # locked joints (e.g. a gripper finger_joint) via
+                # get_full_dof_from_solution(), so rows can be wider than
+                # joint_names (Kortex: 8 columns vs 7 names). Project the
+                # streamed command back onto ACTIVE joints by name so it matches
+                # the controller's arm joints — mirrors the FK handling in
+                # _publish_plan_path().
+                joint_names, cols = self._active_joint_projection(traj)
+                if cols is not None:
+                    pos_list = [[r[i] for i in cols] for r in pos_list]
+                    vel_list = [[r[i] for i in cols] for r in vel_list]
+                    acc_list = [[r[i] for i in cols] for r in acc_list]
+                    joint_names = [joint_names[i] for i in cols]
+
                 self._command_epoch = robot_context.set_command(
-                    traj.joint_names,
+                    joint_names,
                     vel_list,
                     acc_list,
                     pos_list,
@@ -678,6 +692,42 @@ class SinglePlanner(TrajectoryPlanner):
             Processed trajectory (default: unchanged)
         """
         return trajectory
+
+    def _active_joint_projection(self, traj):
+        """Column projection of a FULL-joint-space plan onto ACTIVE joints.
+
+        cuRobo's interpolated plan carries every model joint, including joints
+        the config locks (e.g. ``lock_joints: {finger_joint: 0.0}``), appended
+        via ``get_full_dof_from_solution()``. The robot's controller only owns
+        the active (arm) joints, so streamed commands must drop those extra
+        columns. Returns ``(names, cols)`` where ``cols`` selects the active
+        columns of each row by NAME; ``(name_list, None)`` signals the plan is
+        already active-sized and needs no projection.
+        """
+        full = list(getattr(traj, 'joint_names', None) or [])
+        if (not full or self.motion_planner is None
+                or traj.position is None or traj.position.ndim == 0):
+            return full, None
+        dof = int(traj.position.shape[-1])
+        # Rows wider than the name list: cuRobo appended locked/fixed joint
+        # columns (e.g. finger_joint) via get_full_dof_from_solution(), with
+        # the named joints leading in order — a plain prefix keeps the arm
+        # joints and drops the appended tail.
+        if len(full) < dof:
+            return full, list(range(len(full)))
+        try:
+            probe = JointState.from_position(
+                traj.position.reshape(-1, dof)[:1], joint_names=full)
+            active = self.motion_planner.kinematics.get_active_js(probe)
+        except Exception:
+            return full, None
+        active_names = list(active.joint_names)
+        if len(active_names) == len(full):
+            return full, None
+        index = {n: i for i, n in enumerate(full)}
+        if any(n not in index for n in active_names):
+            return full, None
+        return full, [index[n] for n in active_names]
 
     def execute(self, robot_context, goal_handle=None) -> bool:
         """

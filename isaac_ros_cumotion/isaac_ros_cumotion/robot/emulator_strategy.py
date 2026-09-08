@@ -160,7 +160,9 @@ class EmulatorStrategy(JointCommandStrategy):
 
                 self._publish_state(names_snapshot, positions, velocities)
 
-                time.sleep(self.dt)
+                # Re-timed pacing: time_dilation_factor scales playback too
+                # (see JointCommandStrategy._dilated_dt).
+                time.sleep(self._dilated_dt())
 
             with self.buffer_lock:
                 if self._buffer_epoch == epoch:

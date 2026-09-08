@@ -36,6 +36,10 @@ class GhostStrategy(JointCommandStrategy):
             # Set joint names
             joint_trajectory_msg.joint_names = self.joint_names
 
+            # Re-timed step: time_dilation_factor scales the stamped duration
+            # (see JointCommandStrategy._dilated_dt) so the preview matches the
+            # executed trajectory.
+            stamp_dt = self._dilated_dt()
             # Create a list of JointTrajectoryPoints for every position in the JointState
             for i in range(len(self.position_command)):
                 joint_trajectory_point = JointTrajectoryPoint()
@@ -49,8 +53,8 @@ class GhostStrategy(JointCommandStrategy):
                 joint_trajectory_point.effort = []
 
                 # Set the time_from_start for this point (incremented by time_step for each point)
-                joint_trajectory_point.time_from_start = Duration(sec=int(self.dt * i),
-                                                                nanosec=int((self.dt * i % 1) * 1e9))
+                joint_trajectory_point.time_from_start = Duration(sec=int(stamp_dt * i),
+                                                                nanosec=int((stamp_dt * i % 1) * 1e9))
 
                 # Add the point to the trajectory message
                 joint_trajectory_msg.points.append(joint_trajectory_point)

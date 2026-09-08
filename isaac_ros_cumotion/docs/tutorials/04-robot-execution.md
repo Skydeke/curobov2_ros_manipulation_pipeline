@@ -67,7 +67,7 @@ Feedback carries `state`, `step_progression`, and the streamed `joint_command`. 
 Safety notes for hardware:
 
 - Keep the physical E-stop within reach; action cancellation is a software stop.
-- **Robot speed is set in the robot YAML** (cspace velocity/acceleration/jerk limits), not by a ROS parameter — scale them down for first runs, then `update_motion_gen_config`. The `time_dilation_factor` parameter is only a feedback cadence in v2.
+- **Trajectory speed at runtime** is controlled by the `time_dilation_factor` parameter (stamped dt = `interpolation_dt / tdf`; 1.0 = nominal, <1.0 slower, >1.0 faster). The hard velocity/acceleration/jerk *limits* come from the robot YAML cspace — scale those down for first runs, then `update_motion_gen_config`.
 - The world the planner avoids is only what you gave it ([Tutorial 3](03-collision-objects.md), [Tutorial 7](07-pointcloud-detection.md)) — the real table is not an obstacle until it is in the scene.
 
 ## Connecting your own robot

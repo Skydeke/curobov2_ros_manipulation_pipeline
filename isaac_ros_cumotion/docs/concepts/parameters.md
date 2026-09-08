@@ -29,7 +29,7 @@ These are the launch arguments that actually configure the system:
 | `voxel_size` | `0.05` | Perception/collision voxel size (m) |
 | `mapper_extent_xyz` | `[2.56, 2.56, 2.56]` | Perception volume extent (m), centred on the robot base |
 | `max_attempts` | `1` | Planning retries per request |
-| `time_dilation_factor` | `0.5` | Feedback publish period (s) during open-loop execution |
+| `time_dilation_factor` | `1.0` | Trajectory re-timing: 1.0 = nominal interpolation_dt pacing; <1.0 slows the motion, >1.0 speeds it up. Also gates execute() feedback re-reads |
 | `collision_activation_distance` | `0.025` | Distance (m) at which the collision cost activates |
 
 The last four are forwarded straight to the node, so their defaults above are also the node's defaults — see the tables below for what each one does.
@@ -46,7 +46,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `voxel_size` | `0.05` | Voxel size (m) shared by the perception ESDF, the collision cache, and `get_voxel_grid` | Build-time |
 | `collision_activation_distance` | `0.025` | Distance (m) at which collision cost activates | Build-time |
 | `use_cuda_graph` | `true` | Capture/replay CUDA graphs in the solvers (faster). Env var `CUROBO_USE_CUDA_GRAPH=0` overrides for A/B testing | Startup |
-| `time_dilation_factor` | `0.5` | Feedback publish cadence (s) during open-loop execution. **Not a speed control**: set robot speed in the robot YAML cspace (velocity/acceleration/jerk limits), then rebuild | Plan-time |
+| `time_dilation_factor` | `1.0` | Trajectory RE-TIMING: the stamped per-point dt of every sent trajectory becomes `interpolation_dt / tdf` — 1.0 = nominal, <1.0 slower, >1.0 faster (cuRobo convention). Also gates how often execute() re-reads progression | Plan-time |
 | `trajectory_cache_ttl` | `30.0` | Lifetime (s) of a trajectory cached by `generate_trajectory` and reusable by the execute action (`allow_cached`) | Plan-time |
 | `sparse_voxel_publish_rate` | `7.0` | Publish rate (Hz) of `/unified_planner/voxel_grid_sparse`; `<= 0` disables | Startup |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |

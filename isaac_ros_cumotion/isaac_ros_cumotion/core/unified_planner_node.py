@@ -104,11 +104,12 @@ class UnifiedPlannerNode(Node):
 
         self.declare_parameter('planner_type', 'classic')
         self.declare_parameter('max_attempts', 1)
-        # Feedback publish cadence (s) during open-loop execution. NOTE: this is
-        # NOT a speed control in v2 — set robot speed natively in the robot YAML
-        # cspace (velocity_scale / max_acceleration / max_jerk), then call
-        # update_motion_gen_config to rebuild.
-        self.declare_parameter('time_dilation_factor', 0.5)
+        # Trajectory RE-TIMING: scales the stamped time of every sent trajectory
+        # (see JointCommandStrategy._dilated_dt). 1.0 = nominal interpolation_dt
+        # pacing; <1.0 slows the motion down, >1.0 speeds it up (cuRobo
+        # convention). The same value still gates how often execute() re-reads
+        # progression.
+        self.declare_parameter('time_dilation_factor', 1.0)
         self.declare_parameter('voxel_size', 0.05)
         # Publish rate (Hz) of the sparse voxel grid topic. <= 0 disables it.
         self.declare_parameter('sparse_voxel_publish_rate', 7.0)

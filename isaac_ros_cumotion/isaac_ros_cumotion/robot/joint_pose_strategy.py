@@ -1,6 +1,7 @@
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from builtin_interfaces.msg import Duration
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+import time
 
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float32
@@ -57,11 +58,14 @@ class JointPoseStrategy(JointCommandStrategy):
             if len(self.position_command) == 0:
                 self.trajectory_progression = 1.0
 
+            # Re-timed step: time_dilation_factor scales the stamped duration
+            # (see JointCommandStrategy._dilated_dt).
+            stamp_dt = self._dilated_dt()
             for i in range(len(self.position_command)):
                 point = JointTrajectoryPoint()
                 point.positions = self.position_command[i]   # positions only
                 point.time_from_start = Duration(
-                    sec=int(self.dt * i), nanosec=int((self.dt * i % 1) * 1e9))
+                    sec=int(stamp_dt * i), nanosec=int((stamp_dt * i % 1) * 1e9))
                 msg.points.append(point)
 
             self.position_command = []
@@ -70,6 +74,10 @@ class JointPoseStrategy(JointCommandStrategy):
             self.trajectory_progression = 0.0
 
         self.pub_trajectory.publish(msg)
+        self.mark_execution_start(
+            len(msg.points),
+            positions=[pt.positions for pt in msg.points],
+        )
 
     def get_joint_pose(self):
         with self.buffer_lock:
@@ -83,11 +91,11 @@ class JointPoseStrategy(JointCommandStrategy):
             self.command_index = 0
             self.trajectory_progression = 0.0
             self.robot_state = RobotState.STOPPED
+        self.clear_execution_timer()
         self.pub_trajectory.publish(JointTrajectory())
 
     def callback_trajectory_state(self, msg):
-        with self.buffer_lock:
-            self.trajectory_progression = msg.data
+        self.mark_progression_feedback(msg.data)
 
     def callback_joint_pose(self, msg):
         # Prefer a NAME-based remap against the canonical cspace arm joints when
@@ -107,6 +115,7 @@ class JointPoseStrategy(JointCommandStrategy):
 
         n = self.dof or len(msg.position)
         with self.buffer_lock:
+            self._joint_states_last_mono = time.monotonic()
             if remap is not None:
                 self.joint_pose = [msg.position[i] for i in remap]
                 self.joint_names = list(expected)
@@ -116,5 +125,4 @@ class JointPoseStrategy(JointCommandStrategy):
                     self.joint_names = list(msg.name[:n])
 
     def get_progression(self):
-        with self.buffer_lock:
-            return self.trajectory_progression
+        return self._get_progression()

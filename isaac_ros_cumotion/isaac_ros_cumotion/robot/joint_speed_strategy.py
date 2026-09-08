@@ -184,6 +184,10 @@ class JointSpeedStrategy(JointCommandStrategy):
             if self.vel_command:
                 self._debug_csv_write(vel_clamped)
 
+            # Re-timed step: time_dilation_factor scales the stamped duration
+            # (see JointCommandStrategy._dilated_dt) — a factor <1.0 now really
+            # slows the executed motion, not just the feedback cadence.
+            stamp_dt = self._dilated_dt()
             for i in range(len(self.position_command)):
                 point = JointTrajectoryPoint()
                 point.positions = self.position_command[i]
@@ -191,7 +195,7 @@ class JointSpeedStrategy(JointCommandStrategy):
                 point.accelerations = self.accel_command[i]
                 point.effort = []
                 point.time_from_start = Duration(
-                    sec=int(self.dt * i), nanosec=int((self.dt * i % 1) * 1e9))
+                    sec=int(stamp_dt * i), nanosec=int((stamp_dt * i % 1) * 1e9))
                 msg.points.append(point)
 
             self.position_command = []
@@ -200,6 +204,10 @@ class JointSpeedStrategy(JointCommandStrategy):
             self.trajectory_progression = 0.0
 
         self.pub_trajectory.publish(msg)
+        self.mark_execution_start(
+            len(msg.points),
+            positions=[pt.positions for pt in msg.points],
+        )
 
     def get_joint_pose(self):
         with self.buffer_lock:
@@ -217,12 +225,12 @@ class JointSpeedStrategy(JointCommandStrategy):
             self.command_index = 0
             self.trajectory_progression = 0.0
             self.robot_state = RobotState.STOPPED
+        self.clear_execution_timer()
         self.pub_trajectory.publish(JointTrajectory())
         self._debug_csv_close()
 
     def callback_trajectory_state(self, msg):
-        with self.buffer_lock:
-            self.trajectory_progression = msg.data
+        self.mark_progression_feedback(msg.data)
 
     def callback_joint_pose(self, msg):
         # Prefer a NAME-based remap against the canonical cspace arm joints
@@ -246,6 +254,7 @@ class JointSpeedStrategy(JointCommandStrategy):
 
         n = self.dof or len(msg.position)
         with self.buffer_lock:
+            self._joint_states_last_mono = time.monotonic()
             if remap is not None:
                 self.joint_pose = [msg.position[i] for i in remap]
                 if msg.velocity:
@@ -259,5 +268,4 @@ class JointSpeedStrategy(JointCommandStrategy):
                     self.joint_names = list(msg.name[:n])
 
     def get_progression(self):
-        with self.buffer_lock:
-            return self.trajectory_progression
+        return self._get_progression()

@@ -107,11 +107,11 @@ class RobotContext:
     def select_strategy(self, node, dt):
         '''Instantiate the control strategy named by the ``control_strategy`` param.
 
-        ``dt`` here is the trajectory sampling step (interpolation_dt) — it has
-        nothing to do with the ``time_dilation_factor`` ROS param, which only
-        drives open-loop feedback publish cadence. The parameter used to be
-        named after that unrelated param, which was misleading at every call
-        site.
+        ``dt`` here is the trajectory sampling step (interpolation_dt), the
+        nominal (undilated) step. The strategy re-stamps every outgoing
+        trajectory with ``dt / time_dilation_factor`` (see
+        JointCommandStrategy._dilated_dt), so the parameter is now a real
+        speed control: 1.0 = nominal, <1.0 slower, >1.0 faster.
         '''
         key = node.get_parameter('control_strategy').get_parameter_value().string_value
         strategy = create_strategy(key, node, dt, self.description)

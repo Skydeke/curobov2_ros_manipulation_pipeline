@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import threading
+import time
 
 
 class RobotState():
@@ -60,6 +61,20 @@ class JointCommandStrategy(ABC):
         # lets the emulator's playback thread detect preemption mid-playback.
         self._buffer_epoch = 0
 
+        # Open-loop progression fallback (no state_topic configured).
+        # trajectory_progression is only advanced by callback_trajectory_state
+        # from the optional Float32 state_topic; without one it stays 0.0 and
+        # SinglePlanner.execute() would spin forever. Completion is instead
+        # derived from joint FEEDBACK by matching the measured joints to the
+        # nearest sent waypoint — true progress even when the robot moves at
+        # its own velocity limits rather than the stamped dt. Wall-clock is
+        # used only as a no-feedback fallback/cap.
+        self._progression_feedback_ready = False
+        self._exec_start_mono = None
+        self._exec_total_s = 0.0
+        self._exec_positions = None
+        self._reach_tol = 0.02
+
     @property
     def buffer_epoch(self) -> int:
         with self.buffer_lock:
@@ -83,6 +98,105 @@ class JointCommandStrategy(ABC):
     def get_joint_name(self):
         with self.buffer_lock:
             return list(self.joint_names)
+
+    def mark_progression_feedback(self, value):
+        """Record REAL progress feedback (state_topic) and disable the fallback."""
+        with self.buffer_lock:
+            self.trajectory_progression = value
+            self._progression_feedback_ready = True
+
+    def _dilated_dt(self) -> float:
+        """Output time-step (s) of the RE-TIMED trajectory.
+
+        ``time_dilation_factor`` scales the trajectory's time parameterization
+        on its way out: the stamped per-point step becomes
+        ``self.dt / time_dilation_factor``, so the whole trajectory plays at
+        ``1/factor`` of its nominal (interpolation_dt) duration. A factor < 1.0
+        slows the motion down, > 1.0 speeds it up — the cuRobo convention
+        (``MotionGenPlanConfig.time_dilation_factor``, curobo CHANGELOG). This
+        re-stamping is what actually makes the parameter a speed control, which
+        it was NOT in v2 (feedback cadence only).
+        """
+        factor = 1.0
+        if self.node.has_parameter('time_dilation_factor'):
+            factor = float(
+                self.node.get_parameter('time_dilation_factor').get_parameter_value().double_value
+            )
+        if factor <= 0.0:
+            return self.dt
+        return self.dt / factor
+
+    def mark_execution_start(self, num_points, positions=None):
+        """Record the sent trajectory for REAL progression measurement.
+
+        ``dilated_dt * (num_points - 1)`` is the nominal end only — the
+        controller may actually play the path slower (velocity limits), so
+        progression must be derived from joint FEEDBACK (nearest sent waypoint)
+        rather than wall clock. ``positions`` is the full sent trajectory
+        (per-waypoint joint rows) used for that match. The nominal duration and
+        start time are kept only as a no-feedback fallback; it uses the SAME
+        re-timed dt as the stamping so the fallback tracks the stamped plan."""
+        with self.buffer_lock:
+            self._exec_total_s = self._dilated_dt() * max(num_points - 1, 0)
+            self._exec_positions = (
+                [[float(v) for v in row] for row in positions] if positions else None
+            )
+            self._exec_start_mono = time.monotonic()
+
+    def clear_execution_timer(self):
+        with self.buffer_lock:
+            self._exec_start_mono = None
+            self._exec_total_s = 0.0
+            self._exec_positions = None
+
+    def _pose_progress(self, pose):
+        """Fraction [0, 1] of the sent path actually covered, from the index of
+        the waypoint nearest the MEASURED joints (body frames stay in sync with
+        the projected command rows). Velocity-limit-paced motion is captured
+        naturally; wall-clock drift cannot race ahead of it."""
+        rows = self._exec_positions or []
+        if len(rows) < 2 or len(pose) != len(rows[0]):
+            return None
+        # ARRIVAL: measured joints within tolerance of the FINAL waypoint.
+        # The tail points of an interpolated plan are nearly coincident, so a
+        # pure nearest-match can stick at N-2 under feedback noise and peg
+        # progression at (N-2)/(N-1) — stalling execution forever.
+        if all(abs(p - g) <= self._reach_tol for p, g in zip(pose, rows[-1])):
+            return 1.0
+        best = 0
+        best_d = None
+        for i, row in enumerate(rows):
+            d = sum((p - g) * (p - g) for p, g in zip(pose, row))
+            if best_d is None or d < best_d:
+                best_d = d
+                best = i
+            if d < 1e-12:
+                break
+        return best / (len(rows) - 1)
+
+    def _get_progression(self):
+        """Shared progression read: real feedback when present, otherwise the
+        fraction of the path the measured joints have actually covered, with a
+        wall-clock fallback/cap only when joint feedback is unavailable or
+        stale."""
+        with self.buffer_lock:
+            if self._progression_feedback_ready:
+                return self.trajectory_progression
+            pose = getattr(self, 'joint_pose', None)
+            last_mono = getattr(self, '_joint_states_last_mono', None)
+            if pose is not None and last_mono is not None:
+                if time.monotonic() - last_mono < 1.0:
+                    prog = self._pose_progress(pose)
+                    if prog is not None:
+                        return prog
+            if self._exec_start_mono is None or self._exec_total_s <= 0:
+                return 0.0
+            elapsed = time.monotonic() - self._exec_start_mono
+            if elapsed >= self._exec_total_s + max(0.5, 0.15 * self._exec_total_s):
+                return 1.0
+            if elapsed < self._exec_total_s:
+                return elapsed / self._exec_total_s
+            return 0.99
 
     def get_joint_velocity(self):
         """Real, measured joint velocity, if this strategy's driver provides

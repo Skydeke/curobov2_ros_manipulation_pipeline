@@ -293,9 +293,10 @@ def generate_launch_description():
             description='Planning retries per request (MotionPlanner.plan_pose)'
         ),
         DeclareLaunchArgument(
-            'time_dilation_factor', default_value='0.5',
-            description='Feedback publish period (s) during open-loop execution. '
-                        'Not a speed control: set velocity/acceleration limits in the robot YAML cspace'
+            'time_dilation_factor', default_value='1.0',
+            description='Trajectory re-timing: multiplies the stamped per-point dt '
+                        'as 1/factor. 1.0 = nominal; <1.0 slows the motion, >1.0 speeds it up. '
+                        'Also gates execute() feedback re-read cadence'
         ),
         DeclareLaunchArgument(
             'voxel_size', default_value='0.05',
