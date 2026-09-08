@@ -518,9 +518,28 @@ class SinglePlanner(TrajectoryPlanner):
             if hasattr(success_val, 'item'):
                 success_val = success_val.item()
             if not success_val:
+                # TrajOptSolverResult has no `.status`; the informative fields
+                # are debug_info (dict) and feasible (constraint satisfaction).
+                status = getattr(result, 'status', None)
+                if not status:
+                    dbg = getattr(result, 'debug_info', None) or {}
+                    status = next(iter(dbg.values()), None) if dbg else None
+                if not status:
+                    feasible = getattr(result, 'feasible', None)
+                    if feasible is not None:
+                        try:
+                            ok = feasible
+                            if hasattr(ok, 'detach'):
+                                ok = ok.detach().cpu()
+                            if hasattr(ok, 'all'):
+                                ok = bool(ok.all())
+                            if not ok:
+                                status = "constraints violated (collision/limits)"
+                        except Exception:
+                            pass
                 return PlannerResult(
                     success=False,
-                    message=f"Planning failed: {getattr(result, 'status', 'unknown')}",
+                    message=f"Planning failed: {status or 'unknown'}",
                     metadata=self._result_metadata(result=result)
                 )
 

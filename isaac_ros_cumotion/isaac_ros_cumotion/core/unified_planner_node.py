@@ -35,11 +35,13 @@ from isaac_ros_cumotion_interfaces.srv import TrajectoryGeneration, SetPlanner, 
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
 
 from curobo.types import DeviceCfg, JointState
-from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo.logging import setup_logger as setup_curobo_logger
 
 from isaac_ros_cumotion.robot.robot_context import RobotContext
 from isaac_ros_cumotion.core.config_wrapper_motion import ConfigWrapperMotion
+from isaac_ros_cumotion.core.collision_distance import (
+    _attributed_collisions,
+)
 from isaac_ros_cumotion.core.attachment_services import AttachmentServices
 from isaac_ros_cumotion.core.ik_services import IKServices
 from isaac_ros_cumotion.core.fk_services import FKServices
@@ -437,6 +439,12 @@ class UnifiedPlannerNode(Node):
         self.ik_services.update_world()
         self.fk_services.update_world()
 
+        # Every update_world above clears + re-adds all obstacles with enable=1,
+        # which wipes the flag cuRobo set for an attached obstacle — re-assert
+        # the disabled set now or the static copy collides with the attached
+        # spheres again.
+        obstacle_manager.reapply_attached_disables(self)
+
     def _solver_bound_scene(self, scene, obstacle_manager):
         """Resolve/normalize a scene before it is pushed to the solvers.
 
@@ -608,9 +616,11 @@ class UnifiedPlannerNode(Node):
                 if result.success:
                     self.get_logger().info(f"Planning succeeded: {result.message}")
                 else:
+                    diag = self._collision_diagnostic(planner)
+                    if diag:
+                        response.message = f"{response.message} | {diag}"
                     self.get_logger().error(
-                        f"Planning failed: {result.message}"
-                        f" | {self._collision_diagnostic(planner)}")
+                        f"Planning failed: {response.message}")
 
             return response
 
@@ -624,80 +634,64 @@ class UnifiedPlannerNode(Node):
             return response
 
     def _collision_diagnostic(self, planner=None) -> str:
-        """Human-readable list of robot links currently in collision.
+        """Describe, as collision tuples, what the robot currently collides with.
 
-        Queries per-sphere collision distance at the current joint state and
-        maps the colliding sphere indices back to link names (the sphere array
-        is grouped by link in ``collision_link_names`` order). Appends which
-        links are touching and by how much, so a failed plan logs *what* is
-        colliding rather than a bare "Planning failed: unknown". Best-effort:
-        returns an empty string on any failure.
+        Queries the shared collision_distance harness with the SAME activation
+        margin the planner's optimizer uses (``collision_activation_distance``),
+        so the diagnostic agrees with the failure ("start/end in collision")
+        that produced it — nothing is reported that the planner wouldn't have
+        rejected, and nothing the planner rejected is silently skipped. Unlike
+        the raw per-sphere cost it names the offending links AND the scene
+        obstacles involved (cuboids matched exactly against the same OBB SDF the
+        GPU kernel uses; mesh/voxel involvement flagged by name when it can't be
+        pinned down). Reports also carry ``(link, obstacle, depth_m)`` tuples for
+        the message string, plus a human-readable summary. Best-effort: returns
+        an empty string on any failure.
         """
         try:
-            solver = (
-                planner if planner is not None
-                else getattr(self, 'motion_planner', None)
-                or getattr(self, 'mpc', None)
-                or getattr(self, 'ik_solver', None)
-            )
-            if solver is None:
-                return ""
-            scene_collision_checker = getattr(solver, 'scene_collision_checker', None)
-            if scene_collision_checker is None or not hasattr(
-                    scene_collision_checker, 'get_sphere_distance'):
-                return ""
             wrapper = self.config_wrapper_motion
-            kin_cfg = wrapper.kin_model.config.kinematics_config
+            # Use the MotionPlanner's kinematics when attached so the fitted
+            # payload spheres are included (same source the RViz colouring
+            # uses); attribution shares the same sphere ordering.
+            kin = None
+            attach_svc = getattr(self, 'attachment_services', None)
+            if attach_svc is not None:
+                try:
+                    kin = attach_svc.kinematics()
+                except Exception:
+                    kin = None
 
-            q_js = JointState(
-                position=torch.tensor(
-                    wrapper.robot.get_joint_pose(),
-                    dtype=wrapper._ops_dtype,
-                    device=wrapper._device,
-                ),
-                joint_names=kin_cfg.joint_names,
-            )
-            kinematics_state = wrapper.kin_model.compute_kinematics(q_js)
-            robot_spheres = kinematics_state.robot_spheres
-
-            device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
-            collision_buffer = CollisionBuffer.from_shape(
-                robot_spheres.shape, device_cfg)
-            weight = device_cfg.to_device([1.0])
-            activation = 0.0
-            if self.has_parameter('collision_activation_distance'):
-                activation = self.get_parameter(
-                    'collision_activation_distance'
-                ).get_parameter_value().double_value
-            activation_t = device_cfg.to_device([activation])
-
-            sphere_dist = scene_collision_checker.get_sphere_distance(
-                kinematics_state,
-                collision_buffer,
-                weight,
-                activation_distance=activation_t,
-            )
-            dists = torch.flatten(sphere_dist, start_dim=0).tolist()
-
-            kp = kin_cfg
-            idx_to_name = [None] * int(kp.num_links)
-            for name, idx in kp.link_name_to_idx_map.items():
-                idx_to_name[int(idx)] = name
-            idx_map = kp.link_sphere_idx_map.detach().cpu().numpy()
-
-            collided_links = {}
-            for i, d in enumerate(dists):
-                if i < len(idx_map) and d > 0.0:
-                    link = idx_to_name[int(idx_map[i])]
-                    if link is None:
-                        link = f"link#{int(idx_map[i])}"
-                    collided_links[link] = max(collided_links.get(link, 0.0), d)
-            if not collided_links:
+            reports = _attributed_collisions(wrapper, self, kin=kin, solver=planner)
+            if reports is None:
                 return ""
-            parts = [f"{name} penetrated {val:.4f}m"
-                     for name, val in sorted(collided_links.items(),
-                                             key=lambda kv: -kv[1])]
-            return "In collision: " + ", ".join(parts)
+            if not reports:
+                return ""
+
+            act = reports[0].get('activation')
+            act = act if act is not None else (
+                self.get_parameter('collision_activation_distance')
+                .get_parameter_value().double_value
+                if self.has_parameter('collision_activation_distance') else 0.0)
+
+            parts = []
+            tuples = []
+            for r in sorted(reports, key=lambda r: -r['depth']):
+                what = ", ".join(r['obstacles']) if r['obstacles'] \
+                    else r['clobber_note']
+                what = what if what else "unknown-obstacle"
+                depth_m = r['depth']
+                tuples.append((r['link'], what, round(depth_m, 4)))
+                if depth_m > act:  # beyond the inflated surface => real contact
+                    parts.append(
+                        f"{r['link']} hard-collides {what} "
+                        f"({depth_m * 1000:.1f} mm past surface)")
+                else:
+                    parts.append(
+                        f"{r['link']} within {act * 1000:.1f} mm margin of {what}"
+                        f" ({depth_m * 1000:.1f} mm past margin surface)")
+            human = "In collision (margin " + (f"{act * 1000:.1f} mm" if act else "none") \
+                + "): " + "; ".join(parts)
+            return f"{human} | collision_contacts={tuples}"
         except Exception as e:
             self.get_logger().debug(
                 f"collision diagnostic unavailable: {e}", throttle_duration_sec=5.0)

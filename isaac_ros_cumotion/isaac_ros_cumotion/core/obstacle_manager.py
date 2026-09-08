@@ -40,13 +40,15 @@ class ObstacleManager:
         # Tracks registered obstacle names for uniqueness validation.
         self.obstacle_names = []
 
-        # Obstacles currently excluded from the derived collision worlds (the
-        # cuboid/mesh buffers pushed to the solvers AND the voxel-map
-        # rasterization). The attach flow marks the grasped obstacle here so its
-        # STATIC copy vanishes everywhere the moment it is picked up — disabling
-        # it in one solver's collision model is not enough: every derived scene
-        # is rebuilt fresh from this Scene, and cuRobo re-adds whatever it sees
-        # (see the disable-flag wipe in update_world). Un-excluded on detach.
+        # Obstacles excluded ONLY from the voxel-map rasterization scene (the
+        # analytic primitives reloaded on every get_voxel_grid publish), NOT from
+        # the solver scenes. cuRobo's per-obstacle `enable` flag cannot survive a
+        # world push (load_from_scene_cfg clears + re-adds with enable=1), so
+        # while attached the obstacle stays registered in the solvers but is
+        # disabled BY NAME — reapply_attached_disables() re-asserts that flag
+        # after every push. Dropping it from the voxel-map rasterization (this
+        # set) keeps the carried object's analytic voxels out of the published
+        # grid. Un-excluded on detach.
         self.excluded_obstacle_names = set()
 
         # Perception (created lazily in setup_perception()).
@@ -108,23 +110,71 @@ class ObstacleManager:
         self.obstacle_names.append(obstacle.name)
 
     def exclude_obstacle(self, name: str):
-        """Drop a named obstacle from every derived collision world.
+        """Drop a named obstacle from the voxel-map rasterization only.
 
-        Marks `name` so the collision/voxel scenes built from this Scene
-        (solvers' cuboid/mesh buffers and the voxel-map rasterization) ship
-        without it, while the authoritative Scene keeps it (so it still renders
-        in scene_obstacles and can be restored by include_obstacle). Used by the
-        attach flow: once the obstacle moves with the arm as attached spheres,
-        its static world copy must not survive in any collision representation.
+        Solver scenes KEEP the obstacle — it must stay registered there for the
+        name-based disable (reapply_attached_disables) to apply. This only
+        removes its STATIC copy from the analytic-primitives scene used by
+        _compute_dense_voxel_grid, so the carried object's voxels vanish from
+        the published voxel map. The authoritative Scene keeps it (still renders
+        in scene_obstacles; restored by include_obstacle). Used by the attach
+        flow.
         """
         self.excluded_obstacle_names.add(name)
 
     def include_obstacle(self, name: str):
-        """Restore a named obstacle into the derived collision worlds."""
+        """Restore a named obstacle into the voxel-map rasterization."""
         self.excluded_obstacle_names.discard(name)
         # Invalidate the voxel grid key so the next get_voxel_grid / sparse
         # voxel publish re-rasterizes with the obstacle back.
         self._voxel_grid_key = None
+
+    def reapply_attached_disables(self, node) -> None:
+        """Re-assert the disabled flag for attached obstacles on every solver.
+
+        cuRobo's per-obstacle `enable` flag lives in the GPU buffers and is
+        reset to enabled by any world push (SceneData.load_from_scene_cfg does
+        clear() + re-add with enable=1; see CuboidData.clear/add_from_raw). The
+        attach flow therefore keeps the grasped obstacle REGISTERED in the
+        solver scenes but disabled by name; this re-applies that flag across all
+        solvers after every push so the static copy stays collision-inert until
+        detach. Best-effort: only checkers that actually hold the obstacle are
+        touched, and any failure skips that checker — reapply must never break
+        the world push itself.
+        """
+        if not self.excluded_obstacle_names:
+            return
+        checkers = []
+        seen = set()
+
+        def _add(checker):
+            if checker is not None and id(checker) not in seen:
+                seen.add(id(checker))
+                checkers.append(checker)
+
+        planner = getattr(node, 'motion_planner', None)
+        _add(getattr(planner, 'scene_collision_checker', None))
+        mpc = getattr(node, 'mpc', None)
+        _add(getattr(mpc, 'scene_collision_checker', None))
+        ik = getattr(getattr(node, 'ik_services', None), '_ik_solver', None)
+        _add(getattr(ik, 'scene_collision_checker', None))
+        if getattr(node, 'fk_services', None) is not None:
+            _add(node.fk_services._collision_checker)
+        ret = getattr(node, 'retargeter', None)
+        if ret is not None:
+            _add(getattr(getattr(ret, 'solver', None), 'scene_collision_checker', None))
+            _add(getattr(
+                getattr(getattr(ret, 'solver', None), '_global_ik_solver', None),
+                'scene_collision_checker', None))
+
+        for name in tuple(self.excluded_obstacle_names):
+            for checker in checkers:
+                try:
+                    if not checker.check_obstacle_exists(name):
+                        continue
+                    checker.enable_obstacle(name, enable=False)
+                except Exception:
+                    continue
 
     # ---- Perception parameters (single source of truth) ----
 
@@ -847,9 +897,15 @@ class ObstacleManager:
         return int(occ_mask.sum())
 
     def primitives_only_scene(self) -> Scene:
-        """The current Scene minus the perception ESDF voxel layer, with all
-        obstacles converted to the collision types CuRobo's GPU solver supports
-        (cuboid / mesh).
+        """The current Scene minus the perception ESDF voxel layer and minus any
+        excluded (attached) obstacles, with all remaining obstacles converted to
+        the collision types CuRobo's GPU solver supports (cuboid / mesh).
+
+        The attached-object exclusion is applied HERE (and only here): the
+        voxel-map rasterization must not re-introduce the carried object's
+        analytic voxels, so its static copy is dropped before conversion.
+        Solver-bound scenes (collision_world_scene / _from) keep it, disabled by
+        name via reapply_attached_disables.
 
         Scene.objects is assembled from every bucket *including* `voxel`, so
         handing self.scene to a SceneCollision query also queries the nvblox ESDF
@@ -883,11 +939,11 @@ class ObstacleManager:
         Cheap: the lists are shared by reference, only the container is new.
         """
         return self._collision_supported(Scene(
-            cuboid=self.scene.cuboid,
-            sphere=self.scene.sphere,
-            capsule=self.scene.capsule,
-            cylinder=self.scene.cylinder,
-            mesh=self.scene.mesh,
+            cuboid=self._without_excluded(self.scene.cuboid),
+            sphere=self._without_excluded(self.scene.sphere),
+            capsule=self._without_excluded(self.scene.capsule),
+            cylinder=self._without_excluded(self.scene.cylinder),
+            mesh=self._without_excluded(self.scene.mesh or []),
         ))
 
     def collision_world_scene(self) -> Scene:
@@ -897,7 +953,9 @@ class ObstacleManager:
 
         This is the scene to push to the solvers at runtime (via update_world),
         where the perception ESDF layer is wanted. It differs from
-        primitives_only_scene() only in that the voxel layer is retained; see
+        primitives_only_scene() only in that the voxel layer is retained and
+        excluded (attached) obstacles are kept — they stay registered so the
+        name-based disable (reapply_attached_disables) applies. See
         `_collision_supported` for why the primitive conversion is needed.
         """
         return self._collision_supported(self.scene)
@@ -921,21 +979,13 @@ class ObstacleManager:
         sphere/cylinder/capsule as trimesh meshes (accurate, via the mesh SDF
         path). Apply it to every solver-bound Scene so all primitive types
         actually collide and appear in the voxel map.
+
+        Attached-object exclusion is NOT applied here: solver scenes keep the
+        grasped obstacle registered (it is disabled by name afterwards via
+        reapply_attached_disables). Only primitives_only_scene() drops it, for
+        the voxel-map rasterization.
         """
-        if self.excluded_obstacle_names:
-            # Attached (disabled) obstacles are dropped BEFORE the conversion so
-            # they vanish from the cuboid/mesh buffers the solvers load AND from
-            # the voxel-map primitive rasterization. The authoritative Scene is
-            # untouched (still renders in scene_obstacles).
-            scene = SceneCfg(
-                sphere=self._without_excluded(scene.sphere),
-                cuboid=self._without_excluded(scene.cuboid),
-                capsule=self._without_excluded(scene.capsule),
-                cylinder=self._without_excluded(scene.cylinder),
-                mesh=self._without_excluded(scene.mesh or []),
-                voxel=scene.voxel,
-            )
-        elif scene.mesh is None:  # create_collision_support_world concatenates it
+        if scene.mesh is None:  # create_collision_support_world concatenates it
             scene = SceneCfg(
                 sphere=scene.sphere,
                 cuboid=scene.cuboid,

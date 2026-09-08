@@ -19,7 +19,6 @@ following the same self-registering pattern as ``IKServices`` / ``FKServices``.
 
 from std_srvs.srv import Trigger
 from curobo.types import JointState, Pose
-from curobo._src.types.device_cfg import DeviceCfg
 from curobo.sphere_fit import estimate_sphere_count
 
 from isaac_ros_cumotion_interfaces.srv import AttachObject
@@ -91,15 +90,18 @@ class AttachmentServices:
 
         The obstacle is fetched from the ObstacleManager's authoritative Scene
         (so it works even if the solver's loaded scene_model is out of sync) and
-        passed directly to ``attach`` (not ``attach_from_scene``, which looks up
-        by name in the solver's scene_model). The obstacle is EXCLUDED from
-        every derived collision world via the ObstacleManager (so neither the
-        solver buffers nor the voxel-map rasterization double-count it with the
-        attached spheres) and the world is pushed to the solvers; detach
-        restores it. cuRobo's own ``disable_obstacle_names``/re-enable cycle is
-        NOT used — it re-enables via ``scene_collision.enable_obstacle`` on
-        detach, which fails because the excluded obstacle is no longer loaded.
-        Affects the shared MotionPlanner only (open-loop transport).
+        fitted via ``_fit_and_attach`` (not ``attach_from_scene``, which looks
+        up by name in the solver's scene_model). cuRobo's native
+        ``disable_obstacle_names`` disables the static copy in the MotionPlanner
+        checker; ``reapply_attached_disables`` (run after every solver world
+        push) re-asserts that flag across ALL solvers, because a world push
+        clears and re-adds every obstacle with enable=1. The obstacle stays
+        REGISTERED in the solver scenes while attached (so cuRobo keeps its
+        collision model and disabling is a flag toggle, not a removal) and is
+        dropped only from the voxel-map rasterization via exclude_obstacle, so
+        its analytic voxels don't reappear in the published grid. Detach
+        re-enables it. Affects the shared MotionPlanner only (open-loop
+        transport).
 
         Sphere-fitting is a GPU operation — held under node.gpu_lock so it can't
         overlap a concurrent CUDA-graph capture or depth-camera integrate.
@@ -139,40 +141,18 @@ class AttachmentServices:
             # estimate stand so a small object isn't padded to the full slot
             # count. n_needed == 0 means the estimate failed -> fall back.
             n_fit = min(n_needed, n_slots) if n_needed > 0 else n_slots
-            device_cfg = DeviceCfg(
-                device=self.config_wrapper._device,
-                dtype=self.config_wrapper._ops_dtype,
-            )
-            # cuRobo's fit_spheres bakes the obstacle world pose into the mesh
-            # (transform_with_pose=True), so `centers` are already in WORLD
-            # space. update() computes obj_to_link = ee.inverse() * P_world and
-            # transforms the (world) centers by it, then the FK render applies
-            # FK(attached_object) — which equals FK(ee) since attached_object is
-            # an identity-fixed child of the tool frame. So the obstacle pose
-            # would be applied TWICE and the spheres land off the gripper.
-            # Passing an IDENTITY world_objects_pose_offset makes the extra
-            # factor drop out: obj_to_link = ee.inverse(), rendered = P_world *
-            # centers (correct world placement). This is the place that can't
-            # change curobo_core, so compensate here.
-            identity_pose = Pose(
-                position=device_cfg.to_device([[0.0, 0.0, 0.0]]),
-                quaternion=device_cfg.to_device([[1.0, 0.0, 0.0, 0.0]]),
-            )
-            # NB: no disable_obstacle_names here. cuRobo records them and
-            # re-enables them on detach via scene_collision.enable_obstacle —
-            # but the world push below EXCLUDES the obstacle from the derived
-            # solver scene (it is no longer loaded), so that re-enable raises
-            # "Obstacle 'object_name' not found in environment 0" and detach
-            # fails. Exclusion + restore is handled by the ObstacleManager
-            # (exclude_obstacle / include_obstacle + world push), so cuRobo's
-            # name-based disable/re-enable would be redundant anyway.
-            am.attach(
-                joint_states=grasp_end_state,
-                obstacles=[obstacle],
-                link_name=ATTACH_LINK,
-                num_spheres=n_fit,
-                world_objects_pose_offset=identity_pose,
-            )
+            disable = [object_name]
+            am_checker = getattr(self.node, 'motion_planner', None)
+            am_checker = (getattr(am_checker, 'scene_collision_checker', None)
+                          if am_checker is not None else None)
+            if am_checker is not None:
+                try:
+                    if not am_checker.check_obstacle_exists(object_name):
+                        disable = []
+                except Exception:
+                    disable = []
+            self._fit_and_attach(am, obstacle, n_fit, grasp_end_state,
+                                 disable or None)
             # The perception voxel layer still holds the voxels of the grasped
             # object at its world position. Disabling the obstacle BY NAME only
             # disables the cuboid collision buffer — the ESDF voxels remain, so
@@ -181,10 +161,12 @@ class AttachmentServices:
             # that region from the depth-derived voxel channel, refresh the ESDF
             # and push the world so the next plan sees the object removed.
             self._attached_name = object_name
-            # Drop the object's STATIC copy from every derived collision world
-            # (solver buffers + voxel map) so it doesn't collide with its own
-            # attached spheres — the world push in _clear_attached_voxels below
-            # already ships the excluded scene.
+            # Drop the object's STATIC copy from the voxel-map RASTERIZATION
+            # only (primitives_only_scene) so its analytic voxels don't reappear
+            # in the published grid. Solver scenes KEEP it registered — cuRobo
+            # disables it via the enable flag (disable_obstacle_names above),
+            # re-asserted by reapply_attached_disables on every world push
+            # (including the one _clear_attached_voxels triggers below).
             obs_mgr = self.config_wrapper.obstacle_manager
             obs_mgr.exclude_obstacle(object_name)
             if not self._clear_attached_voxels(obstacle):
@@ -195,6 +177,98 @@ class AttachmentServices:
         self._attached_name = object_name
         self.node.get_logger().info(
             f"Attached '{object_name}' to link '{ATTACH_LINK}'")
+
+    def _fit_and_attach(self, am, obstacle, n_fit, joint_states, disable):
+        """Fit spheres and write them to the attach link (curobo-side).
+
+        Mirrors ``AttachmentManager.attach()`` (fit + ``update`` + disable), but
+        replaces the ``update`` step with local code, because cuRobo's ``update``
+        CRASHES when the fit yields exactly ONE sphere together with a
+        ``world_objects_pose_offset``: ``env_pose.transform_points(centers)``
+        returns shape ``(num_spheres, 3)`` (see geom/transform.py) and the
+        following ``.squeeze(0)`` collapses ``[1, 3] -> [3]``, so the
+        ``torch.cat`` in the body hits "Tensors must have same number of
+        dimensions: got 1 and 2". We cannot patch curobo_core, so:
+
+        * ``fit_spheres`` is called the same way (world-frame centers — the fit
+          bakes the obstacle world pose into the mesh, ``transform_with_pose``);
+        * the obstacle-to-link transform is applied HERE with an identity world
+          offset (obj_to_link = ee.inverse()), reproducing curobo's math; the
+          FK render then re-applies FK(attached_object) == FK(ee), so the
+          world placement is correct (fit is not applied twice) — identical to
+          the previous ``world_objects_pose_offset=identity`` path;
+        * link-frame spheres are written straight into
+          ``kinematics_params.link_spheres`` with the same padding (radius -100
+          for unused slots) cuRobo would insert, and the world obstacle is
+          disabled by name (recorded for detach) — again matching ``attach``.
+
+        Must be called under ``node.gpu_lock`` (caller holds it). Raises on any
+        cuRobo error, which surfaces as "Attach error: ...".
+        """
+        import torch
+        sphere_tensor = am.fit_spheres(
+            [obstacle], num_spheres=n_fit, surface_radius=0.002)
+        centers = sphere_tensor[:, :3].contiguous()  # warp kernel needs contiguous
+        radii = sphere_tensor[:, 3].unsqueeze(-1)
+
+        q = joint_states.position
+        if q.dim() == 1:
+            q = q.unsqueeze(0)
+        num_envs = q.shape[0]
+
+        joint_state = JointState.from_position(
+            q, joint_names=am._kinematics.joint_names)
+        fk_result = am._kinematics.compute_kinematics(joint_state)
+        if fk_result.tool_poses is None:
+            raise RuntimeError(
+                "FK result has no tool_poses; cannot resolve EE for attachment")
+        ee_link = am._kinematics.tool_frames[0]
+        obj_to_link = fk_result.tool_poses.get_link_pose(ee_link).inverse()
+
+        kparams = am.kinematics_params
+        link_idx = kparams.get_sphere_index_from_link_name(ATTACH_LINK)
+        n_slots = link_idx.shape[0]
+        n_fit = centers.shape[0]
+        if n_fit > n_slots:
+            raise RuntimeError(
+                f"Fitted {n_fit} spheres but link '{ATTACH_LINK}' only has "
+                f"{n_slots} sphere slots")
+        padding = None
+        if n_fit < n_slots:
+            padding = torch.zeros(
+                n_slots - n_fit, 4,
+                device=sphere_tensor.device, dtype=sphere_tensor.dtype,
+            )
+            padding[:, 3] = -100.0
+
+        for i in range(num_envs):
+            env_pose = Pose(
+                position=obj_to_link.position[i: i + 1],
+                quaternion=obj_to_link.quaternion[i: i + 1],
+            )
+            # reshape(-1, 3) absorbs any spurious leading batch dims; cuRobo's
+            # own `.squeeze(0)` is what breaks on a single fitted sphere.
+            link_centers = env_pose.transform_points(centers).reshape(-1, 3)
+            env_spheres = torch.cat([link_centers, radii], dim=-1)
+            if padding is not None:
+                env_spheres = torch.cat([env_spheres, padding], dim=0)
+            kparams.link_spheres[i, link_idx, :] = env_spheres
+        am._attached_link_name = ATTACH_LINK
+
+        # cuRobo's native disable: records the name and disables it in the
+        # MotionPlanner checker via scene_collision.enable_obstacle. The
+        # obstacle STAYS registered in the solver scenes (exclusion is now
+        # voxel-map-rasterization only), so the name-based disable/re-enable is
+        # safe — and the world push below would re-enable it
+        # (load_from_scene_cfg clears + re-adds with enable=1), so
+        # reapply_attached_disables() re-asserts the flag after every push.
+        if disable and am._scene_collision is not None:
+            for name in disable:
+                for env_idx in range(num_envs):
+                    am._scene_collision.enable_obstacle(
+                        name, enable=False, env_idx=env_idx)
+            am._disabled_obstacle_names = list(disable)
+            am._disabled_num_envs = num_envs
 
     def _clear_attached_voxels(self, obstacle) -> bool:
         """Remove the depth-derived voxels spanning the attached obstacle's
@@ -286,15 +360,18 @@ class AttachmentServices:
 
     def detach(self) -> str:
         """Release the attached object (reset link spheres, restore the static
-        obstacle to the collision world)."""
+        obstacle to collision checking)."""
         released = self._attached_name
         with self.node.gpu_lock:
             self._attachment_manager().detach(ATTACH_LINK)
             if released:
-                # Bring the static copy back into every derived collision world
-                # now that the arm no longer carries the attached spheres.
+                # Restore the static copy to the voxel-map rasterization, and
+                # push the world so every solver re-loads the obstacle ENABLED
+                # (a push clears + re-adds with enable=1; with nothing left in
+                # excluded_obstacle_names, reapply_attached_disables no-ops).
+                # am.detach(ATTACH_LINK) already re-enabled it on the
+                # MotionPlanner checker via its recorded disabled names.
                 self.config_wrapper.obstacle_manager.include_obstacle(released)
-                # The push re-renders the obstacle in the solvers AND the voxel map.
                 self.node.update_all_solvers_world(
                     self.config_wrapper.obstacle_manager.get_scene())
         self._attached_name = None

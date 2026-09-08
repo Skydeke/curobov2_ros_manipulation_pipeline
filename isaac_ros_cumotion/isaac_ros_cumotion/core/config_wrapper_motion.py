@@ -15,7 +15,6 @@ v2 notes:
 """
 
 from functools import partial
-import torch
 import rclpy
 
 from std_srvs.srv import Trigger
@@ -34,12 +33,10 @@ _curobo_runtime.cuda_graph_reset = True
 import curobo.runtime as _curobo_runtime_public
 _curobo_runtime_public.cuda_graph_reset = True
 
-from curobo.types import JointState
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
-from curobo._src.geom.collision.buffer_collision import CollisionBuffer
-from curobo._src.types.device_cfg import DeviceCfg
 
 from .config_wrapper import ConfigWrapper, resolve_use_cuda_graph
+from .collision_distance import _compute_sphere_distance, _query_sphere_collision
 
 
 class ConfigWrapperMotion(ConfigWrapper):
@@ -168,73 +165,13 @@ class ConfigWrapperMotion(ConfigWrapper):
             # MPCSolver has no top-level update_world(); go through its checker.
             node.mpc.scene_collision_checker.load_collision_model(scene)
 
+        # The pushes re-added every obstacle with enable=1 (load_from_scene_cfg
+        # clears + re-adds); re-assert any attached-obstacle disable.
+        self.obstacle_manager.reapply_attached_disables(node)
+
         self.node.get_logger().info(
             f"Updated world: {len(scene.cuboid)} cuboids, {len(scene.mesh)} meshes"
         )
 
     def callback_get_collision_distance(self, node, request: GetCollisionDistance, response):
         return _compute_sphere_distance(self, node, response)
-
-
-
-# ---------------------------------------------------------------------------
-# Shared helper
-
-def _compute_sphere_distance(wrapper, node, response):
-    """
-    Query collision distance for the robot's current configuration.
-
-    v2: the legacy `CollisionQueryBuffer` API is gone. Solvers (`MotionPlanner`,
-    `ModelPredictiveControl`, `InverseKinematics`) expose the world/scene
-    collision checker as `scene_collision_checker` (a `SceneCollision`), not
-    `scene_model` (which is just the CPU-side scene config). Its
-    `get_sphere_distance` takes the full `KinematicsState`, a pre-allocated
-    `CollisionBuffer`, and `weight`/`activation_distance` tensors — there is
-    no `compute_esdf` kwarg.
-    """
-    q_js = JointState(
-        position=torch.tensor(
-            wrapper.robot.get_joint_pose(),
-            dtype=wrapper._ops_dtype,
-            device=wrapper._device,
-        ),
-        joint_names=wrapper.kin_model.joint_names,
-    )
-    kinematics_state = wrapper.kin_model.compute_kinematics(q_js)
-    # v2: `robot_spheres` replaces `link_spheres_tensor`, shape already [B, H, N, 4]
-    robot_spheres = kinematics_state.robot_spheres
-
-    solver = getattr(node, 'motion_planner', None) or getattr(node, 'mpc', None) or getattr(node, 'ik_solver', None)
-    if solver is None:
-        response.nb_sphere = 0
-        response.data = []
-        return response
-
-    scene_collision_checker = getattr(solver, 'scene_collision_checker', None)
-    if scene_collision_checker is None or not hasattr(scene_collision_checker, 'get_sphere_distance'):
-        response.nb_sphere = 0
-        response.data = []
-        return response
-
-    if node.has_parameter('collision_activation_distance'):
-        activation_distance = node.get_parameter(
-            'collision_activation_distance'
-        ).get_parameter_value().double_value
-    else:
-        activation_distance = 0.025
-
-    device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
-    collision_buffer = CollisionBuffer.from_shape(robot_spheres.shape, device_cfg)
-    weight = device_cfg.to_device([1.0])
-    activation_distance_t = device_cfg.to_device([activation_distance])
-
-    sphere_dist = scene_collision_checker.get_sphere_distance(
-        kinematics_state,
-        collision_buffer,
-        weight,
-        activation_distance=activation_distance_t,
-    )
-    sphere_dist_ar = torch.flatten(sphere_dist, start_dim=0).tolist()
-    response.nb_sphere = len(sphere_dist_ar)
-    response.data = sphere_dist_ar
-    return response

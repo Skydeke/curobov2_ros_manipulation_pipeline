@@ -1,14 +1,11 @@
 from functools import partial
-import torch
 from std_srvs.srv import Trigger, SetBool
-from curobo.types import JointState
-from curobo._src.types.device_cfg import DeviceCfg
-from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetLinkCollision
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
 from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
+from isaac_ros_cumotion.core.collision_distance import _attributed_collisions
 
 
 class RosServiceManager:
@@ -417,10 +414,14 @@ class RosServiceManager:
         Publishes the robot's collision spheres as markers for visualization in RViz.
         Useful for debugging and ensuring proper masking of the robot in the point cloud.
 
-        Spheres are coloured green when they do not collide with any world
-        obstacle and red when they collide with one, except for spheres
-        belonging to an attached object which are blue when not colliding and
-        red when colliding.
+        Spheres are coloured green when they stay clear of every obstacle and
+        red once they come within the planner's ``collision_activation_distance``
+        margin (the SAME activation distance the optimizer uses, so the RViz
+        visual matches what the planner treats as a collision; with the default
+        0.5 cm that means "would the planner refuse/reject this"). A collision
+        also triggers a debug log naming the offending link + obstacle(s);
+        except for spheres belonging to an attached object which are blue when
+        not colliding and red when colliding.
         """
         if not self.collision_spheres_enabled:
             return
@@ -447,6 +448,7 @@ class RosServiceManager:
         # coloured red. Purely a visualization nicety — any failure falls back
         # to "all green".
         colliding = self._spheres_in_collision(node, kin)
+        red_indices = {r['index'] for r in colliding or []}
 
         # Create marker array — prepend a DELETEALL to clear stale markers
         marker_array = MarkerArray()
@@ -469,7 +471,7 @@ class RosServiceManager:
             marker.scale.y = sphere[3] * 2
             marker.scale.z = sphere[3] * 2
             marker.color.a = 0.5  # Transparency
-            is_colliding = colliding is not None and i < len(colliding) and colliding[i]
+            is_colliding = colliding is not None and i in red_indices
             if is_colliding:
                 marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0  # colliding = red
             elif attached_mask[i]:  # attached object, not colliding = blue
@@ -483,79 +485,73 @@ class RosServiceManager:
 
     def _spheres_in_collision(self, node, kin):
         """
-        Returns a list of per-sphere penetration costs, one entry per collision
-        sphere (value > 0 means that sphere collides with a world obstacle), or
-        None if the solver/collision checker isn't ready (callers then fall back
-        to "all green").
+        Margin-aware sphere collisions with obstacle attribution for the RViz
+        colouring: spheres go red when they come within the
+        ``collision_activation_distance`` margin (the same activation distance
+        the planner's optimizer uses — the display matches planning, so "red"
+        means "the planner would treat this as in collision"; no clearance
+        margin is added on top). A positive entry means the sphere surface is
+        closer to an obstacle than the margin, and its value is the overlap of
+        the inflated sphere in metres (depth beyond activation ⇒ real contact).
 
-        Uses the planner's scene_collision_checker.get_sphere_distance(...).
+        When any sphere is red, logs what causes it: per-sphere link, obstacle
+        name(s), position, radius and overlap (a fresh full dump on the
+        red-set transition, then a throttled "still red" summary while the same
+        collision persists, so the timer doesn't spam).
+
+        Returns the list of attribution dicts (see
+        collision_distance._attributed_collisions) or None if the solver /
+        collision checker isn't ready (callers then fall back to "all green").
+        Runs under the node's gpu_lock so the RViz timer thread can't race a
+        CUDA-graph capture on the GPU.
         """
-        try:
-            solver = (getattr(node, 'motion_planner', None)
-                      or getattr(node, 'mpc', None)
-                      or getattr(node, 'ik_solver', None))
-            if solver is None:
-                return None
-            scene_collision_checker = getattr(solver, 'scene_collision_checker', None)
-            if scene_collision_checker is None or not hasattr(
-                    scene_collision_checker, 'get_sphere_distance'):
-                return None
-
-            # The collision checker atoms spill to the GPU/RViz timer thread
-            # otherwise collide with the CUDA-graph capture; reuse the same
-            # non-blocking gpu_lock guard used elsewhere.
-            gpu_lock = getattr(node, 'gpu_lock', None)
-            if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-                self.node.get_logger().debug(
-                    "gpu_lock busy (CUDA graph capture) - skipping sphere "
-                    "collision colouring", throttle_duration_sec=5.0)
-                return None
-
-            try:
-                wrapper = getattr(self, 'config_wrapper', None)
-                kin_model = kin if kin is not None else (
-                    wrapper.kin_model if wrapper is not None else None
-                )
-                if kin_model is None:
-                    return None
-
-                q_js = JointState(
-                    position=torch.tensor(
-                        self.robot_model_manager.robot.get_joint_pose(),
-                        dtype=wrapper._ops_dtype,
-                        device=wrapper._device,
-                    ),
-                    joint_names=kin_model.joint_names,
-                )
-                kinematics_state = kin_model.compute_kinematics(q_js)
-                robot_spheres_t = kinematics_state.robot_spheres
-
-                activation_distance = 0.0  # exact collision detection
-                if node.has_parameter('collision_activation_distance'):
-                    activation_distance = node.get_parameter(
-                        'collision_activation_distance'
-                    ).get_parameter_value().double_value
-
-                device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
-                collision_buffer = CollisionBuffer.from_shape(
-                    robot_spheres_t.shape, device_cfg)
-                weight = device_cfg.to_device([1.0])
-                activation_distance_t = device_cfg.to_device([activation_distance])
-
-                sphere_dist = scene_collision_checker.get_sphere_distance(
-                    kinematics_state,
-                    collision_buffer,
-                    weight,
-                    activation_distance=activation_distance_t,
-                )
-                return torch.flatten(sphere_dist, start_dim=0).tolist()
-            finally:
-                if gpu_lock is not None:
-                    gpu_lock.release()
-        except Exception as e:
-            self.node.get_logger().debug(
-                f"sphere-collision colouring unavailable: {e}", throttle_duration_sec=5.0)
+        wrapper = getattr(self, 'config_wrapper', None)
+        if wrapper is None:
             return None
+
+        # Reuse the non-blocking gpu_lock guard used elsewhere: the collision
+        # checker atoms otherwise collide with the CUDA-graph capture.
+        gpu_lock = getattr(node, 'gpu_lock', None)
+        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+            self.node.get_logger().debug(
+                "gpu_lock busy (CUDA graph capture) - skipping sphere "
+                "collision colouring", throttle_duration_sec=5.0)
+            return None
+
+        try:
+            reports = _attributed_collisions(wrapper, node, kin=kin)
+            if not reports:
+                self._collision_red_key = None
+                return reports
+            # Dedupe log spam: log a full attribution only when the SET of
+            # (sphere, link, obstacles) actually changes; while it persists,
+            # fall back to a throttled one-liner.
+            red_key = tuple(sorted(
+                (r['index'], r['link'], tuple(r['obstacles']), r['clobber_note'])
+                for r in reports))
+            if red_key != getattr(self, '_collision_red_key', None):
+                act_mm = reports[0].get('activation')
+                act_mm = act_mm * 1000.0 if act_mm is not None else None
+                for r in sorted(reports, key=lambda r: -r['depth']):
+                    what = ", ".join(r['obstacles']) if r['obstacles'] \
+                        else r['clobber_note']
+                    margin_txt = (f" within {act_mm:.1f} mm margin"
+                                  if act_mm is not None else "")
+                    self.node.get_logger().warn(
+                        f"collision_spheres: sphere#{r['index']} on link "
+                        f"{r['link']} (r={r['radius'] * 1000:.1f} mm at "
+                        f"{', '.join(f'{v:.3f}' for v in r['position'])})"
+                        f"{margin_txt} of {what} (overlap "
+                        f"{r['depth'] * 1000:.1f} mm)")
+                self._collision_red_key = red_key
+            else:
+                self.node.get_logger().debug(
+                    f"collision_spheres: {len(reports)} sphere(s) still in "
+                    "collision (unchanged)", throttle_duration_sec=5.0)
+            return reports
+        finally:
+            if gpu_lock is not None:
+                gpu_lock.release()
 
     def _attachment_kinematics(self):
         """The MotionPlanner's kinematics (carries attached-object spheres), or
