@@ -35,6 +35,7 @@ from isaac_ros_cumotion_interfaces.srv import TrajectoryGeneration, SetPlanner, 
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
 
 from curobo.types import DeviceCfg, JointState
+from curobo._src.geom.collision.buffer_collision import CollisionBuffer
 from curobo.logging import setup_logger as setup_curobo_logger
 
 from isaac_ros_cumotion.robot.robot_context import RobotContext
@@ -607,7 +608,9 @@ class UnifiedPlannerNode(Node):
                 if result.success:
                     self.get_logger().info(f"Planning succeeded: {result.message}")
                 else:
-                    self.get_logger().error(f"Planning failed: {result.message}")
+                    self.get_logger().error(
+                        f"Planning failed: {result.message}"
+                        f" | {self._collision_diagnostic(planner)}")
 
             return response
 
@@ -619,6 +622,86 @@ class UnifiedPlannerNode(Node):
             response.trajectory = []
             response.dt = 0.0
             return response
+
+    def _collision_diagnostic(self, planner=None) -> str:
+        """Human-readable list of robot links currently in collision.
+
+        Queries per-sphere collision distance at the current joint state and
+        maps the colliding sphere indices back to link names (the sphere array
+        is grouped by link in ``collision_link_names`` order). Appends which
+        links are touching and by how much, so a failed plan logs *what* is
+        colliding rather than a bare "Planning failed: unknown". Best-effort:
+        returns an empty string on any failure.
+        """
+        try:
+            solver = (
+                planner if planner is not None
+                else getattr(self, 'motion_planner', None)
+                or getattr(self, 'mpc', None)
+                or getattr(self, 'ik_solver', None)
+            )
+            if solver is None:
+                return ""
+            scene_collision_checker = getattr(solver, 'scene_collision_checker', None)
+            if scene_collision_checker is None or not hasattr(
+                    scene_collision_checker, 'get_sphere_distance'):
+                return ""
+            wrapper = self.config_wrapper_motion
+            kin_cfg = wrapper.kin_model.config.kinematics_config
+
+            q_js = JointState(
+                position=torch.tensor(
+                    wrapper.robot.get_joint_pose(),
+                    dtype=wrapper._ops_dtype,
+                    device=wrapper._device,
+                ),
+                joint_names=kin_cfg.joint_names,
+            )
+            kinematics_state = wrapper.kin_model.compute_kinematics(q_js)
+            robot_spheres = kinematics_state.robot_spheres
+
+            device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
+            collision_buffer = CollisionBuffer.from_shape(
+                robot_spheres.shape, device_cfg)
+            weight = device_cfg.to_device([1.0])
+            activation = 0.0
+            if self.has_parameter('collision_activation_distance'):
+                activation = self.get_parameter(
+                    'collision_activation_distance'
+                ).get_parameter_value().double_value
+            activation_t = device_cfg.to_device([activation])
+
+            sphere_dist = scene_collision_checker.get_sphere_distance(
+                kinematics_state,
+                collision_buffer,
+                weight,
+                activation_distance=activation_t,
+            )
+            dists = torch.flatten(sphere_dist, start_dim=0).tolist()
+
+            kp = kin_cfg
+            idx_to_name = [None] * int(kp.num_links)
+            for name, idx in kp.link_name_to_idx_map.items():
+                idx_to_name[int(idx)] = name
+            idx_map = kp.link_sphere_idx_map.detach().cpu().numpy()
+
+            collided_links = {}
+            for i, d in enumerate(dists):
+                if i < len(idx_map) and d > 0.0:
+                    link = idx_to_name[int(idx_map[i])]
+                    if link is None:
+                        link = f"link#{int(idx_map[i])}"
+                    collided_links[link] = max(collided_links.get(link, 0.0), d)
+            if not collided_links:
+                return ""
+            parts = [f"{name} penetrated {val:.4f}m"
+                     for name, val in sorted(collided_links.items(),
+                                             key=lambda kv: -kv[1])]
+            return "In collision: " + ", ".join(parts)
+        except Exception as e:
+            self.get_logger().debug(
+                f"collision diagnostic unavailable: {e}", throttle_duration_sec=5.0)
+            return ""
 
     def execute_callback(self, goal_handle):
         """Unified 'generate + execute' action for every controller.
@@ -670,8 +753,10 @@ class UnifiedPlannerNode(Node):
                     with self.gpu_lock:
                         result = planner.plan(start_state, goal, config, self.robot_context)
                     if not result.success:
+                        diag = self._collision_diagnostic(planner)
                         self.get_logger().error(
-                            f"Planning failed in execute path: {result.message}")
+                            f"Planning failed in execute path: {result.message}"
+                            + (f" | {diag}" if diag else ""))
                         result_msg.success = False
                         result_msg.message = f"Planning failed: {result.message}"
                         goal_handle.abort()
@@ -683,6 +768,10 @@ class UnifiedPlannerNode(Node):
                 self.get_logger().info(f"Planning with {planner.get_planner_name()}")
                 result = planner.plan(start_state, goal, config, self.robot_context)
                 if not result.success:
+                    diag = self._collision_diagnostic(planner)
+                    self.get_logger().error(
+                        f"Planning failed in execute path: {result.message}"
+                        + (f" | {diag}" if diag else ""))
                     result_msg.success = False
                     result_msg.message = f"Planning failed: {result.message}"
                     goal_handle.abort()

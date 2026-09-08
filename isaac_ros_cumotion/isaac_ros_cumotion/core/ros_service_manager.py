@@ -513,7 +513,9 @@ class RosServiceManager:
 
             try:
                 wrapper = getattr(self, 'config_wrapper', None)
-                kin_model = wrapper.kin_model if wrapper is not None else None
+                kin_model = kin if kin is not None else (
+                    wrapper.kin_model if wrapper is not None else None
+                )
                 if kin_model is None:
                     return None
 

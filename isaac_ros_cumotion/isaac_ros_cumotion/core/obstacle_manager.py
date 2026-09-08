@@ -40,6 +40,15 @@ class ObstacleManager:
         # Tracks registered obstacle names for uniqueness validation.
         self.obstacle_names = []
 
+        # Obstacles currently excluded from the derived collision worlds (the
+        # cuboid/mesh buffers pushed to the solvers AND the voxel-map
+        # rasterization). The attach flow marks the grasped obstacle here so its
+        # STATIC copy vanishes everywhere the moment it is picked up — disabling
+        # it in one solver's collision model is not enough: every derived scene
+        # is rebuilt fresh from this Scene, and cuRobo re-adds whatever it sees
+        # (see the disable-flag wipe in update_world). Un-excluded on detach.
+        self.excluded_obstacle_names = set()
+
         # Perception (created lazily in setup_perception()).
         self.mapper = None
         self._esdf_voxel_name = None
@@ -97,6 +106,25 @@ class ObstacleManager:
     def _append(self, bucket: str, obstacle):
         getattr(self.scene, bucket).append(obstacle)
         self.obstacle_names.append(obstacle.name)
+
+    def exclude_obstacle(self, name: str):
+        """Drop a named obstacle from every derived collision world.
+
+        Marks `name` so the collision/voxel scenes built from this Scene
+        (solvers' cuboid/mesh buffers and the voxel-map rasterization) ship
+        without it, while the authoritative Scene keeps it (so it still renders
+        in scene_obstacles and can be restored by include_obstacle). Used by the
+        attach flow: once the obstacle moves with the arm as attached spheres,
+        its static world copy must not survive in any collision representation.
+        """
+        self.excluded_obstacle_names.add(name)
+
+    def include_obstacle(self, name: str):
+        """Restore a named obstacle into the derived collision worlds."""
+        self.excluded_obstacle_names.discard(name)
+        # Invalidate the voxel grid key so the next get_voxel_grid / sparse
+        # voxel publish re-rasterizes with the obstacle back.
+        self._voxel_grid_key = None
 
     # ---- Perception parameters (single source of truth) ----
 
@@ -333,14 +361,31 @@ class ObstacleManager:
         Call ``refresh_esdf()`` and push the world afterwards so the solvers
         see the cleared map. Returns the number of cleared blocks.
         """
-        if self.mapper is None:
-            raise RuntimeError(
-                "No perception mapper (use_mapper=False) - nothing to clear"
-            )
         center = np.array(self._mapper_grid_center, dtype=np.float32)
         half = np.array(self._mapper_extent_xyz, dtype=np.float32) / 2.0
         bounds_min = torch.from_numpy(center - half)
         bounds_max = torch.from_numpy(center + half)
+        if self.mapper is None:
+            raise RuntimeError(
+                "No perception mapper (use_mapper=False) - nothing to clear"
+            )
+        return self.clear_voxel_region(bounds_min, bounds_max, node)
+
+    def clear_voxel_region(self, bounds_min, bounds_max, node) -> int:
+        """Clear the Mapper's dynamic TSDF channel within a world AABB.
+
+        Removes just the depth-derived voxels spanning ``bounds_min`` →
+        ``bounds_max`` (each a length-3 tensor, world frame), e.g. the region
+        of a grasped object whose voxels would otherwise collide with the
+        just-attached collision spheres. Analytic obstacles stored in the
+        Scene's cuboid/mesh buffers are unaffected by construction.
+
+        The caller should then call ``refresh_esdf()`` and push the world to
+        the solvers. Returns the number of cleared blocks. No-op without a
+        Mapper.
+        """
+        if self.mapper is None:
+            return 0
         node.get_logger().info(
             f"Clearing dynamic voxel channel over "
             f"[{bounds_min.tolist()}, {bounds_max.tolist()}]"
@@ -877,7 +922,20 @@ class ObstacleManager:
         path). Apply it to every solver-bound Scene so all primitive types
         actually collide and appear in the voxel map.
         """
-        if scene.mesh is None:  # create_collision_support_world concatenates it
+        if self.excluded_obstacle_names:
+            # Attached (disabled) obstacles are dropped BEFORE the conversion so
+            # they vanish from the cuboid/mesh buffers the solvers load AND from
+            # the voxel-map primitive rasterization. The authoritative Scene is
+            # untouched (still renders in scene_obstacles).
+            scene = SceneCfg(
+                sphere=self._without_excluded(scene.sphere),
+                cuboid=self._without_excluded(scene.cuboid),
+                capsule=self._without_excluded(scene.capsule),
+                cylinder=self._without_excluded(scene.cylinder),
+                mesh=self._without_excluded(scene.mesh or []),
+                voxel=scene.voxel,
+            )
+        elif scene.mesh is None:  # create_collision_support_world concatenates it
             scene = SceneCfg(
                 sphere=scene.sphere,
                 cuboid=scene.cuboid,
@@ -887,6 +945,17 @@ class ObstacleManager:
                 voxel=scene.voxel,
             )
         return SceneCfg.create_collision_support_world(scene)
+
+    def _without_excluded(self, bucket):
+        """Bucket list minus the currently-excluded (attached) obstacle names.
+
+        Empty set returns the list by reference (existing behaviour); otherwise
+        a new list is built so the authoritative Scene is never mutated.
+        """
+        if not self.excluded_obstacle_names or not bucket:
+            return bucket
+        return [obs for obs in bucket
+                if getattr(obs, 'name', None) not in self.excluded_obstacle_names]
 
     def set_collision_cache(
         self,
