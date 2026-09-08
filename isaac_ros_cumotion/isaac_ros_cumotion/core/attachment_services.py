@@ -19,7 +19,7 @@ following the same self-registering pattern as ``IKServices`` / ``FKServices``.
 
 from std_srvs.srv import Trigger
 from curobo.types import JointState, Pose
-from curobo.sphere_fit import estimate_sphere_count
+from curobo.sphere_fit import SphereFitType, estimate_sphere_count
 
 from isaac_ros_cumotion_interfaces.srv import AttachObject
 
@@ -207,7 +207,8 @@ class AttachmentServices:
         """
         import torch
         sphere_tensor = am.fit_spheres(
-            [obstacle], num_spheres=n_fit, surface_radius=0.002)
+            [obstacle], num_spheres=n_fit, surface_radius=0.002,
+            sphere_fit_type=SphereFitType.SURFACE)
         centers = sphere_tensor[:, :3].contiguous()  # warp kernel needs contiguous
         radii = sphere_tensor[:, 3].unsqueeze(-1)
 
