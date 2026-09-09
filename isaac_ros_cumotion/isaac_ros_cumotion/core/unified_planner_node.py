@@ -1322,7 +1322,7 @@ def main(args=None):
     rclpy.init(args=args)
     node = UnifiedPlannerNode()
 
-    executor = MultiThreadedExecutor()
+    executor = MultiThreadedExecutor(num_threads=8)
     executor.add_node(node)
     try:
         node.get_logger().info('Unified planner running, shut down with CTRL-C')
