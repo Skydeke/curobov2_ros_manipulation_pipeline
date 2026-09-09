@@ -157,8 +157,14 @@ class RobotSegmentation:
     def listener_callback_depth(self, msg):
         """Mask the robot out of a depth frame and republish the result.
 
-        Runs at the camera rate (frame arrival). All GPU work is under the
-        owning node's gpu_lock so a CUDA-graph capture can't race it.
+        Runs at the camera rate (frame arrival). All GPU work — including the
+        frame's CPU->GPU transfer — is under the owning node's gpu_lock so a
+        CUDA-graph capture can't race it. An illegal kernel launch into a
+        capturing stream invalidates the capture AND the stream, so the
+        transfer must not happen before the lock is held. Any CUDA error that
+        still slips through only drops this frame: an exception escaping a
+        subscription callback is re-raised by rclpy's executor and kills the
+        whole node.
         """
         try:
             if msg.encoding == '16UC1':
@@ -169,8 +175,6 @@ class RobotSegmentation:
                 self._node.get_logger().warn(
                     f'Unsupported depth encoding: {msg.encoding}')
                 return
-            depth = torch.from_numpy(depth).to(
-                dtype=self._ops_dtype, device=self._device)
         except CvBridgeError as e:
             self._node.get_logger().error(f'CvBridge Error: {e}')
             return
@@ -197,10 +201,16 @@ class RobotSegmentation:
                 throttle_duration_sec=2.0)
             return
         try:
+            depth = torch.from_numpy(depth).to(
+                dtype=self._ops_dtype, device=self._device)
             q = torch.tensor(joint_pose, dtype=self._ops_dtype, device=self._device)
             masked = self._mask_depth_image(depth, q, msg.header.stamp)
             self.publisher_.publish(
                 self.depth_tensor_to_image_msg(masked, msg.header.stamp))
+        except Exception as e:
+            self._node.get_logger().debug(
+                f'robot_segmentation frame dropped ({e})',
+                throttle_duration_sec=2.0)
         finally:
             if gpu_lock is not None:
                 gpu_lock.release()
