@@ -280,6 +280,21 @@ class RobotContext:
                 return [0.0] * self.description.dof
             return self.robot_strategy.get_joint_pose()
 
+    def get_joint_pose_at(self, stamp_ns, offset_ns=0):
+        """Time-synchronized joint pose (interpolated), or None if the active
+        strategy has not yet accumulated timestamped feedback.
+
+        ``stamp_ns`` is a data capture time (e.g. a depth image header stamp);
+        ``offset_ns`` is extra latency to add. Used by consumers that need the
+        joint state as it was WHEN data was captured, not the live state —
+        e.g. robot segmentation FK'ing collision spheres to match a depth
+        image captured moments in the past.
+        """
+        with self.strategy_lock:
+            if self.robot_strategy is None:
+                return None
+            return self.robot_strategy.get_joint_pose_at(stamp_ns, offset_ns)
+
     def get_joint_velocity(self):
         """Real, measured joint velocity (driver feedback), if the active
         strategy provides one — else zeros. See JointCommandStrategy.

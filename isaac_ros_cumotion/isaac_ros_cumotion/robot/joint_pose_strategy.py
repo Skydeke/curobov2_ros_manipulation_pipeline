@@ -119,10 +119,22 @@ class JointPoseStrategy(JointCommandStrategy):
             if remap is not None:
                 self.joint_pose = [msg.position[i] for i in remap]
                 self.joint_names = list(expected)
+                feedback = self.joint_pose
             else:
                 self.joint_pose = list(msg.position[:n])
                 if msg.name:
                     self.joint_names = list(msg.name[:n])
+                feedback = self.joint_pose
+        have_stamp = (
+            msg.header.stamp is not None
+            and msg.header.stamp.sec != 0
+            and msg.header.stamp.nanosec != 0
+        )
+        if have_stamp:
+            self._record_joint_feedback(
+                msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec,
+                feedback,
+            )
 
     def get_progression(self):
         return self._get_progression()

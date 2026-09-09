@@ -45,6 +45,7 @@ from isaac_ros_cumotion.core.collision_distance import (
 from isaac_ros_cumotion.core.attachment_services import AttachmentServices
 from isaac_ros_cumotion.core.ik_services import IKServices
 from isaac_ros_cumotion.core.fk_services import FKServices
+from isaac_ros_cumotion.core.robot_segmentation import RobotSegmentation
 from isaac_ros_cumotion.planners import (
     PlannerFactory,
     PlannerManager,
@@ -158,6 +159,15 @@ class UnifiedPlannerNode(Node):
         # an empty [] default is type-ambiguous in rclpy and clashes with the
         # launch's STRING_ARRAY override.
         self.declare_parameter('camera_correction_frame', [''])
+        # Fold the depth-map robot segmentation INTO this server node (rather
+        # than a standalone node): when true, the depth stream is masked against
+        # the robot's own collision spheres before the mapper integrates it, so
+        # the arm / mount never become ESDF voxels. The masking component
+        # subscribes to the raw depth, republishes a node-namespaced
+        # /<node>/masked_depth_image (which cameras.yaml points the
+        # DepthMapCameraStrategy at), and reads its config from the
+        # robot_segmentation_* params declared below.
+        self.declare_parameter('enable_robot_segmentation', False)
         # Reactive (MPC) solver build params — read by MPCController.build_solver().
         self.declare_parameter('mpc_step_dt', 0.03)
         self.declare_parameter('mpc_horizon_steps', 30)
@@ -209,6 +219,22 @@ class UnifiedPlannerNode(Node):
         # Adopt the canonical joint order/DOF into the RobotContext descriptor now
         # that the kinematics exist (RobotContext is built before the kin model).
         self.robot_context.bind_kinematics(self.config_wrapper_motion.kin_model)
+
+        # Depth-map robot segmentation, folded into this node (not a standalone
+        # node). Gated by `enable_robot_segmentation`; shares this node's
+        # RobotContext + Kinematics so it can never disagree with the planner's
+        # own joint state / collision spheres. Its masked-depth output (and
+        # debug cloud) publishers are node-namespaced, and its mask services are
+        # registered through the RosServiceManager.
+        self.robot_segmentation = None
+        if self.get_parameter('enable_robot_segmentation').value:
+            self.robot_segmentation = RobotSegmentation(
+                self,
+                self.robot_context,
+                self.config_wrapper_motion.kin_model,
+            )
+            self.config_wrapper_motion.ros_service_manager \
+                .register_robot_segmentation(self.robot_segmentation)
 
         # Shared Scene for all planners — references ObstacleManager's Scene.
         # All planners see the same obstacles after update_world(scene).
@@ -1304,6 +1330,8 @@ def main(args=None):
     except KeyboardInterrupt:
         node.get_logger().info('Keyboard interrupt, shutting down.\n')
 
+    if getattr(node, 'robot_segmentation', None) is not None:
+        node.robot_segmentation.destroy()
     node.destroy_node()
     # rclpy's own SIGINT handler already shuts the context down, so calling
     # shutdown() unconditionally raises "rcl_shutdown already called" and the

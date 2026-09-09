@@ -1,159 +1,112 @@
 import os
-import torch
+
 import numpy as np
-
-# ROS2
-import rclpy
-from rclpy.node import Node
-from sensor_msgs.msg import Image, CameraInfo, PointCloud2, PointField
-from std_msgs.msg import Header
-from visualization_msgs.msg import Marker, MarkerArray
+import torch
 from cv_bridge import CvBridge, CvBridgeError
+from rclpy import time as rclpy_time
+from scipy.spatial.transform import Rotation
+from sensor_msgs.msg import CameraInfo, Image, PointCloud2, PointField
+from std_msgs.msg import Header
 import tf2_ros
-import struct
 
-# cuRobo imports (v2)
-from curobo.kinematics import Kinematics, KinematicsCfg
 from curobo.types import JointState
 
-from isaac_ros_cumotion_interfaces.srv import SetMask, RemoveObject
 
-from scipy.spatial.transform import Rotation
+class RobotSegmentation:
+    """Removes the robot (and any user-defined mask shapes) from the raw depth
+    stream before it reaches the perception Mapper, so the arm and its mounting
+    never become ESDF voxels.
 
-from isaac_ros_cumotion.robot.robot_context import RobotContext
-from isaac_ros_cumotion.robot.robot_description import resolve_curobo_config
+    This is a composable component, NOT a standalone node: it is owned and
+    constructed by the UnifiedPlannerNode and runs in that node's process. It
+    reuses the node's RobotContext (joint state) and Kinematics (FK for the
+    collision spheres), publishes the masked depth image on a configurable
+    topic, and is gated by the ``enable_robot_segmentation`` parameter. The
+    set_mask / remove_mask services are registered node-namespaced by the
+    RosServiceManager.
+    """
 
-
-class DepthMapRobotSegmentation(Node):
-    def __init__(self, distance_threshold=0.05, ops_dtype=torch.float32):
-        """
-        Initializes the depth map segmentation node.
-        This node removes the robot from depth images using joint states.
-
-        Args:
-            distance_threshold: Minimum distance (in meters) to consider a point as not part of the robot
-            ops_dtype: Data type for tensor operations
-        """
-        super().__init__('curobo_depth_map_robot_segmentation')
-
-        # ---- Node params first (no robot/kinematics dependency) ----
-        self.declare_parameter('depth_image_topic', '/depth_to_rgb/image_raw')
-        self.declare_parameter('camera_info_topic', '/depth_to_rgb/camera_info')
-        self.declare_parameter('robot_base_frame', 'base_0')
-        # Inflation added to every mask shape's half-extents / radius, separate
-        # from distance_threshold below.
-        self.declare_parameter('mask_margin', 0.0)
-        # Minimum distance (m) to a robot collision sphere for a depth point to
-        # be kept (i.e. considered NOT part of the robot). Was a constructor-only
-        # kwarg, unreachable from a launch file — now a runtime-settable param.
-        self.declare_parameter('distance_threshold', distance_threshold)
-        self.mask_margin = self.get_parameter('mask_margin').get_parameter_value().double_value
-        self.distance_threshold = self.get_parameter(
-            'distance_threshold').get_parameter_value().double_value
-
-        depth_image_topic = self.get_parameter('depth_image_topic').get_parameter_value().string_value
-        camera_info_topic = self.get_parameter('camera_info_topic').get_parameter_value().string_value
-
+    def __init__(self, node, robot_context, kin_model, ops_dtype=torch.float32):
+        self._node = node
+        self.robot_context = robot_context
+        self._kin_model = kin_model
         self._ops_dtype = ops_dtype
         self._device = torch.device('cuda')
 
-        # ---- Robot: single descriptor-driven source (was: a hardcoded m1013
-        # path here, independent of RobotContext's own robot resolution — two
-        # sources of truth that could silently disagree). RobotContext declares
-        # the 'robot' param and loads the descriptor; robot_config_file below
-        # defaults to that SAME descriptor instead of a hardcoded path.
-        self.robot_context = RobotContext(self)
+        # Namespaced parameters so they can't collide with the server's own.
+        node.declare_parameter('robot_segmentation_depth_image_topic',
+                               '/depth_to_rgb/image_raw')
+        node.declare_parameter('robot_segmentation_camera_info_topic',
+                               '/depth_to_rgb/camera_info')
+        # Masked-depth output (consumed by the mapper's DepthMapCameraStrategy).
+        node.declare_parameter('robot_segmentation_output_topic',
+                               f'{node.get_name()}/masked_depth_image')
+        # Frame the depth pixels are judged in for the distance test. The mapper
+        # integrates at the per-camera `camera_correction_frame` (e.g.
+        # "curobo_frame"), so the segmentation must use the SAME frame or the
+        # arm's pixels won't line up with the collision spheres. Empty degrades
+        # to the raw depth frame_id.
+        node.declare_parameter('robot_segmentation_correction_frame', '')
+        # Inflation added to every mask shape's half-extents / radius.
+        node.declare_parameter('robot_segmentation_mask_margin', 0.0)
+        # Minimum distance (m) to a robot collision sphere for a depth point
+        # to be kept (i.e. considered NOT part of the robot).
+        node.declare_parameter('robot_segmentation_distance_threshold', 0.05)
 
-        default_robot_config = self.robot_context.description.curobo_config_path
-        if not self.has_parameter('robot_config_file'):
-            self.declare_parameter('robot_config_file', default_robot_config)
-        robot_config_file = self.get_parameter('robot_config_file').get_parameter_value().string_value
-        if not robot_config_file:
-            robot_config_file = default_robot_config
-
-        if not robot_config_file:
-            raise RuntimeError(
-                "No robot model configured: the selected robot descriptor "
-                f"('{self.robot_context.description.name}') ships without a "
-                "curobo_config, and no 'robot_config_file' parameter was provided. "
-                "Supply the robot's cuRobo config (and URDF) at launch.")
-
-        # An explicit robot_config_file override bypasses load_robot_description's
-        # own path resolution — resolve urdf_path/asset_root_path here too, or a
-        # package://-relative/custom-relative path silently falls back to cuRobo's
-        # bundled-assets resolution instead. See resolve_curobo_config.
-        robot_config_file = resolve_curobo_config(robot_config_file)
-
-        # v2: Kinematics replaces CudaRobotModel; from_robot_yaml_file loads the
-        # robot YAML directly — no manual load_yaml/RobotConfig.from_dict dance.
-        kin_model = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_config_file))
-        self._kin_model = kin_model
-        # Adopt the canonical joint order/DOF into the shared descriptor, same as
-        # unified_planner_node does — makes RobotContext.get_joint_pose()/
-        # get_joint_name() DOF-consistent with this node's own kinematics.
-        self.robot_context.bind_kinematics(kin_model)
+        self._robot_base_frame = self._get_str('base_link')
+        self._depth_image_topic = self._get_str('robot_segmentation_depth_image_topic')
+        self._camera_info_topic = self._get_str('robot_segmentation_camera_info_topic')
+        self._output_topic = self._get_str('robot_segmentation_output_topic')
+        self._correction_frame = self._get_str('robot_segmentation_correction_frame')
+        self._mask_margin = self._get_double('robot_segmentation_mask_margin')
+        self._distance_threshold = self._get_double(
+            'robot_segmentation_distance_threshold')
 
         self.tf_buffer = tf2_ros.Buffer()
-        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, node)
 
-        # DOF-agnostic (was a hardcoded 6-zero vector + empty joint_names).
-        self.q_js = JointState(
-            position=torch.zeros(len(kin_model.joint_names), dtype=self._ops_dtype, device=self._device),
-            joint_names=list(kin_model.joint_names))
-
-        self.depth_image = None
         self.camera_info = None
         self.depth_frame_id = None
+        self._depth_encoding = '16UC1'
         self.bridge = CvBridge()
 
-        # Extra user-defined masks (e.g. a grasped object) removed from the depth
-        # in addition to the robot. Keyed by name; each entry rides a TF frame so
-        # it follows the arm. See SetMask.srv / _shape_inside_mask.
+        # User-defined extra masks (e.g. a grasped object), keyed by name. Each
+        # rides a TF frame so it follows the arm (see set_mask_callback).
         self._masks = {}
 
-        # Publisher for the masked depth image
-        self.publisher_ = self.create_publisher(Image, "masked_depth_image", 10)
+        self.publisher_ = node.create_publisher(Image, self._output_topic, 10)
+        self.robot_pointcloud_pub = node.create_publisher(
+            PointCloud2, f'{node.get_name()}/robot_pointcloud_debug', 10)
+        self.subscription_depth = node.create_subscription(
+            Image, self._depth_image_topic, self.listener_callback_depth, 1)
+        self.subscription_camera_info = node.create_subscription(
+            CameraInfo, self._camera_info_topic, self.listener_callback_camera_info, 1)
 
-        # Publisher for collision spheres visualization
-        self.sphere_marker_pub = self.create_publisher(MarkerArray, 'collision_spheres', 10)
+        # The set_mask / remove_mask services are registered by the
+        # RosServiceManager via register_robot_segmentation().
 
-        # Publisher for robot point cloud (debug)
-        self.robot_pointcloud_pub = self.create_publisher(PointCloud2, 'robot_pointcloud_debug', 10)
+    def _get_str(self, name):
+        return self._node.get_parameter(name).get_parameter_value().string_value
 
-        # Subscription to depth image
-        self.subscription_depth = self.create_subscription(
-            Image,
-            depth_image_topic,
-            self.listener_callback_depth,
-            1)
+    def _get_double(self, name):
+        return self._node.get_parameter(name).get_parameter_value().double_value
 
-        # Subscription to camera info
-        self.subscription_camera_info = self.create_subscription(
-            CameraInfo,
-            camera_info_topic,
-            self.listener_callback_camera_info,
-            1)
+    def destroy(self):
+        for sub in (self.subscription_depth, self.subscription_camera_info):
+            if sub is not None:
+                self._node.destroy_subscription(sub)
+        for pub in (self.publisher_, self.robot_pointcloud_pub):
+            if pub is not None:
+                self._node.destroy_publisher(pub)
 
-        # Services to add/update and remove extra depth masks (e.g. grasped
-        # object). Sync callbacks: pure dict mutation, no GPU -> safe under spin.
-        self.set_mask_srv = self.create_service(
-            SetMask, 'set_mask', self.set_mask_callback)
-        self.remove_mask_srv = self.create_service(
-            RemoveObject, 'remove_mask', self.remove_mask_callback)
-
-        # Segmentation is driven by the depth-frame subscriber callback (runs at
-        # the camera rate), not a fixed timer — see listener_callback_depth.
-
-        self.get_logger().info("Depth map segmentation node initialized")
-
-    # ── Mask services ────────────────────────────────────────────────────────
+    # ---- Mask services ----
 
     def set_mask_callback(self, request, response):
         """Add or update a named mask shape (SetMask.srv).
 
         Dimension conventions mirror obstacle_manager.add_object:
-        CUBOID [dx,dy,dz], SPHERE [r,_,_], CAPSULE [r,h,_] (segment [0,0,0]->[0,0,h]),
-        CYLINDER [r,h,_] (centered, axis z), MESH [sx,sy,sz].
+        CUBOID [dx,dy,dz], SPHERE [r,_,_], CAPSULE [r,h,_] (segment
+        [0,0,0]->[0,0,h]), CYLINDER [r,h,_] (centered, axis z), MESH [sx,sy,sz].
         """
         d = request.dimensions
         if request.type == 4:
@@ -177,11 +130,11 @@ class DepthMapRobotSegmentation(Node):
             'quat': [o.x, o.y, o.z, o.w],  # scipy order
             'dims': [d.x, d.y, d.z],
         }
-        frame = request.frame_id if request.frame_id else \
-            self.get_parameter('robot_base_frame').get_parameter_value().string_value
+        frame = request.frame_id or self._robot_base_frame
         response.success = True
-        response.message = f"Mask '{request.name}' set (type={request.type}, frame='{frame}')"
-        self.get_logger().info(response.message)
+        response.message = (f"Mask '{request.name}' set "
+                            f"(type={request.type}, frame='{frame}')")
+        self._node.get_logger().info(response.message)
         return response
 
     def remove_mask_callback(self, request, response):
@@ -193,526 +146,310 @@ class DepthMapRobotSegmentation(Node):
         else:
             response.success = True
             response.message = f"Mask '{request.name}' not present (nothing to remove)"
-        self.get_logger().info(response.message)
+        self._node.get_logger().info(response.message)
         return response
 
+    # ---- Depth stream callbacks ----
+
     def listener_callback_camera_info(self, msg):
-        """
-        Callback for receiving camera info data.
-        Stores the camera intrinsics matrix.
-        """
         self.camera_info = msg
 
     def listener_callback_depth(self, msg):
-        """
-        Callback for receiving depth image data.
-        Converts the Image message into a tensor.
+        """Mask the robot out of a depth frame and republish the result.
+
+        Runs at the camera rate (frame arrival). All GPU work is under the
+        owning node's gpu_lock so a CUDA-graph capture can't race it.
         """
         try:
-            # Convert ROS Image message to numpy array
-            # Assuming depth is in millimeters (16UC1) or meters (32FC1)
-            if msg.encoding == "16UC1":
-                depth_img = self.bridge.imgmsg_to_cv2(msg, "16UC1")
-                # Convert from millimeters to meters
-                depth_img = depth_img.astype(np.float32) / 1000.0
-            elif msg.encoding == "32FC1":
-                depth_img = self.bridge.imgmsg_to_cv2(msg, "32FC1")
+            if msg.encoding == '16UC1':
+                depth = self.bridge.imgmsg_to_cv2(msg, '16UC1').astype(np.float32) / 1000.0
+            elif msg.encoding == '32FC1':
+                depth = self.bridge.imgmsg_to_cv2(msg, '32FC1')
             else:
-                self.get_logger().warn(f"Unsupported depth encoding: {msg.encoding}")
+                self._node.get_logger().warn(
+                    f'Unsupported depth encoding: {msg.encoding}')
                 return
-
-            # Convert to torch tensor
-            self.depth_image = torch.from_numpy(depth_img).to(
+            depth = torch.from_numpy(depth).to(
                 dtype=self._ops_dtype, device=self._device)
-            self.depth_frame_id = msg.header.frame_id
-
         except CvBridgeError as e:
-            self.get_logger().error(f"CvBridge Error: {e}")
+            self._node.get_logger().error(f'CvBridge Error: {e}')
             return
 
-        # Segmentation is driven by frame ARRIVAL (i.e. camera rate, ~5Hz)
-        # rather than a 100Hz timer that republished the same frame -- nvblox
-        # then re-integrated the same depth data ~6x (wasted GPU work, competing
-        # with the MPPI solve). See debug 2026-07-15.
-        if self.camera_info is not None:
-            joint_pose = self.robot_context.get_joint_pose()
-            expected_dof = len(self._kin_model.joint_names)
-            if len(joint_pose) != expected_dof:
-                # A mismatched vector would otherwise build a silently
-                # mis-shaped tensor here, and the failure would only surface
-                # deep inside compute_kinematics — hard to trace back to this.
-                self.get_logger().warn(
-                    f"Joint pose has {len(joint_pose)} values, expected "
-                    f"{expected_dof} (model DOF) - skipping this frame",
-                    throttle_duration_sec=5.0)
-                return
-            self.q_js.position = torch.tensor(
-                joint_pose, dtype=self._ops_dtype, device=self._device)
-            self.q_js.joint_names = self.robot_context.get_joint_name()
-            self.segment_and_publish()
+        if self.camera_info is None:
+            return
 
-    def segment_and_publish(self):
+        self.depth_frame_id = msg.header.frame_id
+        self._depth_encoding = msg.encoding
+
+        joint_pose = self._joint_pose_at(msg.header.stamp)
+        if len(joint_pose) != len(self._kin_model.joint_names):
+            self._node.get_logger().warn(
+                f'Joint pose has {len(joint_pose)} values, expected '
+                f'{len(self._kin_model.joint_names)} (model DOF) - skipping '
+                'this frame',
+                throttle_duration_sec=5.0)
+            return
+
+        gpu_lock = getattr(self._node, 'gpu_lock', None)
+        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+            self._node.get_logger().debug(
+                'robot_segmentation frame skipped (GPU capture in progress)',
+                throttle_duration_sec=2.0)
+            return
+        try:
+            q = torch.tensor(joint_pose, dtype=self._ops_dtype, device=self._device)
+            masked = self._mask_depth_image(depth, q, msg.header.stamp)
+            self.publisher_.publish(
+                self.depth_tensor_to_image_msg(masked, msg.header.stamp))
+        finally:
+            if gpu_lock is not None:
+                gpu_lock.release()
+
+    def _joint_pose_at(self, stamp):
+        """Joint position at the depth frame's capture time, or the live pose.
+
+        The FK'd collision spheres can only cover what the camera actually saw
+        if the joint state matches the image's capture time. The active control
+        strategy keeps a timestamped feedback buffer for this query; the live
+        pose is used while that buffer is still filling.
         """
-        Performs the segmentation by masking the robot in the depth image.
-        Publishes the filtered depth image as a ROS2 message.
-        """
-        masked_depth = self._mask_depth_image(self.depth_image, self.q_js.position)
-        masked_depth_msg = self.depth_tensor_to_image_msg(masked_depth)
-        self.publisher_.publish(masked_depth_msg)
+        stamp_ns = stamp.sec * 1_000_000_000 + stamp.nanosec
+        pose = self.robot_context.get_joint_pose_at(stamp_ns)
+        if pose is None:
+            pose = self.robot_context.get_joint_pose()
+            self._node.get_logger().debug(
+                'No time-synced joint feedback yet - masking with live pose',
+                throttle_duration_sec=5.0)
+        return pose
 
-    def depth_to_pointcloud(self, depth_image: torch.Tensor, camera_intrinsics: dict) -> torch.Tensor:
-        """
-        Converts a depth image to a 3D point cloud.
+    # ---- Masking pipeline ----
 
-        Args:
-            depth_image: torch.Tensor of shape (H, W) with depth values in meters
-            camera_intrinsics: dict with keys 'fx', 'fy', 'cx', 'cy'
+    def _mask_depth_image(self, depth_image, q, stamp):
+        """Return the depth image with robot (and mask-shape) pixels zeroed.
 
-        Returns:
-            torch.Tensor of shape (N, 3) representing 3D points (x, y, z)
+        Every kept pixel retains its exact original depth: the keep/drop mask
+        is scattered back onto the image through each point's original pixel
+        coordinate, avoiding a lossy point-cloud -> depth round trip.
         """
         H, W = depth_image.shape
+        k = self.camera_info.k
+        intrinsics = {'fx': k[0], 'fy': k[4], 'cx': k[2], 'cy': k[5]}
+        points, u, v = self.depth_to_pointcloud(depth_image, intrinsics)
+        keep = self._mask_pointcloud(points, q, stamp)  # (N,) True = not robot
 
-        # Get camera intrinsics
-        fx = camera_intrinsics['fx']
-        fy = camera_intrinsics['fy']
-        cx = camera_intrinsics['cx']
-        cy = camera_intrinsics['cy']
+        keep_img = torch.zeros(H * W, dtype=torch.bool, device=self._device)
+        keep_img[(v.long() * W) + u.long()] = keep
+        keep_img = keep_img.view(H, W)
+        return torch.where(keep_img, depth_image, torch.zeros_like(depth_image))
 
-        # Create pixel coordinate grid
+    def depth_to_pointcloud(self, depth_image, intrinsics):
+        """Convert a (H, W) depth image (meters) to a (N, 3) camera-frame point
+        cloud. Also returns the original pixel coordinate of every valid point.
+        """
+        H, W = depth_image.shape
         v_coords, u_coords = torch.meshgrid(
             torch.arange(H, dtype=self._ops_dtype, device=self._device),
             torch.arange(W, dtype=self._ops_dtype, device=self._device),
             indexing='ij')
+        valid = (depth_image > 0) & ~torch.isnan(depth_image) & ~torch.isinf(depth_image)
 
-        # Get valid depth values (non-zero and non-nan)
-        valid_mask = (depth_image > 0) & (~torch.isnan(depth_image)) & (~torch.isinf(depth_image))
+        u = u_coords[valid]
+        v = v_coords[valid]
+        z = depth_image[valid]
+        x = (u - intrinsics['cx']) * z / intrinsics['fx']
+        y = (v - intrinsics['cy']) * z / intrinsics['fy']
+        return torch.stack([x, y, z], dim=1), u, v
 
-        # Extract valid pixels
-        u_valid = u_coords[valid_mask]
-        v_valid = v_coords[valid_mask]
-        z_valid = depth_image[valid_mask]
-
-        # Convert to 3D coordinates using pinhole camera model
-        # x = (u - cx) * z / fx
-        # y = (v - cy) * z / fy
-        x = (u_valid - cx) * z_valid / fx
-        y = (v_valid - cy) * z_valid / fy
-        z = z_valid
-
-        # Stack into (N, 3) point cloud
-        points = torch.stack([x, y, z], dim=1)
-
-        return points, valid_mask
-
-    def pointcloud_to_depth(self, points: torch.Tensor, camera_intrinsics: dict,
-                           image_shape: tuple) -> torch.Tensor:
-        """
-        Converts a 3D point cloud back to a depth image.
-
-        Args:
-            points: torch.Tensor of shape (N, 3) representing 3D points
-            camera_intrinsics: dict with keys 'fx', 'fy', 'cx', 'cy'
-            image_shape: tuple (H, W) for the output depth image
-
-        Returns:
-            torch.Tensor of shape (H, W) representing the depth image
-        """
-        H, W = image_shape
-
-        # Get camera intrinsics
-        fx = camera_intrinsics['fx']
-        fy = camera_intrinsics['fy']
-        cx = camera_intrinsics['cx']
-        cy = camera_intrinsics['cy']
-
-        # Initialize depth image with zeros
-        depth_image = torch.zeros((H, W), dtype=self._ops_dtype, device=self._device)
-
-        # Project 3D points to 2D pixel coordinates
-        x, y, z = points[:, 0], points[:, 1], points[:, 2]
-
-        # Avoid division by zero
-        valid_z = z > 0
-        x_valid = x[valid_z]
-        y_valid = y[valid_z]
-        z_valid = z[valid_z]
-
-        # Project to pixel coordinates
-        u = (x_valid * fx / z_valid + cx).long()
-        v = (y_valid * fy / z_valid + cy).long()
-
-        # Filter points within image bounds
-        valid_pixels = (u >= 0) & (u < W) & (v >= 0) & (v < H)
-        u_valid = u[valid_pixels]
-        v_valid = v[valid_pixels]
-        z_final = z_valid[valid_pixels]
-
-        # Fill depth image (handle occlusions by keeping closest depth)
-        # Vectorized approach: sort points by depth (far to near) and scatter
-        # Points written last (nearest) will overwrite farther points at same pixel
-
-        if len(z_final) > 0:
-            # Sort by depth (descending order: farthest to nearest)
-            # This way, when we scatter, nearest points overwrite farther ones
-            sorted_indices = torch.argsort(z_final, descending=True)
-            u_sorted = u_valid[sorted_indices]
-            v_sorted = v_valid[sorted_indices]
-            z_sorted = z_final[sorted_indices]
-
-            # Convert 2D indices (v, u) to 1D linear indices
-            linear_indices = v_sorted * W + u_sorted
-
-            # Scatter depth values into flattened depth image
-            # Later values (closer points) will overwrite earlier ones (farther points)
-            depth_image.view(-1).scatter_(0, linear_indices, z_sorted)
-
-        return depth_image
-
-    def _mask_depth_image(self, depth_image: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-        """
-        Masks the depth image by removing robot points.
-
-        Strategy:
-        1. Convert depth image to point cloud
-        2. Apply robot masking on point cloud (reusing existing logic)
-        3. Convert masked point cloud back to depth image
-
-        Args:
-            depth_image: torch.Tensor of shape (H, W)
-            q: torch.Tensor of joint positions
-
-        Returns:
-            torch.Tensor of shape (H, W) with robot pixels masked (set to 0)
-        """
-        # Get camera intrinsics from camera_info
-        camera_intrinsics = {
-            'fx': self.camera_info.k[0],
-            'fy': self.camera_info.k[4],
-            'cx': self.camera_info.k[2],
-            'cy': self.camera_info.k[5]
-        }
-
-        # Step 1: Convert depth image to point cloud
-        points, valid_mask = self.depth_to_pointcloud(depth_image, camera_intrinsics)
-
-        # Step 2: Apply robot masking (reuse logic from point cloud segmentation)
-        filtered_points = self._mask_pointcloud(points, q)
-
-        # Step 3: Convert filtered point cloud back to depth image
-        masked_depth = self.pointcloud_to_depth(
-            filtered_points,
-            camera_intrinsics,
-            depth_image.shape)
-
-        return masked_depth
-
-    def _mask_pointcloud(self, point_cloud: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
-        """
-        Applies masking operation to remove points belonging to the robot.
-        This is the same logic as in the original robot_segmentation.py
-
-        Args:
-            point_cloud: torch.Tensor of shape (N, 3)
-            q: torch.Tensor of joint positions
-
-        Returns:
-            torch.Tensor of filtered points (M, 3) where M <= N
-        """
-        q = q.unsqueeze(0) if len(q.shape) == 1 else q
+    def _mask_pointcloud(self, point_cloud, q, stamp):
+        """Return (N,) bool: True = keep (not the robot or a mask shape)."""
+        q = q.unsqueeze(0) if q.ndim == 1 else q
         js = JointState(position=q, joint_names=self._kin_model.joint_names)
-        kinematics_state = self._kin_model.compute_kinematics(js)
-        # v2: `robot_spheres` replaces `link_spheres_tensor`, shape [B, H, N, 4]
-        robot_spheres = kinematics_state.robot_spheres.reshape(-1, 4)
+        spheres = self._kin_model.compute_kinematics(js).robot_spheres.reshape(-1, 4)
 
-        # Publish collision spheres for visualization (robot base frame)
-        self.publish_collision_spheres(robot_spheres)
-
-        # The point cloud is in the camera optical frame, but robot_spheres are
-        # in the robot base frame. Transform the points into the base frame for
-        # the distance test; keep the original camera-frame cloud so the depth
-        # is reconstructed in the camera frame downstream.
-        points_base = self._transform_points_to_base(point_cloud)
+        # Distance to the robot spheres, judged in the base frame. The camera is
+        # wrist-mounted, so the cloud is transformed at the image's capture time.
+        points_base = self._transform_points_to_base(point_cloud, stamp)
         if points_base is None:
-            # No TF available -> skip masking instead of masking the wrong points.
-            return point_cloud
+            # No TF at the capture instant - mask everything rather than risk
+            # integrating the robot. A dropped frame is harmless; an unmasked
+            # robot is a permanent voxel error.
+            return torch.zeros(point_cloud.shape[0], dtype=torch.bool,
+                               device=self._device)
 
-        points = points_base.unsqueeze(1)  # (N, 1, 3)
-        spheres_centers = robot_spheres[:, :3].unsqueeze(0)  # (1, S, 3)
-        spheres_radii = robot_spheres[:, 3].unsqueeze(0)  # (1, S)
+        dist = (torch.norm(points_base.unsqueeze(1) - spheres[:, :3].unsqueeze(0),
+                           dim=2) - spheres[:, 3].unsqueeze(0))
+        keep = dist.min(dim=1).values > self._distance_threshold
 
-        # Calculate distances from each point to each sphere
-        distances = torch.norm(points - spheres_centers, dim=2) - spheres_radii
-        min_distances, _ = torch.min(distances, dim=1)
+        # Also drop points inside user-defined mask shapes (e.g. a grasped
+        # object) so they never reach the mapper / ESDF.
+        inside = self._shape_inside_mask(points_base, stamp)
+        if inside is not None:
+            keep = keep & ~inside
 
-        # Keep points that are farther than threshold (i.e. NOT the robot)
-        mask = min_distances > self.distance_threshold
+        # Publish the points masked OUT as robot, in the base frame, for debug.
+        robot_points = points_base[~keep]
+        if robot_points.shape[0] > 0:
+            self.robot_pointcloud_pub.publish(self._create_pointcloud2_msg(
+                robot_points, self._robot_base_frame,
+                self._node.get_clock().now().to_msg()))
+        return keep
 
-        # Also drop points inside any user-defined mask shape (e.g. a grasped
-        # object) so they never reach the mapper / ESDF. Uses the same base-frame
-        # cloud; each mask follows its TF frame.
-        inside_shapes = self._shape_inside_mask(points_base)
-        if inside_shapes is not None:
-            mask = mask & ~inside_shapes
-
-        # Publish robot point cloud for debug (the points masked OUT as robot),
-        # in the robot base frame to match the transformed coordinates.
-        if self.robot_pointcloud_pub.get_subscription_count() > 0:
-            robot_points = points_base[~mask]  # Points that belong to the robot
-            if robot_points.shape[0] > 0:
-                timestamp = self.get_clock().now().to_msg()
-                robot_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-                pc_msg = self._create_pointcloud2_msg(robot_points, robot_frame, timestamp)
-                self.robot_pointcloud_pub.publish(pc_msg)
-
-        return point_cloud[mask]
-
-    def _transform_points_to_base(self, points: torch.Tensor):
-        """Transform camera-frame points (N, 3) into the robot base frame via TF.
-
-        Robot collision spheres are expressed in the kinematic base frame while
-        the depth point cloud is in the camera optical frame; without this
-        transform the masking compares mismatched coordinate systems. The TF
-        comes from the hand-eye calibration (base -> camera). Returns None if
-        the transform is unavailable.
-        """
-        if self.depth_frame_id is None:
+    def _transform_points_to_base(self, points, stamp):
+        """Transform (N, 3) camera-frame points into the robot base frame."""
+        source = self._correction_frame or self.depth_frame_id
+        if source is None:
             return None
-        robot_base_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-        T = self._tf_matrix(robot_base_frame, self.depth_frame_id)
+        T = self._tf_matrix(self._robot_base_frame, source, stamp)
         if T is None:
             return None
-
-        homog = torch.cat(
-            [points, torch.ones((points.shape[0], 1),
-                                dtype=self._ops_dtype, device=self._device)],
-            dim=1)  # (N, 4)
+        ones = torch.ones((points.shape[0], 1), dtype=self._ops_dtype,
+                          device=self._device)
+        homog = torch.cat([points, ones], dim=1)
         return (homog @ T.T)[:, :3]
 
-    def _tf_matrix(self, target_frame: str, source_frame: str):
-        """4x4 homogeneous transform ``target <- source`` from TF, or None.
+    def _tf_matrix(self, target_frame, source_frame, stamp=None):
+        """4x4 transform ``target <- source`` from TF, or None.
 
-        Shared by the robot base transform and the per-mask frame tracking.
-        Returns None (with a throttled warning) if the transform is unavailable.
+        Looks up at ``stamp`` (the data's capture time): for a wrist-mounted
+        camera the transform moves with the arm, so the latest pose would place
+        past pixels at the wrong world location. The image stamp routinely runs
+        a few ms ahead of TF's newest data, so a miss silently falls back to
+        the latest transform (only a few ms stale). None only if that also
+        fails.
         """
+        when = (rclpy_time.Time.from_msg(stamp) if stamp is not None
+                else rclpy_time.Time())
         try:
-            tf = self.tf_buffer.lookup_transform(
-                target_frame, source_frame, rclpy.time.Time())
-        except Exception as e:  # TransformException and friends
-            self.get_logger().warn(
-                f'TF {source_frame} -> {target_frame} unavailable: {e}',
-                throttle_duration_sec=2.0)
-            return None
+            tf = self.tf_buffer.lookup_transform(target_frame, source_frame, when)
+        except Exception:
+            if stamp is None:
+                self._node.get_logger().warn(
+                    f'TF {source_frame} -> {target_frame} unavailable',
+                    throttle_duration_sec=2.0)
+                return None
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    target_frame, source_frame, rclpy_time.Time())
+            except Exception:
+                self._node.get_logger().warn(
+                    f'TF {source_frame} -> {target_frame} unavailable',
+                    throttle_duration_sec=2.0)
+                return None
 
-        tr = tf.transform.translation
-        rot = tf.transform.rotation
-        R = Rotation.from_quat([rot.x, rot.y, rot.z, rot.w]).as_matrix()
+        t = tf.transform.translation
+        r = tf.transform.rotation
+        R = Rotation.from_quat([r.x, r.y, r.z, r.w]).as_matrix()
         T = torch.eye(4, dtype=self._ops_dtype, device=self._device)
         T[:3, :3] = torch.tensor(R, dtype=self._ops_dtype, device=self._device)
-        T[:3, 3] = torch.tensor([tr.x, tr.y, tr.z],
+        T[:3, 3] = torch.tensor([t.x, t.y, t.z],
                                 dtype=self._ops_dtype, device=self._device)
         return T
 
-    def _pose_matrix(self, pos: torch.Tensor, quat) -> torch.Tensor:
-        """4x4 homogeneous transform from a position tensor (3,) and a scipy
-        quaternion [x, y, z, w]."""
+    def _pose_matrix(self, pos, quat):
+        """4x4 transform from a position (3,) and a scipy quaternion [x, y, z, w]."""
         R = Rotation.from_quat(quat).as_matrix()
         T = torch.eye(4, dtype=self._ops_dtype, device=self._device)
         T[:3, :3] = torch.tensor(R, dtype=self._ops_dtype, device=self._device)
         T[:3, 3] = pos
         return T
 
-    def _shape_inside_mask(self, points_base: torch.Tensor):
-        """Boolean (N,) mask, True where a base-frame point lies inside ANY
-        user-defined mask shape. Returns None when no masks are defined.
-
-        Each mask pose is expressed in its ``frame_id`` (re-resolved every cycle
-        so it follows the arm); an empty frame_id means the robot base frame.
+    def _shape_inside_mask(self, points_base, stamp):
+        """(N,) bool: True where a base-frame point lies inside ANY mask shape.
+        Returns None when no masks are defined. Each mask is expressed in its
+        own ``frame_id`` (resolved at the same capture time so a mask attached
+        to a moving frame follows the arm).
         """
         if not self._masks:
             return None
 
-        base_frame = self.get_parameter('robot_base_frame').get_parameter_value().string_value
         N = points_base.shape[0]
-        homog = torch.cat(
-            [points_base, torch.ones((N, 1),
-                                     dtype=self._ops_dtype, device=self._device)],
-            dim=1)  # (N, 4)
+        ones = torch.ones((N, 1), dtype=self._ops_dtype, device=self._device)
+        homog = torch.cat([points_base, ones], dim=1)
         inside_any = torch.zeros(N, dtype=torch.bool, device=self._device)
 
         for m in self._masks.values():
-            T_frame_mask = self._pose_matrix(m['pos'], m['quat'])
+            T_mask = self._pose_matrix(m['pos'], m['quat'])
             if m['frame_id']:
-                T_base_frame = self._tf_matrix(base_frame, m['frame_id'])
-                if T_base_frame is None:
+                T_base = self._tf_matrix(self._robot_base_frame, m['frame_id'], stamp)
+                if T_base is None:
                     continue  # TF missing this cycle -> skip only this mask
-                T_base_mask = T_base_frame @ T_frame_mask
-            else:
-                T_base_mask = T_frame_mask
-
-            # Points into the mask-local frame, then analytic inside test.
-            local = (homog @ torch.inverse(T_base_mask).T)[:, :3]
+                T_mask = T_base @ T_mask
+            local = (homog @ torch.inverse(T_mask).T)[:, :3]
             inside = self._inside_shape(local, m)
             if inside is not None:
                 inside_any |= inside
-
         return inside_any
 
-    def _inside_shape(self, local: torch.Tensor, m: dict):
-        """Analytic point-inside test in the shape's local frame (+mask_margin).
-        Returns bool (N,), or None for unsupported types."""
-        t = self.mask_margin
+    def _inside_shape(self, local, m):
+        """Analytic point-inside test in a shape's local frame (+ mask margin)."""
+        t = self._mask_margin
         dims = m['dims']
         typ = m['type']
 
-        if typ == 0:
+        if typ == 0:  # cuboid, half-extents
             hx, hy, hz = dims[0] / 2 + t, dims[1] / 2 + t, dims[2] / 2 + t
             return ((local[:, 0].abs() <= hx)
                     & (local[:, 1].abs() <= hy)
                     & (local[:, 2].abs() <= hz))
-
-        if typ == 1:
+        if typ == 1:  # sphere
             return torch.norm(local, dim=1) <= dims[0] + t
-
-        if typ == 2:  # centered, axis z, z in [-h/2, h/2]
+        if typ == 2:  # cylinder, centered, axis z, z in [-h/2, h/2]
             r, hz = dims[0] + t, dims[1] / 2 + t
-            radial = torch.norm(local[:, :2], dim=1)
-            return (local[:, 2].abs() <= hz) & (radial <= r)
-
-        if typ == 3:  # segment [0,0,0]->[0,0,h] along +z
+            return ((local[:, 2].abs() <= hz)
+                    & (torch.norm(local[:, :2], dim=1) <= r))
+        if typ == 3:  # capsule segment [0,0,0]->[0,0,h] along +z
             r, h = dims[0] + t, dims[1]
             z_clamped = local[:, 2].clamp(0.0, h)
             dz = local[:, 2] - z_clamped
-            dist = torch.sqrt(local[:, 0] ** 2 + local[:, 1] ** 2 + dz ** 2)
-            return dist <= r
-
+            return (torch.sqrt(local[:, 0] ** 2 + local[:, 1] ** 2 + dz ** 2) <= r)
         if typ == 4:
-            self.get_logger().warn(
-                "MESH mask not supported analytically yet - skipped. "
-                "(future: curobo WorldMeshCollision zero-radius point SDF)",
+            self._node.get_logger().warn(
+                'MESH mask not supported analytically yet - skipped. '
+                '(future: curobo WorldMeshCollision zero-radius point SDF)',
                 throttle_duration_sec=5.0)
-            return None
-
         return None
 
-    def depth_tensor_to_image_msg(self, depth_tensor: torch.Tensor) -> Image:
-        """
-        Converts a depth tensor to a ROS2 Image message.
+    # ---- Message builders ----
 
-        Args:
-            depth_tensor: torch.Tensor of shape (H, W)
+    def depth_tensor_to_image_msg(self, depth_tensor, stamp):
+        """Convert a depth tensor to an Image message.
 
-        Returns:
-            Image message
+        The encoding matches the source stream (16UC1 -> uint16 mm, 32FC1 ->
+        float32 m) so the masked output is byte-compatible with the input.
+
+        The header carries the *capture* stamp of the source frame, not publish
+        time: consumers (the mapper) must resolve transforms at the same instant
+        the mask was evaluated, otherwise the masked pixels and the integrated
+        cloud drift apart to different world poses.
         """
-        # Convert to numpy and scale back to millimeters for 16UC1 encoding
         depth_np = depth_tensor.cpu().numpy()
-        depth_mm = (depth_np * 1000.0).astype(np.uint16)
-
-        # Create Image message
-        msg = self.bridge.cv2_to_imgmsg(depth_mm, encoding="16UC1")
-        msg.header.stamp = self.get_clock().now().to_msg()
+        if self._depth_encoding == '32FC1':
+            msg = self.bridge.cv2_to_imgmsg(depth_np.astype(np.float32),
+                                            encoding='32FC1')
+        else:
+            msg = self.bridge.cv2_to_imgmsg((depth_np * 1000.0).astype(np.uint16),
+                                            encoding='16UC1')
+        msg.header.stamp = stamp
         msg.header.frame_id = self.depth_frame_id
-
         return msg
 
-    def publish_collision_spheres(self, robot_spheres):
-        """
-        Publishes the robot's collision spheres as markers for visualization in RViz.
-
-        Args:
-            robot_spheres: torch.Tensor of shape (N, 4) where each row is [x, y, z, radius]
-        """
-        robot_spheres = robot_spheres.cpu().numpy().tolist()
-        marker_array = MarkerArray()
-
-        for i, sphere in enumerate(robot_spheres):
-            marker = Marker()
-            marker.header.frame_id = self.get_parameter('robot_base_frame').get_parameter_value().string_value
-            marker.header.stamp = self.get_clock().now().to_msg()
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            marker.id = i
-            marker.pose.position.x = sphere[0]
-            marker.pose.position.y = sphere[1]
-            marker.pose.position.z = sphere[2]
-            marker.scale.x = sphere[3] * 2  # Diameter
-            marker.scale.y = sphere[3] * 2
-            marker.scale.z = sphere[3] * 2
-            marker.color.a = 0.5  # Transparency
-            # This node is a depth-masking helper and does not run the world
-            # scene-collision checker, so spheres are shown collision-free
-            # (green) by default. The planner node recolors them red on actual
-            # collision via /<planner>/collision_spheres.
-            marker.color.r = 0.0
-            marker.color.g = 1.0
-            marker.color.b = 0.0
-            marker_array.markers.append(marker)
-
-        self.sphere_marker_pub.publish(marker_array)
-
-
-    def _create_pointcloud2_msg(self, points: torch.Tensor, frame_id: str, timestamp) -> PointCloud2:
-        """
-        Create a PointCloud2 message from a torch tensor of 3D points.
-
-        Args:
-            points: torch.Tensor of shape (N, 3) containing XYZ coordinates
-            frame_id: Frame ID for the point cloud
-            timestamp: ROS timestamp
-
-        Returns:
-            PointCloud2 message
-        """
-        # Convert tensor to numpy on CPU
-        points_np = points.cpu().numpy()
-
-        # Create PointCloud2 message
+    def _create_pointcloud2_msg(self, points, frame_id, timestamp):
+        """Create a PointCloud2 (XYZ float32) message from a (N, 3) tensor."""
+        points_np = points.cpu().numpy().astype('<f4')
         msg = PointCloud2()
         msg.header = Header()
         msg.header.stamp = timestamp
         msg.header.frame_id = frame_id
-
-        # Define point cloud fields (X, Y, Z)
         msg.fields = [
             PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
             PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
             PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
         ]
-
         msg.is_bigendian = False
-        msg.point_step = 12  # 3 * 4 bytes (float32)
+        msg.point_step = 12
         msg.row_step = msg.point_step * points_np.shape[0]
         msg.is_dense = True
         msg.height = 1
         msg.width = points_np.shape[0]
-
-        # Pack point data
-        buffer = []
-        for point in points_np:
-            buffer.append(struct.pack('fff', point[0], point[1], point[2]))
-
-        msg.data = b''.join(buffer)
-
+        msg.data = points_np.tobytes()
         return msg
-
-
-def main(args=None):
-    """
-    Main entry point for the depth map segmentation node.
-    """
-    rclpy.init(args=args)
-    node = DepthMapRobotSegmentation()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    node.destroy_node()
-    # See unified_planner_node.main: rclpy's SIGINT handler has already shut the
-    # context down, so an unguarded shutdown() exits 1 on a clean Ctrl-C.
-    if rclpy.ok():
-        rclpy.shutdown()
-
-
-if __name__ == '__main__':
-    main()

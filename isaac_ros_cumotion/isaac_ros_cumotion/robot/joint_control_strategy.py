@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
+import bisect
 import threading
 import time
+from collections import deque
 
 
 class RobotState():
@@ -74,6 +76,51 @@ class JointCommandStrategy(ABC):
         self._exec_total_s = 0.0
         self._exec_positions = None
         self._reach_tol = 0.02
+
+        # Timestamped joint feedback buffer: (stamp_ns, position_list).
+        # Populated by _record_joint_feedback() from the strategy's own
+        # callback_joint_pose; consumed by get_joint_pose_at() for
+        # time-synchronized queries (e.g. robot segmentation matching the
+        # FK'd collision spheres to the depth image capture time).
+        self._feedback_buffer = deque(maxlen=600)
+
+    def _record_joint_feedback(self, stamp_ns, position):
+        """Append a timestamped joint state sample to the feedback buffer.
+
+        Called by each strategy's callback_joint_pose after name-remap.
+        ``stamp_ns`` is the joint_states message header stamp in nanoseconds.
+        """
+        with self.buffer_lock:
+            self._feedback_buffer.append((int(stamp_ns), list(position)))
+
+    def get_joint_pose_at(self, stamp_ns, offset_ns=0):
+        """Time-synchronized joint pose query.
+
+        Returns the interpolated joint position at ``stamp_ns + offset_ns``,
+        or None when the feedback buffer is still empty (e.g. no joint_states
+        received yet). The depth image's capture timestamp is the expected use.
+
+        Implementation: linear interpolation between the two bracketing
+        buffer entries; clamps to the earliest or latest when the target
+        falls outside the buffer window.
+        """
+        target = int(stamp_ns + offset_ns)
+        with self.buffer_lock:
+            buf = list(self._feedback_buffer)
+        if not buf:
+            return None
+        stamps = [t for t, _ in buf]
+        i = bisect.bisect_right(stamps, target)
+        if i == 0:
+            return list(buf[0][1])
+        if i >= len(buf):
+            return list(buf[-1][1])
+        t0, p0 = buf[i - 1]
+        t1, p1 = buf[i]
+        if t1 <= t0:
+            return list(p1)
+        w = (target - t0) / (t1 - t0)
+        return [p0[j] + w * (p1[j] - p0[j]) for j in range(len(p0))]
 
     @property
     def buffer_epoch(self) -> int:

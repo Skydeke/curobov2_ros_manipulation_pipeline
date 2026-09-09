@@ -35,9 +35,8 @@ def resolve_interpolation_dt(node, default: float = 0.025) -> float:
     sample their interpolated trajectory at, and it is what every
     JointCommandStrategy stamps into time_from_start on the outgoing
     JointTrajectory. Declares the ``interpolation_dt`` ROS parameter if the
-    node hasn't declared it yet (nodes other than the unified planner, e.g.
-    robot_segmentation, that don't declare it themselves), so this is always
-    safe to call first.
+    node hasn't declared it yet (any node that doesn't do so itself), so this
+    is always safe to call first.
     """
     if not node.has_parameter('interpolation_dt'):
         node.declare_parameter('interpolation_dt', default)

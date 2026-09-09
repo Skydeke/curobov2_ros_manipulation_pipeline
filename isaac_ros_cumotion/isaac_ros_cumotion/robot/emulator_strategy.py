@@ -28,13 +28,18 @@ class EmulatorStrategy(JointCommandStrategy):
         node.get_logger().info(f"Emulator strategy initialized - Publishing to {joint_states_topic}")
 
     def _publish_state(self, names, positions, velocities):
+        now = self.node.get_clock().now()
         joint_state_msg = JointState()
-        joint_state_msg.header.stamp = self.node.get_clock().now().to_msg()
+        joint_state_msg.header.stamp = now.to_msg()
         joint_state_msg.name = names
         joint_state_msg.position = positions
         joint_state_msg.velocity = velocities
         joint_state_msg.effort = []
         self.pub_joint_states.publish(joint_state_msg)
+        # The emulator IS the joint-state authority (it publishes /joint_states
+        # for the sim world), so mirror each published state into the shared
+        # feedback buffer for time-synchronized queries (robot segmentation).
+        self._record_joint_feedback(now.nanoseconds, positions)
 
     def _apply_immediate(self, index):
         '''Publish a single point of the current command buffer right away

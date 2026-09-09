@@ -1,6 +1,6 @@
 from functools import partial
 from std_srvs.srv import Trigger, SetBool
-from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetLinkCollision
+from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetLinkCollision, SetMask
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
 from geometry_msgs.msg import Point
@@ -44,6 +44,11 @@ class RosServiceManager:
         self.get_voxel_map_srv = None
         self.get_collision_distance_srv = None
         self.set_collision_cache_srv = None
+        # Robot-segmentation mask services (registered lazily via
+        # register_robot_segmentation once the component exists).
+        self.set_mask_srv = None
+        self.remove_mask_srv = None
+        self.segmentation = None
 
         # Publisher for collision spheres visualization. Enabled by default so the
         # collision spheres (and scene-obstacle markers) show up in RViz without a
@@ -205,6 +210,33 @@ class RosServiceManager:
                 1.0 / sparse_rate,
                 partial(self._publish_sparse_voxel_grid, self.node)
             )
+
+    def register_robot_segmentation(self, segmentation):
+        """Register the depth-map robot segmentation's mask services.
+
+        The RobotSegmentation component is composed into the node after this
+        manager is built, so its set_mask / remove_mask services are registered
+        here (node-namespaced, like every other service) rather than by the
+        component itself. Delegates straight to the component's callbacks.
+
+        Args:
+            segmentation: The core.RobotSegmentation instance.
+        """
+        self.segmentation = segmentation
+        self.set_mask_srv = self.node.create_service(
+            SetMask,
+            self.node.get_name() + '/set_mask',
+            segmentation.set_mask_callback,
+        )
+        self.remove_mask_srv = self.node.create_service(
+            RemoveObject,
+            self.node.get_name() + '/remove_mask',
+            segmentation.remove_mask_callback,
+        )
+        self.node.get_logger().info(
+            f"Registered robot segmentation services on "
+            f"{self.node.get_name()}/set_mask and "
+            f"{self.node.get_name()}/remove_mask")
 
     def _publish_sparse_voxel_grid(self, node):
         """Timer callback: publish the current scene occupancy as SparseVoxelGrid.

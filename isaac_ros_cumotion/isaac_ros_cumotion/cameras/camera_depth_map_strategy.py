@@ -164,35 +164,51 @@ class DepthMapCameraStrategy(CameraStrategy):
                 # when configured, instead of the raw optical frame, to fix the
                 # depth/pointcloud mapping offset. Falls back to the raw frame_id.
                 target_frame = self.correction_frame or self._frame_id
+                # The camera is wrist-mounted, so base -> camera moves with the
+                # arm. Look the transform up AT THE IMAGE'S CAPTURE STAMP (not
+                # the latest) so the depth pixels land where the camera really
+                # was when they were captured; using the latest pose while the
+                # arm moves smears the mapped voxels along the swept path.
                 try:
                     t = self.tf_buffer.lookup_transform(
-                        self.base_frame, target_frame, rclpy.time.Time())
-                    # NPE guard: a lookup that returns without a usable transform,
-                    # or a partially-filled one, must not crash the depth callback.
-                    if t is None or t.transform is None:
+                        self.base_frame, target_frame,
+                        rclpy.time.Time.from_msg(msg.header.stamp))
+                except TransformException:
+                    # The image stamp routinely runs a few ms ahead of TF's
+                    # newest data (the image is published before the transform
+                    # for that instant is). Silently fall back to the latest
+                    # transform — only a few ms stale, and better than dropping
+                    # the frame mid-motion.
+                    try:
+                        t = self.tf_buffer.lookup_transform(
+                            self.base_frame, target_frame, rclpy.time.Time())
+                    except TransformException as ex:
+                        # Do NOT fall back to an identity pose: that would
+                        # integrate this frame's depth as if the camera sat at
+                        # the robot base, placing phantom obstacles in the
+                        # collision world (and leaving the real observed volume
+                        # uncovered) — worse than skipping the frame entirely.
                         self.node.get_logger().warn(
-                            f'NULL transform for {self.base_frame} -> {target_frame}: '
-                            f'returned empty. Dropping this depth frame (no integration).',
+                            f'Could not transform {self.base_frame} to '
+                            f'{target_frame}: {ex}. Dropping this depth frame '
+                            f'(no integration).',
                             throttle_duration_sec=2.0)
                         return
-                    translation = t.transform.translation
-                    rotation_msg = t.transform.rotation
-                    position = [translation.x, translation.y, translation.z]
-                    quat_ros = [rotation_msg.x, rotation_msg.y, rotation_msg.z, rotation_msg.w]
-                    quat_scipy = Rotation.from_quat(quat_ros).as_quat()  # [x, y, z, w]
-                    # cuRobo expects [x, y, z, qw, qx, qy, qz]
-                    pose_list = position + [quat_scipy[3], quat_scipy[0], quat_scipy[1], quat_scipy[2]]
-                except TransformException as ex:
-                    # Do NOT fall back to an identity pose: that would integrate
-                    # this frame's depth as if the camera sat at the robot base,
-                    # placing phantom obstacles in the collision world (and
-                    # leaving the real observed volume uncovered) — worse than
-                    # skipping the frame entirely. Drop it and retry next frame.
+                # NPE guard: a lookup that returns without a usable transform,
+                # or a partially-filled one, must not crash the depth callback.
+                if t is None or t.transform is None:
                     self.node.get_logger().warn(
-                        f'Could not transform {self.base_frame} to {target_frame}: '
-                        f'{ex}. Dropping this depth frame (no integration).',
+                        f'NULL transform for {self.base_frame} -> {target_frame}: '
+                        f'returned empty. Dropping this depth frame (no integration).',
                         throttle_duration_sec=2.0)
                     return
+                translation = t.transform.translation
+                rotation_msg = t.transform.rotation
+                position = [translation.x, translation.y, translation.z]
+                quat_ros = [rotation_msg.x, rotation_msg.y, rotation_msg.z, rotation_msg.w]
+                quat_scipy = Rotation.from_quat(quat_ros).as_quat()  # [x, y, z, w]
+                # cuRobo expects [x, y, z, qw, qx, qy, qz]
+                pose_list = position + [quat_scipy[3], quat_scipy[0], quat_scipy[1], quat_scipy[2]]
 
             # ---- GPU section: EVERY CUDA op is under the lock ----
             # depth->cuda, pose->cuda, rgb alloc AND mapper.integrate are all GPU

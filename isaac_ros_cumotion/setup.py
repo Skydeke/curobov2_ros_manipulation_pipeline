@@ -33,7 +33,6 @@ setup(
     entry_points={
         "console_scripts": [
             "curobo_trajectory_planner = isaac_ros_cumotion.core.unified_planner_node:main",
-            "robot_segmentation = isaac_ros_cumotion.core.robot_segmentation:main",
             # Tools. `ros2 run` only looks in lib/<pkg>/, where console_scripts
             # are the only thing that lands: a file installed through data_files
             # goes to share/ and stays invisible to `ros2 run`.
