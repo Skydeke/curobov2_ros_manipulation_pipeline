@@ -36,6 +36,13 @@ class RosServiceManager:
         self.config_wrapper = config_wrapper
         self.robot_context = robot_context
 
+        # Callback groups assigned by UnifiedPlannerNode so the viz/marker
+        # timers can run in parallel with the perception (camera) callbacks
+        # under the MultiThreadedExecutor. Absent (standalone tests), the
+        # timers fall back to the node's default group.
+        self._viz_callback_group = getattr(node, '_viz_callback_group', None)
+        self._marker_callback_group = getattr(node, '_marker_callback_group', None)
+
         # Services (initialized in init_services)
         self.add_object_srv = None
         self.remove_object_srv = None
@@ -156,7 +163,8 @@ class RosServiceManager:
         # Create timer for periodic collision sphere publishing
         self.publish_collision_spheres_timer = self.node.create_timer(
             0.5,
-            partial(self.publish_collision_spheres, self.node)
+            partial(self.publish_collision_spheres, self.node),
+            callback_group=self._viz_callback_group
         )
 
         # Scene-obstacle markers (always on): shows every scene obstacle, with the
@@ -169,7 +177,8 @@ class RosServiceManager:
         )
         self.scene_obstacle_timer = self.node.create_timer(
             0.5,
-            partial(self.publish_scene_obstacles, self.node)
+            partial(self.publish_scene_obstacles, self.node),
+            callback_group=self._marker_callback_group
         )
 
         # Mapper workspace marker: wireframe box of the mapper TSDF/ESDF extent
@@ -208,7 +217,8 @@ class RosServiceManager:
         if sparse_rate > 0.0:
             self.sparse_voxel_timer = self.node.create_timer(
                 1.0 / sparse_rate,
-                partial(self._publish_sparse_voxel_grid, self.node)
+                partial(self._publish_sparse_voxel_grid, self.node),
+                callback_group=self._viz_callback_group
             )
 
     def register_robot_segmentation(self, segmentation):
@@ -278,6 +288,11 @@ class RosServiceManager:
 
         marker_array = MarkerArray()
         clear = Marker()
+        # Empty namespace on purpose: rviz's DELETEALL is namespace-scoped
+        # (ros2/rviz#685) — a namespaced DELETEALL only clears markers in that
+        # namespace, so markers no longer re-published (e.g. an attached
+        # object's spheres after detach) would freeze at their last pose.
+        # With an unset ns it clears every marker in this display.
         clear.action = Marker.DELETEALL
         marker_array.markers.append(clear)
 
@@ -482,7 +497,13 @@ class RosServiceManager:
         colliding = self._spheres_in_collision(node, kin)
         red_indices = {r['index'] for r in colliding or []}
 
-        # Create marker array — prepend a DELETEALL to clear stale markers
+        # Prepend a DELETEALL so markers that are no longer re-published (e.g.
+        # an attached object's spheres after detach) do not linger. It must
+        # carry an EMPTY namespace: rviz's DELETEALL is namespace-scoped
+        # (ros2/rviz#685), so a namespaced DELETEALL would only clear markers
+        # in that namespace. The sphere markers all live under
+        # ns='collision_spheres', so an unset-ns DELETEALL cannot collide with
+        # any of them.
         marker_array = MarkerArray()
         clear = Marker()
         clear.action = Marker.DELETEALL
@@ -492,6 +513,7 @@ class RosServiceManager:
             if sphere[3] <= 0:  # skip disabled spheres (radius = -100)
                 continue
             marker = Marker()
+            marker.ns = 'collision_spheres'
             marker.header.frame_id = self.config_manager.base_link
             marker.type = Marker.SPHERE
             marker.action = Marker.ADD

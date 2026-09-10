@@ -8,6 +8,9 @@ import rclpy
 from scipy.spatial.transform import Rotation
 from tf2_ros import TransformException
 
+import threading
+from collections import deque
+
 import torch
 import numpy as np
 
@@ -23,7 +26,8 @@ class DepthMapCameraStrategy(CameraStrategy):
                  camera_info_topic='/camera/depth/camera_info',
                  frame_id='',
                  intrinsics=None,
-                 extrinsics=None
+                 extrinsics=None,
+                 callback_group=None
                  ):
         """
         Initialize a depthmap camera strategy.
@@ -36,6 +40,8 @@ class DepthMapCameraStrategy(CameraStrategy):
             frame_id: Frame ID for the camera
             intrinsics: Optional camera intrinsics from config (list or dict)
             extrinsics: Optional camera extrinsics from config (list)
+            callback_group: rclpy callback group for the depth subscription
+                (typically the node's perception group — see camera_context).
         """
         super().__init__(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics)
 
@@ -95,7 +101,22 @@ class DepthMapCameraStrategy(CameraStrategy):
 
         # Create subscription to depth topic
         self.sub_depth = self.node.create_subscription(
-            Image, topic, self.callback_depth_map, 1)
+            Image, topic, self.callback_depth_map, 1, callback_group=callback_group)
+
+        # Map-building runs on a DEDICATED integration worker, NOT inside this
+        # executor subscription callback. mapper.integrate() is heavy and holds
+        # gpu_lock; running it inline serialized the whole node behind the depth
+        # stream — every viz timer (collision spheres, sparse voxel grid) dropped
+        # toward ~1 Hz and one core was pinned (measured: depth integrated at
+        # only ~2 fps while cpu sat on the integrate). The callback now does only
+        # cheap CPU work (decode + TF lookup) and hands the frame off; the worker
+        # always consumes the FRESHEST frame (bounded drop-oldest deque), so a
+        # slow integrate never builds a stale backlog.
+        self._integrate_queue = deque(maxlen=1)
+        self._integrate_stop = threading.Event()
+        self._integrate_thread = threading.Thread(
+            target=self._integrate_loop, name=f'{camera_name}_integrate', daemon=True)
+        self._integrate_thread.start()
 
         # Image processing
         self.bridge = CvBridge()
@@ -106,11 +127,13 @@ class DepthMapCameraStrategy(CameraStrategy):
         """
         Callback for receiving depth image data.
 
-        Args:
-            msg: Image message
+        CPU-only: decode + TF lookup + hand-off to the integration worker. No
+        CUDA op runs here (the worker holds gpu_lock for the GPU section), so
+        this callback always returns quickly and never starves the executor's
+        other groups (viz markers, sparse voxel, services).
         """
         try:
-            # ---- CPU-only work first (safe to run during a CUDA graph capture) ----
+            # ---- CPU-only work (safe to run during a CUDA graph capture) ----
             # Convert ROS image to numpy (millimetres 16UC1 or metres 32FC1).
             if msg.encoding == "16UC1":
                 depth_img = self.bridge.imgmsg_to_cv2(msg, "16UC1")
@@ -121,8 +144,9 @@ class DepthMapCameraStrategy(CameraStrategy):
                 self.node.get_logger().warn(f"Unsupported depth encoding: {msg.encoding}, trying 32FC1")
                 depth_img_float = self.bridge.imgmsg_to_cv2(msg, "32FC1")
 
-            # Resolve the camera pose as a plain CPU list; GPU conversion is deferred
-            # to the locked section below.
+            # Resolve the camera pose as a plain CPU list; GPU conversion is done
+            # by the integration worker (TF buffer is not thread-safe, so the
+            # lookup stays on this executor thread).
             pose_list = None
             if self.camera_pose_static is None:
                 # Map in the configured camera frame (`camera_frame`).
@@ -173,55 +197,79 @@ class DepthMapCameraStrategy(CameraStrategy):
                 # cuRobo expects [x, y, z, qw, qx, qy, qz]
                 pose_list = position + [quat_scipy[3], quat_scipy[0], quat_scipy[1], quat_scipy[2]]
 
-            # ---- GPU section: EVERY CUDA op is under the lock ----
-            # depth->cuda, pose->cuda, rgb alloc AND mapper.integrate are all GPU
-            # ops. If curobo is capturing a CUDA graph (plan / MPC cold-start) it
-            # holds gpu_lock, so skip the WHOLE frame — issuing ANY of these ops
-            # mid-capture raises cudaErrorStreamCaptureUnsupported and poisons the
-            # process's CUDA context. (Previously only integrate() was guarded, so
-            # the depth->cuda copy above still raced the capture.)
+            # Hand off to the integration worker. The deque is bounded
+            # drop-oldest, so an overloaded worker always integrates the freshest
+            # frame instead of falling behind on a stale backlog.
+            self._integrate_queue.append((depth_img_float, pose_list))
+
+        except CvBridgeError as e:
+            self.node.get_logger().error(f"CvBridge error: {e}")
+        except Exception as e:
+            self.node.get_logger().error(f"Error processing depth image: {e}")
+
+    def _integrate_loop(self):
+        """Dedicated map-integration thread (pops the freshest queued frame).
+
+        One frame at a time, under the node's gpu_lock (non-blocking — drop the
+        frame if a CUDA graph capture holds the GPU). Never touches the TF
+        buffer. cf. the class docstring for why this exists (executor starvation
+        / single-core pin).
+        """
+        while True:
+            try:
+                depth_img_float, pose_list = self._integrate_queue.pop()
+            except IndexError:
+                if self._integrate_stop.wait(0.005):
+                    return
+                continue
             mapper = getattr(self.node, 'mapper', None)
             if mapper is None:
                 self.node.get_logger().warn(
                     "No mapper on node - depth frame ignored. "
                     "Unified planner should expose `node.mapper` (curobo.perception.Mapper).",
                     throttle_duration_sec=5.0)
-                return
+                continue
             gpu_lock = getattr(self.node, 'gpu_lock', None)
             if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-                self.node.get_logger().debug(
-                    "depth frame skipped (GPU capture in progress)",
-                    throttle_duration_sec=2.0)
-                return
+                continue  # capture in progress — drop this frame
             try:
-                depth_tensor = torch.from_numpy(depth_img_float).to(
-                    device=self.tensor_args.device, dtype=self.tensor_args.dtype)
-
-                if self.camera_pose_static is not None:
-                    self.camera_pose = self.camera_pose_static
-                else:
-                    self.camera_pose = Pose.from_list(pose_list, device_cfg=self.tensor_args)
-
-                # v2 Mapper requires a leading camera dimension on every field and a
-                # paired rgb image (zero buffer — no colour for collision mapping).
-                depth_b = depth_tensor.unsqueeze(0) if depth_tensor.ndim == 2 else depth_tensor
-                intrinsics_b = (
-                    self.intrinsics.unsqueeze(0) if self.intrinsics.ndim == 2 else self.intrinsics)
-                rgb_b = torch.zeros(
-                    (depth_b.shape[0], depth_b.shape[1], depth_b.shape[2], 3),
-                    dtype=torch.uint8, device=self.tensor_args.device)
-                data_camera = CameraObservation(
-                    depth_image=depth_b, rgb_image=rgb_b,
-                    intrinsics=intrinsics_b, pose=self.camera_pose)
-
-                mapper.integrate(data_camera)
-                torch.cuda.synchronize()
-                self.depth_map = depth_tensor
+                self._integrate_once(depth_img_float, pose_list, mapper)
+            except Exception as e:
+                self.node.get_logger().error(f"Depth integrate failed: {e}")
             finally:
                 if gpu_lock is not None:
                     gpu_lock.release()
 
-        except CvBridgeError as e:
-            self.node.get_logger().error(f"CvBridge error: {e}")
-        except Exception as e:
-            self.node.get_logger().error(f"Error processing depth image: {e}")
+    def _integrate_once(self, depth_img_float, pose_list, mapper):
+        """Move the frame to cuda and push it into the Mapper TSDF (under gpu_lock)."""
+        depth_tensor = torch.from_numpy(depth_img_float).to(
+            device=self.tensor_args.device, dtype=self.tensor_args.dtype)
+
+        if self.camera_pose_static is not None:
+            self.camera_pose = self.camera_pose_static
+        else:
+            self.camera_pose = Pose.from_list(pose_list, device_cfg=self.tensor_args)
+
+        # v2 Mapper requires a leading camera dimension on every field and a
+        # paired rgb image (zero buffer — no colour for collision mapping).
+        depth_b = depth_tensor.unsqueeze(0) if depth_tensor.ndim == 2 else depth_tensor
+        intrinsics_b = (
+            self.intrinsics.unsqueeze(0) if self.intrinsics.ndim == 2 else self.intrinsics)
+        rgb_b = torch.zeros(
+            (depth_b.shape[0], depth_b.shape[1], depth_b.shape[2], 3),
+            dtype=torch.uint8, device=self.tensor_args.device)
+        data_camera = CameraObservation(
+            depth_image=depth_b, rgb_image=rgb_b,
+            intrinsics=intrinsics_b, pose=self.camera_pose)
+
+        mapper.integrate(data_camera)
+        # CPU/GPU ordering bridge — off by default (torch_sync param):
+        # per-frame synchronize() blocks the worker on the GPU and starves the
+        # viz timers (see node.torch_sync_enabled()).
+        if self.node.torch_sync_enabled():
+            torch.cuda.synchronize()
+        self.depth_map = depth_tensor
+
+    def destroy(self):
+        """Stop the integration worker (daemon; safe to call once)."""
+        self._integrate_stop.set()

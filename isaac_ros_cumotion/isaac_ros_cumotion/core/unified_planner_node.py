@@ -17,6 +17,7 @@ v2 notes:
 - ground plane lives on the Scene via ObstacleManager, not `world_cfg.add_obstacle`.
 """
 
+import contextlib
 import logging
 import threading
 import time
@@ -74,6 +75,24 @@ class UnifiedPlannerNode(Node):
         # acquire and simply skips its frame.
         self.gpu_lock = threading.RLock()
 
+        # Callback groups for the MultiThreadedExecutor (num_threads=8): without
+        # these every subscription/timer lands in the default MutuallyExclusive
+        # group, so the executor serializes all of them and the camera callbacks
+        # block the viz publishers (and vice versa) — broadcast starvation
+        # symptoms. Explicit groups let the GPU-heavy work run in parallel:
+        #  - perception: camera subscriptions (depth integrate + segmentation) —
+        #    the sustained GPU-bound path, so it never shares a thread slot with
+        #    viz.
+        #  - viz: the GPU-backed viz timers (collision spheres, sparse voxel
+        #    grid, workspace marker); CPU-light and rate-limited.
+        #  - markers: the CPU-only scene-obstacle marker timer so it always
+        #    ticks even while perception/viz are busy.
+        # Created before cameras/solvers so they always exist when callbacks
+        # fire. cf. manager-architecture.md (callback groups / gpu_lock).
+        self._perception_callback_group = MutuallyExclusiveCallbackGroup()
+        self._viz_callback_group = MutuallyExclusiveCallbackGroup()
+        self._marker_callback_group = MutuallyExclusiveCallbackGroup()
+
         # Serializes goal admission: only one execute_trajectory goal may be
         # active at a time (open-loop or reactive). Guards against two
         # concurrent servo/execute loops driving the robot at once. Set in
@@ -105,6 +124,13 @@ class UnifiedPlannerNode(Node):
 
         self.declare_parameter('planner_type', 'classic')
         self.declare_parameter('max_attempts', 1)
+        # torch.cuda.synchronize() bridges the executor's Python threads to the
+        # GPU but blocks the calling thread every frame/kernel — off by default
+        # so the depth callback and viz timers keep running while the GPU works
+        # asynchronously (cf. the 1-core executor behaviour that starved the
+        # collision-spheres publisher). Enable only when you need deterministic
+        # GPU/CPU ordering (e.g. debugging a race).
+        self.declare_parameter('torch_sync', False)
         # Trajectory RE-TIMING: scales the stamped time of every sent trajectory
         # (see JointCommandStrategy._dilated_dt). 1.0 = nominal interpolation_dt
         # pacing; <1.0 slows the motion down, >1.0 speeds it up (cuRobo
@@ -590,11 +616,14 @@ class UnifiedPlannerNode(Node):
             self.refresh_perception_world()
 
             self.get_logger().info(f"Planning with {planner.get_planner_name()}")
-            # plan() may (re)capture the MotionGen CUDA graph — hold the lock so a
-            # concurrent depth integrate can't invalidate the capture (mirrors the
-            # execute-action path). Without this, the camera callback's
-            # mapper.integrate() races the capture -> cudaErrorStreamCaptureInvalidated.
-            with self.gpu_lock:
+            # plan() may (re)capture the MotionGen CUDA graph — hold the lock
+            # only when the plan can capture (first plan after a switch / graph
+            # release / warmup), not for every plan. Replaying a captured graph
+            # is safe to overlap with the camera's mapper.integrate(), and
+            # holding the lock for the whole optimize starved the viz
+            # publishers. _setup_planner above already set the capture-pending
+            # flag when it released/recaptured, so _plan_lock() sees it.
+            with self._plan_lock():
                 result = planner.plan(start_state, request, config, self.robot_context)
 
             response.success = result.success
@@ -792,9 +821,11 @@ class UnifiedPlannerNode(Node):
                 else:
                     self.refresh_perception_world()
                     self.get_logger().info(f"Planning with {planner.get_planner_name()}")
-                    # First plan captures the MotionGen CUDA graph — hold the
-                    # lock so a concurrent depth integrate can't invalidate it.
-                    with self.gpu_lock:
+                    # First plan after a switch / graph release recaptures the
+                    # CUDA graph — lock only then (see _plan_lock), not the
+                    # whole optimize, so the depth callback and viz publishers
+                    # stay live during long open-loop plans.
+                    with self._plan_lock():
                         result = planner.plan(start_state, goal, config, self.robot_context)
                     if not result.success:
                         diag = self._collision_diagnostic(planner)
@@ -1112,6 +1143,34 @@ class UnifiedPlannerNode(Node):
             self._graph_capture_pending = False
             return pending
 
+    def _plan_lock(self):
+        """gpu_lock only when the next open-loop plan may CAPTURE a CUDA graph.
+
+        Mirrors ReactiveController._step_guard: a plan that merely replays an
+        already-captured graph performs no process-global CUDA op and is safe to
+        overlap with the depth callback's mapper.integrate() and the viz
+        publishers — but the FIRST plan after a solver switch / graph release /
+        warmup re-captures, and capture is process-global (see
+        _graph_capture_pending's docstring). take_graph_capture_pending() is
+        atomic take-and-clear, so exactly one plan captures. The graph-release
+        paths (e.g. _setup_planner after an owner change) set the pending flag
+        BEFORE _plan_lock() is evaluated here, so the flag is still pending when
+        the guarded plan() runs.
+        """
+        if self.config_wrapper_motion.use_cuda_graph and self.take_graph_capture_pending():
+            return self.gpu_lock
+        return contextlib.nullcontext()
+
+    def torch_sync_enabled(self) -> bool:
+        """``torch_sync`` param: sync the CPU to the GPU after the guarded calls.
+
+        Off by default — a per-frame torch.cuda.synchronize() in the depth
+        callback blocks the executor thread on the GPU every frame and starves
+        the viz timers (see the 'torch_sync' parameter declaration). Set True
+        only when deterministic GPU/CPU ordering is needed (race debugging).
+        """
+        return bool(self.get_parameter('torch_sync').get_parameter_value().bool_value)
+
     def _safe_reset_graph(self, solver):
         """Release a solver's captured CUDA graph(s); never raise into callers.
 
@@ -1355,6 +1414,16 @@ def main(args=None):
 
     if getattr(node, 'robot_segmentation', None) is not None:
         node.robot_segmentation.destroy()
+    # Stop the depth integration workers BEFORE tearing down the node so the
+    # daemon threads don't fall out mid-integrate (camera_depth_map_strategy.py).
+    cam_mgr = getattr(getattr(node, 'config_wrapper_motion', None),
+                      'camera_system_manager', None)
+    camera_context = getattr(cam_mgr, 'camera_context', None)
+    if camera_context is not None:
+        for strategy in camera_context.cameras.values():
+            destroy = getattr(strategy, 'destroy', None)
+            if destroy is not None:
+                destroy()
     node.destroy_node()
     # rclpy's own SIGINT handler already shuts the context down, so calling
     # shutdown() unconditionally raises "rcl_shutdown already called" and the

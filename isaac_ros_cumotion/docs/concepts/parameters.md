@@ -51,6 +51,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `trajectory_cache_ttl` | `30.0` | Lifetime (s) of a trajectory cached by `generate_trajectory` and reusable by the execute action (`allow_cached`) | Plan-time |
 | `sparse_voxel_publish_rate` | `7.0` | Publish rate (Hz) of `/unified_planner/voxel_grid_sparse`; `<= 0` disables | Startup |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |
+| `torch_sync` | `false` | Guard every `torch.cuda.synchronize()` (depth callback, IK service, MPC IK). Off by default — a per-frame sync blocks the executor thread on the GPU and starves the viz timers. Enable only for deterministic GPU/CPU ordering (race debugging) | Runtime |
 
 ## Node parameters — perception (Mapper)
 

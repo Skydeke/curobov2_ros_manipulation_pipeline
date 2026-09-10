@@ -2,6 +2,7 @@ import torch
 from typing import List, Tuple
 
 from curobo.kinematics import Kinematics, KinematicsCfg
+from curobo._src.types.robot import RobotCfg
 from curobo.types import JointState
 from isaac_ros_cumotion_interfaces.srv import SetLinkCollision
 
@@ -12,8 +13,12 @@ class RobotModelManager:
 
     v2 notes:
     - `CudaRobotModel` → `Kinematics` (curobo.kinematics)
-    - `RobotConfig` no longer exists — kinematics is built from a YAML path
-      or dict via `KinematicsCfg.create(robot=…)`.
+    - `RobotConfig` no longer exists; `KinematicsCfg.from_robot_yaml_file`
+      parses the robot YAML exactly once here (the URDF config is parsed a
+      single time per process).
+    - `kin_cfg` is the parsed `KinematicsCfg`, `robot_cfg` the wrapping
+      `RobotCfg` passed into `*.cfg.create(robot=…)` by every other solver so
+      nothing re-parses the robot config, and `kin_model` the GPU `Kinematics`.
     - KinematicsTensorConfig still lives on the kinematics instance; the
       `enable_link_spheres` / `disable_link_spheres` API is unchanged.
     """
@@ -31,7 +36,16 @@ class RobotModelManager:
         self.base_link = base_link
         self.node = node
 
-        self.kin_model = Kinematics(KinematicsCfg.from_robot_yaml_file(robot_config_file))
+        # `RobotModelManager` owns the SINGLE curobo kinematic model for the
+        # node. One `RobotCfg` wraps one parsed `KinematicsCfg` (the URDF is
+        # parsed exactly once, here); every other solver built afterwards
+        # (MotionPlanner, IK, FK, MPC) constructs its GPU `Kinematics` from
+        # THIS `robot_cfg` instead of re-parsing the robot YAML/URDF — that was
+        # loading and configuring the robot model multiple times per process
+        # (one set of "Converting continuous joint" warnings per construction).
+        self.kin_cfg = KinematicsCfg.from_robot_yaml_file(robot_config_file)
+        self.robot_cfg = RobotCfg(kinematics=self.kin_cfg)
+        self.kin_model = Kinematics(self.robot_cfg.kinematics)
 
         self._ops_dtype = torch.float32
         self._device = torch.device('cuda')

@@ -76,6 +76,8 @@ class CameraSystemManager:
                     extrinsics=cfg.extrinsics,
                     frame_rate_hz=cfg.frame_rate_hz,
                     camera_index=cfg.camera_index,
+                    callback_group=getattr(
+                        self.node, '_perception_callback_group', None),
                 )
 
         self.camera_cfg = self.camera_cfgs[0] if self.camera_cfgs else None

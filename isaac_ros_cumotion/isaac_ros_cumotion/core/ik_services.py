@@ -159,14 +159,15 @@ class IKServices:
         # Primitives only at construction; update_world() pushes the perception
         # layer by copy afterwards. See primitives_only_scene().
         scene = self._config.obstacle_manager.primitives_only_scene()
-        robot_yml = self._config.robot_config_file
 
         self._node.get_logger().info(
             f"Initializing IK solver (batch_size={batch_size})..."
         )
 
+        # Single shared curobo kinematic from RobotModelManager (one URDF
+        # parse for the whole node) — do not re-build from the YAML path.
         cfg = InverseKinematicsCfg.create(
-            robot=robot_yml,
+            robot=self._config.robot_model_manager.robot_cfg,
             scene_model=scene,
             num_seeds=20,
             position_tolerance=0.005,
@@ -187,7 +188,10 @@ class IKServices:
         kin_state = self._ik_solver.compute_kinematics(js)
         goal = kin_state.tool_poses.as_goal()
         self._ik_solver.solve_pose(goal_tool_poses=goal)
-        torch.cuda.synchronize()
+        # CPU/GPU ordering bridge — off by default (torch_sync param), see
+        # node.torch_sync_enabled().
+        if self._node.torch_sync_enabled():
+            torch.cuda.synchronize()
 
         self._node.get_logger().info("IK solver ready")
 
@@ -239,5 +243,6 @@ class IKServices:
                 self._ik_batch_size = 0
                 return False, None
 
-        torch.cuda.synchronize()
+        if self._node.torch_sync_enabled():
+            torch.cuda.synchronize()
         return True, result

@@ -25,7 +25,7 @@ import torch
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Pose
 
-from curobo.kinematics import Kinematics, KinematicsCfg
+from curobo.kinematics import Kinematics
 from curobo.collision_checking import RobotCollisionChecker, RobotCollisionCheckerCfg
 from curobo.types import DeviceCfg, JointState as CuRoboJS
 
@@ -50,12 +50,11 @@ class FKServices:
         Args:
             node: ROS2 node.
             config_wrapper: The shared ConfigWrapperMotion (like IKServices),
-                supplying `obstacle_manager`, `robot_config_file`, device/dtype.
+                supplying `obstacle_manager`, `robot_model_manager`, device/dtype.
         """
         self._node = node
         self._config = config_wrapper
 
-        self._robot_config_file = config_wrapper.robot_config_file
         self._obstacle_manager = config_wrapper.obstacle_manager
 
         self._fk_model: Kinematics | None = None
@@ -194,12 +193,13 @@ class FKServices:
             f"Initializing FK model (batch_size={batch_size})..."
         )
 
-        fk_model = Kinematics(
-            KinematicsCfg.from_robot_yaml_file(
-                self._robot_config_file,
-                device_cfg=DeviceCfg(device=self._device, dtype=self._dtype),
-            )
-        )
+        # Build the FK model from the node's SINGLE shared curobo kinematic
+        # (robot_model_manager.robot_cfg), never from the YAML path — otherwise
+        # each service instantiates its own robot model (one URDF parse + one
+        # set of intermediate buffers per construction; cf.
+        # RobotModelManager docstring).
+        robot_cfg = self._config.robot_model_manager.robot_cfg
+        fk_model = Kinematics(robot_cfg.kinematics)
         self._fk_model = fk_model
 
         # Collision validator for FkBatch: built from the same primitives-only

@@ -34,7 +34,7 @@ class CameraContext:
         self._device = torch.device('cuda')
 
     def add_camera(self, camera_name, camera_type, topic, camera_info, frame_id,
-                   intrinsics=None, extrinsics=None, frame_rate_hz=None, **kwargs):
+                   intrinsics=None, extrinsics=None, frame_rate_hz=None, callback_group=None, **kwargs):
         """
         Add a camera strategy to the context.
 
@@ -50,6 +50,10 @@ class CameraContext:
             frame_rate_hz: Declared publication rate of `topic`, in Hz. Only used
                 to normalise the TSDF decay (see get_total_frame_rate_hz).
                 Not set for robot-segmentation cameras (they don't integrate).
+            callback_group: rclpy callback group for this camera's subscriptions
+                (typically the node's perception group, so camera callbacks can
+                run in parallel with the viz/marker threads — see
+                unified_planner_node._perception_callback_group).
             **kwargs: Additional parameters for specific camera strategies
         """
         # v2 perception ingests depth+rgb images through the Mapper TSDF; raw
@@ -66,6 +70,7 @@ class CameraContext:
                 frame_id=frame_id,
                 intrinsics=intrinsics,
                 extrinsics=extrinsics,
+                callback_group=callback_group,
             )
 
         elif camera_type == 'robot_segmentation':
@@ -92,6 +97,7 @@ class CameraContext:
                 distance_threshold=kwargs.get('distance_threshold', 0.05),
                 mask_margin=kwargs.get('mask_margin', 0.0),
                 masks=kwargs.get('masks'),
+                callback_group=callback_group,
             )
 
         else:

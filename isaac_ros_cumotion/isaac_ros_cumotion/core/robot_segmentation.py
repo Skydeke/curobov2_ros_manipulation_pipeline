@@ -88,6 +88,8 @@ class RobotSegmentation:
                 distance_threshold=distance_threshold,
                 mask_margin=mask_margin,
                 masks=self._masks,
+                callback_group=getattr(
+                    self._node, '_perception_callback_group', None),
             )
         for cfg in camera_cfgs or []:
             strategy = self.camera_context.cameras.get(cfg.name)

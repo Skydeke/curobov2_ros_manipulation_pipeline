@@ -54,7 +54,7 @@ class RetargetController(ReactiveController):
 
         tool = self._tool_frame()
         cfg = MotionRetargeterCfg.create(
-            robot=cw.robot_config_file,
+            robot=cw.robot_model_manager.robot_cfg,
             tool_pose_criteria={
                 tool: ToolPoseCriteria.track_position_and_orientation(
                     xyz=[w_pos, w_pos, w_pos], rpy=[w_rot, w_rot, w_rot],

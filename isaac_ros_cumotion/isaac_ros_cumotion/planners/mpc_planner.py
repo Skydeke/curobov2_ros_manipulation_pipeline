@@ -197,7 +197,7 @@ class MPCController(ReactiveController):
         # "solid everywhere". collision_cache pre-allocates the voxel storage
         # instead; update_world fills it by copy. See primitives_only_scene().
         base_kwargs = dict(
-            robot=cw.robot_config_file,
+            robot=cw.robot_model_manager.robot_cfg,
             scene_model=cw.obstacle_manager.primitives_only_scene(),
             optimization_dt=step_dt,
             use_cuda_graph=resolve_use_cuda_graph(node),
@@ -608,7 +608,7 @@ class MPCController(ReactiveController):
         if getattr(self, '_ik_solver', None) is None:
             cw = self.config_wrapper
             cfg = InverseKinematicsCfg.create(
-                robot=cw.robot_config_file,
+                robot=cw.robot_model_manager.robot_cfg,
                 scene_model=None,
                 num_seeds=20,
                 position_tolerance=0.005,
@@ -641,7 +641,10 @@ class MPCController(ReactiveController):
                     joint_names=self.solver.joint_names,
                 )
             result = ik.solve_pose(goal_tool_poses=goal, current_state=seed_state)
-            torch.cuda.synchronize()
+            # CPU/GPU ordering bridge — off by default (torch_sync param), see
+            # node.torch_sync_enabled().
+            if self.node.torch_sync_enabled():
+                torch.cuda.synchronize()
             if not bool(result.success.reshape(-1)[0].item()):
                 self.node.get_logger().warn("MPC: IK goal-state: no successful solution")
                 return None

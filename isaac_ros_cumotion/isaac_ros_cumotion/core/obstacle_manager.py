@@ -389,7 +389,9 @@ class ObstacleManager:
         period = float(self._mapper_stats_period)
         if period <= 0.0:
             return
-        self._stats_timer = self.node.create_timer(period, self._log_mapper_stats)
+        self._stats_timer = self.node.create_timer(
+            period, self._log_mapper_stats,
+            callback_group=getattr(self.node, '_viz_callback_group', None))
 
     def _log_mapper_stats(self):
         mapper = self.mapper
@@ -397,9 +399,13 @@ class ObstacleManager:
             return
         # Every CUDA op in this node runs under gpu_lock so it cannot race a
         # CUDA graph capture (same invariant as the depth-camera callback).
+        # The acquire is NON-blocking (matching the depth-callback and viz
+        # publishers): this is a 60 s statistics timer, it must not stall the
+        # executor on a long plan / capture — it simply skips this round and
+        # retries on the next tick.
         gpu_lock = getattr(self.node, 'gpu_lock', None)
-        if gpu_lock is not None:
-            gpu_lock.acquire()
+        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+            return
         try:
             try:
                 stats = mapper.get_stats(scan_pool=True, scan_hash=False)

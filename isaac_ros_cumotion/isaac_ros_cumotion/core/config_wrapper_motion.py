@@ -96,7 +96,7 @@ class ConfigWrapperMotion(ConfigWrapper):
         ).get_parameter_value().double_value
 
         cfg = MotionPlannerCfg.create(
-            robot=self.robot_config_file,
+            robot=self.robot_model_manager.robot_cfg,
             scene_model=scene,
             num_ik_seeds=self.num_ik_seeds,
             num_trajopt_seeds=self.num_trajopt_seeds,

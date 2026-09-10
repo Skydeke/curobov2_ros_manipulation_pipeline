@@ -38,7 +38,8 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
                  frame_id='', intrinsics=None, extrinsics=None,
                  robot_context=None, kin_model=None, base_frame=None,
                  ops_dtype=None, device=None,
-                 distance_threshold=0.05, mask_margin=0.0, masks=None):
+                 distance_threshold=0.05, mask_margin=0.0, masks=None,
+                 callback_group=None):
         """
         Initialize a robot-segmentation camera strategy.
 
@@ -65,6 +66,9 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
             masks: Shared dict of user-defined mask shapes (the facade's
                 ``self._masks``), mutated by the set_mask / remove_mask
                 services; every strategy sees the same shapes.
+            callback_group: rclpy callback group for the depth/camera_info
+                subscriptions (typically the node's perception group — see
+                camera_context).
         """
         super().__init__(node, camera_name, topic, camera_info_topic,
                          frame_id, intrinsics, extrinsics)
@@ -98,9 +102,10 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
         self.encoding = '16UC1'
 
         self.sub_camera_info = self.node.create_subscription(
-            CameraInfo, camera_info_topic, self.callback_camera_info, 1)
+            CameraInfo, camera_info_topic, self.callback_camera_info, 1,
+            callback_group=callback_group)
         self.sub_depth = self.node.create_subscription(
-            Image, topic, self.callback_depth, 1)
+            Image, topic, self.callback_depth, 1, callback_group=callback_group)
         self.publisher = self.node.create_publisher(Image, self.output_topic, 10)
         self.robot_pointcloud_pub = self.node.create_publisher(
             PointCloud2, self._debug_topic(topic), 10)
