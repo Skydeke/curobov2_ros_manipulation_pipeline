@@ -79,6 +79,79 @@ def _resolve_activation(node, default_activation=0.0):
     return default_activation
 
 
+def _sphere_collision_snapshot(
+        wrapper, node, kin=None, solver=None,
+        default_activation=0.0, activation_distance=None, at_joints=None):
+    """Single FK snapshot: per-sphere distances AND the sphere array they came from.
+
+    One ``kin.compute_kinematics`` call feeds both the scene-collision distance
+    query and the returned ``spheres`` array, so the distance list and the array
+    always index 1:1 (identical N). Callers MUST attribute distances against the
+    returned sphere array — never re-run FK (or query spheres) separately and
+    index from a different source, and never reshape ``sphere_dist`` in a way
+    that changes its length relative to ``spheres``. Either would give distance
+    entries that index past the N-row sphere array.
+
+    Returns (``spheres`` [N, 4] float-tensor, flat per-sphere distance list) on
+    success, or (None, None) if the solver/checker isn't ready or FK failed.
+    Never raises.
+    """
+    try:
+        if kin is None:
+            kin = wrapper.kin_model
+        q_js = JointState(
+            position=torch.tensor(
+                _at_joints_pose(wrapper, at_joints),
+                dtype=wrapper._ops_dtype,
+                device=wrapper._device,
+            ),
+            joint_names=kin.joint_names,
+        )
+        kinematics_state = kin.compute_kinematics(q_js)
+        robot_spheres = kinematics_state.robot_spheres
+        spheres = robot_spheres.reshape(-1, 4)
+
+        scene_collision_checker = _resolve_scene_checker(node, solver)
+        if scene_collision_checker is None or not hasattr(
+                scene_collision_checker, 'get_sphere_distance'):
+            return None, None
+
+        if activation_distance is None:
+            activation = _resolve_activation(node, default_activation)
+        else:
+            activation = activation_distance
+
+        device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
+        collision_buffer = CollisionBuffer.from_shape(robot_spheres.shape, device_cfg)
+        weight = device_cfg.to_device([1.0])
+        activation_t = device_cfg.to_device([activation])
+
+        sphere_dist = scene_collision_checker.get_sphere_distance(
+            kinematics_state,
+            collision_buffer,
+            weight,
+            activation_distance=activation_t,
+        )
+        # A negative-radius sphere has no physical meaning and its inflated
+        # radius (radius + activation) stays positive against any obstacle, so
+        # it would always read as "colliding". Ignore such spheres outright.
+        #
+        # CRITICAL: the mask must be SHAPE-PRESERVING. This buffer is
+        # [batch, horizon, num_spheres] (no trailing singleton), so applying
+        # the mask as ``negative_radius.unsqueeze(-1)`` (4-D) makes
+        # ``masked_fill`` BROADCAST the result to [b, h, N, N] — a sphere×sphere
+        # cross product whose flattened indices no longer map back onto the N
+        # robot spheres. That was the "index <k> is out of bounds for dimension
+        # 0 with size <N>" crash in ``_attributed_collisions`` (any red index
+        # >= N from the cross-product list blew past the N-row sphere array).
+        negative_radius = robot_spheres[..., 3] < 0
+        if negative_radius.any():
+            sphere_dist = sphere_dist * (~negative_radius)
+        return spheres, torch.flatten(sphere_dist, start_dim=0).tolist()
+    except Exception:
+        return None, None
+
+
 def _query_sphere_collision(
         wrapper, node, kin=None, solver=None,
         default_activation=0.0, activation_distance=None, at_joints=None):
@@ -116,51 +189,11 @@ def _query_sphere_collision(
         the solver/checker isn't ready — callers fall back to "no collision
         info". Never raises.
     """
-    try:
-        if kin is None:
-            kin = wrapper.kin_model
-        q_js = JointState(
-            position=torch.tensor(
-                _at_joints_pose(wrapper, at_joints),
-                dtype=wrapper._ops_dtype,
-                device=wrapper._device,
-            ),
-            joint_names=kin.joint_names,
-        )
-        kinematics_state = kin.compute_kinematics(q_js)
-        robot_spheres = kinematics_state.robot_spheres
-
-        scene_collision_checker = _resolve_scene_checker(node, solver)
-        if scene_collision_checker is None or not hasattr(
-                scene_collision_checker, 'get_sphere_distance'):
-            return None
-
-        if activation_distance is None:
-            activation = _resolve_activation(node, default_activation)
-        else:
-            activation = activation_distance
-
-        device_cfg = DeviceCfg(device=wrapper._device, dtype=wrapper._ops_dtype)
-        collision_buffer = CollisionBuffer.from_shape(robot_spheres.shape, device_cfg)
-        weight = device_cfg.to_device([1.0])
-        activation_t = device_cfg.to_device([activation])
-
-        sphere_dist = scene_collision_checker.get_sphere_distance(
-            kinematics_state,
-            collision_buffer,
-            weight,
-            activation_distance=activation_t,
-        )
-        # A negative-radius sphere has no physical meaning and its inflated
-        # radius (radius + activation) stays positive against any obstacle, so
-        # it would always read as "colliding". Ignore such spheres outright.
-        negative_radius = robot_spheres[..., 3] < 0
-        if negative_radius.any():
-            sphere_dist = sphere_dist.masked_fill(
-                negative_radius.unsqueeze(-1), 0.0)
-        return torch.flatten(sphere_dist, start_dim=0).tolist()
-    except Exception:
-        return None
+    _spheres, dists = _sphere_collision_snapshot(
+        wrapper, node, kin=kin, solver=solver,
+        default_activation=default_activation,
+        activation_distance=activation_distance, at_joints=at_joints)
+    return dists
 
 
 def _rot_from_quat_wxyz(quat):
@@ -178,12 +211,15 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
                            activation_distance=None, at_joints=None):
     """Collisions (with obstacle attribution) at the robot's current joint state.
 
-    Identical kinematics/shape-source as ``_query_sphere_collision`` (so the
-    returned sphere indices line up with the marker-array spheres), but for
-    every reported sphere also names the enabled scene cuboids it comes within
-    the activation distance of (computed against the same OBB SDF the GPU
-    kernel uses), and flags mesh / voxel-layer involvement when present but
-    unattributable.
+    Computes distances and the sphere centers from the SAME
+    ``kin.compute_kinematics`` snapshot (``_sphere_collision_snapshot``), so
+    every returned sphere index indexes the array the distances were computed
+    against (see that function for why cross-indexing a differently-computed
+    sphere array breaks). The returned sphere indices line up with the
+    marker-array spheres. For every reported sphere it also names the enabled
+    scene cuboids it comes within the activation distance of (computed against
+    the same OBB SDF the GPU kernel uses), and flags mesh / voxel-layer
+    involvement when present but unattributable.
 
     ``at_joints`` overrides the evaluated configuration (robot's live pose by
     default) — pass the goal joint positions to attribute "start or end state
@@ -206,10 +242,10 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
     Returns None when the solver/collision checker isn't ready. Never raises.
     """
     import numpy as np
-    dists = _query_sphere_collision(
+    spheres, dists = _sphere_collision_snapshot(
         wrapper, node, kin=kin, solver=solver,
         activation_distance=activation_distance, at_joints=at_joints)
-    if dists is None:
+    if spheres is None or dists is None:
         return None
     red = [(i, d) for i, d in enumerate(dists) if d > 0.0]
     if not red:
@@ -222,15 +258,6 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
 
     if kin is None:
         kin = wrapper.kin_model
-    q_js = JointState(
-        position=torch.tensor(
-            _at_joints_pose(wrapper, at_joints),
-            dtype=wrapper._ops_dtype,
-            device=wrapper._device,
-        ),
-        joint_names=kin.joint_names,
-    )
-    spheres = kin.compute_kinematics(q_js).robot_spheres.reshape(-1, 4)
 
     # Sphere -> link name attribution (same mapping the diagnostic uses).
     kp = kin.config.kinematics_config
@@ -275,6 +302,13 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
 
     reports = []
     for sph_idx, depth_sum in red:
+        # Belt-and-braces: only attribute indices that exist in THIS snapshot's
+        # sphere array. With correct per-sphere distances the red indices are
+        # always < len(spheres); a past shape bug (negative-radius mask that
+        # broadcast the distance tensor to a sphere×sphere cross product) put
+        # garbage indices here and crashed with "index out of bounds".
+        if sph_idx >= len(spheres):
+            continue
         c = spheres[sph_idx].detach().cpu().numpy()
         center, radius = c[:3].astype(np.float64), float(c[3])
         if radius < 0:
