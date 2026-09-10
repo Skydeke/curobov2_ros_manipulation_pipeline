@@ -23,8 +23,7 @@ class DepthMapCameraStrategy(CameraStrategy):
                  camera_info_topic='/camera/depth/camera_info',
                  frame_id='',
                  intrinsics=None,
-                 extrinsics=None,
-                 camera_index=0
+                 extrinsics=None
                  ):
         """
         Initialize a depthmap camera strategy.
@@ -37,8 +36,6 @@ class DepthMapCameraStrategy(CameraStrategy):
             frame_id: Frame ID for the camera
             intrinsics: Optional camera intrinsics from config (list or dict)
             extrinsics: Optional camera extrinsics from config (list)
-            camera_index: Position of this camera in the cameras: list, used to
-                pair it with the `camera_correction_frame` param (per camera).
         """
         super().__init__(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics)
 
@@ -50,16 +47,13 @@ class DepthMapCameraStrategy(CameraStrategy):
             node.get_parameter('base_link').get_parameter_value().string_value
             if node.has_parameter('base_link') else 'base_0')
 
-        # Per-camera correction frame (e.g. 'curobo_frame') used instead of the
-        # raw optical frame for the mapper pose lookup. Mirrors the old
-        # curobo_server mapper's `camera_correction_frame` param: a list, one
-        # entry per camera. Falls back to the raw frame_id when unset.
-        self.correction_frame = self._resolve_correction_frame(node, camera_index)
-
-        if self.correction_frame:
+        # The frame the depth is integrated in is the configured camera frame
+        # (`camera_frame`, e.g. curobo_frame in the kortex launch) — there is
+        # no separate correction-frame param anymore, so the deployer sets the
+        # frame they want directly via camera_frame.
+        if self._frame_id:
             node.get_logger().info(
-                f"[{self.name}] mapping camera pose from frame "
-                f"'{self.correction_frame}' (curobo correction frame)")
+                f"[{self.name}] mapping camera pose from frame '{self._frame_id}'")
 
         self.depth_map = None
         self.intrinsics = None
@@ -108,35 +102,6 @@ class DepthMapCameraStrategy(CameraStrategy):
 
         node.get_logger().info(f"DepthMap camera initialized with depth topic: {topic}")
 
-    def _resolve_correction_frame(self, node, camera_index: int):
-        """Pick this camera's correction frame from the node parameter.
-
-        Reads the node's `camera_correction_frame` parameter (a list, one entry
-        per camera in the cameras: config) and returns the entry for this
-        camera, or ``None`` when unset / out of range (fall back to the raw
-        optical frame). Never raises: a misconfigured parameter simply disables
-        the correction.
-        """
-        if not node.has_parameter('camera_correction_frame'):
-            return None
-        try:
-            frames = node.get_parameter('camera_correction_frame').value
-        except Exception:
-            return None
-        if not frames:
-            return None
-        try:
-            frame = frames[camera_index]
-        except (IndexError, TypeError):
-            return None
-        # An empty string default ('') means "no correction": fall back to the
-        # raw optical frame just like a missing entry. This keeps the declared
-        # parameter a valid non-empty STRING_ARRAY (an empty [] default is
-        # ambiguous in rclpy and collides with the launch override's type).
-        if isinstance(frame, str) and not frame.strip():
-            return None
-        return frame
-
     def callback_depth_map(self, msg):
         """
         Callback for receiving depth image data.
@@ -160,10 +125,8 @@ class DepthMapCameraStrategy(CameraStrategy):
             # to the locked section below.
             pose_list = None
             if self.camera_pose_static is None:
-                # Integrate at the per-camera correction frame (e.g. curobo_frame)
-                # when configured, instead of the raw optical frame, to fix the
-                # depth/pointcloud mapping offset. Falls back to the raw frame_id.
-                target_frame = self.correction_frame or self._frame_id
+                # Map in the configured camera frame (`camera_frame`).
+                target_frame = self._frame_id
                 # The camera is wrist-mounted, so base -> camera moves with the
                 # arm. Look the transform up AT THE IMAGE'S CAPTURE STAMP (not
                 # the latest) so the depth pixels land where the camera really

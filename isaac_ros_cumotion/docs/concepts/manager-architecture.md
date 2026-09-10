@@ -39,7 +39,17 @@ One subtlety worth knowing: solvers are constructed from `primitives_only_scene(
 
 ### 4. `CameraSystemManager` (`camera_system_manager.py`)
 
-Parses `cameras_config_file` into a `CameraContext` and instantiates one camera strategy per entry. In v2 only `type: depth_camera` exists (`DepthMapCameraStrategy`); perception is **push-based**: each depth frame is integrated into the Mapper from the camera callback, under a non-blocking GPU lock (frames are dropped during CUDA-graph capture or on TF failure). See [Tutorial 7](../tutorials/07-pointcloud-detection.md).
+Reads the shared `camera_*` array params (`PerceptionCameraCfg`, no YAML file),
+builds a `CameraContext` and instantiates one `DepthMapCameraStrategy` per camera
+whose `camera_purpose` includes `esdf`. Perception is **push-based**: each depth
+frame is integrated into the Mapper from the camera callback, under a non-blocking
+GPU lock (frames are dropped during CUDA-graph capture or on TF failure). The same
+params feed the in-server `RobotSegmentation`, which registers one
+`RobotSegmentationCameraStrategy` per `segmentation`-purpose camera through the
+SAME `CameraContext` — a segmented camera is just another camera strategy, and its
+masked output topic is derived from that camera's own raw `camera_topic` (leaf
+segment → `masked_depth`). Both consumers stay aligned because they read the same
+arrays. See [Tutorial 7](../tutorials/07-pointcloud-detection.md).
 
 ### 5. `RosServiceManager` (`ros_service_manager.py`)
 

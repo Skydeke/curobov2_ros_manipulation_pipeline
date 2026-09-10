@@ -339,8 +339,8 @@ Linux GUI apps inside the container need an X-server running on the host.
 
 There is no launch file that starts a depth camera for you: `gen_traj.launch.py`
 launches the planner, not your sensor. Start your camera driver yourself, then
-point a `cameras.yaml` entry at its depth topic and pass it with
-`cameras_config_file:=`. See [Tutorial 7](../tutorials/07-pointcloud-detection.md)
+set `camera_topic:=` (an array, one entry per camera).
+See [Tutorial 7](../tutorials/07-pointcloud-detection.md)
 for the full configuration, including the intrinsics/extrinsics choices and the
 startup log lines that confirm frames are arriving.
 

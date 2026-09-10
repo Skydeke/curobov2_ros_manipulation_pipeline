@@ -150,24 +150,26 @@ class UnifiedPlannerNode(Node):
         # the perception ESDF from the solvers. Leave true for normal operation —
         # false disables camera-based collision avoidance.
         self.declare_parameter('push_esdf_to_solvers', True)
-        # Per-camera mapper integration frame override (one entry per camera in
-        # cameras.yaml), e.g. ["curobo_frame"]. Read by DepthMapCameraStrategy;
-        # an empty/default '' entry means "integrate at the raw frame_id".
-        # Declared here so the launch `parameters=` override is always readable
-        # (the planner node does not use allow_undeclared_parameters, unlike the
-        # legacy mapper node). Default is [''] (a non-empty STRING_ARRAY) because
-        # an empty [] default is type-ambiguous in rclpy and clashes with the
-        # launch's STRING_ARRAY override.
-        self.declare_parameter('camera_correction_frame', [''])
         # Fold the depth-map robot segmentation INTO this server node (rather
-        # than a standalone node): when true, the depth stream is masked against
-        # the robot's own collision spheres before the mapper integrates it, so
-        # the arm / mount never become ESDF voxels. The masking component
-        # subscribes to the raw depth, republishes a node-namespaced
-        # /<node>/masked_depth_image (which cameras.yaml points the
-        # DepthMapCameraStrategy at), and reads its config from the
-        # robot_segmentation_* params declared below.
-        self.declare_parameter('enable_robot_segmentation', False)
+        # than a standalone node): when true, each camera whose `camera_purpose`
+        # is 'all' or 'segmentation' has its depth stream masked against the
+        # robot's own collision spheres before the mapper integrates it, so the
+        # arm / mount never become ESDF voxels. On by default — "use cameras
+        # for everything" unless a camera is purpose-limited. The masking
+        # component subscribes to each segmented camera's raw depth (the shared
+        # camera_* params) and republishes the masked streams, which the mapper
+        # camera strategies are derived to consume. Camera identity comes from
+        # the shared camera_* config, not duplicated params.
+        self.declare_parameter('enable_robot_segmentation', True)
+        # Segmenter tuning (declared here — not just inside the component — so
+        # launch-file overrides are applied at node construction like every
+        # other param). Min distance (m) to a robot collision sphere for a
+        # depth point to be kept; inflation (m) of the mask shapes. The masked
+        # OUTPUT topic is derived per camera from that camera's raw `camera_topic`
+        # (leaf segment replaced by `masked_depth`), so there is no segmenter
+        # output-topic parameter.
+        self.declare_parameter('robot_segmentation_distance_threshold', 0.05)
+        self.declare_parameter('robot_segmentation_mask_margin', 0.0)
         # Reactive (MPC) solver build params — read by MPCController.build_solver().
         self.declare_parameter('mpc_step_dt', 0.03)
         self.declare_parameter('mpc_horizon_steps', 30)
@@ -223,18 +225,39 @@ class UnifiedPlannerNode(Node):
         # Depth-map robot segmentation, folded into this node (not a standalone
         # node). Gated by `enable_robot_segmentation`; shares this node's
         # RobotContext + Kinematics so it can never disagree with the planner's
-        # own joint state / collision spheres. Its masked-depth output (and
-        # debug cloud) publishers are node-namespaced, and its mask services are
-        # registered through the RosServiceManager.
+        # own joint state / collision spheres, and the SHARED perception camera
+        # configs (raw topic, camera-info topic, camera frame) so it can
+        # never disagree with the mapper about which depth stream is which. One
+        # RobotSegmentationCameraStrategy is created per segmented camera
+        # (purpose 'all' or 'segmentation' in `camera_purpose`) and registered
+        # through CameraContext just like the mapper's camera strategies; each
+        # publishes on a topic derived from that camera's own raw topic
+        # (e.g. /kortex_vision/depth/masked_depth), which is what the mapper's
+        # strategy for that camera subscribes to. The mask services are
+        # registered through the RosServiceManager (shared across all streams).
         self.robot_segmentation = None
         if self.get_parameter('enable_robot_segmentation').value:
-            self.robot_segmentation = RobotSegmentation(
-                self,
-                self.robot_context,
-                self.config_wrapper_motion.kin_model,
-            )
-            self.config_wrapper_motion.ros_service_manager \
-                .register_robot_segmentation(self.robot_segmentation)
+            camera_cfgs = (self.config_wrapper_motion.camera_system_manager
+                           .camera_cfgs) or []
+            seg_cfgs = [c for c in camera_cfgs if c.for_segmentation]
+            if not seg_cfgs:
+                self.get_logger().error(
+                    "enable_robot_segmentation requires at least one camera "
+                    "with a camera_purpose of 'all' or 'segmentation': set "
+                    "'camera_topic' (and camera_info_topic) at launch. "
+                    "Segmentation disabled.")
+            else:
+                self.robot_segmentation = RobotSegmentation(
+                    self,
+                    self.robot_context,
+                    self.config_wrapper_motion.kin_model,
+                    camera_cfgs=seg_cfgs,
+                    base_frame=self.config_wrapper_motion.base_link,
+                    ops_dtype=self.tensor_args.dtype,
+                    device=self.tensor_args.device,
+                )
+                self.config_wrapper_motion.ros_service_manager \
+                    .register_robot_segmentation(self.robot_segmentation)
 
         # Shared Scene for all planners — references ObstacleManager's Scene.
         # All planners see the same obstacles after update_world(scene).

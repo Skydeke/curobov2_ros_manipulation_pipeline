@@ -6,7 +6,7 @@ the robot DRIVER interface (command/state/joint-feedback topics), the joint-comm
 strategy key, and a display name.
 
 Deliberately NOT here: camera/depth topics. Those belong to the perception setup
-(``config/cameras.yaml`` / the in-server ``robot_segmentation_*`` params), not
+(the ``camera_*`` params / the in-server ``robot_segmentation_*`` params), not
 to the robot — the same cell's camera is shared across robots, and the same
 robot moves between cells.
 

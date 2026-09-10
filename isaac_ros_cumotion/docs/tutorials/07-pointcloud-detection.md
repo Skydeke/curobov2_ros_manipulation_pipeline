@@ -7,10 +7,13 @@ curobo_ros integrates depth cameras directly into the collision world. Each dept
 ## How it works
 
 ```
+ raw depth (camera_topic) ──► RobotSegmentationCameraStrategy ──► masked depth (derived)
+                                 (per segmented camera, §4)         │
+                                                                   ▼
 depth image topic ──► DepthMapCameraStrategy ──► mapper.integrate(CameraObservation)
-                                                        │ (GPU TSDF, decays over time)
-                                                        ▼
-                                              ESDF shared by all solvers
+                                                         │ (GPU TSDF, decays over time)
+                                                         ▼
+                                               ESDF shared by all solvers
 ```
 
 Key properties:
@@ -19,46 +22,72 @@ Key properties:
 - **Voxels decay**: stale voxels fade with half-life `decay_half_life_s` (default 0.7 s), so a person walking through the scene doesn't leave a permanent ghost. The decay rate is derived from the cameras' declared `frame_rate_hz`.
 - Only `type: depth_camera` is supported in v2 (the old pull-based point-cloud path was removed).
 
-## 1. Configure your camera (`cameras.yaml`)
+## 1. Configure the cameras (`camera_*` node params)
 
-Pass a config file at launch: `cameras_config_file:=/path/to/cameras.yaml`. The shipped example is `config/cameras.yaml` (an Azure Kinect):
-
+The cameras are configured with node parameters — **no `cameras.yaml` file**. One
+`camera_*` param holds an *array*, one entry per camera (declared by
+`PerceptionCameraCfg`):
 ```yaml
-cameras:
-  - name: my_depth_cam
-    type: depth_camera                      # the only supported type
-    topic: /depth_to_rgb/image_raw          # sensor_msgs/Image, 16UC1 (mm) or 32FC1 (m)
-    frame_id: rgb_camera_link               # TF frame of the camera
-    camera_info: /depth_to_rgb/camera_info  # used when intrinsics is empty
-    intrinsics: []                          # [] = read once from camera_info (5 s wait)
-    # or a 9-element row-major K: [fx, 0, cx, 0, fy, cy, 0, 0, 1]
-    extrinsics: [0.161, -0.428, 1.585, -0.3409296, 0.6840516, -0.6215661, 0.1717437]
-    # [x, y, z, qw, qx, qy, qz] camera pose in the robot base frame;
-    # [] = look it up from TF (base frame -> frame_id) per frame
-    frame_rate_hz: 30.0                     # declared publication rate (drives decay)
+# Params of the unified_planner node (set in your launch file or a params YAML).
+# Every entry is indexed by position; camera_index pairs a camera with the
+# same-position entry of every other array.
+camera_topic: [/depth_to_rgb/image_raw]        # sensor_msgs/Image, 16UC1 (mm) or 32FC1 (m)
+camera_info_topic: [/depth_to_rgb/camera_info] # used when camera_intrinsics is empty
+camera_frame: [rgb_camera_link]                # map/mask frame: the frame the mapper
+                                               # integrates into (and the segmenter masks in);
+                                               # '' -> the depth msg's own frame_id
+camera_intrinsics: ['']                        # '' = read once from camera_info (5 s wait)
+                                               # or 'fx,0,cx,0,fy,cy,0,0,1' row-major K
+camera_extrinsics: ['']                        # '' = TF base frame -> camera_frame per frame,
+                                               # or 'x,y,z,qw,qx,qy,qz' camera pose in base frame
+camera_frame_rate_hz: [30.0]                   # declared publication rate (drives decay)
+camera_purpose: [all]                          # what this camera feeds: all (default) |
+                                               # esdf | segmentation
 ```
+
+`camera_purpose` decides per camera which pipelines it feeds:
+
+| Purpose | Mapper (ESDF) | Robot segmentation |
+|---|---|---|
+| `all` (default) | yes | yes |
+| `esdf` | yes | no |
+| `segmentation` | no | yes |
+
+So a fixed scene camera can map the world (`all` or `esdf`) while a wrist camera
+is used only to keep the arm out of its own way (`segmentation`). The master
+switch `enable_robot_segmentation` (default `true` — "use cameras for
+everything") additionally gates all segmentation streams.
+
+The raw depth topics and camera-info topics are **shared with
+`RobotSegmentation`** — both consumers read the same arrays, so they can't
+drift apart.
 
 Two decisions per camera:
 
-- **Intrinsics** — leave `[]` to read them once from the `camera_info` topic at startup, or hardcode the 9-element K matrix.
-- **Extrinsics** — hardcode the 7-element pose (recommended once calibrated), or leave `[]` to resolve TF `base frame → frame_id` per frame. With TF, frames are **dropped** when the transform is unavailable — there is no identity-pose fallback.
+- **Intrinsics** — leave `''` to read them once from the `camera_info` topic at startup, or hardcode a comma-separated K: `'fx,0,cx,0,fy,cy,0,0,1'`.
+- **Extrinsics** — hardcode `'x,y,z,qw,qx,qy,qz'` (recommended once calibrated), or leave `''` to resolve TF `base frame → camera_frame` per frame. With TF, frames are **dropped** when the transform is unavailable — there is no identity-pose fallback.
 
-Multiple cameras: add more list entries. Their rates sum for the decay computation, and all integrate into the same Mapper.
+The depth streams are pushed into the Mapper from within the planner node; the
+old multi-camera YAML file is gone (multiple cameras are configured by adding
+array entries).
 
-## 2. Launch with the camera
+## 2. Launch with the cameras
 
 ```bash
 ros2 launch curobo_ros gen_traj.launch.py robot:=emulator robot_config_file:=<path-to-your-robot-curobo.yml> \
-  cameras_config_file:=$(ros2 pkg prefix curobo_ros)/share/curobo_ros/config/cameras.yaml
+  camera_topic:='["/depth_to_rgb/image_raw"]' \
+  camera_info_topic:='["/depth_to_rgb/camera_info"]'
 ```
 
 Startup log lines to look for:
 
 ```
-Loading camera configuration from: ...
-Added camera strategy 'my_depth_cam' of type 'depth_camera' ...
+Camera 'depth_camera_0' (index 0): raw=/depth_to_rgb/image_raw, purpose=all [esdf+segmentation], ...
+Added camera strategy 'depth_camera_0' of type 'depth_camera' ...
+RobotSegmentation stream for camera 'depth_camera_0' (index 0): /depth_to_rgb/image_raw -> /depth_to_rgb/masked_depth
+Added camera strategy 'depth_camera_0' of type 'robot_segmentation' ...
 Camera intrinsics from topic: fx=...        # or: Using static extrinsics from config file
-DepthMap camera initialized with depth topic: /depth_to_rgb/image_raw
+DepthMap camera initialized with depth topic: /depth_to_rgb/masked_depth
 ```
 
 Relevant perception parameters (see [Parameters](../concepts/parameters.md)): `mapper_extent_xyz` (perception volume), `voxel_size`, `mapper_image_width`/`mapper_image_height` (frames are resized to this before integration), `decay_half_life_s`.
@@ -81,24 +110,43 @@ ros2 service call /unified_planner/get_voxel_grid curobo_msgs/srv/GetVoxelGrid \
 
 Then plan through the space the obstacle occupies ([Tutorial 1](01-first-trajectory.md)): the trajectory deflects around it. Remove the obstacle, wait a second (decay), and the same plan goes straight again. With MPC active ([Tutorial 5](05-mpc-planner.md)) the avoidance happens *during* motion.
 
-## 4. Remove the robot from its own view (`robot_segmentation`)
+## 4. Remove the robot from its own view (in-server `RobotSegmentation`)
 
-If the camera sees the robot arm, the arm becomes an "obstacle" for itself. The second executable of the package subtracts the robot from the depth image before integration:
+If the camera sees the robot arm, the arm becomes an "obstacle" for itself. The planner
+node can subtract the robot from the depth image *before* integration — no separate
+executable. On by default (`enable_robot_segmentation: true`); with it on, every camera
+whose `camera_purpose` is `all` or `segmentation` gets its own masking stream, and that
+camera's mapper input switches to its masked output automatically:
 
-```bash
-ros2 run curobo_ros robot_segmentation
+```yaml
+enable_robot_segmentation: true        # master switch (default true)
+camera_purpose: [all]                  # 'segmentation' -> mask, don't map
 ```
 
-It computes the robot's collision spheres at the current joint state, masks every depth pixel within `distance_threshold` (default 0.05 m) of a sphere, and republishes the cleaned image:
+Each stream computes the robot's collision spheres at the depth frame's capture-time
+joint state, masks every pixel within `robot_segmentation_distance_threshold` (default
+0.05 m) of a sphere (camera frame from the shared `camera_*` array
+entry), and republishes the cleaned image. Segmentation streams are first-class
+`CameraStrategy`s — the component registers one `RobotSegmentationCameraStrategy` per
+segmented camera through the same `CameraContext` the mapper uses — and each masked
+output topic is **derived from that camera's own `camera_topic`**: the leaf segment is
+stripped and published as `masked_depth` (e.g. raw `/kortex_vision/depth/image` →
+`/kortex_vision/depth/masked_depth`), so every segmented camera gets a unique stream
+with no extra configuration:
 
 | Interface | Name | Notes |
 |---|---|---|
-| Subscribes | `/depth_to_rgb/image_raw`, `/depth_to_rgb/camera_info` | Params `depth_image_topic` / `camera_info_topic` |
-| Publishes | `/masked_depth_image` | The depth image with the robot removed |
-| Publishes | `/collision_spheres`, `/robot_pointcloud_debug` | Debug visualization |
-| Services | `/set_mask`, `/remove_mask` | Extra user-defined masks, optionally riding TF frames |
+| Subscribes | raw depth + camera info from `camera_topic` / `camera_info_topic` | one strategy per segmented camera |
+| Publishes | `<derived>/masked_depth` | The depth image with the robot removed (derived from the raw topic, e.g. `/depth_to_rgb/image_raw` → `/depth_to_rgb/masked_depth`) |
+| Publishes | `<derived>/robot_pointcloud_debug` | The masked-out points (base frame) |
+| Services | `<node>/set_mask`, `<node>/remove_mask` | Extra user-defined masks, shared by every stream, optionally riding TF frames |
 
-To use it, point the camera entry's `topic` at `/masked_depth_image` instead of the raw depth topic. Key parameters: `robot_base_frame` (default `base_0`), `mask_margin`.
+With segmentation on, each segmented camera's mapper strategy *derives* its input to
+that camera's masked output topic automatically (`camera_topic` then only feeds the
+segmenter). So the loop per segmented camera is: raw depth → segmenter masks the robot →
+mapper integrates the cleaned image → solvers avoid what *remains*. A camera marked
+`esdf` (or with the master switch off) keeps feeding the mapper its raw stream.
+Key parameters: `robot_segmentation_distance_threshold`, `robot_segmentation_mask_margin`.
 
 ## Tuning
 

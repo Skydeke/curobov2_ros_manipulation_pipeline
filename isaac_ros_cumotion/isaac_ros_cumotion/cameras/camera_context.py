@@ -4,6 +4,8 @@ from typing import List, Dict
 import torch
 from isaac_ros_cumotion.cameras.camera_strategy import CameraStrategy
 from isaac_ros_cumotion.cameras.camera_depth_map_strategy import DepthMapCameraStrategy
+from isaac_ros_cumotion.cameras.camera_robot_segmentation_strategy import (
+    RobotSegmentationCameraStrategy)
 
 
 class CameraContext:
@@ -32,23 +34,22 @@ class CameraContext:
         self._device = torch.device('cuda')
 
     def add_camera(self, camera_name, camera_type, topic, camera_info, frame_id,
-                   intrinsics=None, extrinsics=None, frame_rate_hz=None, camera_index=0, **kwargs):
+                   intrinsics=None, extrinsics=None, frame_rate_hz=None, **kwargs):
         """
         Add a camera strategy to the context.
 
         Args:
             camera_name: Unique identifier for this camera
-            camera_type: Type of camera ('depth_camera')
+            camera_type: Type of camera ('depth_camera' | 'robot_segmentation')
             topic: ROS topic for the camera data
             camera_info: Camera intrinsics (for depth cameras)
-            frame_id: Frame ID for the camera
+            frame_id: Map/mask frame for the camera (frame both the mapper and the
+                segmenter work in); '' -> the depth message's own frame_id
             intrinsics: Optional camera intrinsics from config (list or dict)
             extrinsics: Optional camera extrinsics from config (list)
             frame_rate_hz: Declared publication rate of `topic`, in Hz. Only used
                 to normalise the TSDF decay (see get_total_frame_rate_hz).
-            camera_index: Position of this camera in the cameras: list. Used to
-                pair it with the entry of the node's `camera_correction_frame`
-                parameter (a list, one correction frame per camera).
+                Not set for robot-segmentation cameras (they don't integrate).
             **kwargs: Additional parameters for specific camera strategies
         """
         # v2 perception ingests depth+rgb images through the Mapper TSDF; raw
@@ -65,7 +66,32 @@ class CameraContext:
                 frame_id=frame_id,
                 intrinsics=intrinsics,
                 extrinsics=extrinsics,
-                camera_index=camera_index
+            )
+
+        elif camera_type == 'robot_segmentation':
+            # Robot-segmentation stream: masks the robot out of this camera's
+            # raw depth and republishes it on a topic derived from that raw
+            # topic (cf. RobotSegmentationCameraStrategy). Consumes the raw
+            # `topic` (NOT the mapper's possibly-masked input) and the shared
+            # robot context / kinematics for the FK'd collision spheres. This
+            # strategy does NOT integrate into the Mapper, so it is not counted
+            # in the camera frame rates.
+            camera_strategy = RobotSegmentationCameraStrategy(
+                node=self.node,
+                camera_name=camera_name,
+                topic=topic,
+                camera_info_topic=camera_info,
+                frame_id=frame_id,
+                intrinsics=intrinsics,
+                extrinsics=extrinsics,
+                robot_context=kwargs.get('robot_context'),
+                kin_model=kwargs.get('kin_model'),
+                base_frame=kwargs.get('base_frame'),
+                ops_dtype=kwargs.get('ops_dtype'),
+                device=kwargs.get('device'),
+                distance_threshold=kwargs.get('distance_threshold', 0.05),
+                mask_margin=kwargs.get('mask_margin', 0.0),
+                masks=kwargs.get('masks'),
             )
 
         else:
@@ -78,9 +104,10 @@ class CameraContext:
         self.cameras[camera_name] = camera_strategy
         if frame_rate_hz is not None:
             self.camera_frame_rates[camera_name] = float(frame_rate_hz)
+        rate_note = f", rate={frame_rate_hz} Hz" if frame_rate_hz is not None else ""
         self.node.get_logger().info(
-            f"Added camera strategy '{camera_name}' of type '{camera_type}' "
-            f"({frame_rate_hz} Hz)")
+            f"Added camera strategy '{camera_name}' of type '{camera_type}'"
+            f"{rate_note}")
 
     def set_camera_update_callback(self, callback):
         """

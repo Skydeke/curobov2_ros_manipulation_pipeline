@@ -130,7 +130,7 @@ classDiagram
 1. `ConfigManager` — robot descriptor, cuRobo YAML resolution, world file.
 2. `RobotModelManager` — cuRobo `Kinematics`, collision spheres, per-link collision toggling.
 3. `ObstacleManager` — the single `Scene`, obstacle add/remove, collision caches, voxel grid, `Mapper` perception.
-4. `CameraSystemManager` — camera strategies from `cameras.yaml`.
+4. `CameraSystemManager` — depth camera strategy from the `camera_*` params.
 5. `RosServiceManager` — obstacle/introspection services and visualization publishers.
 
 ## Key invariants
@@ -149,7 +149,7 @@ curobo_ros/
 ├── cameras/        # camera strategies (depth_camera)
 ├── launch/         # gen_traj.launch.py and helpers
 ├── robots/         # robot descriptors (emulator.yaml); concrete robots come from deploy repos
-└── config/         # cameras.yaml, floor_world.yml, test specs
+└── config/         # floor_world.yml, test specs
 ```
 
 ## Related pages

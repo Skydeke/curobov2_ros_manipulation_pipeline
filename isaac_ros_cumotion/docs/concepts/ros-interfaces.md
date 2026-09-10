@@ -266,20 +266,27 @@ The active control strategy adds its own topics, configured in the robot descrip
 | Topic | Type | Notes |
 |---|---|---|
 | `/unified_planner/mpc_goal` | `geometry_msgs/Pose` | Live goal retargeting; ignored (with a warning) unless a reactive planner (MPC, retarget) is active |
-| depth image topic from `cameras.yaml` | `sensor_msgs/Image` | e.g. `/depth_to_rgb/image_raw`; one subscription per configured camera |
-| camera info topic from `cameras.yaml` | `sensor_msgs/CameraInfo` | Read once at startup (5 s wait) when intrinsics are not given in the YAML |
+| raw depth topics (param `camera_topic`) | `sensor_msgs/Image` | e.g. `/depth_to_rgb/image_raw`, one entry per camera — consumed by each camera's robot-segmentation strategy (when segmented) |
+| masked depth topics (derived) | `sensor_msgs/Image` | segmented cameras: the mapper strategy subscribes to the derived masked output instead of the raw stream (raw `camera_topic` → `masked_depth` in the same directory) |
+| camera info topics (param `camera_info_topic`) | `sensor_msgs/CameraInfo` | Read once at startup (5 s wait) when the camera's `camera_intrinsics` is empty |
 
-### `robot_segmentation` node
+### Robot segmentation (in-server component)
+
+Folded into `unified_planner` (gated by `enable_robot_segmentation`), not a
+standalone node. Each `segmentation`-purpose camera gets one
+`RobotSegmentationCameraStrategy` registered through the same `CameraContext` as
+the mapper's strategies; it subscribes to that camera's RAW depth and publishes
+the masked image on a topic DERIVED from that camera's own `camera_topic` (leaf
+segment → `masked_depth`), which is what the mapper's strategy for that camera
+then subscribes to. Topics are therefore per-camera, not node-namespaced.
 
 | Interface | Name | Type |
 |---|---|---|
-| Subscribes | `/depth_to_rgb/image_raw` (param `depth_image_topic`) | `sensor_msgs/Image` |
-| Subscribes | `/depth_to_rgb/camera_info` (param `camera_info_topic`) | `sensor_msgs/CameraInfo` |
-| Publishes | `/masked_depth_image` | `sensor_msgs/Image` (`16UC1`) |
-| Publishes | `/collision_spheres` | `visualization_msgs/MarkerArray` |
-| Publishes | `/robot_pointcloud_debug` | `sensor_msgs/PointCloud2` |
-| Service | `/set_mask` | `curobo_msgs/srv/SetMask` |
-| Service | `/remove_mask` | `curobo_msgs/srv/RemoveObject` |
+| Subscribes | raw depth + camera info from `camera_topic` / `camera_info_topic` | `sensor_msgs/Image`, `sensor_msgs/CameraInfo` |
+| Publishes | `<derived>/masked_depth` (e.g. `/depth_to_rgb/image_raw` → `/depth_to_rgb/masked_depth`) | `sensor_msgs/Image` |
+| Publishes | `<derived>/robot_pointcloud_debug` (per camera) | `sensor_msgs/PointCloud2` |
+| Service | `<node>/set_mask` | `curobo_msgs/srv/SetMask` |
+| Service | `<node>/remove_mask` | `curobo_msgs/srv/RemoveObject` |
 
 ## Checking node readiness
 

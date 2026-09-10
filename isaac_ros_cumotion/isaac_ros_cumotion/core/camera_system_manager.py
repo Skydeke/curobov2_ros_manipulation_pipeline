@@ -1,133 +1,95 @@
-from curobo.config_io import load_yaml
+from isaac_ros_cumotion.cameras.camera_cfg import PerceptionCameraCfg
 from isaac_ros_cumotion.cameras.camera_context import CameraContext
-
-# Assumed rate for a camera whose YAML omits `frame_rate_hz`.
-# Deliberately HIGH: this value normalizes the TSDF decay (see
-# ObstacleManager._resolve_time_decay). Overestimating the rate pushes
-# `time_decay` toward 1.0 -> forgetting is too slow, obstacles linger, which is
-# the conservative direction for collision. Underestimating clears the map
-# faster than reality -> real obstacles vanish, which is the dangerous
-# direction. So err high.
-DEFAULT_CAMERA_FRAME_RATE_HZ = 30.0
 
 
 class CameraSystemManager:
-    """
-    Manages camera system configuration and setup.
+    """Owns the perception cameras: maps the ``camera_*`` parameter block onto
+    the mapper's camera strategies.
+
     Responsible for:
-    - Loading camera configuration from YAML files
-    - Creating and managing CameraContext
-    - Configuring multiple cameras with different types
+    - Declaring/reading the perception-camera params (one array entry per
+      camera, see PerceptionCameraCfg) — replaces the old per-repo
+      ``cameras.yaml`` file, whose fields had to be hand-synced with the
+      robot_segmentation params.
+    - Creating the CameraContext and one DepthMapCameraStrategy per camera that
+      feeds the shared Mapper. Which cameras feed the mapper is the per-camera
+      ``camera_purpose``; each strategy subscribes to the robot-segmentation
+      output when that camera is segmented, to the raw depth stream otherwise.
+    - Exposing the resolved ``camera_cfgs`` so the in-server RobotSegmentation
+      consumes the SAME camera identity (raw topic, camera-info topic,
+      camera frame) for the cameras marked to be segmented.
     """
 
-    def __init__(self, node, cameras_config_file: str):
+    def __init__(self, node):
         """
-        Initialize camera system manager.
+        Initialize the camera system manager.
 
         Args:
             node: ROS2 node instance
-            cameras_config_file: Path to YAML file containing camera configuration
         """
         self.node = node
         self.camera_context = None
+        self.camera_cfgs = []
+        self.camera_cfg = None
+        self._configure()
 
-        if cameras_config_file:
-            self._load_and_configure_cameras(cameras_config_file)
-        else:
-            self.node.get_logger().info("No camera configuration file specified")
+    def _configure(self):
+        """Declare and read the camera params, then build the camera strategies.
 
-    def _load_and_configure_cameras(self, cameras_config_file: str):
+        The cameras are described entirely by the ``camera_*`` params
+        (PerceptionCameraCfg) — there is no config file anymore. ``camera_cfgs``
+        is exposed so the robot-segmentation component can consume the SAME
+        camera identity (raw topic, camera-info topic, camera frame).
         """
-        Load camera configuration from YAML and configure all cameras.
+        PerceptionCameraCfg.declare(self.node)
+        num = PerceptionCameraCfg.num_cameras(self.node)
 
-        Args:
-            cameras_config_file: Path to YAML configuration file
-        """
-        self.node.get_logger().info(f"Loading camera configuration from: {cameras_config_file}")
+        esdf_cfg = None
+        for i in range(num):
+            cfg = PerceptionCameraCfg.from_node(self.node, camera_index=i)
+            self.camera_cfgs.append(cfg)
+            if not cfg.depth_topic:
+                continue
 
-        try:
-            # Load the YAML file
-            camera_config = load_yaml(cameras_config_file)
+            roles = []
+            if cfg.for_esdf:
+                roles.append('esdf')
+            if cfg.for_segmentation:
+                roles.append('segmentation')
+            self.node.get_logger().info(
+                f"Camera '{cfg.name}' (index {i}): raw={cfg.depth_topic}, "
+                f"purpose={cfg.purpose} [{'+'.join(roles)}], "
+                f"mapper_input={cfg.mapper_topic}, "
+                f"frame_rate_hz={cfg.frame_rate_hz:.1f}, frame={cfg.frame_id}")
 
-            # Check if the configuration contains cameras
-            if 'cameras' in camera_config and len(camera_config['cameras']) > 0:
-                self.camera_context = CameraContext(self.node)
-                print(camera_config)
+            if cfg.for_esdf:
+                esdf_cfg = cfg
+                if self.camera_context is None:
+                    self.camera_context = CameraContext(self.node)
+                self.camera_context.add_camera(
+                    camera_name=cfg.name,
+                    camera_type='depth_camera',
+                    topic=cfg.mapper_topic,
+                    camera_info=cfg.camera_info_topic,
+                    frame_id=cfg.frame_id,
+                    intrinsics=cfg.intrinsics,
+                    extrinsics=cfg.extrinsics,
+                    frame_rate_hz=cfg.frame_rate_hz,
+                    camera_index=cfg.camera_index,
+                )
 
-                # Add each camera from the configuration
-                for index, camera in enumerate(camera_config['cameras']):
-                    camera_name = camera.get("name", "unknown")
-                    camera_type = camera.get("type", "point_cloud")  # Default to point_cloud
-                    camera_topic = camera.get("topic", "")
-                    camera_frame_id = camera.get("frame_id", "")
-                    camera_info = camera.get("camera_info", '')
-                    camera_intrinsics = camera.get("intrinsics", None)
-                    camera_extrinsics = camera.get("extrinsics", None)
-                    camera_frame_rate = self._parse_frame_rate(camera, camera_name)
-
-                    # Add camera with appropriate type
-                    self.camera_context.add_camera(
-                        camera_name=camera_name,
-                        camera_type=camera_type,
-                        topic=camera_topic,
-                        camera_info=camera_info,
-                        frame_id=camera_frame_id,
-                        intrinsics=camera_intrinsics,
-                        extrinsics=camera_extrinsics,
-                        frame_rate_hz=camera_frame_rate,
-                        camera_index=index
-                    )
-
-                self.node.get_logger().info(f"Successfully loaded {len(camera_config['cameras'])} camera(s)")
-            else:
-                self.node.get_logger().warn("Camera config file found but no cameras defined")
-
-        except Exception as e:
-            self.node.get_logger().error(f"Failed to load camera configuration from {cameras_config_file}: {e}")
-
-    def _parse_frame_rate(self, camera: dict, camera_name: str) -> float:
-        """Read `frame_rate_hz` for one camera entry, with a safe fallback.
-
-        The rate is not used to drive any subscription: it only feeds the TSDF
-        decay normalisation (the decay fires once per integrate(), so the sum of
-        the camera rates is the real decay rate). A missing or invalid value is
-        replaced by DEFAULT_CAMERA_FRAME_RATE_HZ and logged, because a silently
-        wrong rate mistunes how fast the collision map forgets obstacles.
-
-        Args:
-            camera: One entry of the `cameras:` list from the YAML config.
-            camera_name: Name used in the log messages.
-
-        Returns:
-            The publication rate in Hz (strictly positive).
-        """
-        raw = camera.get("frame_rate_hz", None)
-        if raw is None:
+        self.camera_cfg = self.camera_cfgs[0] if self.camera_cfgs else None
+        if esdf_cfg is None:
             self.node.get_logger().warn(
-                f"Camera '{camera_name}' has no 'frame_rate_hz' - assuming "
-                f"{DEFAULT_CAMERA_FRAME_RATE_HZ} Hz for the TSDF decay "
-                f"normalisation. Declare the real rate in the cameras config."
-            )
-            return DEFAULT_CAMERA_FRAME_RATE_HZ
-
-        try:
-            rate = float(raw)
-        except (TypeError, ValueError):
-            rate = 0.0
-        if rate <= 0.0:
-            self.node.get_logger().warn(
-                f"Camera '{camera_name}' has an invalid 'frame_rate_hz' "
-                f"({raw!r}) - assuming {DEFAULT_CAMERA_FRAME_RATE_HZ} Hz for the "
-                f"TSDF decay normalisation."
-            )
-            return DEFAULT_CAMERA_FRAME_RATE_HZ
-        return rate
+                "No camera feeds the Mapper: set 'camera_topic' (with a "
+                "camera_purpose of 'all' or 'esdf') at launch. The legacy "
+                "cameras_config_file YAML has been removed.")
 
     def get_camera_context(self):
         """
         Get the camera context.
 
         Returns:
-            CameraContext instance or None if no cameras configured
+            CameraContext instance or None if no camera feeds the Mapper
         """
         return self.camera_context

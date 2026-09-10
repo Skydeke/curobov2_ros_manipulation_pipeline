@@ -201,6 +201,8 @@ class ObstacleManager:
         self._mapper_depth_max = self._declare_param('mapper_depth_max', 5.0)
         # ESDF voxel size shares the pre-existing `voxel_size` param.
         self._esdf_voxel_size = self._declare_param('voxel_size', 0.05)
+        # Period (s) of the periodic mapper stats logger (0 disables it).
+        self._mapper_stats_period = self._declare_param('mapper_stats_period', 60.0)
         # Time (s) for an unobserved voxel to lose half its TSDF weight. Expressed
         # in seconds rather than as a raw per-call factor so it stays meaningful
         # when cameras are added/removed or their frame rate changes — see
@@ -284,7 +286,7 @@ class ObstacleManager:
                 "No camera frame rate available: cannot convert "
                 f"decay_half_life_s={half_life}s into a per-integrate factor. "
                 "Falling back to no decay (the map will accumulate). Declare "
-                "'frame_rate_hz' on each camera in the cameras config."
+                "'camera_frame_rate_hz' in the camera params."
             )
             return 1.0
 
@@ -328,8 +330,13 @@ class ObstacleManager:
         existing = getattr(self.node, 'mapper', None)
         if existing is not None:
             self.mapper = existing
-            return
+        else:
+            self._build_mapper(num_cameras, total_frame_rate_hz)
 
+        self._arm_mapper_stats_timer()
+
+    def _build_mapper(self, num_cameras, total_frame_rate_hz):
+        """Construct the v2 Mapper and expose it as `node.mapper`."""
         # num_cameras is the per-integrate batch size. Each camera strategy
         # integrates ONE frame per ROS callback, so the Mapper is built for a
         # single-camera frame; multiple cameras simply call integrate() in turn
@@ -368,6 +375,42 @@ class ObstacleManager:
             f"decay: half_life={self._decay_half_life_s}s @ R={total_frame_rate_hz}Hz "
             f"-> time_decay={time_decay:.4f}"
         )
+
+    def _arm_mapper_stats_timer(self):
+        """Periodically log Mapper internals (block-pool / memory / frame count).
+
+        Runs `Mapper.get_stats(scan_pool=True, scan_hash=False)` once per
+        `mapper_stats_period` seconds (param; <= 0 disables). The stats call
+        does O(num_allocated) GPU reductions, hence the coarse period rather
+        than per-frame. Disabled when no Mapper exists.
+        """
+        if getattr(self, '_stats_timer', None) is not None:
+            return
+        period = float(self._mapper_stats_period)
+        if period <= 0.0:
+            return
+        self._stats_timer = self.node.create_timer(period, self._log_mapper_stats)
+
+    def _log_mapper_stats(self):
+        mapper = self.mapper
+        if mapper is None:
+            return
+        # Every CUDA op in this node runs under gpu_lock so it cannot race a
+        # CUDA graph capture (same invariant as the depth-camera callback).
+        gpu_lock = getattr(self.node, 'gpu_lock', None)
+        if gpu_lock is not None:
+            gpu_lock.acquire()
+        try:
+            try:
+                stats = mapper.get_stats(scan_pool=True, scan_hash=False)
+            except Exception as e:
+                self.node.get_logger().warn(
+                    f"mapper.get_stats failed: {e}", throttle_duration_sec=10.0)
+                return
+        finally:
+            if gpu_lock is not None:
+                gpu_lock.release()
+        self.node.get_logger().info(f"[mapper-stats] {stats}")
 
     def refresh_esdf(self) -> bool:
         """Recompute the ESDF from the Mapper and stage it into the Scene.

@@ -103,12 +103,23 @@ class ConfigWrapper(ABC):
             initial_scene=self.config_manager.get_scene(),
         )
 
-        # Phase 5: CameraSystemManager - Manage cameras
-        # Declare camera config parameter
+        # Phase 5: CameraSystemManager - one perception camera from the
+        # `camera_*` params (raw depth stream + optional in-server
+        # robot-segmentation filter). The old `cameras_config_file` YAML is
+        # gone: topic / camera_info / intrinsics / extrinsics / rate live in
+        # node params, so the mapper's camera and the robot_segmentation
+        # component can never disagree about the camera identity.
         if not node.has_parameter('cameras_config_file'):
             node.declare_parameter('cameras_config_file', '')
-        cameras_config_file = node.get_parameter('cameras_config_file').get_parameter_value().string_value
-        self.camera_system_manager = CameraSystemManager(node, cameras_config_file)
+        stale_cameras_file = node.get_parameter(
+            'cameras_config_file').get_parameter_value().string_value
+        if stale_cameras_file:
+            node.get_logger().warn(
+                "'cameras_config_file' is deprecated and ignored: the camera is "
+                "now configured via the camera_* parameters. Remove "
+                f"'{stale_cameras_file}' from your launch and set camera_topic / "
+                "camera_info_topic instead.")
+        self.camera_system_manager = CameraSystemManager(node)
 
         # Phase 3: RosServiceManager - Manage ROS services (last, depends on others)
         self.ros_service_manager = RosServiceManager(

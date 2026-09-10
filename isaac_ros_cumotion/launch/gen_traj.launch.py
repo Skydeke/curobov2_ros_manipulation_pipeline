@@ -112,6 +112,19 @@ def launch_setup(context, *args, **kwargs):
     mapper_extent_xyz = ast.literal_eval(
         LaunchConfiguration('mapper_extent_xyz').perform(context))
 
+    def _camera_argv(name):
+        raw = (LaunchConfiguration(name).perform(context) or '').strip()
+        if not raw:
+            return []
+        try:
+            value = ast.literal_eval(raw)
+        except (ValueError, SyntaxError):
+            return [raw]  # a bare topic string counts as one camera
+        return value if isinstance(value, list) else [value]
+
+    camera_topics = _camera_argv('camera_topic')
+    camera_info_topics = _camera_argv('camera_info_topic')
+
     nodes = [
         # The state publishers are declared inline rather than pulled in from
         # another launch file, so they receive the URDF resolved above for the
@@ -148,7 +161,9 @@ def launch_setup(context, *args, **kwargs):
             parameters=[{
                 'robot': robot_name,
                 'robot_config_file': LaunchConfiguration('robot_config_file'),
-                'cameras_config_file': LaunchConfiguration('cameras_config_file'),
+                'camera_topic': camera_topics,
+                'camera_info_topic': camera_info_topics,
+                'camera_frame_rate_hz': [30.0],
                 'base_link': base_link,
                 'world_file': LaunchConfiguration('world_file'),
                 # ESDF/voxel resolution (shared by Mapper ESDF, collision cache
@@ -260,10 +275,17 @@ def generate_launch_description():
         default_value='',
         description='Override of the curobo YAML (if empty, derived from the robot descriptor)'
     )
-    declare_camera_config_file = DeclareLaunchArgument(
-        'cameras_config_file',
-        default_value='',
-        description='Path to the cameras YAML configuration file'
+    declare_camera_topic = DeclareLaunchArgument(
+        'camera_topic',
+        default_value='[]',
+        description='Raw depth streams (sensor_msgs/Image), one array entry per camera, '
+                    'as a Python repr e.g. [\'/depth/image\']; empty = no cameras'
+    )
+    declare_camera_info_topic = DeclareLaunchArgument(
+        'camera_info_topic',
+        default_value='[]',
+        description='CameraInfo topics carrying the camera intrinsics (sensor_msgs/CameraInfo), '
+                    'one array entry per camera'
     )
 
     declare_gui = DeclareLaunchArgument(
@@ -282,7 +304,8 @@ def generate_launch_description():
         declare_robot,
         declare_urdf_path,
         declare_robot_config_file,
-        declare_camera_config_file,
+        declare_camera_topic,
+        declare_camera_info_topic,
         declare_gui,
         declare_world_file,
         # The defaults below MUST stay aligned with the declare_parameter() calls

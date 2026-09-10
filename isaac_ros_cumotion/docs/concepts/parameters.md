@@ -23,7 +23,8 @@ These are the launch arguments that actually configure the system:
 | `robot` | `emulator` | Robot descriptor name (loads `robots/<name>.yaml`) or path. Robot-abstract: no robot is hardcoded; concrete robots (e.g. Kortex) provide their own descriptor and model at launch |
 | `robot_config_file` | `''` (auto) | cuRobo robot YAML; empty = resolved from the robot descriptor |
 | `urdf_path` | `''` (auto) | URDF for `robot_state_publisher`; empty = read from the robot descriptor |
-| `cameras_config_file` | `''` | Camera configuration YAML (see [Tutorial 7](../tutorials/07-pointcloud-detection.md)); empty = no cameras |
+| `camera_topic` | `[]` | Raw depth streams for the perception Mapper and the robot segmentation (see [Tutorial 7](../tutorials/07-pointcloud-detection.md)); array launch arg (Python repr), empty = no cameras |
+| `camera_info_topic` | `[]` | Camera intrinsics topics (`sensor_msgs/CameraInfo`), array launch arg |
 | `world_file` | `''` | Static world YAML (e.g. `config/floor_world.yml`); empty = empty world — **including no floor** |
 | `gui` | `true` | Start RViz |
 | `voxel_size` | `0.05` | Perception/collision voxel size (m) |
@@ -100,18 +101,45 @@ Read by the MPC controller when it is built (first switch to `mpc`); change them
 | `base_link` | from descriptor | Robot base frame (defaults to `base_0` if the descriptor/model does not specify one) |
 | `world_file` | `''` | Static world YAML |
 | `robot_config_file` | from descriptor | Resolved cuRobo robot YAML; required when the descriptor ships model-less (e.g. the default `emulator`) |
-| `cameras_config_file` | `''` | Camera configuration YAML |
+| `camera_topic` | `['']` | Raw depth streams (`sensor_msgs/Image`), one array entry per camera; empty = no cameras |
 | `node_is_available` | `false` | Read-only status: flips to `true` once warmup completes |
 
-## `robot_segmentation` node parameters
+## Node parameters — cameras (`PerceptionCameraCfg`)
+
+One array per parameter, one entry per camera (indexed together; `camera_index`
+pairs a camera with the same-position entry of every other array). Declared by
+`CameraSystemManager`, consumed by the mapper's strategies AND the in-server
+`RobotSegmentation` — no `cameras.yaml`.
 
 | Parameter | Default | Effect |
 |---|---|---|
-| `depth_image_topic` | `/depth_to_rgb/image_raw` | Input depth image |
-| `camera_info_topic` | `/depth_to_rgb/camera_info` | Camera intrinsics |
-| `robot_base_frame` | `base_0` | TF frame of the robot base |
-| `mask_margin` | `0.0` | Extra margin (m) around the robot mask |
-| `distance_threshold` | `0.05` | Distance (m) to a collision sphere below which a pixel is masked |
+| `camera_topic` | `['']` | RAW depth stream per camera (`sensor_msgs/Image`, `16UC1` or `32FC1`) |
+| `camera_info_topic` | `['']` | Camera intrinsics (`sensor_msgs/CameraInfo`) per camera |
+| `camera_frame` | `['']` | Map/mask frame per camera: the frame BOTH the mapper integrates the depth into AND the segmenter masks in (TF fallback = raw `frame_id` of the depth msg) |
+| `camera_intrinsics` | `['']` | `''` = read once from `camera_info_topic` (5 s wait), or a comma-separated row-major K `'fx,0,cx,0,fy,cy,0,0,1'` |
+| `camera_extrinsics` | `['']` | `''` = per-frame TF `base frame → camera_frame`, or `'x,y,z,qw,qx,qy,qz'` camera pose in the base frame |
+| `camera_frame_rate_hz` | `[0.0]` (→ 30.0) | Declared publication rate per camera; drives the TSDF decay normalisation |
+| `camera_purpose` | `['all']` | What each camera feeds: `all` (default, = everything) / `esdf` / `segmentation` |
+
+## Node parameters — robot segmentation (in-server component)
+
+`RobotSegmentation` runs inside the planner node (no standalone executable). Its input —
+raw depth topics, camera-info topics, camera/base frame — comes from the shared
+`camera_*` arrays; each segmented camera gets one `RobotSegmentationCameraStrategy`
+registered through the same `CameraContext` the mapper uses, so only its tuning knobs
+are listed here.
+
+| Parameter | Default | Effect |
+|---|---|---|
+| `enable_robot_segmentation` | `true` | Mask the robot (collision spheres) out of each `segmentation`-purpose camera's stream; those cameras' mapper input switches to their masked output |
+| `robot_segmentation_mask_margin` | `0.0` | Extra margin (m) around the robot mask |
+| `robot_segmentation_distance_threshold` | `0.05` | Distance (m) to a collision sphere below which a pixel is masked |
+
+The masked output topic is **derived per camera** from that camera's own
+`camera_topic` — the leaf segment is stripped and replaced by `masked_depth`
+(e.g. raw `/kortex_vision/depth/image` → `/kortex_vision/depth/masked_depth`).
+There is no output-topic parameter; each segmented camera automatically gets a
+unique stream.
 
 ## Robot YAML configuration
 
