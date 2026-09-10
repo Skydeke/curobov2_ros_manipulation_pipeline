@@ -52,6 +52,19 @@ def _resolve_scene_checker(node, solver):
     return checker
 
 
+def _at_joints_pose(wrapper, at_joints):
+    """Joint positions (list, in ``kin.joint_names`` order) or the live pose.
+
+    ``at_joints`` lets callers attribute collisions at an arbitrary
+    configuration (e.g. a goal state) instead of only the robot's current
+    pose — the start/end-state collision check has no way to distinguish the
+    two otherwise.
+    """
+    if at_joints is not None:
+        return list(at_joints)
+    return wrapper.robot.get_joint_pose()
+
+
 def _resolve_activation(node, default_activation=0.0):
     """Resolve the effective activation distance (metres).
 
@@ -68,7 +81,7 @@ def _resolve_activation(node, default_activation=0.0):
 
 def _query_sphere_collision(
         wrapper, node, kin=None, solver=None,
-        default_activation=0.0, activation_distance=None):
+        default_activation=0.0, activation_distance=None, at_joints=None):
     """Per-sphere collision distance at the robot's current joint state.
 
     v2 notes: solvers (`MotionPlanner`, `ModelPredictiveControl`,
@@ -95,6 +108,8 @@ def _query_sphere_collision(
             None = use the ``collision_activation_distance`` node param (safety
             margin); 0.0 = true contact only (positive value = real overlap and
             the magnitude is the penetration depth in metres).
+        at_joints: Joint positions (list, ``kin.joint_names`` order) to evaluate
+            at instead of the robot's live pose. None = live pose.
 
     Returns:
         Flat per-sphere distance list (value > 0 = sphere collides), or None if
@@ -106,7 +121,7 @@ def _query_sphere_collision(
             kin = wrapper.kin_model
         q_js = JointState(
             position=torch.tensor(
-                wrapper.robot.get_joint_pose(),
+                _at_joints_pose(wrapper, at_joints),
                 dtype=wrapper._ops_dtype,
                 device=wrapper._device,
             ),
@@ -136,6 +151,13 @@ def _query_sphere_collision(
             weight,
             activation_distance=activation_t,
         )
+        # A negative-radius sphere has no physical meaning and its inflated
+        # radius (radius + activation) stays positive against any obstacle, so
+        # it would always read as "colliding". Ignore such spheres outright.
+        negative_radius = robot_spheres[..., 3] < 0
+        if negative_radius.any():
+            sphere_dist = sphere_dist.masked_fill(
+                negative_radius.unsqueeze(-1), 0.0)
         return torch.flatten(sphere_dist, start_dim=0).tolist()
     except Exception:
         return None
@@ -153,7 +175,7 @@ def _rot_from_quat_wxyz(quat):
 
 
 def _attributed_collisions(wrapper, node, kin=None, solver=None,
-                           activation_distance=None):
+                           activation_distance=None, at_joints=None):
     """Collisions (with obstacle attribution) at the robot's current joint state.
 
     Identical kinematics/shape-source as ``_query_sphere_collision`` (so the
@@ -162,6 +184,10 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
     the activation distance of (computed against the same OBB SDF the GPU
     kernel uses), and flags mesh / voxel-layer involvement when present but
     unattributable.
+
+    ``at_joints`` overrides the evaluated configuration (robot's live pose by
+    default) — pass the goal joint positions to attribute "start or end state
+    in collision" failures that the live-pose check can't see.
 
     The activation distance defaults to the ``collision_activation_distance``
     param (None) — the SAME margin the planner's optimizer uses, so the red
@@ -182,7 +208,7 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
     import numpy as np
     dists = _query_sphere_collision(
         wrapper, node, kin=kin, solver=solver,
-        activation_distance=activation_distance)
+        activation_distance=activation_distance, at_joints=at_joints)
     if dists is None:
         return None
     red = [(i, d) for i, d in enumerate(dists) if d > 0.0]
@@ -198,7 +224,7 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
         kin = wrapper.kin_model
     q_js = JointState(
         position=torch.tensor(
-            wrapper.robot.get_joint_pose(),
+            _at_joints_pose(wrapper, at_joints),
             dtype=wrapper._ops_dtype,
             device=wrapper._device,
         ),
@@ -251,6 +277,8 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
     for sph_idx, depth_sum in red:
         c = spheres[sph_idx].detach().cpu().numpy()
         center, radius = c[:3].astype(np.float64), float(c[3])
+        if radius < 0:
+            continue
 
         hits = []
         for name, dims, inv_pose in cuboids:
@@ -286,6 +314,151 @@ def _attributed_collisions(wrapper, node, kin=None, solver=None,
             "clobber_note": note,
         })
     return reports
+
+
+def _attributed_self_collisions(wrapper, node, kin=None, at_joints=None):
+    """Self-collisions (link-vs-link) at a joint state, attributed by link.
+
+    cuRobo's self-collision check is a DIFFERENT mechanism from the scene
+    collision checker: a fixed table of sphere pairs (one sphere on each of two
+    robot links) queried directly against the FK'd robot spheres, inflated by a
+    per-link ``self_collision_link_padding``. Scene obstacles play no part — a
+    closed gripper on an empty bench still self-collides. That is why
+    "Start or End state in collision" failures caused by self-contact produced
+    no ``collision_contacts``: ``_query_sphere_collision`` only queries the
+    scene checker, which never sees robot-self sphere pairs.
+
+    Mirrors the kernel (``SelfCollisionDistance`` in curobo) exactly: for every
+    sphere pair in the kinematics' ``SelfCollisionKinematicsCfg.collision_pairs``
+    it computes the same squared overlap
+    ``(r_a + pad_a + r_b + pad_b)**2 - |c_a - c_b|**2`` (positive = the pair is
+    in self-collision). The planner applies NO activation margin to
+    self-collision (only scene collision uses ``collision_activation_distance``,
+    see ``RobotCostManagerCfg.update_collision_activation_distance``), so these
+    are hard contacts at the configured per-link padding — reported with a
+    linear penetration depth for readability on top of the kernel's squared
+    value.
+
+    Returns a list of dicts (one per colliding sphere pair): ``sphere_a`` /
+    ``sphere_b`` (indices), ``link`` / ``link_b`` (kinematics link names),
+    ``radius_a`` / ``radius_b`` (m), ``padding_a`` / ``padding_b`` (m),
+    ``center_distance`` (m), ``overlap2`` (m^2, the kernel's stored value),
+    ``depth`` (m, linear penetration). Returns None when self-collision is
+    disabled or the kinematics/sphere counts don't line up, [] when nothing
+    collides, and [] duplicates can't happen (indices are unique). Never raises.
+    """
+    import numpy as np
+    try:
+        if kin is None:
+            kin = wrapper.kin_model
+        sc = getattr(kin.config, 'self_collision_config', None)
+        if sc is None:
+            return None
+        pairs = getattr(sc, 'collision_pairs', None)
+        padding = getattr(sc, 'sphere_padding', None)
+        if pairs is None or padding is None or pairs.numel() == 0:
+            return None
+
+        q_js = JointState(
+            position=torch.tensor(
+                _at_joints_pose(wrapper, at_joints),
+                dtype=wrapper._ops_dtype,
+                device=wrapper._device,
+            ),
+            joint_names=kin.joint_names,
+        )
+        spheres = kin.compute_kinematics(q_js).robot_spheres.reshape(-1, 4)
+        # The self-collision table indexes into the SAME robot-sphere array
+        # (kinematic spheres). Bail if it somehow doesn't apply to this kin.
+        if spheres.shape[0] != int(getattr(sc, 'num_spheres', -1)):
+            return None
+
+        c = spheres.detach().cpu().numpy()
+        pad = padding.detach().cpu().numpy().reshape(-1)
+        idx = pairs.detach().cpu().numpy().astype(np.int64)
+
+        ca = c[idx[:, 0], :3]
+        cb = c[idx[:, 1], :3]
+        ra = c[idx[:, 0], 3] + pad[idx[:, 0]]
+        rb = c[idx[:, 1], 3] + pad[idx[:, 1]]
+        center_dist = np.linalg.norm(ca - cb, axis=1)
+        overlap2 = (ra + rb) ** 2 - center_dist ** 2  # kernel's pair value
+
+        kp = kin.config.kinematics_config
+        idx_map = (kp.link_sphere_idx_map.reshape(-1).detach().cpu().tolist()
+                   if kp.link_sphere_idx_map is not None else [])
+        idx_to_name = {int(v): k for k, v in kp.link_name_to_idx_map.items()}
+
+        def _link_of(sph):
+            li = idx_map[sph] if sph < len(idx_map) else None
+            return (idx_to_name.get(li, f"link#{li}")
+                    if li is not None else "unknown-link")
+
+        reports = []
+        radius_valid = c[:, 3] >= 0
+        good = ((overlap2 > 0.0)
+                & radius_valid[idx[:, 0]] & radius_valid[idx[:, 1]])
+        for k in np.flatnonzero(good):
+            a, b = int(idx[k, 0]), int(idx[k, 1])
+            reports.append({
+                "sphere_a": a,
+                "sphere_b": b,
+                "link": _link_of(a),
+                "link_b": _link_of(b),
+                "radius_a": float(c[a, 3]),
+                "radius_b": float(c[b, 3]),
+                "padding_a": float(pad[a]),
+                "padding_b": float(pad[b]),
+                "center_distance": float(center_dist[k]),
+                "overlap2": float(overlap2[k]),
+                "depth": float(ra[k] + rb[k] - center_dist[k]),
+            })
+        return reports
+    except Exception:
+        return None
+
+
+def _attributed_joint_limit_violations(wrapper, node, kin=None, at_joints=None):
+    """Position-limit (cspace bound) violations at a joint state.
+
+    The graph planner's feasibility check treats the cspace boundary as a hard
+    constraint: a start or goal configuration outside a joint's position limits
+    makes that state infeasible and prints the SAME ``Start or End state in
+    collision`` warning as a sphere contact. So a plan failure can come from a
+    joint value out of range even when every collision sphere is clear — and,
+    because RViz sphere colouring only queries world/self sphere collisions,
+    NO sphere turns red for it.
+
+    Returns a list of dicts (one per violated joint): ``joint`` (name),
+    ``value``, ``lower``, ``upper`` (all rad). None when the limits can't be
+    reached or the joint ordering can't be aligned with the kinematics; never
+    raises.
+    """
+    try:
+        if kin is None:
+            kin = wrapper.kin_model
+        limits = kin.get_joint_limits()
+        pos = limits.position.detach().cpu().numpy()
+        lim_names = list(limits.joint_names)
+        names = list(kin.joint_names)
+        at = _at_joints_pose(wrapper, at_joints)
+        if at is None or len(at) != len(names) or len(lim_names) != len(names):
+            return None
+        lim_idx = {n: i for i, n in enumerate(lim_names)}
+        for n in names:
+            if n not in lim_idx:
+                return None
+        reports = []
+        for i, name in enumerate(names):
+            v = float(at[i])
+            lo = float(pos[0, lim_idx[name]])
+            hi = float(pos[1, lim_idx[name]])
+            if v < lo or v > hi:
+                reports.append({"joint": name, "value": v,
+                                "lower": lo, "upper": hi})
+        return reports
+    except Exception:
+        return None
 
 
 def _compute_sphere_distance(wrapper, node, response):

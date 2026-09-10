@@ -46,7 +46,14 @@ namespace manipulation
 namespace
 {
 
-constexpr int kServiceTimeoutSeconds = 5;
+// Default bound on a single service round-trip (seconds). 5s was the old
+// hard-coded value, but the FIRST generate_trajectory after a planner switch /
+// solver rebuild re-records the ESDF CUDA graph and compiles kernels in
+// addition to the planning itself (~5-6s cold, ~4s warm with max_attempts=10),
+// so a fixed 5s cap raced legitimate cold-start latency and MoveIt dropped
+// plans the server was actively producing. 60s is generous yet still bounded;
+// override via the `cumotion_service_timeout` ROS parameter.
+constexpr double kDefaultServiceTimeoutSeconds = 60.0;
 
 }  // namespace
 
@@ -60,6 +67,16 @@ CumotionServiceClient::CumotionServiceClient(const rclcpp::Node::SharedPtr & nod
     node_->declare_parameter<std::string>("cumotion_service_namespace", "curobo_server");
   }
   ns_ = "/" + node_->get_parameter("cumotion_service_namespace").as_string();
+
+  // Per-call timeout (seconds) for every service the client issues. Must cover
+  // the cold-start cost of the first plan after a solver rebuild (CUDA graph
+  // re-record + kernel compile + planning), not just warm replans — see the
+  // constant above. Same re-declaration guard as the namespace parameter.
+  if (!node_->has_parameter("cumotion_service_timeout")) {
+    node_->declare_parameter<double>(
+      "cumotion_service_timeout", kDefaultServiceTimeoutSeconds);
+  }
+  service_timeout_secs_ = node_->get_parameter("cumotion_service_timeout").as_double();
 
   set_planner_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::SetPlanner>(
     ns_ + "/set_planner");
@@ -78,17 +95,19 @@ bool CumotionServiceClient::callService(
   const typename Srv::Request::SharedPtr & req,
   typename Srv::Response::SharedPtr & res)
 {
-  if (!client->wait_for_service(std::chrono::seconds(kServiceTimeoutSeconds))) {
+  auto timeout = std::chrono::duration<double>(service_timeout_secs_);
+  if (!client->wait_for_service(timeout)) {
     RCLCPP_ERROR_STREAM(
       node_->get_logger(), "Service not available: " << client->get_service_name());
     return false;
   }
   auto future = client->async_send_request(req);
-  if (future.wait_for(std::chrono::seconds(kServiceTimeoutSeconds)) !=
-    std::future_status::ready)
+  if (future.wait_for(timeout) != std::future_status::ready)
   {
     RCLCPP_ERROR_STREAM(
-      node_->get_logger(), "Service call timed out: " << client->get_service_name());
+      node_->get_logger(),
+      "Service call timed out (" << service_timeout_secs_ << "s): "
+        << client->get_service_name());
     return false;
   }
   res = future.get();

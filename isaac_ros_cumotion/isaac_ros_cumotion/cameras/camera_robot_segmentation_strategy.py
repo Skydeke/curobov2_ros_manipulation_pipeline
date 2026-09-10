@@ -159,10 +159,14 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
         GPU work — including the frame's CPU->GPU transfer — is under the owning
         node's gpu_lock so a CUDA-graph capture can't race it. An illegal kernel
         launch into a capturing stream invalidates the capture AND the stream,
-        so the transfer must not happen before the lock is held. Any CUDA error
-        that still slips through only drops this frame: an exception escaping a
-        subscription callback is re-raised by rclpy's executor and kills the
-        whole node.
+        so the transfer must not happen before the lock is held. The acquire is
+        BLOCKING on purpose: during planning/servoing the planner repeatedly
+        holds gpu_lock for the ESDF refresh (refresh_perception_world), and a
+        non-blocking acquire made every frame in those windows get dropped —
+        masked_depth stalled to ~2 Hz during planning even from a 5 Hz input.
+        Waiting (then grabbing the FRESHEST queued frame) keeps the stream at
+        the input rate; the wait is always finite (the lock holders only do GPU
+        work, they never wait on this callback).
         """
         try:
             if msg.encoding == '16UC1':
@@ -193,11 +197,15 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
             return
 
         gpu_lock = getattr(self.node, 'gpu_lock', None)
-        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-            self.node.get_logger().debug(
-                'robot_segmentation frame skipped (GPU capture in progress)',
-                throttle_duration_sec=2.0)
-            return
+        if gpu_lock is not None:
+            # Blocking (vs a non-blocking drop): during planning/servoing the
+            # planner repeatedly holds gpu_lock for the ESDF refresh, and a
+            # non-blocking acquire dropped every frame in those windows —
+            # masked_depth stalled to ~2 Hz during planning from a 5 Hz input.
+            # Waiting is safe (see the class docstring): the lock holders only
+            # do GPU work and never wait on this callback, so the wait is
+            # finite. tf2's single-camera frame resolution is unchanged.
+            gpu_lock.acquire()
         try:
             depth = torch.from_numpy(depth).to(
                 dtype=self._ops_dtype, device=self._device)
@@ -295,11 +303,15 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
             keep = keep & ~inside
 
         # Publish the points masked OUT as robot, in the base frame, for debug.
-        robot_points = points_base[~keep]
-        if robot_points.shape[0] > 0:
-            self.robot_pointcloud_pub.publish(self._create_pointcloud2_msg(
-                robot_points, self._robot_base_frame,
-                self.node.get_clock().now().to_msg()))
+        # Gated on an actual subscriber: the .cpu() sync + serialization is
+        # done every frame, and its cost is pure waste when nothing displays it
+        # (it competes with the masked-depth publish on the same GPU).
+        if self.robot_pointcloud_pub.get_subscription_count() > 0:
+            robot_points = points_base[~keep]
+            if robot_points.shape[0] > 0:
+                self.robot_pointcloud_pub.publish(self._create_pointcloud2_msg(
+                    robot_points, self._robot_base_frame,
+                    self.node.get_clock().now().to_msg()))
         return keep
 
     def _transform_points_to_base(self, points, stamp):

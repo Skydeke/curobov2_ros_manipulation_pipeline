@@ -51,6 +51,11 @@ namespace manipulation
  *
  * The service namespace (node name, e.g. `curobo_server`) is configurable via
  * the `cumotion_service_namespace` ROS parameter.
+ *
+ * Every service round-trip is bounded by the `cumotion_service_timeout`
+ * parameter (seconds, default 60). The old fixed 5s bound raced the first
+ * plan's cold-start cost (CUDA graph re-record + kernel compile), making MoveIt
+ * drop plans the server was actively producing.
  */
 class CumotionServiceClient
 {
@@ -79,6 +84,7 @@ private:
 
   std::shared_ptr<rclcpp::Node> node_;
   std::string ns_;  // service namespace, e.g. "curobo_server"
+  double service_timeout_secs_;  // per-call service timeout (cumotion_service_timeout)
 
   rclcpp::Client<isaac_ros_cumotion_interfaces::srv::SetPlanner>::SharedPtr set_planner_client_;
   rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedPtr

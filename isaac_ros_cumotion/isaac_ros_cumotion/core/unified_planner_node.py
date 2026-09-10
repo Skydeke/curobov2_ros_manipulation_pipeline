@@ -42,6 +42,8 @@ from isaac_ros_cumotion.robot.robot_context import RobotContext
 from isaac_ros_cumotion.core.config_wrapper_motion import ConfigWrapperMotion
 from isaac_ros_cumotion.core.collision_distance import (
     _attributed_collisions,
+    _attributed_joint_limit_violations,
+    _attributed_self_collisions,
 )
 from isaac_ros_cumotion.core.attachment_services import AttachmentServices
 from isaac_ros_cumotion.core.ik_services import IKServices
@@ -402,6 +404,10 @@ class UnifiedPlannerNode(Node):
             "Unified planner ready with initial planner: "
             f"{self.planner_manager.get_current_planner().get_planner_name()}"
         )
+        self.get_logger().info(
+            "collision diagnostic v3: world (collision_contacts) + self "
+            "(self_collision_contacts) + cspace (cspace_bound_contacts)"
+        )
 
     # ------------------------------------------------------------------
     # Warmup
@@ -695,7 +701,11 @@ class UnifiedPlannerNode(Node):
                 if result.success:
                     self.get_logger().info(f"Planning succeeded: {result.message}")
                 else:
-                    diag = self._collision_diagnostic(planner)
+                    goal_joints = getattr(request, 'target_joint_positions', None)
+                    diag = self._collision_diagnostic(
+                        planner,
+                        start_joints=self._diagnostic_joints(start_state),
+                        goal_joints=list(goal_joints) if goal_joints else None)
                     if diag:
                         response.message = f"{response.message} | {diag}"
                     self.get_logger().error(
@@ -712,7 +722,26 @@ class UnifiedPlannerNode(Node):
             response.dt = 0.0
             return response
 
-    def _collision_diagnostic(self, planner=None) -> str:
+    @staticmethod
+    def _diagnostic_joints(state):
+        """Joint positions (list) from a JointState's first batch row, or None.
+
+        Best-effort: any malformed state yields None, and the caller falls back
+        to the robot's live pose for the "start state" clause.
+        """
+        try:
+            if state is None:
+                return None
+            pos = state.position
+            if pos is None:
+                return None
+            if pos.ndim > 1:
+                pos = pos[0]
+            return pos.detach().cpu().tolist()
+        except Exception:
+            return None
+
+    def _collision_diagnostic(self, planner=None, start_joints=None, goal_joints=None) -> str:
         """Describe, as collision tuples, what the robot currently collides with.
 
         Queries the shared collision_distance harness with the SAME activation
@@ -726,6 +755,12 @@ class UnifiedPlannerNode(Node):
         pinned down). Reports also carry ``(link, obstacle, depth_m)`` tuples for
         the message string, plus a human-readable summary. Best-effort: returns
         an empty string on any failure.
+
+        "Start or End state in collision" failures never say WHICH state, and a
+        live-pose check alone is blind to a colliding goal — so when the request
+        carries joint-space positions, both the start configuration (defaulting
+        to the live pose when no explicit start is given) and the goal
+        configuration are evaluated and reported, each labelled.
         """
         try:
             wrapper = self.config_wrapper_motion
@@ -740,40 +775,123 @@ class UnifiedPlannerNode(Node):
                 except Exception:
                     kin = None
 
-            reports = _attributed_collisions(wrapper, self, kin=kin, solver=planner)
-            if reports is None:
-                return ""
-            if not reports:
-                return ""
+            def _fmt(label, at):
+                clauses = []
+                reports = _attributed_collisions(
+                    wrapper, self, kin=kin, solver=planner, at_joints=at)
+                if reports:
+                    act = reports[0].get('activation')
+                    if act is None:
+                        act = (
+                            self.get_parameter('collision_activation_distance')
+                            .get_parameter_value().double_value
+                            if self.has_parameter('collision_activation_distance')
+                            else 0.0)
 
-            act = reports[0].get('activation')
-            act = act if act is not None else (
-                self.get_parameter('collision_activation_distance')
-                .get_parameter_value().double_value
-                if self.has_parameter('collision_activation_distance') else 0.0)
+                    parts = []
+                    tuples = []
+                    for r in sorted(reports, key=lambda r: -r['depth']):
+                        what = ", ".join(r['obstacles']) if r['obstacles'] \
+                            else r['clobber_note']
+                        what = what if what else "unknown-obstacle"
+                        depth_m = r['depth']
+                        tuples.append((r['link'], what, round(depth_m, 4)))
+                        if depth_m > act:  # beyond the inflated surface => real contact
+                            parts.append(
+                                f"{r['link']} hard-collides {what} "
+                                f"({depth_m * 1000:.1f} mm past surface)")
+                        else:
+                            parts.append(
+                                f"{r['link']} within {act * 1000:.1f} mm margin of {what}"
+                                f" ({depth_m * 1000:.1f} mm past margin surface)")
+                    scope = f"{label} in collision" if label else "In collision"
+                    human = scope + " (margin " \
+                        + (f"{act * 1000:.1f} mm" if act else "none") \
+                        + "): " + "; ".join(parts)
+                    clauses.append(f"{human} | collision_contacts={tuples}")
 
-            parts = []
-            tuples = []
-            for r in sorted(reports, key=lambda r: -r['depth']):
-                what = ", ".join(r['obstacles']) if r['obstacles'] \
-                    else r['clobber_note']
-                what = what if what else "unknown-obstacle"
-                depth_m = r['depth']
-                tuples.append((r['link'], what, round(depth_m, 4)))
-                if depth_m > act:  # beyond the inflated surface => real contact
-                    parts.append(
-                        f"{r['link']} hard-collides {what} "
-                        f"({depth_m * 1000:.1f} mm past surface)")
-                else:
-                    parts.append(
-                        f"{r['link']} within {act * 1000:.1f} mm margin of {what}"
-                        f" ({depth_m * 1000:.1f} mm past margin surface)")
-            human = "In collision (margin " + (f"{act * 1000:.1f} mm" if act else "none") \
-                + "): " + "; ".join(parts)
-            return f"{human} | collision_contacts={tuples}"
+                # World-obstacle checks can't see robot-self contacts (the scene
+                # collision checker is never queried with robot-vs-robot sphere
+                # pairs). Report those separately — a closed gripper / folded
+                # arm tripping "Start or End state in collision" shows up here,
+                # not in collision_contacts. Self-collision uses no activation
+                # margin (that is scene-collision-only), so every report is a
+                # hard contact at the configured per-link padding.
+                selfs = _attributed_self_collisions(
+                    wrapper, self, kin=kin, at_joints=at)
+                if selfs:
+                    parts = []
+                    tuples = []
+                    for r in sorted(selfs, key=lambda r: -r['depth']):
+                        tuples.append((r['link'], r['link_b'], round(r['depth'], 4)))
+                        parts.append(
+                            f"{r['link']} hard self-collides {r['link_b']} "
+                            f"({r['depth'] * 1000:.1f} mm penetration)")
+                    scope = f"{label} self-collision" if label else "Self-collision"
+                    clauses.append(
+                        f"{scope}: " + "; ".join(parts)
+                        + f" | self_collision_contacts={tuples}")
+
+                # The graph feasibility check treats the cspace boundary as a
+                # hard constraint: a joint value outside its position limits
+                # fails in a way that prints the SAME "Start or End state in
+                # collision" warning as a contact, with no sphere involved (so
+                # nothing turns red in RViz).
+                limits = _attributed_joint_limit_violations(
+                    wrapper, self, kin=kin, at_joints=at)
+                if limits:
+                    parts = []
+                    tuples = []
+                    for r in limits:
+                        tuples.append((r['joint'], round(r['value'], 4),
+                                       round(r['lower'], 4), round(r['upper'], 4)))
+                        parts.append(
+                            f"{r['joint']}={r['value']:.3f} outside "
+                            f"[{r['lower']:.3f}, {r['upper']:.3f}]")
+                    scope = (f"{label} joint-limit (cspace) violation"
+                             if label else "Joint-limit (cspace) violation")
+                    clauses.append(
+                        f"{scope}: " + "; ".join(parts)
+                        + f" | cspace_bound_contacts={tuples}")
+
+                if not clauses:
+                    # Never return a bare None here: an empty result must be
+                    # distinguishable from "the diagnostic never ran". If one
+                    # of the three checks bailed it is named explicitly;
+                    # otherwise claim the decisive clean marker for exactly the
+                    # situation where the planner rejects a state but none of
+                    # the sphere checks or the joint-limit check sees anything.
+                    missing = []
+                    if reports is None:
+                        missing.append("world(collision_contacts)")
+                    if selfs is None:
+                        missing.append("self(self_collision_contacts)")
+                    if limits is None:
+                        missing.append("cspace(cspace_bound_contacts)")
+                    if missing:
+                        scope = label if label else "State"
+                        return (f"{scope}: diagnostics incomplete — checks "
+                                f"unavailable: {', '.join(missing)}")
+                    if label:
+                        return (f"{label}: no sphere collisions (world + self) "
+                                "and within joint limits")
+                    return ("No sphere collisions (world + self) "
+                            "and within joint limits")
+                return " | ".join(clauses)
+
+            pieces = []
+            start = _fmt("Start state", start_joints)
+            if start:
+                pieces.append(start)
+            if goal_joints:
+                g = _fmt("Goal state", list(goal_joints))
+                if g:
+                    pieces.append(g)
+            return " | ".join(pieces)
         except Exception as e:
-            self.get_logger().debug(
-                f"collision diagnostic unavailable: {e}", throttle_duration_sec=5.0)
+            self.get_logger().warn(
+                f"collision diagnostic unavailable: {e}\n{traceback.format_exc()}",
+                throttle_duration_sec=5.0)
             return ""
 
     def execute_callback(self, goal_handle):
@@ -828,10 +946,16 @@ class UnifiedPlannerNode(Node):
                     with self._plan_lock():
                         result = planner.plan(start_state, goal, config, self.robot_context)
                     if not result.success:
-                        diag = self._collision_diagnostic(planner)
+                        goal_joints = getattr(goal, 'target_joint_positions', None)
+                        diag = self._collision_diagnostic(
+                            planner,
+                            start_joints=self._diagnostic_joints(start_state),
+                            goal_joints=list(goal_joints) if goal_joints else None)
+                        suffix = f" | {diag}" if diag \
+                            else " | collision-diagnostic(empty)"
                         self.get_logger().error(
                             f"Planning failed in execute path: {result.message}"
-                            + (f" | {diag}" if diag else ""))
+                            + suffix)
                         result_msg.success = False
                         result_msg.message = f"Planning failed: {result.message}"
                         goal_handle.abort()
@@ -844,9 +968,11 @@ class UnifiedPlannerNode(Node):
                 result = planner.plan(start_state, goal, config, self.robot_context)
                 if not result.success:
                     diag = self._collision_diagnostic(planner)
+                    suffix = f" | {diag}" if diag \
+                        else " | collision-diagnostic(empty)"
                     self.get_logger().error(
                         f"Planning failed in execute path: {result.message}"
-                        + (f" | {diag}" if diag else ""))
+                        + suffix)
                     result_msg.success = False
                     result_msg.message = f"Planning failed: {result.message}"
                     goal_handle.abort()
