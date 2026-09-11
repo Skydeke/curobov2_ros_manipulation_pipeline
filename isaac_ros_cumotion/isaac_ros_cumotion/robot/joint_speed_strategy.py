@@ -18,7 +18,9 @@ class JointSpeedStrategy(JointCommandStrategy):
     into speed commands. Robot-agnostic — topics come from the RobotDescription.
 
     Descriptor strategy_params:
-      command_topic        (publish JointTrajectory)
+      action_topic          (FollowJointTrajectory action — the ONLY execution
+                            path, e.g. /joint_trajectory_controller/
+                            follow_joint_trajectory)
       state_topic           (subscribe Float32 progression, optional)
       joint_states_topic    (subscribe JointState feedback, optional)
       max_joint_accel_dps    (deg/s^2, hard velocity-rate limit on outgoing
@@ -36,9 +38,6 @@ class JointSpeedStrategy(JointCommandStrategy):
         # curobo_ros is the single authority on trajectory pacing (see
         # resolve_interpolation_dt). It is what gets stamped into
         # time_from_start below.
-
-        command_topic = self.params.get('command_topic', '/execute_trajectory')
-        self.pub_trajectory = node.create_publisher(JointTrajectory, command_topic, 10)
 
         # Hard acceleration clamp on OUTGOING velocity commands, independent of
         # whatever the planner (e.g. MPC re-optimizing every ~90ms) computed.
@@ -203,11 +202,7 @@ class JointSpeedStrategy(JointCommandStrategy):
             self.accel_command = []
             self.trajectory_progression = 0.0
 
-        self.pub_trajectory.publish(msg)
-        self.mark_execution_start(
-            len(msg.points),
-            positions=[pt.positions for pt in msg.points],
-        )
+        self._send_as_action(msg, positions=[pt.positions for pt in msg.points])
 
     def get_joint_pose(self):
         with self.buffer_lock:
@@ -226,7 +221,7 @@ class JointSpeedStrategy(JointCommandStrategy):
             self.trajectory_progression = 0.0
             self.robot_state = RobotState.STOPPED
         self.clear_execution_timer()
-        self.pub_trajectory.publish(JointTrajectory())
+        self._cancel_action()
         self._debug_csv_close()
 
     def callback_trajectory_state(self, msg):

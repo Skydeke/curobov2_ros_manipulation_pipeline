@@ -15,7 +15,8 @@ class JointPoseStrategy(JointCommandStrategy):
     and topics as joint_speed, but no velocity/acceleration setpoints — for drivers
     that follow position references rather than streamed speeds.
 
-    Descriptor strategy_params: command_topic, state_topic (opt), joint_states_topic (opt).
+    Descriptor strategy_params: action_topic (FollowJointTrajectory action —
+    the ONLY execution path), state_topic (opt), joint_states_topic (opt).
     '''
 
     def __init__(self, node, dt, description=None):
@@ -23,9 +24,6 @@ class JointPoseStrategy(JointCommandStrategy):
         # self.dt (base class) is already the resolved interpolation_dt —
         # curobo_ros is the single authority on trajectory pacing (see
         # resolve_interpolation_dt).
-
-        command_topic = self.params.get('command_topic', '/execute_trajectory')
-        self.pub_trajectory = node.create_publisher(JointTrajectory, command_topic, 10)
 
         state_topic = self.params.get('state_topic')
         if state_topic:
@@ -73,11 +71,7 @@ class JointPoseStrategy(JointCommandStrategy):
             self.accel_command = []
             self.trajectory_progression = 0.0
 
-        self.pub_trajectory.publish(msg)
-        self.mark_execution_start(
-            len(msg.points),
-            positions=[pt.positions for pt in msg.points],
-        )
+        self._send_as_action(msg, positions=[pt.positions for pt in msg.points])
 
     def get_joint_pose(self):
         with self.buffer_lock:
@@ -92,7 +86,7 @@ class JointPoseStrategy(JointCommandStrategy):
             self.trajectory_progression = 0.0
             self.robot_state = RobotState.STOPPED
         self.clear_execution_timer()
-        self.pub_trajectory.publish(JointTrajectory())
+        self._cancel_action()
 
     def callback_trajectory_state(self, msg):
         self.mark_progression_feedback(msg.data)

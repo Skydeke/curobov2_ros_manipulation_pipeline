@@ -13,6 +13,7 @@ v2 notes:
 """
 
 from curobo.types import JointState, Pose, GoalToolPose
+from curobo._src.state.state_joint_ops import stack_joint_states
 
 from .single_planner import SinglePlanner
 
@@ -105,7 +106,8 @@ class MultiPointPlanner(SinglePlanner):
                 if combined_trajectory is None:
                     combined_trajectory = segment
                 else:
-                    combined_trajectory = combined_trajectory.stack(segment.clone())
+                    combined_trajectory = stack_joint_states(
+                        combined_trajectory, segment.clone())
 
                 # Build the next start state from the final waypoint of the segment.
                 # segment.position is [B, T, D]; plan_pose requires a 2D [B, D]

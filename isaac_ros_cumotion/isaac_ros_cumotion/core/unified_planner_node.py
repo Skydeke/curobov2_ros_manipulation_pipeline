@@ -19,6 +19,8 @@ v2 notes:
 
 import contextlib
 import logging
+import os
+import sys
 import threading
 import time
 import traceback
@@ -55,6 +57,68 @@ from isaac_ros_cumotion.planners import (
     ReactiveController,
     SinglePlanner,
 )
+
+# cuRobo logs through Python's `logging` module ('curobo' logger) which the
+# node configures at startup; by default its messages are plain. Color them
+# with the same level palette rclpy uses so `[WARNING] [curobo] ...` lines
+# look like the colored ROS logs next to them. Both streams go to stderr, so
+# any pipeline that keeps ROS colors will keep curobo colors too.
+_CUROBO_LOG_FORMAT = "[%(levelname)s] [%(name)s] %(message)s"
+_CUROBO_COLOR_RESET = "\033[0m"
+_CUROBO_LEVEL_COLORS = {
+    logging.DEBUG: "\033[96m",
+    logging.INFO: "\033[32m",
+    logging.WARNING: "\033[33m",
+    logging.ERROR: "\033[31m",
+    logging.CRITICAL: "\033[1;31m",
+}
+
+
+def _curobo_colors_enabled() -> bool:
+    """Whether ANSI colors should be emitted for curobo log lines.
+
+    Mirrors rcutils' decision (RCUTILS_COLORIZED_OUTPUT env var, then the
+    stderr tty check) so curobo lines follow exactly the same colorization
+    rules as the adjacent ROS logs. ``NO_COLOR`` disables them.
+    """
+    if os.environ.get("NO_COLOR"):
+        return False
+    colorized = os.environ.get("RCUTILS_COLORIZED_OUTPUT", "").strip().lower()
+    if colorized:
+        return colorized not in ("0", "false", "no", "off")
+    return sys.stderr.isatty()
+
+
+class _CuroboColorFormatter(logging.Formatter):
+    """Level-colored formatter for the 'curobo' logger.
+
+    Colors the WHOLE line with the severity color, matching rclpy's colored
+    output (rclpy wraps the entire formatted log message, not just the
+    ``[INFO]``/``[WARN]`` token).
+    """
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        if _curobo_colors_enabled():
+            color = _CUROBO_LEVEL_COLORS.get(record.levelno)
+            if color:
+                return f"{color}{msg}{_CUROBO_COLOR_RESET}"
+        return msg
+
+
+def install_colored_curobo_logger(level: int = logging.WARNING, logger_name: str = "curobo") -> None:
+    """Route the ``logger_name`` logger through a single colored stderr handler.
+
+    Replaces any pre-existing handlers on the logger and stops propagation to
+    the root logger so each curobo line is emitted exactly once.
+    """
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(level)
+    logger.handlers[:] = []
+    handler = logging.StreamHandler()
+    handler.setFormatter(_CuroboColorFormatter(_CUROBO_LOG_FORMAT))
+    logger.addHandler(handler)
+    logger.propagate = False
 
 
 class UnifiedPlannerNode(Node):
@@ -123,6 +187,9 @@ class UnifiedPlannerNode(Node):
         curobo_debug = self.get_parameter('enable_curobo_debug_mode').value
         setup_curobo_logger('info' if curobo_debug else 'warning', 'curobo')
         curobo_level = logging.INFO if curobo_debug else logging.WARNING
+        # Route curobo's logger through a colored formatter so its lines match
+        # the level colors of the adjacent ROS logs (same stderr stream).
+        install_colored_curobo_logger(curobo_level)
         if hasattr(logging, 'lastResort') and logging.lastResort is not None:
             logging.lastResort.setLevel(curobo_level)
 
@@ -154,6 +221,11 @@ class UnifiedPlannerNode(Node):
         # (nav_msgs/Path on /planned_path) for RViz. Mirrors MPC's
         # mpc_predicted_path for the open-loop planners.
         self.declare_parameter('publish_path', True)
+        # Publish the motion-plan debug image (joint-trajectory pos/vel/acc/jerk
+        # plot as an RGB Image on /<node>/motion_plan_debug). Independent of
+        # enable_curobo_debug_mode; off by default. See
+        # SinglePlanner._publish_plan_image().
+        self.declare_parameter('publish_plan_debug_image', False)
         # Publish a wireframe box of the Mapper's TSDF/ESDF workspace extent
         # (mapper_extent_xyz centered at mapper_grid_center) on
         # /<node>/mapper_workspace for RViz. Disable at launch if the marker

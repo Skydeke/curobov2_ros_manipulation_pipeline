@@ -851,6 +851,25 @@ class SinglePlanner(TrajectoryPlanner):
                     self._exec_csv_close()
                 return False
 
+            # Re-read progression: the loop may have stopped on a stale sample
+            # while the controller's Result reported failure. The action is the
+            # execution authority — a non-success Result (progression -1.0)
+            # means the path was NOT completed; report it instead of success.
+            final_progression = robot_context.get_progression()
+            if final_progression < 0.0:
+                reason = ""
+                strategy = getattr(robot_context, 'robot_strategy', None)
+                if strategy is not None and hasattr(strategy, 'action_failure_summary'):
+                    reason = strategy.action_failure_summary()
+                self.node.get_logger().error(
+                    f"{self.get_planner_name()}: trajectory execution FAILED: "
+                    f"{reason or 'controller reported a non-success result'}"
+                )
+                robot_context.stop_robot()
+                if exec_csv:
+                    self._exec_csv_close()
+                return False
+
             # Wait for emulator thread to finish updating position
             # This ensures the next planner reads the correct final position
             time.sleep(0.1)
