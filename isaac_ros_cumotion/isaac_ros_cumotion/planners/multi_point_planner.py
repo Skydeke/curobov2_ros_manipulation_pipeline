@@ -46,7 +46,6 @@ class MultiPointPlanner(SinglePlanner):
             return None
 
         max_attempts = config.get('max_attempts', 1)
-        connect_waypoints = config.get('connect_waypoints', False)
 
         # v2: a single ToolPoseCriteria applies to the whole plan, so per-waypoint
         # axis constraints can't be honored — only the whole-path
@@ -70,9 +69,8 @@ class MultiPointPlanner(SinglePlanner):
             last_result = None
 
             for i, goal in enumerate(waypoints):
-                if not connect_waypoints:
-                    current_state.velocity[:] = 0.0
-                    current_state.acceleration[:] = 0.0
+                current_state.velocity[:] = 0.0
+                current_state.acceleration[:] = 0.0
 
                 result = self.motion_planner.plan_pose(
                     goal,
@@ -98,10 +96,7 @@ class MultiPointPlanner(SinglePlanner):
                     )
                     return result
 
-                segment = (
-                    result.optimized_plan if connect_waypoints
-                    else result.get_interpolated_plan()
-                )
+                segment = result.get_interpolated_plan()
 
                 if combined_trajectory is None:
                     combined_trajectory = segment
@@ -156,8 +151,3 @@ class MultiPointPlanner(SinglePlanner):
 
         self.node.get_logger().warn("_combined_trajectory not set, using single segment")
         return trajectory
-
-    def get_config_parameters(self) -> list:
-        params = super().get_config_parameters()
-        params.extend(['connect_waypoints'])
-        return params
