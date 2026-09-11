@@ -343,6 +343,13 @@ class ReactiveController(TrajectoryPlanner):
             self._last_log_time = 0.0
             self.node.get_logger().info(f"Starting {self.get_planner_name()} servo loop")
 
+            exec_csv = self._exec_csv_enabled()
+            if exec_csv:
+                self._exec_csv_init(
+                    prefix="exec_servo",
+                    columns=["t_s", "tstep", "error_m", "on_target", "step_ms"],
+                )
+
             # Initialize the solver state from the robot once, then advance it
             # from the solver's own prediction each step (see the loop below).
             current_state = self._read_state(robot_context)
@@ -422,9 +429,20 @@ class ReactiveController(TrajectoryPlanner):
                         f"{self.get_position_error():.4f}m on_target={self.is_on_target()}"
                     )
 
+                if exec_csv and tstep % 1 == 0:
+                    self._exec_csv_write([
+                        f"{time.monotonic() - self._exec_csv_t0:.3f}",
+                        f"{tstep}",
+                        f"{self.get_position_error():.6f}",
+                        str(self.is_on_target()),
+                        f"{time.time() - st_time:.4f}",
+                    ])
+
                 tstep += 1
 
             robot_context.stop_robot()
+            if exec_csv:
+                self._exec_csv_close()
 
             if self._step_times:
                 avg_time = sum(self._step_times) / len(self._step_times)
@@ -440,6 +458,7 @@ class ReactiveController(TrajectoryPlanner):
             self.node.get_logger().error(f"{self.get_planner_name()} execution error: {e}")
             self.node.get_logger().error(traceback.format_exc())
             robot_context.stop_robot()
+            self._exec_csv_close()
             return False
 
     def _execute_paced(self, robot_context, goal_handle, interval: float) -> bool:
@@ -462,6 +481,13 @@ class ReactiveController(TrajectoryPlanner):
             self.node.get_logger().info(
                 f"Starting {self.get_planner_name()} servo loop (paced, interval={interval}s)"
             )
+
+            exec_csv = self._exec_csv_enabled()
+            if exec_csv:
+                self._exec_csv_init(
+                    prefix="exec_servo",
+                    columns=["t_s", "tstep", "error_m", "on_target", "step_ms"],
+                )
 
             current_state = self._read_state(robot_context)
 
@@ -523,11 +549,22 @@ class ReactiveController(TrajectoryPlanner):
                             f"{self.get_position_error():.4f}m on_target={self.is_on_target()}"
                         )
 
+                    if exec_csv and tstep % 1 == 0:
+                        self._exec_csv_write([
+                            f"{time.monotonic() - self._exec_csv_t0:.3f}",
+                            f"{tstep}",
+                            f"{self.get_position_error():.6f}",
+                            str(self.is_on_target()),
+                            f"{time.time() - st_time:.4f}",
+                        ])
+
                     tstep += 1
             finally:
                 self.node.destroy_timer(timer)
 
             robot_context.stop_robot()
+            if exec_csv:
+                self._exec_csv_close()
 
             if self._step_times:
                 avg_time = sum(self._step_times) / len(self._step_times)
@@ -542,6 +579,7 @@ class ReactiveController(TrajectoryPlanner):
             self.node.get_logger().error(f"{self.get_planner_name()} execution error: {e}")
             self.node.get_logger().error(traceback.format_exc())
             robot_context.stop_robot()
+            self._exec_csv_close()
             return False
 
     def _on_send_tick(self, robot_context, goal_handle):

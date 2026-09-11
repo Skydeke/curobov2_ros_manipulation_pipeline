@@ -10,8 +10,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, List, Any
 from enum import Enum
+import time
 
 from curobo.types import JointState
+
+from isaac_ros_cumotion.core.diagnostics import open_diag_csv
 
 
 class ExecutionMode(Enum):
@@ -147,3 +150,39 @@ class TrajectoryPlanner(ABC):
             List of parameter names
         """
         return []
+
+    # ------------------------------------------------------------------
+    # Execution debug CSV (shared by all planners)
+    # ------------------------------------------------------------------
+    # Gate: ``exec_debug_csv`` param (default False, off in production).
+    # Columns differ per planner — ``_exec_csv_init`` takes a header list;
+    # the first ``write`` call outputs it (DiagCsv.write_header_once).
+    # File goes to ``diagnostic_csv_dir`` or the ROS log dir (see
+    # core/diagnostics.py:resolve_diag_dir).
+
+    def _exec_csv_enabled(self) -> bool:
+        if not self.node.has_parameter('exec_debug_csv'):
+            self.node.declare_parameter('exec_debug_csv', False)
+        return bool(self.node.get_parameter('exec_debug_csv').value)
+
+    def _exec_csv_init(self, prefix: str = "exec_progress",
+                       columns: Optional[List[str]] = None):
+        self._exec_csv = open_diag_csv(self.node, prefix)
+        if self._exec_csv is None:
+            return False
+        self._exec_csv_columns = columns or ["t_s", "elapsed_s"]
+        self._exec_csv_t0 = time.monotonic()
+        return True
+
+    def _exec_csv_close(self):
+        csv_obj = getattr(self, '_exec_csv', None)
+        if csv_obj is not None:
+            csv_obj.close()
+        self._exec_csv = None
+
+    def _exec_csv_write(self, row):
+        csv_obj = getattr(self, '_exec_csv', None)
+        if csv_obj is None:
+            return
+        csv_obj.write_header_once(self._exec_csv_columns)
+        csv_obj.writerow(row)

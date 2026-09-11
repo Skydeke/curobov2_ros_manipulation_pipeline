@@ -769,6 +769,14 @@ class SinglePlanner(TrajectoryPlanner):
                 f"{self.get_planner_name()}: Trajectory execution started"
             )
 
+            exec_csv = self._exec_csv_enabled()
+            if exec_csv:
+                self._exec_csv_init(
+                    prefix="exec_progress",
+                    columns=["t_s", "elapsed_s", "progression", "goal_active",
+                             "cancelled", "joint_pose_snapshot"],
+                )
+
             # Monitor progress with feedback
             start_time = time.time()
             time_dilation_factor = self.node.get_parameter(
@@ -782,6 +790,8 @@ class SinglePlanner(TrajectoryPlanner):
                 if goal_handle is not None and not goal_handle.is_active:
                     self.node.get_logger().warn("Trajectory execution cancelled")
                     robot_context.stop_robot()
+                    if exec_csv:
+                        self._exec_csv_close()
                     return False
 
                 # Publish feedback at regular intervals
@@ -790,6 +800,8 @@ class SinglePlanner(TrajectoryPlanner):
                     if goal_handle is not None and not goal_handle.is_active:
                         self.node.get_logger().warn("Trajectory execution cancelled")
                         robot_context.stop_robot()
+                        if exec_csv:
+                            self._exec_csv_close()
                         return False
 
                     if goal_handle is not None:
@@ -805,6 +817,27 @@ class SinglePlanner(TrajectoryPlanner):
                         # self.node.get_logger().info(
                         #     f"Trajectory progress: {progression*100:.1f}%"
                         # )
+                    if exec_csv:
+                        goal_active = False
+                        if goal_handle is not None:
+                            try:
+                                goal_active = goal_handle.is_active
+                            except Exception:
+                                pass
+                        try:
+                            pose = robot_context.robot_strategy.get_joint_pose()
+                            pose_str = ("[" + ",".join(f"{v:.4f}" for v in pose) + "]"
+                                        if pose else "[]")
+                        except Exception:
+                            pose_str = "[]"
+                        self._exec_csv_write([
+                            f"{time.monotonic() - self._exec_csv_t0:.3f}",
+                            f"{time.time() - start_time:.3f}",
+                            f"{progression:.6f}",
+                            str(goal_active),
+                            str(self._cancelled),
+                            pose_str,
+                        ])
                     start_time = time.time()
 
                 # Small sleep to prevent busy-waiting
@@ -813,6 +846,8 @@ class SinglePlanner(TrajectoryPlanner):
             # Check if we exited due to cancellation or completion
             if self._cancelled:
                 self.node.get_logger().info("Trajectory execution cancelled via flag")
+                if exec_csv:
+                    self._exec_csv_close()
                 return False
 
             # Wait for emulator thread to finish updating position
@@ -822,12 +857,15 @@ class SinglePlanner(TrajectoryPlanner):
                 f"Trajectory execution completed. "
                 f"Final position: {robot_context.get_joint_pose()}"
             )
+            if exec_csv:
+                self._exec_csv_close()
             return True
 
         except Exception as e:
             self.node.get_logger().error(f"Execution error: {e}")
             self.node.get_logger().error(traceback.format_exc())
             robot_context.stop_robot()
+            self._exec_csv_close()
             return False
 
     def get_config_parameters(self) -> list:
