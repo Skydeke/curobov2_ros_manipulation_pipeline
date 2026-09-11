@@ -120,33 +120,34 @@ class SinglePlanner(TrajectoryPlanner):
         self._path_frame = getattr(config_wrapper, 'base_link', None)
 
         # Motion-plan debug image (joint-trajectory plot as an RGB Image).
-        # Lazy publisher; only active in curobo debug mode. See
-        # _publish_plan_image().
+        # Lazy publisher; only active when the node's `publish_plan_debug_image`
+        # param is true (off by default). See _publish_plan_image().
         self._debug_img_pub = None
 
-    def _debug_mode_enabled(self) -> bool:
-        """Whether the owning node is running in curobo debug mode.
+    def _plan_image_enabled(self) -> bool:
+        """Whether the owning node should publish the motion-plan debug image.
 
-        Publish-side knob: the motion-plan debug image is only produced while
-        ``enable_curobo_debug_mode`` is true. Off by default if the node has not
-        declared the param, matching the node's own default (False).
+        Publish-side knob: unlike the legacy ``enable_curobo_debug_mode``
+        (which raises curobo's own logging), this is an INDEPENDENT param so the
+        plan plot can be turned on without bumping curobo's log verbosity.
+        Defaults to off if the node has not declared the param.
         """
         if not getattr(self.node, 'has_parameter', None):
             return False
-        if not self.node.has_parameter('enable_curobo_debug_mode'):
+        if not self.node.has_parameter('publish_plan_debug_image'):
             return False
-        return bool(self.node.get_parameter('enable_curobo_debug_mode').value)
+        return bool(self.node.get_parameter('publish_plan_debug_image').value)
 
     def _publish_plan_image(self):
         """Publish the planned trajectory's debug plot as a latched Image.
 
-        Only runs while the node's ``enable_curobo_debug_mode`` param is true.
+        Only runs while the node's ``publish_plan_debug_image`` param is true.
         Publishes once per NEW plan (this is called from ``plan()`` on every
         successful plan) on ``/<node>/motion_plan_debug`` with a transient_local
         depth-1 QoS: the latest frame is latched for late subscribers and at
         most one frame is buffered, so bandwidth stays flat.
         """
-        if not self._debug_mode_enabled():
+        if not self._plan_image_enabled():
             return
         if self.planned_trajectory is None:
             return
