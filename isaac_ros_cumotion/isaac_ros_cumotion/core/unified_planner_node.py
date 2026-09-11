@@ -67,14 +67,18 @@ class UnifiedPlannerNode(Node):
         # code paths that read `.device` / `.dtype` from it.
         self.tensor_args = DeviceCfg(device='cuda', dtype=torch.float32)
 
-        # Serializes curobo CUDA-graph *capture* (classic first plan, MPC
-        # cold-start) against concurrent GPU work on other executor threads —
-        # notably the depth-camera callback's mapper.integrate(). A GPU op
-        # launched while a stream is capturing invalidates the capture
-        # (cudaErrorStreamCaptureInvalidated). Created before cameras/solvers so
-        # it always exists when callbacks fire. RLock: the holder thread may
-        # re-enter; a different thread (depth callback) fails the non-blocking
-        # acquire and simply skips its frame.
+        # Serializes curobo CUDA-graph *capture* against concurrent GPU work on
+        # other executor threads — notably the depth-camera callback's
+        # mapper.integrate() and the viz timer's _spheres_in_collision .cpu().
+        # A GPU op launched while a stream is capturing invalidates the capture
+        # (cudaErrorStreamCaptureUnsupported / cudaErrorStreamCaptureInvalidated).
+        # Created before cameras/solvers so it always exists when callbacks
+        # fire. RLock: the holder thread may re-enter; a different thread
+        # (depth callback) fails the non-blocking acquire and simply skips its
+        # frame.  Open-loop plans (use_cuda_graph=True) hold gpu_lock for the
+        # entire plan() call — cuRobo can re-capture GraphExecutors mid-plan
+        # (reset_shape from _prepare_goal_buffer), so the old single-shot
+        # pending-flag guard was insufficient (exit 1, 2026-09-11).
         self.gpu_lock = threading.RLock()
 
         # Callback groups for the MultiThreadedExecutor (num_threads=8): without
@@ -310,10 +314,12 @@ class UnifiedPlannerNode(Node):
         # True whenever the next call into a reactive solver may CAPTURE a CUDA
         # graph (fresh solver, or right after a release) rather than just replay
         # one. Capture is process-global — no other thread may issue ANY CUDA op
-        # while it's in progress — so callers use take_graph_capture_pending() to
-        # decide whether their next solver call needs gpu_lock. Guards only the
-        # step(s) that can actually capture; steps that only replay stay
-        # unguarded so the perception thread isn't starved. cf. debug 2026-07-28.
+        # while it's in progress — so ReactiveController._step_guard uses
+        # take_graph_capture_pending() to decide whether its next step() needs
+        # gpu_lock. Open-loop plans (generate_trajectory / execute) now ALWAYS
+        # hold gpu_lock when use_cuda_graph is on, because cuRobo can re-capture
+        # graphs mid-plan via reset_shape() (see _plan_lock docstring,
+        # 2026-09-11). cf. debug 2026-07-28.
         self._graph_capture_pending = True
         self._graph_capture_pending_lock = threading.Lock()
 
@@ -622,13 +628,10 @@ class UnifiedPlannerNode(Node):
             self.refresh_perception_world()
 
             self.get_logger().info(f"Planning with {planner.get_planner_name()}")
-            # plan() may (re)capture the MotionGen CUDA graph — hold the lock
-            # only when the plan can capture (first plan after a switch / graph
-            # release / warmup), not for every plan. Replaying a captured graph
-            # is safe to overlap with the camera's mapper.integrate(), and
-            # holding the lock for the whole optimize starved the viz
-            # publishers. _setup_planner above already set the capture-pending
-            # flag when it released/recaptured, so _plan_lock() sees it.
+            # _plan_lock() holds gpu_lock for the entire plan when CUDA graphs
+            # are enabled: cuRobo's optimizer can re-capture graphs mid-plan
+            # (reset_shape from _prepare_goal_buffer), which races with the viz
+            # timer if no lock is held (see _plan_lock docstring, 2026-09-11).
             with self._plan_lock():
                 result = planner.plan(start_state, request, config, self.robot_context)
 
@@ -939,10 +942,8 @@ class UnifiedPlannerNode(Node):
                 else:
                     self.refresh_perception_world()
                     self.get_logger().info(f"Planning with {planner.get_planner_name()}")
-                    # First plan after a switch / graph release recaptures the
-                    # CUDA graph — lock only then (see _plan_lock), not the
-                    # whole optimize, so the depth callback and viz publishers
-                    # stay live during long open-loop plans.
+                    # _plan_lock() holds gpu_lock for the entire plan when CUDA
+                    # graphs are enabled (see _plan_lock docstring, 2026-09-11).
                     with self._plan_lock():
                         result = planner.plan(start_state, goal, config, self.robot_context)
                     if not result.success:
@@ -1257,12 +1258,15 @@ class UnifiedPlannerNode(Node):
             self._graph_capture_pending = True
 
     def take_graph_capture_pending(self) -> bool:
-        """Atomically take-and-clear: True if the next solver call may capture.
+        """Atomically take-and-clear: True if the next reactive step may capture.
 
-        Callers (ReactiveController._step_guard) use this to decide whether
-        their next step() needs gpu_lock — capture is process-global (see
+        Called by ReactiveController._step_guard to decide whether its next
+        step() needs gpu_lock — capture is process-global (see
         _graph_capture_pending's docstring), replay is not. Take-and-clear
         mirrors _take_live_goal(): exactly one caller sees True per release.
+
+        Open-loop plans no longer use this — they always hold gpu_lock when
+        use_cuda_graph is on (see _plan_lock docstring, 2026-09-11).
         """
         with self._graph_capture_pending_lock:
             pending = self._graph_capture_pending
@@ -1270,20 +1274,23 @@ class UnifiedPlannerNode(Node):
             return pending
 
     def _plan_lock(self):
-        """gpu_lock only when the next open-loop plan may CAPTURE a CUDA graph.
+        """Hold gpu_lock for the entire open-loop plan when CUDA graphs are on.
 
-        Mirrors ReactiveController._step_guard: a plan that merely replays an
-        already-captured graph performs no process-global CUDA op and is safe to
-        overlap with the depth callback's mapper.integrate() and the viz
-        publishers — but the FIRST plan after a solver switch / graph release /
-        warmup re-captures, and capture is process-global (see
-        _graph_capture_pending's docstring). take_graph_capture_pending() is
-        atomic take-and-clear, so exactly one plan captures. The graph-release
-        paths (e.g. _setup_planner after an owner change) set the pending flag
-        BEFORE _plan_lock() is evaluated here, so the flag is still pending when
-        the guarded plan() runs.
+        cuRobo's optimizer can reset and re-capture its GraphExecutors mid-plan
+        (e.g. _prepare_goal_buffer → reset_shape → reset_cuda_graph when the
+        goal buffer structure changes). That re-capture is a process-global CUDA
+        op — any concurrent CPU-side CUDA call (viz timer .cpu(), depth
+        integrate) invalidates the stream and crashes the node. The original
+        single-shot pending-flag design only covered the first plan after a
+        graph release; re-captures on subsequent plans raced with the viz timer
+        (cudaErrorStreamCaptureUnsupported → exit 1, 2026-09-11).
+
+        Holding gpu_lock for the full plan() call means the depth callback and
+        viz publishers drop their frames during planning — but the data is
+        already stale (refresh_perception_world ran right before), and plans
+        finish in seconds. Correctness beats throughput.
         """
-        if self.config_wrapper_motion.use_cuda_graph and self.take_graph_capture_pending():
+        if self.config_wrapper_motion.use_cuda_graph:
             return self.gpu_lock
         return contextlib.nullcontext()
 

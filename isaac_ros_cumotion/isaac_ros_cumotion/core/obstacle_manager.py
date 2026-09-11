@@ -208,6 +208,36 @@ class ObstacleManager:
         # when cameras are added/removed or their frame rate changes — see
         # _resolve_time_decay. <= 0 disables the decay entirely.
         self._decay_half_life_s = self._declare_param('decay_half_life_s', 0.7)
+        # TSDF truncation distance (m). ~2.5-3x the TSDF voxel size keeps the
+        # signed-distance band numerically stable right at the surface.
+        self._mapper_truncation_distance = self._declare_param('mapper_truncation_distance', 0.04)
+        # Voxels per TSDF block edge (power of 2 in [2, 32]). Specializes the
+        # Warp kernel builder: a change triggers a one-time recompile.
+        self._mapper_block_size = self._declare_param('mapper_block_size', 8)
+        # ESDF surface seeding: "gather" (CUDA-graph-safe, ~1.5-voxel-thick
+        # dilated seed band) or "scatter" (exactly one ESDF voxel at the TSDF
+        # surface, but the ESDF launch runs eager - not graph-captured).
+        self._mapper_seeding_method = self._declare_param('mapper_seeding_method', 'gather')
+        # Post-process the computed ESDF: flip any free cell whose down neighbour
+        # and all four horizontal neighbours are occupied — a hole in an
+        # otherwise-solid, horizontally-extended surface. The ESDF sign kernel
+        # marks every cell whose TSDF voxel is absent/low-weight as FREE
+        # (compute_esdf_from_min_tsdf_kernel writes +edt_dist when the sampled
+        # SDF is infinite), so tabletop cells the camera never integrated
+        # (masked shadow, depth hole, surface-band sign speckle) become free
+        # "caves". This pass rewrites them to the occupied value from below.
+        # The up neighbour is deliberately NOT required to be occupied, so
+        # genuine open-top cavities (a cup, a box opening) keep their free
+        # column — only cells embedded in a solid surface are sealed.
+        self._mapper_esdf_seal_tabletop_holes = self._declare_param(
+            'mapper_esdf_seal_tabletop_holes', True)
+        # Min total TSDF weight before a block is recycled as empty.
+        self._mapper_minimum_tsdf_weight = self._declare_param('mapper_minimum_tsdf_weight', 0.1)
+        # Per-camera support pixels kept per visible block for RGB/feature
+        # integration. Only pixels feeding color/features use this buffer -
+        # TSDF geometry never does, so overflow never costs collision geometry.
+        self._mapper_max_support_pixels_per_block_camera = self._declare_param(
+            'mapper_max_support_pixels_per_block_camera', 8)
         self._warn_removed_decay_factor()
 
     def _warn_removed_decay_factor(self):
@@ -355,6 +385,11 @@ class ObstacleManager:
             image_width=self._mapper_image_width,
             depth_minimum_distance=self._mapper_depth_min,
             depth_maximum_distance=self._mapper_depth_max,
+            truncation_distance=self._mapper_truncation_distance,
+            minimum_tsdf_weight=self._mapper_minimum_tsdf_weight,
+            block_size=self._mapper_block_size,
+            seeding_method=self._mapper_seeding_method,
+            max_support_pixels_per_block_camera=self._mapper_max_support_pixels_per_block_camera,
             # decay_factor defaults to 1.0, meaning NO decay: occupancy then
             # accumulates without bound and the occupied-voxel count grows
             # monotonically even on a static scene (edge noise gradually crossing
@@ -369,7 +404,9 @@ class ObstacleManager:
         self.node.mapper = self.mapper
         self.node.get_logger().info(
             f"Mapper configured: extent={self._mapper_extent_xyz}m, "
-            f"tsdf={self._mapper_voxel_size}m, esdf={self._esdf_voxel_size}m, "
+            f"tsdf={self._mapper_voxel_size}m (trunc={self._mapper_truncation_distance}m), "
+            f"esdf={self._esdf_voxel_size}m, seeding={self._mapper_seeding_method}, "
+            f"block={self._mapper_block_size}, "
             f"image={self._mapper_image_width}x{self._mapper_image_height} "
             f"({int(num_cameras)} camera(s) feeding the shared TSDF), "
             f"decay: half_life={self._decay_half_life_s}s @ R={total_frame_rate_hz}Hz "
@@ -400,9 +437,9 @@ class ObstacleManager:
         # Every CUDA op in this node runs under gpu_lock so it cannot race a
         # CUDA graph capture (same invariant as the depth-camera callback).
         # The acquire is NON-blocking (matching the depth-callback and viz
-        # publishers): this is a 60 s statistics timer, it must not stall the
-        # executor on a long plan / capture — it simply skips this round and
-        # retries on the next tick.
+        # publishers): this is a periodic statistics timer, it must not stall
+        # the executor on a long plan / capture — it simply skips this round
+        # and retries on the next tick.
         gpu_lock = getattr(self.node, 'gpu_lock', None)
         if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
             return
@@ -416,7 +453,95 @@ class ObstacleManager:
         finally:
             if gpu_lock is not None:
                 gpu_lock.release()
-        self.node.get_logger().info(f"[mapper-stats] {stats}")
+        self._log_mapper_stats_summary(stats)
+
+    def _log_mapper_stats_summary(self, stats: dict) -> None:
+        """Render Mapper.get_stats as a readable [mapper-stats] block.
+
+        The raw dict is machine-friendly but opaque in a log. This prints the
+        same numbers grouped by concern (grid / block pool / mapper memory),
+        shows the ESDF grid dims and the process-wide CUDA memory (the figure
+        nvtop actually displays), and annotates fields that are loud but benign
+        (e.g. support-pixel overflow only degrades RGB/feature evidence).
+        """
+        log = self.node.get_logger()
+        try:
+            camera = stats.get('last_camera_integration', {}) or {}
+            n_visible = int(camera.get('num_visible_blocks', 0))
+            n_overflow = int(camera.get('support_overflow_count', 0))
+        except Exception:
+            n_visible, n_overflow = 0, 0
+
+        esdf = float(self._esdf_voxel_size or 0.0)
+        if esdf > 0.0:
+            grid_dims = tuple(int(np.ceil(e / esdf)) for e in self._mapper_extent_xyz)
+        else:
+            grid_dims = (0, 0, 0)
+
+        log.info(
+            "[mapper-stats] grid: tsdf=%.3fm esdf=%.3fm trunc=%.3fm block=%d "
+            "seeding=%s extent=%sm center=%sm esdf_dims=%s" % (
+                float(self._mapper_voxel_size), esdf, float(self._mapper_truncation_distance),
+                int(self._mapper_block_size), self._mapper_seeding_method,
+                self._mapper_extent_xyz, self._mapper_grid_center, grid_dims,
+            )
+        )
+        log.info(
+            "[mapper-stats] blocks: allocated=%d free=%d active=%d holes=%d "
+            "pool=%.2f%% fragmentation=%.1f%% hash=%.2f%% frames=%d "
+            "recycled_last=%d alloc_failures=%d" % (
+                int(stats.get('num_allocated', 0)), int(stats.get('free_count', 0)),
+                int(stats.get('active_blocks', 0)), int(stats.get('holes', 0)),
+                float(stats.get('pool_usage_pct', 0.0)), float(stats.get('fragmentation_pct', 0.0)),
+                float(stats.get('hash_load_pct', 0.0)), int(stats.get('frame_count', 0)),
+                int(stats.get('recycled_last', 0)), int(stats.get('allocation_failures', 0)),
+            )
+        )
+        log.info(
+            "[mapper-stats] mem mapper: tsdf=%.2fMB esdf=%.2fMB total=%.2fMB "
+            "(mapper's OWN tensors only - solver voxel caches, torch/warp pools "
+            "and the CUDA context are NOT included)" % (
+                float(stats.get('tsdf_memory_mb', 0.0)), float(stats.get('esdf_memory_mb', 0.0)),
+                float(stats.get('total_memory_mb', 0.0)),
+            )
+        )
+        log.info("[mapper-stats] %s" % self._process_gpu_mem_txt())
+        if n_overflow:
+            # Support pixels only feed RGB/feature integration
+            # (integrate_block_grid_rgb_kernel); TSDF geometry integrates depth
+            # directly (integrate_voxels_kernel) and never reads them, so this
+            # caps color evidence only — it cannot cause missing collision voxels.
+            # Feature integration is unused here (MapperCfg.feature_dim == 0).
+            log.info(
+                "[mapper-stats] note: support_overflow=%d on %d visible blocks "
+                "is RGB/feature-texture only; TSDF collision geometry is unaffected"
+                % (n_overflow, n_visible)
+            )
+
+    def _process_gpu_mem_txt(self) -> str:
+        """Process-wide CUDA memory, as nvtop would report it (best effort).
+
+        nvtop shows what the whole process has committed to the device
+        (CUDA context + torch's caching allocator + warp pools + solver
+        buffers). ``torch_reserved`` is the closest proxy for that figure.
+        1 MB = 1e6 bytes here to match nvtop's own MB display.
+        """
+        try:
+            if not torch.cuda.is_available():
+                return "process GPU mem: no CUDA device available"
+            dev_idx = torch.cuda.current_device()
+            name = torch.cuda.get_device_name(dev_idx)
+            free_b, total_b = torch.cuda.mem_get_info(dev_idx)
+            alloc = torch.cuda.memory_allocated(dev_idx)
+            reserved = torch.cuda.memory_reserved(dev_idx)
+            peak = torch.cuda.max_memory_reserved(dev_idx)
+            return (
+                f"mem process ({name}): free={free_b/1e6:.0f}/{total_b/1e6:.0f}MB "
+                f"torch_allocated={alloc/1e6:.0f}MB torch_reserved={reserved/1e6:.0f}MB "
+                f"torch_peak={peak/1e6:.0f}MB"
+            )
+        except Exception:
+            return "process GPU mem: query failed"
 
     def refresh_esdf(self) -> bool:
         """Recompute the ESDF from the Mapper and stage it into the Scene.
@@ -442,6 +567,10 @@ class ObstacleManager:
         # here rather than crash the whole node mid-plan.
         if not self._inspect_esdf(vg):
             return False
+        # Close free "caves" (never-integrated cells are forced free by the ESDF
+        # sign kernel) that poke through an otherwise-solid surface.
+        if self._mapper_esdf_seal_tabletop_holes:
+            self._seal_tabletop_holes(vg)
         # Single perception voxel grid in the Scene (replaces any previous one).
         self.scene.voxel = [vg]
         self._esdf_voxel_name = vg.name
@@ -555,6 +684,69 @@ class ObstacleManager:
             self.node.get_logger().warn(
                 f"ESDF inspection skipped (error: {e})", throttle_duration_sec=5.0)
             return True
+
+    def _seal_tabletop_holes(self, vg) -> int:
+        """Close free "caves" poking through an otherwise-solid surface.
+
+        A free (sdf > 0) ESDF cell whose down neighbour and all four horizontal
+        neighbours are occupied marks a hole in a horizontally-extended surface
+        (a tabletop): the camera never integrated that cell — robot-masked
+        shadow, a depth hole, or a surface-band sign speckle. CuRobo's sign
+        kernel forces any cell with an absent/low-weight TSDF voxel to FREE
+        (``compute_esdf_from_min_tsdf_kernel`` writes ``+edt_dist`` when the
+        sampled SDF is ~1e10), so those cells read as passable "caves". This
+        pass rewrites them to the occupied value of the cell directly below.
+
+        The up neighbour is deliberately ignored: a surface hole sits at the
+        bottom of a free column, so its up neighbour is free even though the
+        cell is embedded in solid. Requiring all 6 would seal nothing useful;
+        requiring only `down + 4 horizontal` keeps the free column above/inside
+        genuine open-top cavities (a cup, a box opening) intact — cells there
+        do not have all four horizontal neighbours occupied below the rim. Some
+        shallow cavity bottoms can still seal (the cell just above a cup floor
+        is surrounded by walls) — acceptable since cavities at this voxel scale
+        are handled conservatively (occupied).
+
+        Far-field free space is untouched (its neighbours are free too), cells
+        at the grid border are skipped (no confirmation), and the ESDF values
+        actually seeded in the far field are never modified. The pass mutates
+        ``vg.feature_tensor`` (the integrator's live ``_dist_field``), which the
+        next ``compute_esdf()`` fully rewrites, so it is safe between refreshes
+        and against CUDA-graph replay.
+
+        Returns the number of cells rewritten.
+        """
+        ft = getattr(vg, 'feature_tensor', None)
+        if ft is None or ft.ndim != 3:
+            return 0
+        nx, ny, nz = ft.shape
+        if nx < 3 or ny < 3 or nz < 3:
+            return 0
+        occ = ft <= 0.0
+        pos = ft > 0.0
+
+        # Neighbour-occupied masks, edge-padded with False (unconfirmed).
+        down = torch.zeros_like(occ)        # -Z (dim 2): cell z's z-1 neighbour
+        down[:, :, 1:] = occ[:, :, :-1]
+        west = torch.zeros_like(occ)        # -Y (dim 1)
+        west[:, 1:, :] = occ[:, :-1, :]
+        east = torch.zeros_like(occ)        # +Y (dim 1)
+        east[:, :ny - 1, :] = occ[:, 1:, :]
+        south = torch.zeros_like(occ)       # -X (dim 0)
+        south[1:, :, :] = occ[:nx - 1, :, :]
+        north = torch.zeros_like(occ)       # +X (dim 0)
+        north[:nx - 1, :, :] = occ[1:, :, :]
+
+        enclosed = pos & down & west & east & south & north
+        n = int(enclosed.sum().item())
+        if n > 0:
+            down_val = torch.zeros_like(ft)
+            down_val[:, :, 1:] = ft[:, :, :-1]
+            ft[enclosed] = down_val[enclosed]
+            self.node.get_logger().info(
+                f"Sealed {n} tabletop ESDF cave cell(s) into occupied",
+                throttle_duration_sec=10.0)
+        return n
 
     # ---- Services ----
 
