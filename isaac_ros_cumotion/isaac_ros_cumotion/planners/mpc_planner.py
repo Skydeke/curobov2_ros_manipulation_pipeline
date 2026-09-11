@@ -7,8 +7,8 @@ import time
 from typing import Any
 
 import torch
-from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from builtin_interfaces.msg import Duration as DurationMsg
 from visualization_msgs.msg import Marker
 
 from isaac_ros_cumotion_interfaces.msg import MpcCosts
@@ -243,9 +243,10 @@ class MPCController(ReactiveController):
         # so multiple planners don't clobber each other on the global topic,
         # matching ros_service_manager's collision_spheres/scene_obstacles.
         pub_prefix = node.get_name() + '/'
-        # Predicted end-effector path (current MPC horizon), for RViz (nav_msgs/Path
-        # renders natively, no custom plugin needed).
-        self._path_pub = node.create_publisher(Path, pub_prefix + 'mpc_predicted_path', 10)
+        # Predicted trajectory (full MPC horizon as joint states), for RViz's
+        # CuroboTrajectoryDisplay (trajectory_msgs/JointTrajectory makes the
+        # custom display animate the full robot body through the horizon).
+        self._path_pub = node.create_publisher(JointTrajectory, pub_prefix + 'mpc_predicted_path', 10)
         self._goal_marker_pub = node.create_publisher(Marker, pub_prefix + 'mpc_goal_marker', 10)
         # Cost/constraint breakdown, for live inspection via rqt_plot (each
         # named field is individually plottable). See _cost_breakdown().
@@ -369,7 +370,7 @@ class MPCController(ReactiveController):
             + [f"{deg(v):.2f}" for v in vfirst] + [f"{deg(v):.2f}" for v in vlast])
 
     def _publish_predicted_path(self, result):
-        """Publish the MPC's full predicted end-effector path for RViz.
+        """Publish the MPC's full predicted horizon as a JointTrajectory.
 
         ``result.action_sequence`` (used elsewhere to command the robot) is
         NOT the full optimized horizon: cuRobo's TrajectoryExecutionManager
@@ -377,35 +378,56 @@ class MPCController(ReactiveController):
         slice meant to be executed before the next re-plan (see
         ``get_command_sequence()``). The full horizon the optimizer actually
         reasoned over (collision costs, goal convergence, etc.) is
-        ``result.robot_state_sequence`` instead, already FK'd (untrimmed).
+        ``result.robot_state_sequence`` instead.  Its joint positions power
+        the custom CuroboTrajectoryDisplay RViz plugin, which animates the
+        full robot body through the horizon.
         """
         if getattr(self, '_path_pub', None) is None:
             return
         try:
             state_seq = getattr(result, 'robot_state_sequence', None)
-            if state_seq is not None and state_seq.tool_poses is not None:
-                ee_pos = state_seq.tool_poses.position.reshape(-1, 3).cpu().tolist()
-            else:
-                # Fallback: FK on the trimmed action_sequence (partial horizon).
-                seq = result.action_sequence
-                js = JointState.from_position(seq.position[0], joint_names=self.solver.joint_names)
-                fk = getattr(self.solver, 'compute_kinematics', None) or self.solver.kinematics.compute_kinematics
-                ee_pos = fk(js).tool_poses.position.reshape(-1, 3).cpu().tolist()
+            if state_seq is None or state_seq.position is None:
+                return
+            position = state_seq.position
+            while position.ndim > 2:
+                position = position[0]
+            if position.ndim == 1:
+                position = position.unsqueeze(0)
+            full_names = list(getattr(state_seq, 'joint_names', None) or [])
+            pos_rows = position.cpu().tolist()
+            if not pos_rows:
+                return
+
+            # Project from the solver's full joint space onto active joints by
+            # name (the solver may lock/collapse extra joints, e.g. gripper).
+            # get_active_js returns its position as [T, D], so take all rows —
+            # indexing [0] would flatten to one row and crash on iterating floats.
+            active_pos = pos_rows
+            active_names = full_names
+            try:
+                probe = JointState.from_position(pos_rows, joint_names=full_names)
+                active = self.solver.kinematics.get_active_js(probe)
+                active_names = list(active.joint_names)
+                active_pos = active.position.cpu().tolist()
+            except Exception:
+                pass
+
+            msg = JointTrajectory()
+            msg.header.frame_id = self._path_frame
+            msg.header.stamp = self.node.get_clock().now().to_msg()
+            msg.joint_names = active_names
+            dt = float(getattr(self, '_step_dt', 0.01))
+            for i, row in enumerate(active_pos):
+                pt = JointTrajectoryPoint()
+                pt.positions = [float(x) for x in row]
+                duration_ns = int(round(dt * i * 1e9))
+                pt.time_from_start = DurationMsg(
+                    sec=int(duration_ns // 1000000000),
+                    nanosec=int(duration_ns % 1000000000))
+                msg.points.append(pt)
+            self._path_pub.publish(msg)
         except Exception as e:
             self.node.get_logger().warn(f"[MPC DIAG] predicted path FK failed: {e}", throttle_duration_sec=5.0)
-            return
-        path = Path()
-        path.header.frame_id = self._path_frame
-        path.header.stamp = self.node.get_clock().now().to_msg()
-        for x, y, z in ee_pos:
-            pose = PoseStamped()
-            pose.header = path.header
-            pose.pose.position.x = x
-            pose.pose.position.y = y
-            pose.pose.position.z = z
-            pose.pose.orientation.w = 1.0
-            path.poses.append(pose)
-        self._path_pub.publish(path)
 
     def _cost_breakdown(self, result) -> dict:
         """Per-term COST and CONSTRAINT values (horizon-summed) for this solve.

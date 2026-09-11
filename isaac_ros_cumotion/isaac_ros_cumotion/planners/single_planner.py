@@ -20,9 +20,9 @@ from abc import abstractmethod
 from typing import Optional, Any
 import time
 
-from nav_msgs.msg import Path
-from geometry_msgs.msg import PoseStamped
+from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import Image as ImageMsg
+from builtin_interfaces.msg import Duration as DurationMsg
 from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
@@ -112,10 +112,11 @@ class SinglePlanner(TrajectoryPlanner):
         # Cancellation flag
         self._cancelled = False
 
-        # End-effector trajectory path visualization (RViz). Publishes the
-        # planned open-loop trajectory's EE path as a nav_msgs/Path. Gated by the
-        # node's `publish_path` ROS param (read lazily so a default always holds
-        # even if the node hasn't declared it yet).
+        # Full-joint trajectory visualization (RViz CuroboTrajectoryDisplay).
+        # Publishes the planned open-loop trajectory's joint states as a
+        # trajectory_msgs/JointTrajectory. Gated by the node's `publish_path`
+        # ROS param (read lazily so a default always holds even if the node
+        # hasn't declared it yet).
         self._path_pub = None
         self._path_frame = getattr(config_wrapper, 'base_link', None)
 
@@ -221,12 +222,14 @@ class SinglePlanner(TrajectoryPlanner):
             )
 
     def _publish_plan_path(self):
-        """Publish the planned trajectory's end-effector path as nav_msgs/Path.
+        """Publish the planned trajectory's full joint states as a JointTrajectory.
 
-        FK's every waypoint of ``self.planned_trajectory`` via the shared
-        MotionPlanner and publishes the EE tool-frame positions so the planned
-        motion can be overlaid in RViz (mirrors MPC's ``mpc_predicted_path``).
-        Gated by the node's ``publish_path`` ROS param (default True).
+        Converts every waypoint of ``self.planned_trajectory`` into a
+        ``trajectory_msgs/JointTrajectory`` with positions and velocities for
+        the ACTIVE joints (projected from the full-joint-space cuRobo plan),
+        so the custom CuroboTrajectoryDisplay RViz plugin can animate the full
+        robot body along the path.  Gated by the node's ``publish_path`` ROS
+        param (default True).
         """
         if getattr(self.node, 'has_parameter', None) and self.node.has_parameter('publish_path'):
             if not self.node.get_parameter('publish_path').value:
@@ -239,43 +242,59 @@ class SinglePlanner(TrajectoryPlanner):
                 # so multiple planners don't clobber each other on the global topic,
                 # matching ros_service_manager's collision_spheres/scene_obstacles.
                 self._path_pub = self.node.create_publisher(
-                    Path, self.node.get_name() + '/planned_path', 10)
+                    JointTrajectory, self.node.get_name() + '/planned_path', 10)
                 if self._path_frame is None:
                     self._path_frame = getattr(self.node, 'base_link', None) or 'world'
 
             traj = self.planned_trajectory
-            # traj.position is [B, T, D]; collapse to [T, D] (one row per waypoint).
-            q = traj.position
-            while q.ndim > 2:
-                q = q[0]
-            joint_names = getattr(traj, 'joint_names', None)
-            if q.ndim == 1:
-                q = q.unsqueeze(0)
-            js = JointState.from_position(q.clone(), joint_names=joint_names)
+            # traj.position is [B, T, D]; collapse to [T, D] (one row of floats
+            # per waypoint) regardless of batch rank.
+            def _to_2d_list(t):
+                if t is None:
+                    return None
+                while t.ndim > 2:
+                    t = t[0]
+                return t.detach().cpu().tolist()
+
+            pos_list = _to_2d_list(traj.position)
+            vel_list = _to_2d_list(getattr(traj, 'velocity', None))
+            if not pos_list:
+                return
 
             # The interpolated plan is in FULL joint space — when the config locks
             # a joint (e.g. a gripper finger_joint), cuRobo augments the trajectory
             # via get_full_dof_from_solution(), so D can exceed the model's active
-            # DOF. Project back onto active joints by name before FK, matching the
-            # multi-point planner's current_state handling.
-            js = self.motion_planner.kinematics.get_active_js(js)
+            # DOF. Project back onto active joints by name before publishing,
+            # matching the multi-point planner's current_state handling.
+            joint_names, cols = self._active_joint_projection(traj)
+            if cols is not None:
+                pos_list = [[r[i] for i in cols] for r in pos_list]
+                vel_list = [[r[i] for i in cols] for r in vel_list] if vel_list else None
+                joint_names = [joint_names[i] for i in cols]
 
-            # FK all waypoints in one batched call; tool_poses: [T, 1, L, 3].
-            kin = self.motion_planner.compute_kinematics(js)
-            ee_pos = kin.tool_poses.position[:, 0, 0, :].cpu().tolist()
+            dt = 0.025
+            if getattr(self.node, 'has_parameter', None) and self.node.has_parameter(
+                'interpolation_dt'
+            ):
+                dt = float(self.node.get_parameter('interpolation_dt').value)
+            if dt <= 0:
+                dt = 0.025
 
-            path = Path()
-            path.header.frame_id = self._path_frame
-            path.header.stamp = self.node.get_clock().now().to_msg()
-            for x, y, z in ee_pos:
-                ps = PoseStamped()
-                ps.header = path.header
-                ps.pose.position.x = float(x)
-                ps.pose.position.y = float(y)
-                ps.pose.position.z = float(z)
-                ps.pose.orientation.w = 1.0
-                path.poses.append(ps)
-            self._path_pub.publish(path)
+            msg = JointTrajectory()
+            msg.header.frame_id = self._path_frame
+            msg.header.stamp = self.node.get_clock().now().to_msg()
+            msg.joint_names = joint_names
+            for i, row in enumerate(pos_list):
+                pt = JointTrajectoryPoint()
+                pt.positions = [float(x) for x in row]
+                if vel_list is not None and i < len(vel_list):
+                    pt.velocities = [float(x) for x in vel_list[i]]
+                duration_ns = int(round(float(dt) * i * 1e9))
+                pt.time_from_start = DurationMsg(
+                    sec=int(duration_ns // 1000000000),
+                    nanosec=int(duration_ns % 1000000000))
+                msg.points.append(pt)
+            self._path_pub.publish(msg)
         except Exception as e:
             self.node.get_logger().warn(
                 f"{self.get_planner_name()}: failed to publish planned path: {e}",

@@ -1,4 +1,4 @@
-Cmake_minimum_required(VERSION 3.8)
+cmake_minimum_required(VERSION 3.8)
 project(isaac_ros_cumotion_rviz)
 
 # Default to C99
@@ -35,6 +35,7 @@ set(dependencies_pkgs
   isaac_ros_cumotion_interfaces
   rviz_common
   rviz_rendering
+  rviz_default_plugins
   Qt5Core
   Qt5Gui
   Qt5Widgets
@@ -42,6 +43,11 @@ set(dependencies_pkgs
   visualization_msgs
   interactive_markers
   nav2_msgs
+  sensor_msgs
+  trajectory_msgs
+  urdf
+  eigen3_cmake_module
+  Eigen3
 )
 
 foreach(pkg IN LISTS dependencies_pkgs)
@@ -60,6 +66,9 @@ set(${PROJECT_NAME}_SRCS
   src/arrow_interaction.cpp
   src/arrow_interaction_display.cpp
   src/sparse_voxel_grid_display.cpp
+  src/curobo_trajectory_display.cpp
+  src/curobo_fk.cpp
+  src/curobo_link_updater.cpp
 )
 
 # Define header file
@@ -71,6 +80,9 @@ set(${PROJECT_NAME}_HDRS
   include/${PROJECT_NAME}/arrow_interaction_display.hpp
   include/${PROJECT_NAME}/sparse_voxel_grid_display.hpp
   include/${PROJECT_NAME}/node_spinner.hpp
+  include/${PROJECT_NAME}/curobo_trajectory_display.hpp
+  include/${PROJECT_NAME}/curobo_fk.hpp
+  include/${PROJECT_NAME}/curobo_link_updater.hpp
 )
 
 # Define ui file
@@ -88,7 +100,8 @@ add_library(${library_name} SHARED
   ${${PROJECT_NAME}_UIS_H}
   ${${PROJECT_NAME}_MOCS} 
 )
-target_link_libraries(${library_name} Qt5::Widgets rviz_common::rviz_common)
+target_link_libraries(${library_name} Qt5::Widgets rviz_common::rviz_common rviz_default_plugins::rviz_default_plugins urdf::urdf
+  Eigen3::Eigen)
 ament_target_dependencies(${library_name} ${dependencies_pkgs})
 
 # I prefer the Qt signals and slots to avoid defining "emit", "slots",

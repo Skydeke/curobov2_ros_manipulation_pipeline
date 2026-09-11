@@ -32,4 +32,11 @@
     <message_type>isaac_ros_cumotion_interfaces/msg/SparseVoxelGrid</message_type>
   </class>
 
+  <class name="isaac_ros_cumotion_rviz/CuroboTrajectoryDisplay"
+        type="isaac_ros_cumotion_rviz::CuroboTrajectoryDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Visualise a cuRobo JointTrajectory as an animated full-robot model with optional ghost trail.</description>
+    <message_type>trajectory_msgs/msg/JointTrajectory</message_type>
+  </class>
+
 </library>
