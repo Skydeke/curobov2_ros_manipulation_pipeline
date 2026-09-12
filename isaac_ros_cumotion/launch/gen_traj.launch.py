@@ -202,17 +202,19 @@ def launch_setup(context, *args, **kwargs):
         ),
 
         # Trajectory preview pipeline (the translucent ghost robot in RViz).
-        # /trajectory/joint_states is published by no node in this repository:
-        # it comes from the trajectory_preview/TrajectoryPreviewPanel RViz panel
-        # (rviz/rviz_curobo.rviz), which replays the /trajectory that
-        # GhostStrategy publishes. It only looks orphaned -- do not "fix" it.
+        # /<planner_node>/trajectory/joint_states is published by no node in
+        # this repository: it comes from the trajectory_preview/
+        # TrajectoryPreviewPanel RViz panel (rviz/rviz_curobo.rviz), which
+        # replays the ghost strategy's namespaced JointTrajectory topic
+        # (e.g. /curobo_trajectory_planner/trajectory) that GhostStrategy
+        # publishes. It only looks orphaned -- do not "fix" it.
         RosNode(
             package='joint_state_publisher',
             executable='joint_state_publisher',
             namespace='preview',
             condition=IfCondition(LaunchConfiguration('gui')),
             parameters=[{
-                'source_list': ['/trajectory/joint_states'],
+                'source_list': ['/curobo_trajectory_planner/trajectory/joint_states'],
             }]
         ),
 

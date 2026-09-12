@@ -8,20 +8,21 @@ tests, and launch configs).
 - [x] SendTrajectory.action   -- unified_planner_node, single_planner, reactive_controller, isaac_ros_cumotion_rviz, mpc_viser_node, test_test_planners
 - [ ] DataGeneration.action   -- NOT used anywhere
 
-## Messages (used: 4 / 7)
+## Messages (used: 5 / 7)
 - [x] Goalset.msg             -- TrajectoryGeneration.srv / SendTrajectory.action, mp_viser_node, mpc_viser_node, grasp_orchestrator, cumotion_service_client, isaac_ros_cumotion_rviz
 - [x] ObjectParameters.msg    -- isaac_ros_cumotion_rviz (add_objects_display/panel)
 - [x] SparseVoxelGrid.msg     -- obstacle_manager, ros_service_manager, isaac_ros_cumotion_rviz (sparse_voxel_grid_display)
 - [x] MpcCosts.msg            -- mpc_planner (publisher)
+- [x] ReachabilityMetrics.msg -- isaac_ros_cumotion_rviz (reachability_map_display), reachability_services (GenerateRM response)
 - [ ] GpuVoxelTensor.msg      -- NOT used anywhere
 - [ ] MpcStepDiagnostics.msg  -- NOT used anywhere
-- [ ] ReachabilityMetrics.msg -- NOT used anywhere
 
-## Services (used: 19 / 22)
+## Services (used: 20 / 22)
 - [x] AddObject.srv           -- obstacle_manager, ros_service_manager, cumotion_service_client, rviz add_objects
 - [x] AttachObject.srv        -- attachment_services, test_test_object
 - [x] Fk.srv                  -- fk_services, fk_viser_node
 - [x] FkBatch.srv             -- fk_services
+- [x] GenerateRM.srv          -- reachability_services (curobo_server), isaac_ros_cumotion_rviz (reachability_map_display)
 - [x] GetCollisionDistance.srv-- config_wrapper, config_wrapper_motion, ros_service_manager
 - [x] GetPlanners.srv         -- unified_planner_node, planner_factory, reactive_controller
 - [x] GetRobotStrategies.srv  -- ros_service_manager, robot_context, rviz
@@ -38,11 +39,10 @@ tests, and launch configs).
 - [x] WarmupFK.srv            -- fk_services, fk_viser_node
 - [x] WarmupIK.srv            -- ik_services, ik_viser_node
 - [ ] Collisions.srv          -- NOT used anywhere
-- [ ] GenerateRM.srv          -- NOT used anywhere (reachability-map feature not wired in)
 - [ ] SceneGenerator.srv      -- NOT used anywhere
 
 ## Summary
-- Used: 1 action, 4 messages, 19 services (24 total)
-- Unused: 1 action, 3 messages, 3 services (7 total)
-    DataGeneration, GpuVoxelTensor, MpcStepDiagnostics, ReachabilityMetrics,
-    Collisions, GenerateRM, SceneGenerator
+- Used: 1 action, 5 messages, 20 services (26 total)
+- Unused: 1 action, 2 messages, 2 services (5 total)
+    DataGeneration, GpuVoxelTensor, MpcStepDiagnostics,
+    Collisions, SceneGenerator

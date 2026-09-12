@@ -46,7 +46,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GetRobotStrategies.srv"
   "srv/WarmupIK.srv"
   "srv/WarmupFK.srv"
+  "srv/GenerateRM.srv"
   "msg/MpcCosts.msg"
+  "msg/ReachabilityMetrics.msg"
   DEPENDENCIES geometry_msgs nav2_msgs sensor_msgs std_msgs trajectory_msgs moveit_msgs
 )
 

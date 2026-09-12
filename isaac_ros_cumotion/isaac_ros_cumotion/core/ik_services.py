@@ -16,6 +16,8 @@ v2 notes:
 - load_from_robot_config(...) replaced by Cfg.create(robot=<yaml_path>, scene_model=<Scene>, ...).
 """
 
+import threading
+
 import torch
 import std_msgs.msg
 from sensor_msgs.msg import JointState
@@ -45,6 +47,13 @@ class IKServices:
 
         self._ik_solver: InverseKinematics | None = None
         self._ik_batch_size: int = 0  # 0 = not yet warmed up
+        self._ik_num_seeds: int = 0  # seeds of the current solver (0 = unset)
+
+        # Serializes solves on the single shared solver: /ik, /ik_batch and the
+        # reachability service (/generate_rm) can all arrive from different
+        # executor threads — a second solve_pose() (or a reinit for a different
+        # batch size) racing the first would corrupt the solver's state.
+        self._solve_lock = threading.Lock()
 
         # Device / dtype resolved from config_wrapper (set by RobotModelManager).
         self._device = getattr(config_wrapper, "_device", torch.device("cuda"))
@@ -147,29 +156,32 @@ class IKServices:
         """
         if self._ik_solver is None:
             return
-        self._init(max(1, self._ik_batch_size))
+        self._init(max(1, self._ik_batch_size), num_seeds=max(1, self._ik_num_seeds))
         self._node.get_logger().info("IKServices: solver rebuilt after cache change")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _init(self, batch_size: int):
-        """Create (or recreate) the IK solver for the given batch size."""
+    def _init(self, batch_size: int, num_seeds: int = 20):
+        """Create (or recreate) the IK solver for the given batch size/seeds."""
         # Primitives only at construction; update_world() pushes the perception
         # layer by copy afterwards. See primitives_only_scene().
         scene = self._config.obstacle_manager.primitives_only_scene()
 
         self._node.get_logger().info(
-            f"Initializing IK solver (batch_size={batch_size})..."
+            f"Initializing IK solver (batch_size={batch_size}, num_seeds={num_seeds})..."
         )
 
         # Single shared curobo kinematic from RobotModelManager (one URDF
         # parse for the whole node) — do not re-build from the YAML path.
+        # num_seeds runs that many parallel optimisation trajectories per
+        # pose in the batch, so GPU memory grows with batch x seeds. All
+        # callers use the same seed count (see solve_poses default).
         cfg = InverseKinematicsCfg.create(
             robot=self._config.robot_model_manager.robot_cfg,
             scene_model=scene,
-            num_seeds=20,
+            num_seeds=num_seeds,
             position_tolerance=0.005,
             orientation_tolerance=0.05,
             self_collision_check=True,
@@ -179,6 +191,7 @@ class IKServices:
         )
         self._ik_solver = InverseKinematics(cfg)
         self._ik_batch_size = batch_size
+        self._ik_num_seeds = num_seeds
 
         # Warmup: solve a batch of random configs to prime CUDA kernels.
         q_sample = self._ik_solver.sample_configs(batch_size)
@@ -195,25 +208,31 @@ class IKServices:
 
         self._node.get_logger().info("IK solver ready")
 
-    def _solve(self, poses):
+    def _solve(self, poses, num_seeds: int = 20):
         """
         Solve IK for a list of geometry_msgs/Pose.
-        Reinitializes the solver if the batch size has changed.
+        Reinitializes the solver if the batch size or seed count has changed.
         Returns (success: bool, result).
         """
-        if not poses:
-            self._node.get_logger().error("IK: empty pose list")
-            return False, None
+        with self._solve_lock:
+            if not poses:
+                self._node.get_logger().error("IK: empty pose list")
+                return False, None
+            return self._solve_locked(poses, num_seeds)
+
+    def _solve_locked(self, poses, num_seeds: int = 20):
+        """Must run with ``_solve_lock`` held (see ``_solve``)."""
 
         n = len(poses)
-        if n != self._ik_batch_size:
+        if n != self._ik_batch_size or num_seeds != self._ik_num_seeds:
             try:
-                self._init(n)
+                self._init(n, num_seeds=num_seeds)
             except Exception as e:
                 self._node.get_logger().error(
-                    f"IK reinit for batch_size={n} failed: {e}"
+                    f"IK reinit for batch_size={n}, num_seeds={num_seeds} failed: {e}"
                 )
                 self._ik_batch_size = 0
+                self._ik_num_seeds = 0
                 return False, None
 
         # v2 Pose quaternion is wxyz; ROS geometry_msgs is xyzw.
@@ -236,13 +255,46 @@ class IKServices:
             result = self._ik_solver.solve_pose(goal_tool_poses=goal)
         except Exception:
             try:
-                self._init(n)
+                self._init(n, num_seeds=num_seeds)
                 result = self._ik_solver.solve_pose(goal_tool_poses=goal)
             except Exception as e:
                 self._node.get_logger().error(f"IK solve failed: {e}")
                 self._ik_batch_size = 0
+                self._ik_num_seeds = 0
                 return False, None
 
         if self._node.torch_sync_enabled():
             torch.cuda.synchronize()
         return True, result
+
+    def solve_poses(self, poses, num_seeds: int = 20):
+        """Batch IK for a list of geometry_msgs/Pose (programmatic API).
+
+        Convenience wrapper used by the reachability service: returns the
+        solved joint positions and per-pose convergence flags without building
+        ROS service responses.
+
+        ``num_seeds`` controls the solver's seed count and defaults to the
+        same value as the interactive /ik services so the reachability map
+        gets identical solve quality. Note it scales VRAM as batch x seeds.
+
+        Returns (ok, positions, ok_flags, joint_names) where ``ok`` is False if
+        the solver could not be (re)initialised for this batch size;
+        ``positions[i]`` is the first-seed solved joint vector for pose ``i``;
+        ``ok_flags[i]`` is True only when pose ``i`` converged (failed cells
+        keep their raw value); ``joint_names`` is the active joint list ([] if
+        the solver is unavailable).
+        """
+        n = len(poses)
+        if n == 0:
+            return False, None, [], []
+
+        ok, result = self._solve(list(poses), num_seeds=num_seeds)
+        if not ok:
+            return False, None, [False] * n, []
+
+        sol = result.solution.detach().cpu().numpy()  # [B, seeds, D]
+        suc = result.success.detach().cpu().numpy()   # [B, seeds]
+        positions = [sol[i][0].tolist() for i in range(n)]
+        flags = [bool(suc[i][0]) for i in range(n)]
+        return True, positions, flags, list(self._ik_solver.kinematics.joint_names)

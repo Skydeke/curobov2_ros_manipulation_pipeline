@@ -1,5 +1,26 @@
-float64 resolution
-int32 batch_size
+# Reachability-map request: solve a uniform grid of IK goals on a plane.
+#
+# The plane is described by its pose (position + orientation quaternion
+# plane_orientation_*) and extents. grid_size_x cells span plane_size_x along
+# the plane's local X axis and grid_size_y cells span plane_size_y along its
+# local Y axis, centred on the pose. Every cell is solved with the exact plane
+# orientation (positions vary, orientation is constant), which keeps the tool
+# oriented the same at every grid point.
+float64 plane_position_x
+float64 plane_position_y
+float64 plane_position_z
+float64 plane_orientation_x
+float64 plane_orientation_y
+float64 plane_orientation_z
+float64 plane_orientation_w
+float64 plane_size_x
+float64 plane_size_y
+uint32 grid_size_x
+uint32 grid_size_y
 ---
+# Solver outcome. On a solver failure `success` is false, `message` explains,
+# and `metrics.goals` still carries the requested grid (all cells marked
+# unsolved) so a viewer can show geometry even on failure.
+ReachabilityMetrics metrics
 bool success
 string message

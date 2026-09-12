@@ -9,8 +9,11 @@ class GhostStrategy(JointCommandStrategy):
 
     def __init__(self, node, dt, description=None):
         super().__init__(node, dt, description)
-        # create a publisher
-        self.pub_command = node.create_publisher(JointTrajectory, 'trajectory', 10)
+        # create a publisher (namespaced under the owning node, e.g.
+        # /curobo_server/trajectory) so the preview topic always lives with
+        # the planner it tracks -- matching the <node>/planned_path pattern.
+        self.pub_command = node.create_publisher(
+            JointTrajectory, node.get_name() + '/trajectory', 10)
         # self.dt (base class) is already the resolved interpolation_dt —
         # curobo_ros is the single authority on trajectory pacing (see
         # resolve_interpolation_dt). The RViz preview now plays back at the

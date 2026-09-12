@@ -112,14 +112,14 @@ classDiagram
     JointCommandStrategy <|-- JointPoseStrategy
     class GhostStrategy {
         always-on RViz preview
-        publishes /trajectory
+        publishes /<node>/trajectory
     }
 ```
 
 - `EmulatorStrategy` — simulates the robot, publishes `/emulator/joint_states`.
 - `JointSpeedStrategy` — streams `JointTrajectory` with velocities to a real robot bridge (topics from the deployment repo's descriptor), with a hard acceleration clamp and real velocity feedback.
 - `JointPoseStrategy` — streams positions only.
-- `GhostStrategy` — not switchable; always publishes the planned trajectory on `/trajectory` for the RViz preview robot (namespace `preview/`).
+- `GhostStrategy` — not switchable; always publishes the planned trajectory on `<node>/trajectory` (namespaced under the planner node, e.g. `/curobo_server/trajectory`) for the RViz preview robot (namespace `preview/`).
 
 `RobotContext` (`curobo_ros/robot/robot_context.py`) enforces a strict lock order (`gpu_lock > strategy_lock > buffer_lock`) and uses buffer epochs to refuse superseded trajectories.
 

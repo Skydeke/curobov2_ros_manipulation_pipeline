@@ -254,7 +254,7 @@ ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/Sen
 | `/unified_planner/scene_obstacles` | `visualization_msgs/MarkerArray` | every 2 s | Markers for all scene obstacles |
 | `/unified_planner/collision_spheres` | `visualization_msgs/MarkerArray` | every 2 s, **off by default** | Robot collision spheres (enable with `set_collision_spheres_enabled`) |
 | `/unified_planner/voxel_grid_sparse` | `curobo_msgs/msg/SparseVoxelGrid` | `sparse_voxel_publish_rate` (default 7 Hz, ≤0 disables) | Occupied voxel indices of the perception layer |
-| `/trajectory` | `trajectory_msgs/JointTrajectory` | on plan | Ghost/preview trajectory for RViz |
+| `<node>/trajectory` | `trajectory_msgs/JointTrajectory` | on plan | Ghost/preview trajectory for RViz, namespaced under the planner node (e.g. `/curobo_server/trajectory`) |
 | `/mpc_predicted_path` | `nav_msgs/Path` | MPC active | Predicted end-effector path over the horizon |
 | `/mpc_goal_marker` | `visualization_msgs/Marker` | MPC active | Current MPC goal |
 | `/mpc_costs` | `curobo_msgs/msg/MpcCosts` | MPC active | Per-step cost and constraint breakdown |

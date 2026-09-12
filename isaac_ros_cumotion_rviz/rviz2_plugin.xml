@@ -39,4 +39,10 @@
     <message_type>trajectory_msgs/msg/JointTrajectory</message_type>
   </class>
 
+  <class name="isaac_ros_cumotion_rviz/ReachabilityMapDisplay"
+        type="isaac_ros_cumotion_rviz::ReachabilityMapDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Solve and visualise a reachability map on a configurable plane using the curobo_server GenerateRM service.</description>
+  </class>
+
 </library>

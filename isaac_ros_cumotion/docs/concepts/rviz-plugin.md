@@ -60,7 +60,7 @@ Known limitations (from the plugin's own roadmap): no preview before adding, no 
 
 ### Trajectory preview
 
-Planned trajectories are replayed by a translucent "preview" robot (namespace `preview/`), fed by the `/trajectory` topic through the ghost strategy. This happens for every plan, regardless of whether you execute it.
+Planned trajectories are replayed by a translucent "preview" robot (namespace `preview/`), fed by the ghost strategy's namespaced topic (`<node>/trajectory`, e.g. `/curobo_server/trajectory`). This happens for every plan, regardless of whether you execute it.
 
 ![Trajectory preview](img/trajectory_preview.png)
 

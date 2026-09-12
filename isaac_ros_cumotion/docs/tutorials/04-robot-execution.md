@@ -37,7 +37,7 @@ Same wiring as `joint_speed` but streams positions only. For drivers without a v
 
 ### The ghost preview (always on)
 
-Independently of the active strategy, every plan is published on `/trajectory` and replayed by the translucent preview robot (namespace `preview/`) in RViz. It is not a strategy you select — it is always there, and it never moves hardware.
+Independently of the active strategy, every plan is published on `<node>/trajectory` (namespaced under the planner node, e.g. `/curobo_server/trajectory`) and replayed by the translucent preview robot (namespace `preview/`) in RViz. It is not a strategy you select — it is always there, and it never moves hardware.
 
 ## Switching strategies at runtime
 

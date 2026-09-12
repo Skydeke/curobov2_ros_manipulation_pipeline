@@ -67,6 +67,7 @@ set(${PROJECT_NAME}_SRCS
   src/arrow_interaction_display.cpp
   src/sparse_voxel_grid_display.cpp
   src/curobo_trajectory_display.cpp
+  src/reachability_map_display.cpp
   src/curobo_fk.cpp
   src/curobo_link_updater.cpp
 )
@@ -81,6 +82,7 @@ set(${PROJECT_NAME}_HDRS
   include/${PROJECT_NAME}/sparse_voxel_grid_display.hpp
   include/${PROJECT_NAME}/node_spinner.hpp
   include/${PROJECT_NAME}/curobo_trajectory_display.hpp
+  include/${PROJECT_NAME}/reachability_map_display.hpp
   include/${PROJECT_NAME}/curobo_fk.hpp
   include/${PROJECT_NAME}/curobo_link_updater.hpp
 )

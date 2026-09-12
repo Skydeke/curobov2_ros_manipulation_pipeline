@@ -25,6 +25,11 @@ import threading
 import time
 import traceback
 
+# PyTorch allocator hint recommended by the OOM errors themselves: reduces
+# VRAM fragmentation on the 7.65 GiB cards this stack runs on. Must be set
+# before the first CUDA allocation, so before rclpy/torch/curobo import here.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import rclpy
 import torch
 from rclpy.action import ActionServer
@@ -50,6 +55,7 @@ from isaac_ros_cumotion.core.collision_distance import (
 from isaac_ros_cumotion.core.attachment_services import AttachmentServices
 from isaac_ros_cumotion.core.ik_services import IKServices
 from isaac_ros_cumotion.core.fk_services import FKServices
+from isaac_ros_cumotion.core.reachability_services import ReachabilityServices
 from isaac_ros_cumotion.core.robot_segmentation import RobotSegmentation
 from isaac_ros_cumotion.planners import (
     PlannerFactory,
@@ -406,6 +412,10 @@ class UnifiedPlannerNode(Node):
 
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_motion)
+
+        # Reachability map (uniform grid IK on a plane) — reuses the IK solver.
+        self.reachability_services = ReachabilityServices(
+            self, self.config_wrapper_motion, self.ik_services)
 
         # FK — needs the robot YAML (geometry) and the shared Scene (batch
         # collision validation for FkBatch).
