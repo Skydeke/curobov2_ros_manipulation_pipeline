@@ -223,10 +223,6 @@ class UnifiedPlannerNode(Node):
         # default. Disable at launch if a live CUDA-graph capture is wanted with
         # no competing visualization traffic.
         self.declare_parameter('publish_collision_spheres', True)
-        # Publish the planned open-loop trajectory's end-effector path
-        # (nav_msgs/Path on /planned_path) for RViz. Mirrors MPC's
-        # mpc_predicted_path for the open-loop planners.
-        self.declare_parameter('publish_path', True)
         # Publish the motion-plan debug image (joint-trajectory pos/vel/acc/jerk
         # plot as an RGB Image on /<node>/motion_plan_debug). Independent of
         # enable_curobo_debug_mode; off by default. See

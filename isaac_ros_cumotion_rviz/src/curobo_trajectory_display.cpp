@@ -387,9 +387,10 @@ void CuroboTrajectoryDisplay::update(float wall_dt, float ros_dt)
   }
 
   // Promote a pending trajectory whenever one is available — even mid-animation.
-  // cuRobo publishes each plan exactly once on /planned_path, so the next plan
-  // can arrive while the previous one is still playing.  Without this the
-  // display would only ever show the very first plan.
+  // The ghost preview strategy publishes each plan exactly once on
+  // <node>/trajectory, so the next plan can arrive while the previous one is
+  // still playing.  Without this the display would only ever show the very
+  // first plan.
   bool promoted = false;
   {
     std::lock_guard<std::mutex> lock(trajectory_mutex_);

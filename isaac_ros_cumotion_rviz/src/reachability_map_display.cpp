@@ -244,9 +244,17 @@ void ReachabilityMapDisplay::onInitialize()
     gizmo_client_->setResetCallback(
       std::bind(&ReachabilityMapDisplay::gizmoResetCallback, this));
     gizmo_client_->setStatusCallback(
-      std::bind(
-        &ReachabilityMapDisplay::gizmoStatusCallback, this,
+      std::bind(&ReachabilityMapDisplay::gizmoStatusCallback, this,
         std::placeholders::_1, std::placeholders::_2));
+  }
+
+  // The base Display only toggles scene-node visibility when the Enabled
+  // checkbox changes, and the box starts unchecked, so a display loaded with
+  // "Enabled: false" short-circuits in Display::load() and the content built
+  // above would render anyway. Match the box now; later enable/disable goes
+  // through onEnableChanged()/onEnable()/onDisable() like any other display.
+  if (!isEnabled()) {
+    scene_node_->setVisible(false);
   }
 }
 

@@ -24,8 +24,10 @@ an in-node MotionPlanner):
 - "Move" (green)  -> Classic single-pose plan toward the goal gizmo,
 - "Grasp" (blue)  -> MultiPoint approach->grasp->lift plan toward the gizmo.
 
-The returned trajectory is animated in the viewer and rendered as a
-joint-trajectory plot in the GUI panel.
+The returned trajectory is animated in the viewer; the joint-trajectory plot
+image in the GUI panel is NOT computed locally — the node enables the server's
+``publish_plan_debug_image`` param and displays the latched ``/<node>/motion_plan_debug``
+image the server publishes per plan.
 """
 
 import math
@@ -33,8 +35,12 @@ import numpy as np
 
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.task import Future
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import SetParameters
 from geometry_msgs.msg import Pose
+from sensor_msgs.msg import Image as ImageMsg
 from sensor_msgs.msg import JointState
 
 from isaac_ros_cumotion_interfaces.srv import SetPlanner, TrajectoryGeneration
@@ -103,6 +109,22 @@ class MpViserNode(Node):
         self._set_planner_client = self.create_client(
             SetPlanner, f'{prefix}/set_planner'
         )
+        self._set_params_client = self.create_client(
+            SetParameters, f'{prefix}/set_parameters'
+        )
+
+        # The server publishes the plan plot on /<node>/motion_plan_debug with a
+        # transient_local (latched) depth-1 QoS, so a matching latched subscription
+        # keeps the GUI panel in sync without consuming extra bandwidth.
+        latched = QoSProfile(
+            depth=1,
+            history=HistoryPolicy.KEEP_LAST,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            reliability=ReliabilityPolicy.RELIABLE,
+        )
+        self._plot_image_sub = self.create_subscription(
+            ImageMsg, f'{prefix}/motion_plan_debug', self._on_plan_image, latched
+        )
 
         self._js_sub = self.create_subscription(
             JointState, '/joint_states', self._on_js, 10
@@ -127,6 +149,7 @@ class MpViserNode(Node):
 
         self.get_logger().info('MpViserNode ready - waiting for trajectory service')
         start_service_poll(self, self._traj_client, self._on_service_ready)
+        start_service_poll(self, self._set_params_client, self._on_params_ready)
 
     # ------------------------------------------------------------------
     # Viser UI
@@ -279,6 +302,32 @@ class MpViserNode(Node):
         self._ready = True
         self.get_logger().info('TrajectoryGeneration service is up')
 
+    def _on_params_ready(self, client):
+        """Enable the server's ``publish_plan_debug_image`` param so it publishes
+        the per-plan joint-trajectory plot on ``/<node>/motion_plan_debug`` for
+        the GUI panel (no local re-compute of the plot)."""
+        req = SetParameters.Request()
+        param = Parameter()
+        param.name = 'publish_plan_debug_image'
+        param.value = ParameterValue(
+            type=ParameterType.PARAMETER_BOOL, bool_value=True
+        )
+        req.parameters = [param]
+        fut = client.call_async(req)
+        fut.add_done_callback(self._on_params_set)
+
+    def _on_params_set(self, future: Future):
+        try:
+            resp = future.result()
+            ok = bool(resp.results and resp.results[0].successful)
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().error(f'Could not enable plan debug image: {exc}')
+            return
+        if ok:
+            self.get_logger().info('publish_plan_debug_image = true on server')
+        else:
+            self.get_logger().warn('Server rejected publish_plan_debug_image')
+
     def _on_planner_switched(self, future: Future):
         build = getattr(self, '_pending_build', None)
         self._pending_build = None
@@ -335,9 +384,6 @@ class MpViserNode(Node):
         self.get_logger().debug(f'{self._mode} plan - {len(trajectory)} waypoints, dt={resp.dt}')
         self._set_status(f'{self._mode} OK - {len(trajectory)} waypoints')
         self._animate_trajectory(trajectory)
-        title = (f'{self._mode} Plan  |  {len(trajectory) * resp.dt:.2f}s   '
-                 f'({len(trajectory)} waypoints)')
-        self._plot_trajectory(trajectory, resp.dt, title)
 
     def _animate_trajectory(self, waypoints):
         """Move the viser robot through the returned joint waypoints."""
@@ -360,91 +406,48 @@ class MpViserNode(Node):
                 self._viz, list(js.position)[: len(self._joint_names)], self._joint_names
             )
 
-    def _plot_trajectory(self, waypoints, dt, title=''):
-        """Render a joint trajectory plot as a PNG image in the viser GUI.
+    def _on_plan_image(self, msg: ImageMsg):
+        """Display the server-published plan plot in the GUI panel.
 
-        Mirrors cuRobo's ``motion_planning.py`` plot: stacked Position /
-        Velocity / Accel / Jerk panels using the real joint names, shown in a
-        GUI image panel.
+        The server renders the joint-trajectory plot from the actual cuRobo
+        trajectory (``/<node>/motion_plan_debug``, latched rgb8); this node
+        only decodes and shows it -- no local re-compute.
         """
         try:
-            import matplotlib
-            matplotlib.use('Agg')
-            import matplotlib.pyplot as plt
-            import io
-            from PIL import Image
+            if msg.encoding not in ('rgb8', 'bgr8'):
+                self.get_logger().debug(
+                    f'Unsupported plan-image encoding: {msg.encoding}'
+                )
+                return
+            if not msg.height or not msg.width or not msg.data:
+                return
+            img = np.frombuffer(msg.data, dtype=np.uint8).reshape(
+                msg.height, msg.width, int(msg.step // msg.width)
+            )
+            if img.shape[2] < 3:
+                return
+            img = img[:, :, :3]
+            if msg.encoding == 'bgr8':
+                img = img[:, :, ::-1].copy()
         except Exception as exc:  # noqa: BLE001
-            self.get_logger().warn(f'Could not import plotting: {exc}')
+            self.get_logger().warn(f'Could not decode plan image: {exc}')
             return
+        self._render_plan_image(img)
 
-        n = len(waypoints)
-        if not n:
-            return
-        dof = len(self._joint_names)
-        t = np.arange(n) * dt
-
-        pos = np.zeros((n, dof))
-        vel = np.zeros((n, dof))
-        acc = np.zeros((n, dof))
-        jrk = np.zeros((n, dof))
-        for i, js in enumerate(waypoints):
-            p = np.asarray(js.position)
-            v = np.asarray(js.velocity) if len(js.velocity) else np.zeros(len(p))
-            pos[i, : min(dof, len(p))] = p[:dof]
-            vel[i, : min(dof, len(v))] = v[:dof]
-
-        d = max(dt, 1e-6)
-        if not np.any(vel):
-            vel = np.diff(pos, axis=0, prepend=pos[:1]) / d
-        acc = np.diff(vel, axis=0, prepend=vel[:1]) / d
-        jrk = np.diff(acc, axis=0, prepend=acc[:1]) / d
-
-        names = self._joint_names
-        plot_data = [
-            (pos, 'Position (rad)'),
-            (vel, 'Velocity (rad/s)'),
-            (acc, 'Accel (rad/s^2)'),
-            (jrk, 'Jerk (rad/s^3)'),
-        ]
-
-        n_plots = len(plot_data)
-        fig, axes = plt.subplots(n_plots, 1, figsize=(6, 2 * n_plots), dpi=100, sharex=True)
-        if n_plots == 1:
-            axes = [axes]
-
-        for ax, (data, ylabel) in zip(axes, plot_data):
-            for j in range(dof):
-                label = names[j] if j < len(names) else f'J{j}'
-                if len(label) > 10:
-                    label = label[:8] + '..'
-                ax.plot(t, data[:, j], linewidth=1.2, label=label)
-            ax.set_ylabel(ylabel, fontsize=9)
-            ax.grid(True, alpha=0.3)
-            ax.tick_params(labelsize=8)
-
-        axes[0].legend(loc='upper right', fontsize=7, ncol=2)
-        axes[-1].set_xlabel('Time (s)', fontsize=9)
-        if title:
-            fig.suptitle(title, fontsize=11, fontweight='bold')
-        fig.tight_layout()
-
-        buf = io.BytesIO()
-        fig.savefig(buf, format='png')
-        plt.close(fig)
-        buf.seek(0)
-        img = np.array(Image.open(buf).convert('RGB'))
-
+    def _render_plan_image(self, img):
+        """Put the decoded plan plot image into the viser GUI panel."""
         server = getattr(self._viz, '_server', None)
         if server is None:
             return
-        if getattr(self, '_traj_plot_handle', None) is not None:
-            try:
-                self._traj_plot_handle.remove()
-            except Exception:  # noqa: BLE001
-                pass
-        self._traj_plot_handle = server.gui.add_image(
-            img, label='Joint trajectory', format='png'
-        )
+        try:
+            if self._traj_plot_handle is not None:
+                self._traj_plot_handle.remove()  # type: ignore[attr-defined]
+                self._traj_plot_handle = None
+            self._traj_plot_handle = server.gui.add_image(
+                img, label='Joint trajectory', format='png'
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.get_logger().warn(f'Could not render plan image: {exc}')
 
 
 def main(args=None):

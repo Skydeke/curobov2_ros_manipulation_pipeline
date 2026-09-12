@@ -24,7 +24,10 @@ Keeps the ROS2 service architecture (IK is computed on ``curobo_server`` via the
 - dragging it re-solves IK continuously (mirroring curobo_core's interactive
   examples), and the solved configuration is rendered on the robot,
 - optional reachability mode: a draggable slice gizmo with a green/red heatmap
-  showing which workspace positions are IK-solvable.
+  showing which workspace positions are IK-solvable. The whole grid is solved
+  on the server in one ``/<node>/generate_rm`` (GenerateRM) call; this node
+  only sends the plane pose/extent/grid and renders the returned per-cell
+  joint configurations.
 """
 
 import math
@@ -36,7 +39,7 @@ from rclpy.node import Node
 from rclpy.task import Future
 from geometry_msgs.msg import Pose
 
-from isaac_ros_cumotion_interfaces.srv import Ik, IkBatch, WarmupIK
+from isaac_ros_cumotion_interfaces.srv import GenerateRM, Ik, WarmupIK
 
 from ._viser_helpers import (
     _viz_set_positions,
@@ -45,7 +48,7 @@ from ._viser_helpers import (
     viser_serve_forever,
 )
 
-_GRID_BATCH = 500  # ~22x22 grid
+_GRID_CELLS = 100  # 10x10 grid, one GenerateRM solve on the server
 
 
 class IkViserNode(Node):
@@ -96,7 +99,7 @@ class IkViserNode(Node):
         prefix = f'/{server_node}'
         self._warmup_ik_client = self.create_client(WarmupIK, f'{prefix}/warmup_ik')
         self._ik_client = self.create_client(Ik, f'{prefix}/ik')
-        self._ik_batch_client = self.create_client(IkBatch, f'{prefix}/ik_batch')
+        self._rm_client = self.create_client(GenerateRM, f'{prefix}/generate_rm')
 
         self._joint_names = active_joint_names_from_content(cp) or [
             f'joint_{i + 1}' for i in range(7)
@@ -131,7 +134,7 @@ class IkViserNode(Node):
         self._gui_grid_extent_slider = None
         self._gui_reachability_slice = None
         self._gui_reachability_bounds = None
-        self._n_per_axis = int(_GRID_BATCH ** 0.5)
+        self._n_per_axis = int(_GRID_CELLS ** 0.5)
 
         self._setup_viser_ui()
 
@@ -143,7 +146,7 @@ class IkViserNode(Node):
         self.get_logger().info('IkViserNode ready - waiting for IK service')
         start_service_poll(self, self._warmup_ik_client, self._on_service_ready)
         start_service_poll(self, self._ik_client, self._on_service_ready)
-        start_service_poll(self, self._ik_batch_client, self._on_service_ready)
+        start_service_poll(self, self._rm_client, self._on_service_ready)
 
     def _setup_viser_ui(self):
         """Create the interactive IK gizmo, status text, and reachability controls."""
@@ -352,8 +355,8 @@ class IkViserNode(Node):
         if not self._reachability_enabled or not self._ik_ready:
             return
 
-        if not self._ik_batch_client.service_is_ready():
-            self.get_logger().warn('IkBatch service not ready')
+        if not self._rm_client.service_is_ready():
+            self.get_logger().warn('GenerateRM service not ready')
             return
 
         gp = self._gizmo_pose()
@@ -425,41 +428,24 @@ class IkViserNode(Node):
         self._reachability_busy = True
         self._set_status('Reachability: solving...')
 
-        import viser.transforms as vtf
+        # Delegate the whole grid solve to the server: /<server_node>/generate_rm
+        # solves one IK per grid cell on a plane through the gizmo pose (the
+        # server composes the tool-frame orientation internally, so the client
+        # only sends the plane pose + extents + grid count).
+        req = GenerateRM.Request()
+        req.plane_position_x = float(cur_pos[0])
+        req.plane_position_y = float(cur_pos[1])
+        req.plane_position_z = float(cur_pos[2])
+        req.plane_orientation_w = float(cur_wxyz[0])
+        req.plane_orientation_x = float(cur_wxyz[1])
+        req.plane_orientation_y = float(cur_wxyz[2])
+        req.plane_orientation_z = float(cur_wxyz[3])
+        req.plane_size_x = float(cur_extent)
+        req.plane_size_y = float(cur_extent)
+        req.grid_size_x = self._n_per_axis
+        req.grid_size_y = self._n_per_axis
 
-        n = self._n_per_axis
-        extent = cur_extent
-        half = extent / 2.0
-
-        rot = vtf.SO3(cur_wxyz).as_matrix().astype(np.float32)
-        pose_matrix = np.eye(4, dtype=np.float32)
-        pose_matrix[:3, :3] = rot
-        pose_matrix[:3, 3] = cur_pos
-
-        lin = np.linspace(-half, half, n, dtype=np.float32)
-        uu, vv = np.meshgrid(lin, lin, indexing='xy')
-        local_pts = np.stack([uu.ravel(), vv.ravel(),
-                              np.zeros(n * n, dtype=np.float32),
-                              np.ones(n * n, dtype=np.float32)], axis=-1)
-        grid_world = (pose_matrix @ local_pts.T).T[:, :3]
-
-        # Every grid cell uses the gizmo's exact orientation (position varies,
-        # orientation = gizmo's), matching the esdf_viser reachability mode.
-        orientations = np.tile(cur_wxyz, (n * n, 1))
-
-        req = IkBatch.Request()
-        for i in range(n * n):
-            p = Pose()
-            p.position.x = float(grid_world[i, 0])
-            p.position.y = float(grid_world[i, 1])
-            p.position.z = float(grid_world[i, 2])
-            p.orientation.w = float(orientations[i, 0])
-            p.orientation.x = float(orientations[i, 1])
-            p.orientation.y = float(orientations[i, 2])
-            p.orientation.z = float(orientations[i, 3])
-            req.poses.append(p)
-
-        fut = self._ik_batch_client.call_async(req)
+        fut = self._rm_client.call_async(req)
         fut.add_done_callback(lambda f, g=gen: self._on_reachability_done(f, g))
 
     def _on_reachability_done(self, future: Future, gen: int):
@@ -472,19 +458,28 @@ class IkViserNode(Node):
             )
             return
         resp = future.result()
-        if not resp.success:
-            self._set_status('Reachability: batch IK failed', ok=False)
+        metrics = resp.metrics
+        if metrics is None or metrics.n_total == 0:
+            self._set_status('Reachability: map solve failed', ok=False)
             return
+        n_total = int(metrics.n_total)
+        if not resp.success:
+            self.get_logger().warn(
+                f'Reachability: solve reported failure ({resp.message}) - '
+                'showing returned map (all-red if nothing converged)'
+            )
 
-        n = self._n_per_axis
-        actual_batch = n * n
+        gx = int(metrics.grid_size_x) or self._n_per_axis
+        gy = int(metrics.grid_size_y) or self._n_per_axis
+        n_solved = int(metrics.n_solved)
 
-        success = np.array(
-            [v.data for v in resp.joint_states_valid[:actual_batch]],
+        valid = np.array(
+            [v.data for v in metrics.joint_states_valid[:n_total]],
             dtype=bool,
-        ).reshape(n, n)
+        )
+        success = valid.reshape(gy, gx)
 
-        img = np.zeros((n, n, 3), dtype=np.uint8)
+        img = np.zeros((gy, gx, 3), dtype=np.uint8)
         img[success] = [0, 200, 0]
         img[~success] = [200, 0, 0]
 
@@ -492,19 +487,27 @@ class IkViserNode(Node):
         if server is None:
             return
 
-        cur_pos = self._prev_gizmo_pos
-        cur_wxyz = self._prev_gizmo_wxyz
-        cur_extent = self._prev_grid_extent
-        if cur_pos is None or cur_wxyz is None or cur_extent is None:
-            return
-        half = cur_extent / 2.0
+        # The metrics plane pose is authoritative (the server normalizes the
+        # input quaternion); use it so the rendered slice always matches the
+        # cells that were actually solved.
+        pp = metrics.plane_pose.position
+        quat = metrics.plane_pose.orientation
+        cur_wxyz = np.array(
+            [quat.w, quat.x, quat.y, quat.z], dtype=np.float32
+        )
+        cur_pos = np.array(
+            [pp.x, pp.y, pp.z], dtype=np.float32
+        )
+        extent_x = float(metrics.plane_size_x) or 1.0
+        extent_y = float(metrics.plane_size_y) or 1.0
+        hx, hy = extent_x / 2.0, extent_y / 2.0
 
         import viser.transforms as vtf
         rot = vtf.SO3(cur_wxyz).as_matrix().astype(np.float32)
 
         corners_local = np.array(
-            [[-half, -half, 0], [half, -half, 0],
-             [half, half, 0], [-half, half, 0]],
+            [[-hx, -hy, 0], [hx, -hy, 0],
+             [hx, hy, 0], [-hx, hy, 0]],
             dtype=np.float32,
         )
         corners_world = (rot @ corners_local.T).T + cur_pos
@@ -534,24 +537,29 @@ class IkViserNode(Node):
         self._gui_reachability_slice = server.scene.add_image(
             name='/reachability_bounds/slice_image',
             image=img,
-            render_width=cur_extent,
-            render_height=cur_extent,
+            render_width=extent_x,
+            render_height=extent_y,
             wxyz=tuple(cur_wxyz),
             position=tuple(cur_pos),
         )
 
-        n_success = int(success.sum())
         self._set_status(
-            f'Reachability: {n_success}/{actual_batch} '
-            f'({100 * n_success / actual_batch:.0f}%)',
+            f'Reachability: {n_solved}/{n_total} '
+            f'({100 * n_solved / n_total:.0f}%)',
             ok=True,
         )
 
-        last = resp.joint_states_valid[actual_batch].data if len(resp.joint_states_valid) > actual_batch else False
-        if last and len(resp.joint_states) > actual_batch:
+        # Render the robot at the first solved cell so the user sees a reachable
+        # pose without guessing.
+        first = int(np.argmax(valid)) if np.any(valid) else -1
+        if (
+            first >= 0
+            and first < len(metrics.joint_states)
+            and len(metrics.joint_states[first].position) > 0
+        ):
             _viz_set_positions(
                 self._viz,
-                list(resp.joint_states[actual_batch].position),
+                list(metrics.joint_states[first].position),
                 self._joint_names,
             )
 

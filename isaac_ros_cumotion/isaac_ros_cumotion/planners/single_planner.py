@@ -20,9 +20,7 @@ from abc import abstractmethod
 from typing import Optional, Any
 import time
 
-from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from sensor_msgs.msg import Image as ImageMsg
-from builtin_interfaces.msg import Duration as DurationMsg
 from rclpy.qos import (
     QoSProfile,
     ReliabilityPolicy,
@@ -112,18 +110,12 @@ class SinglePlanner(TrajectoryPlanner):
         # Cancellation flag
         self._cancelled = False
 
-        # Full-joint trajectory visualization (RViz CuroboTrajectoryDisplay).
-        # Publishes the planned open-loop trajectory's joint states as a
-        # trajectory_msgs/JointTrajectory. Gated by the node's `publish_path`
-        # ROS param (read lazily so a default always holds even if the node
-        # hasn't declared it yet).
-        self._path_pub = None
-        self._path_frame = getattr(config_wrapper, 'base_link', None)
-
         # Motion-plan debug image (joint-trajectory plot as an RGB Image).
         # Lazy publisher; only active when the node's `publish_plan_debug_image`
         # param is true (off by default). See _publish_plan_image().
         self._debug_img_pub = None
+        # Frame id stamped into the debug image header (robot root frame).
+        self._debug_frame = getattr(config_wrapper, 'base_link', None)
 
     def _plan_image_enabled(self) -> bool:
         """Whether the owning node should publish the motion-plan debug image.
@@ -206,7 +198,7 @@ class SinglePlanner(TrajectoryPlanner):
             h, w = img.shape[:2]
             im = ImageMsg()
             im.header.stamp = self.node.get_clock().now().to_msg()
-            im.header.frame_id = self._path_frame or ''
+            im.header.frame_id = self._debug_frame or ''
             im.height = h
             im.width = w
             im.encoding = 'rgb8'
@@ -218,86 +210,6 @@ class SinglePlanner(TrajectoryPlanner):
             self.node.get_logger().warn(
                 f"{self.get_planner_name()}: failed to publish motion-plan debug "
                 f"image: {e}",
-                throttle_duration_sec=5.0,
-            )
-
-    def _publish_plan_path(self):
-        """Publish the planned trajectory's full joint states as a JointTrajectory.
-
-        Converts every waypoint of ``self.planned_trajectory`` into a
-        ``trajectory_msgs/JointTrajectory`` with positions and velocities for
-        the ACTIVE joints (projected from the full-joint-space cuRobo plan),
-        so the custom CuroboTrajectoryDisplay RViz plugin can animate the full
-        robot body along the path.  Gated by the node's ``publish_path`` ROS
-        param (default True).
-        """
-        if getattr(self.node, 'has_parameter', None) and self.node.has_parameter('publish_path'):
-            if not self.node.get_parameter('publish_path').value:
-                return
-        if self.motion_planner is None or self.planned_trajectory is None:
-            return
-        try:
-            if self._path_pub is None:
-                # Namespace under the owning node (e.g. /curobo_server/planned_path)
-                # so multiple planners don't clobber each other on the global topic,
-                # matching ros_service_manager's collision_spheres/scene_obstacles.
-                self._path_pub = self.node.create_publisher(
-                    JointTrajectory, self.node.get_name() + '/planned_path', 10)
-                if self._path_frame is None:
-                    self._path_frame = getattr(self.node, 'base_link', None) or 'world'
-
-            traj = self.planned_trajectory
-            # traj.position is [B, T, D]; collapse to [T, D] (one row of floats
-            # per waypoint) regardless of batch rank.
-            def _to_2d_list(t):
-                if t is None:
-                    return None
-                while t.ndim > 2:
-                    t = t[0]
-                return t.detach().cpu().tolist()
-
-            pos_list = _to_2d_list(traj.position)
-            vel_list = _to_2d_list(getattr(traj, 'velocity', None))
-            if not pos_list:
-                return
-
-            # The interpolated plan is in FULL joint space — when the config locks
-            # a joint (e.g. a gripper finger_joint), cuRobo augments the trajectory
-            # via get_full_dof_from_solution(), so D can exceed the model's active
-            # DOF. Project back onto active joints by name before publishing,
-            # matching the multi-point planner's current_state handling.
-            joint_names, cols = self._active_joint_projection(traj)
-            if cols is not None:
-                pos_list = [[r[i] for i in cols] for r in pos_list]
-                vel_list = [[r[i] for i in cols] for r in vel_list] if vel_list else None
-                joint_names = [joint_names[i] for i in cols]
-
-            dt = 0.025
-            if getattr(self.node, 'has_parameter', None) and self.node.has_parameter(
-                'interpolation_dt'
-            ):
-                dt = float(self.node.get_parameter('interpolation_dt').value)
-            if dt <= 0:
-                dt = 0.025
-
-            msg = JointTrajectory()
-            msg.header.frame_id = self._path_frame
-            msg.header.stamp = self.node.get_clock().now().to_msg()
-            msg.joint_names = joint_names
-            for i, row in enumerate(pos_list):
-                pt = JointTrajectoryPoint()
-                pt.positions = [float(x) for x in row]
-                if vel_list is not None and i < len(vel_list):
-                    pt.velocities = [float(x) for x in vel_list[i]]
-                duration_ns = int(round(float(dt) * i * 1e9))
-                pt.time_from_start = DurationMsg(
-                    sec=int(duration_ns // 1000000000),
-                    nanosec=int(duration_ns % 1000000000))
-                msg.points.append(pt)
-            self._path_pub.publish(msg)
-        except Exception as e:
-            self.node.get_logger().warn(
-                f"{self.get_planner_name()}: failed to publish planned path: {e}",
                 throttle_duration_sec=5.0,
             )
 
@@ -581,10 +493,7 @@ class SinglePlanner(TrajectoryPlanner):
                 f"with {num_wp} waypoints"
             )
 
-            # Publish the planned EE trajectory path for RViz (gated by publish_path).
-            self._publish_plan_path()
-
-            # Publish the motion-plan debug image (only in curobo debug mode).
+            # Publish the motion-plan debug image (gated by publish_plan_debug_image).
             self._publish_plan_image()
 
             # Send trajectory to robot context for visualization
@@ -623,8 +532,8 @@ class SinglePlanner(TrajectoryPlanner):
                 # get_full_dof_from_solution(), so rows can be wider than
                 # joint_names (Kortex: 8 columns vs 7 names). Project the
                 # streamed command back onto ACTIVE joints by name so it matches
-                # the controller's arm joints — mirrors the FK handling in
-                # _publish_plan_path().
+                # the controller's arm joints — same active-joint projection the
+                # preview/ghost pipeline (robot_context) applies to set_command().
                 joint_names, cols = self._active_joint_projection(traj)
                 if cols is not None:
                     pos_list = [[r[i] for i in cols] for r in pos_list]

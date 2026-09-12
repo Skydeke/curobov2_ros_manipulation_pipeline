@@ -11,7 +11,7 @@ class GhostStrategy(JointCommandStrategy):
         super().__init__(node, dt, description)
         # create a publisher (namespaced under the owning node, e.g.
         # /curobo_server/trajectory) so the preview topic always lives with
-        # the planner it tracks -- matching the <node>/planned_path pattern.
+        # the planner it tracks.
         self.pub_command = node.create_publisher(
             JointTrajectory, node.get_name() + '/trajectory', 10)
         # self.dt (base class) is already the resolved interpolation_dt —

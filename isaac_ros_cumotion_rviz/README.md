@@ -74,8 +74,8 @@ Renders the cuRobo mapper's occupied voxels from the `SparseVoxelGrid` topic
 ## CuroboTrajectoryDisplay
 
 Animates a **full robot body** (every link, every joint) through a
-`trajectory_msgs/JointTrajectory` — e.g. the planner's `<node>/planned_path`,
-`<node>/mpc_predicted_path`, or the ghost preview topic `<node>/trajectory`.
+`trajectory_msgs/JointTrajectory` — e.g. the ghost preview topic `<node>/trajectory`
+or the MPC's `<node>/mpc_predicted_path`.
 
 Properties: Trajectory Topic, Alpha, Show Trail (+ Trail Step Size),
 Loop Animation, Speed.
