@@ -20,7 +20,7 @@ depth-to-ESDF mapping, robot segmentation, and trajectory optimization.
 | Package | Purpose |
 |---|---|
 | `curobo_core` | cuRobo v2 library (vendored) |
-| `isaac_ros_cumotion_interfaces` | ROS actions/services/messages (see `USED_INTERFACES.txt` for what is wired in) |
+| `isaac_ros_cumotion_interfaces` | ROS actions/services/messages |
 | `isaac_ros_cumotion` | The unified node `curobo_trajectory_planner` and supporting services |
 | `isaac_ros_cumotion_extra` | Viser/visualization nodes and tools (e.g. `build_curobo_config`) |
 | `isaac_ros_cumotion_moveit` | MoveIt 2 planning plugin |
@@ -56,5 +56,3 @@ management are exposed via the `Ik`/`IkBatch`, `Fk`/`FkBatch`,
 
 - `isaac_ros_cumotion/docs/` — user guide (concepts, getting started, tutorials)
   and `MIGRATION_V2.md` for the v1 → v2 transition.
-- `isaac_ros_cumotion_interfaces/USED_INTERFACES.txt` — authoritative audit of
-  which interfaces are actually referenced by code.
