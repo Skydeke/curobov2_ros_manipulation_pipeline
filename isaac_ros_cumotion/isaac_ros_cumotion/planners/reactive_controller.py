@@ -20,6 +20,7 @@ cuRobo-specific steps:
     build_solver()        -> create the cuRobo solver from the SHARED context
     setup(state, goal)    -> set the initial goal on the solver
     step(state)           -> one optimization step, returns the next action
+    step_paced(state)     -> one full-plan command window (paced mode; MPC)
     apply_live_goal(raw)  -> retarget the goal during execution
     is_converged()        -> stop condition
 
@@ -30,7 +31,6 @@ switch then works for it, and it automatically shares the node's single context
 """
 
 import threading
-import time
 import traceback
 from abc import abstractmethod
 from contextlib import nullcontext
@@ -81,28 +81,29 @@ class ReactiveController(TrajectoryPlanner):
         # Cartesian target (xyz tensor), set by _set_target, read by FK error.
         self._target_position = None
         self._step_times = []
-        # Last commanded action — fed back so the next current_state carries
-        # velocity/acceleration continuity (without it the solver restarts from
-        # rest every step and the arm never builds up motion).
-        self._last_action = None
-        # Wall-clock of the last status log (throttled, rate-independent).
+        # ROS-clock time of the last status log (throttled, rate-independent).
         self._last_log_time = 0.0
 
         # Fixed-interval command pacing (used only when a subclass sets
         # self._command_interval > 0, e.g. MPCController via the
-        # mpc_command_interval ROS param). Producer/consumer split: the
-        # execute() loop is the producer (solves continuously, never blocks on
-        # sending); a per-goal timer is the consumer (sends the latest action
-        # at a fixed cadence, or warns and sends nothing if none is fresh
-        # since the last tick). Only the producer ever calls step() (CUDA),
-        # so the timer's callback group only needs to prevent a slow SEND from
-        # overlapping the next tick — no GPU-concurrency concern. cf. debug
-        # 2026-07-17.
-        self._timer_cb_group = None
-        self._pending_lock = threading.Lock()
-        self._pending_action = None
-        self._pending_action_fresh = False
-        self._paced_send_error = False
+        # mpc_command_interval ROS param). Paced mode is a SEQUENTIAL
+        # solve-and-shoot loop: solve a single-plan command window, send it as
+        # one FollowJointTrajectory goal, wait for it to fully execute, then
+        # re-solve from the FRESH post-execution robot state.
+        # The old producer/consumer split (free-running optimize_next_action
+        # pops accumulated into a buffer drained by a timer) mixed several
+        # re-plans into one window and anchored them on fast-forwarded
+        # states — the robot executed kinked trajectories and looked jumpy.
+        # cf. debug 2026-09-13.
+        # Poll interval while waiting for the sent window to execute
+        # (_wait_for_execution) — keeps the wait responsive to cancel without
+        # busy-polling.
+        self._wait_poll_seconds = 0.02
+        # Dedicated callback group for the execution-wait timer, so its poll
+        # callbacks never serialize with the executor's default group (a long
+        # open-loop plan in the default group must not stall the
+        # solve-and-shoot cadence).
+        self._wait_cb_group = MutuallyExclusiveCallbackGroup()
 
         # Device/dtype for building tensors on the hot path.
         self._device = getattr(config_wrapper, '_device', torch.device('cuda'))
@@ -158,9 +159,27 @@ class ReactiveController(TrajectoryPlanner):
         """
         raise NotImplementedError
 
+    def step_paced(self, current_state: JointState) -> JointState:
+        """Solve ONE command WINDOW from a single plan (paced mode only).
+
+        ``_execute_paced`` sends the returned window as a single
+        FollowJointTrajectory goal and only re-plans after the robot has fully
+        executed it, so the window must be the output of ONE coherent solve.
+        The default returns the single-command ``step()`` (used by subclasses
+        that never set a command interval); MPCController overrides this to
+        return the whole multi-point command window of one fresh
+        ``optimize_action_sequence`` solve.
+        """
+        return self.step(current_state)
+
     @abstractmethod
-    def apply_live_goal(self, raw_goal) -> bool:
-        """Retarget the goal from a raw [x,y,z,qw,qx,qy,qz] list during execution."""
+    def apply_live_goal(self, raw_goal, current_js=None) -> bool:
+        """Retarget the goal from a raw [x,y,z,qw,qx,qy,qz] list during execution.
+
+        Args:
+            raw_goal: 7-element list ``[x, y, z, qw, qx, qy, qz]``.
+            current_js: Optional current joint state (for IK-seeded reseeding).
+        """
         raise NotImplementedError
 
     def update_world(self, scene) -> None:
@@ -317,12 +336,13 @@ class ReactiveController(TrajectoryPlanner):
 
 
     def execute(self, robot_context, goal_handle=None) -> bool:
-        """Dispatch to the paced (producer/consumer) or immediate servo loop.
+        """Dispatch to the paced (solve-and-shoot) or immediate servo loop.
 
         Paced mode (self._command_interval > 0, e.g. MPCController via the
-        mpc_command_interval ROS param) decouples solve time from send
-        cadence — see _execute_paced. Every other caller (interval 0, the
-        default) gets the original behavior, untouched, via _execute_immediate.
+        mpc_command_interval ROS param) sends one solved single-plan command
+        window per re-plan — see _execute_paced. Every other caller
+        (interval 0, the default) gets the original free-running behavior via
+        _execute_immediate.
         """
         if not self.is_goal_active or self.solver is None:
             self.node.get_logger().error(
@@ -339,7 +359,7 @@ class ReactiveController(TrajectoryPlanner):
         try:
             tstep = 0
             self._step_times = []
-            self._last_action = None
+
             self._last_log_time = 0.0
             self.node.get_logger().info(f"Starting {self.get_planner_name()} servo loop")
 
@@ -349,6 +369,7 @@ class ReactiveController(TrajectoryPlanner):
                     prefix="exec_servo",
                     columns=["t_s", "tstep", "error_m", "on_target", "step_ms"],
                 )
+                self._exec_csv_t0 = self._now()
 
             # Initialize the solver state from the robot once, then advance it
             # from the solver's own prediction each step (see the loop below).
@@ -387,7 +408,7 @@ class ReactiveController(TrajectoryPlanner):
                 if raw is not None:
                     try:
                         with self.node.gpu_lock:
-                            self.apply_live_goal(raw)
+                            self.apply_live_goal(raw, current_state)
                     except Exception as e:
                         self.node.get_logger().error(
                             f"{self.get_planner_name()}: live goal rejected "
@@ -395,11 +416,11 @@ class ReactiveController(TrajectoryPlanner):
                             throttle_duration_sec=1.0,
                         )
 
-                st_time = time.time()
+                st_time = self._now()
                 with self._step_guard():
                     action = self.step(current_state)  # step() already syncs (FK .item())
                 if tstep > 5:
-                    self._step_times.append(time.time() - st_time)
+                    self._step_times.append(self._now() - st_time)
 
                 self._send_command(robot_context, action)
 
@@ -416,12 +437,12 @@ class ReactiveController(TrajectoryPlanner):
                 # estimate for warm-starting.
                 predicted_state = self._state_from_action(action)
                 current_state = self._close_state_loop(robot_context, predicted_state)
-                self._last_action = action
+
 
                 if goal_handle is not None and tstep % 5 == 0:
                     self._publish_feedback(goal_handle, action)
 
-                now = time.time()
+                now = self._now()
                 if now - self._last_log_time > 1.0:
                     self._last_log_time = now
                     self.node.get_logger().info(
@@ -431,11 +452,11 @@ class ReactiveController(TrajectoryPlanner):
 
                 if exec_csv and tstep % 1 == 0:
                     self._exec_csv_write([
-                        f"{time.monotonic() - self._exec_csv_t0:.3f}",
+                        f"{self._now() - self._exec_csv_t0:.3f}",
                         f"{tstep}",
                         f"{self.get_position_error():.6f}",
                         str(self.is_on_target()),
-                        f"{time.time() - st_time:.4f}",
+                        f"{self._now() - st_time:.4f}",
                     ])
 
                 tstep += 1
@@ -462,24 +483,32 @@ class ReactiveController(TrajectoryPlanner):
             return False
 
     def _execute_paced(self, robot_context, goal_handle, interval: float) -> bool:
-        """Producer/consumer servo loop: this loop (producer) solves as fast as
-        it can and deposits the latest action under a lock, never blocking on
-        sending; a per-goal timer (consumer) sends the latest action at a
-        fixed cadence, or warns and sends nothing if none is fresh since the
-        last tick (no resending stale data). Only this loop calls step()
-        (CUDA) — the timer only reads a pointer and sends, so it never
-        contends for the GPU with a slow/cold-start solve. cf. debug 2026-07-17.
+        """Solve-and-shoot servo loop for fixed command-window pacing.
+
+        Contract (see docs/concepts/mpc-implementation.md): ONE command window
+        is solved and sent as a single FollowJointTrajectory goal, the robot
+        fully executes it, and only THEN the solver re-plans — anchored on the
+        FRESH post-execution robot state. The window comes from ONE solve
+        (MPCController.step_paced: one optimize_action_sequence solve, whose
+        command window the curobo execution manager returns directly), so the
+        robot never executes a trajectory that blends several re-plans, and
+        every replacement window starts where the arm actually is.
+        _wait_for_execution() (robot progression, with ``interval`` as the
+        nominal-duration fallback) makes the re-solve cadence track the
+        driver's window cadence.
+
+        This loop differs from _execute_immediate only in the send-then-wait
+        sequencing: the cuRobo step() call itself is unchanged. Only this loop
+        calls step() (CUDA).
         """
         try:
             tstep = 0
             self._step_times = []
-            self._last_action = None
+
             self._last_log_time = 0.0
-            self._pending_action = None
-            self._pending_action_fresh = False
-            self._paced_send_error = False
             self.node.get_logger().info(
-                f"Starting {self.get_planner_name()} servo loop (paced, interval={interval}s)"
+                f"Starting {self.get_planner_name()} servo loop "
+                f"(paced, interval={interval}s, single-plan windows)"
             )
 
             exec_csv = self._exec_csv_enabled()
@@ -488,79 +517,73 @@ class ReactiveController(TrajectoryPlanner):
                     prefix="exec_servo",
                     columns=["t_s", "tstep", "error_m", "on_target", "step_ms"],
                 )
+                self._exec_csv_t0 = self._now()
 
             current_state = self._read_state(robot_context)
 
-            if self._timer_cb_group is None:
-                self._timer_cb_group = MutuallyExclusiveCallbackGroup()
-            timer = self.node.create_timer(
-                interval, lambda: self._on_send_tick(robot_context, goal_handle),
-                callback_group=self._timer_cb_group,
-            )
+            while self.is_goal_active:
+                if goal_handle is not None and goal_handle.is_cancel_requested:
+                    self.node.get_logger().info(f"{self.get_planner_name()} cancel requested")
+                    break
+                if goal_handle is None and tstep >= self.max_iterations:
+                    break
 
-            try:
-                while self.is_goal_active:
-                    if goal_handle is not None and goal_handle.is_cancel_requested:
-                        self.node.get_logger().info(f"{self.get_planner_name()} cancel requested")
-                        break
-                    if goal_handle is None and tstep >= self.max_iterations:
-                        break
-                    if self._paced_send_error:
-                        break
+                if (self.perception_refresh_period > 0
+                        and tstep % self.perception_refresh_period == 0
+                        and hasattr(self.node, 'refresh_perception_world')):
+                    self.node.refresh_perception_world()
 
-                    if (self.perception_refresh_period > 0
-                            and tstep % self.perception_refresh_period == 0
-                            and hasattr(self.node, 'refresh_perception_world')):
-                        self.node.refresh_perception_world()
-
-                    # Under gpu_lock, failure narrowed to the goal — see
-                    # _execute_immediate for why.
-                    raw = self._take_live_goal()
-                    if raw is not None:
-                        try:
-                            with self.node.gpu_lock:
-                                self.apply_live_goal(raw)
-                        except Exception as e:
-                            self.node.get_logger().error(
-                                f"{self.get_planner_name()}: live goal rejected "
-                                f"({e}) - keeping previous goal",
-                                throttle_duration_sec=1.0,
-                            )
-
-                    st_time = time.time()
-                    with self._step_guard():
-                        action = self.step(current_state)
-                    if tstep > 5:
-                        self._step_times.append(time.time() - st_time)
-
-                    with self._pending_lock:
-                        self._pending_action = action
-                        self._pending_action_fresh = True
-
-                    predicted_state = self._state_from_action(action)
-                    current_state = self._close_state_loop(robot_context, predicted_state)
-                    self._last_action = action
-
-                    now = time.time()
-                    if now - self._last_log_time > 1.0:
-                        self._last_log_time = now
-                        self.node.get_logger().info(
-                            f"{self.get_planner_name()}: error="
-                            f"{self.get_position_error():.4f}m on_target={self.is_on_target()}"
+                # Under gpu_lock, failure narrowed to the goal — see
+                # _execute_immediate for why.
+                raw = self._take_live_goal()
+                if raw is not None:
+                    try:
+                        with self.node.gpu_lock:
+                            self.apply_live_goal(raw, current_state)
+                    except Exception as e:
+                        self.node.get_logger().error(
+                            f"{self.get_planner_name()}: live goal rejected "
+                            f"({e}) - keeping previous goal",
+                            throttle_duration_sec=1.0,
                         )
 
-                    if exec_csv and tstep % 1 == 0:
-                        self._exec_csv_write([
-                            f"{time.monotonic() - self._exec_csv_t0:.3f}",
-                            f"{tstep}",
-                            f"{self.get_position_error():.6f}",
-                            str(self.is_on_target()),
-                            f"{time.time() - st_time:.4f}",
-                        ])
+                st_time = self._now()
+                with self._step_guard():
+                    action = self.step_paced(current_state)  # fresh single-plan window
+                if tstep > 5:
+                    self._step_times.append(self._now() - st_time)
 
-                    tstep += 1
-            finally:
-                self.node.destroy_timer(timer)
+                self._send_command(robot_context, action)
+                if goal_handle is not None:
+                    self._publish_feedback(goal_handle, action)
+
+                # Let the window fully execute before re-solving: the next
+                # plan must be anchored on the fresh, post-execution robot
+                # state, or consecutive windows overlap/disagree.
+                self._wait_for_execution(robot_context, interval)
+
+                predicted_state = self._state_from_action(action)
+                current_state = self._close_state_loop(robot_context, predicted_state)
+
+
+                now = self._now()
+                if now - self._last_log_time > 1.0:
+                    self._last_log_time = now
+                    self.node.get_logger().info(
+                        f"{self.get_planner_name()}: error="
+                        f"{self.get_position_error():.4f}m on_target={self.is_on_target()}"
+                    )
+
+                if exec_csv and tstep % 1 == 0:
+                    self._exec_csv_write([
+                        f"{self._now() - self._exec_csv_t0:.3f}",
+                        f"{tstep}",
+                        f"{self.get_position_error():.6f}",
+                        str(self.is_on_target()),
+                        f"{self._now() - st_time:.4f}",
+                    ])
+
+                tstep += 1
 
             robot_context.stop_robot()
             if exec_csv:
@@ -573,7 +596,7 @@ class ReactiveController(TrajectoryPlanner):
                     f"avg time={avg_time * 1000:.1f}ms/step"
                 )
 
-            return not self._paced_send_error
+            return True
 
         except Exception as e:
             self.node.get_logger().error(f"{self.get_planner_name()} execution error: {e}")
@@ -582,38 +605,35 @@ class ReactiveController(TrajectoryPlanner):
             self._exec_csv_close()
             return False
 
-    def _on_send_tick(self, robot_context, goal_handle):
-        """Consumer: send the latest produced action if fresh, else warn.
+    def _wait_for_execution(self, robot_context, interval: float) -> None:
+        """Block until the sent command window has executed (or a timeout).
 
-        Never calls step()/CUDA — only reads the pending slot and sends. Any
-        exception here is caught (never let it escape an rclpy timer callback)
-        and signaled to the producer loop via _paced_send_error, which checks
-        it every iteration and stops cleanly (mirrors the immediate loop's
-        except-block behavior: stop_robot() + return False).
+        Event-driven wait on the node's EXECUTOR, not a busy loop: a ROS
+        timer (node.create_timer, own callback group, driven by the node's
+        clock so it tracks /use_sim_time) polls the FollowJointTrajectory
+        progression (robot_context.get_progression: 1.0 = completed) and sets
+        an Event; this loop thread just waits on it. ``interval`` is the
+        nominal window duration (mpc_command_interval) and the fallback: if
+        the controller never reports completion we cap the wait at 2x + 0.2 s
+        and re-solve anyway — the next solve anchors on the fresh state read
+        right after, so a short cadence over/undershoot self-corrects.
         """
+        done = threading.Event()
+        timeout_s = max(interval * 2.0 + 0.2, 0.5)
+
+        def _poll():
+            if not self.is_goal_active or robot_context.get_progression() >= 1.0:
+                done.set()
+
+        timer = self.node.create_timer(
+            self._wait_poll_seconds, _poll,
+            callback_group=self._wait_cb_group,
+        )
         try:
-            with self._pending_lock:
-                if self._pending_action_fresh:
-                    action = self._pending_action
-                    self._pending_action_fresh = False
-                else:
-                    action = None
-
-            if action is None:
-                self.node.get_logger().warn(
-                    f"{self.get_planner_name()}: command tick out of time - nothing sent",
-                    throttle_duration_sec=1.0,
-                )
-                return
-
-            self._send_command(robot_context, action)
-            if goal_handle is not None:
-                self._publish_feedback(goal_handle, action)
-
-        except Exception as e:
-            self.node.get_logger().error(f"{self.get_planner_name()} send-tick error: {e}")
-            self.node.get_logger().error(traceback.format_exc())
-            self._paced_send_error = True
+            done.wait(timeout_s)
+        finally:
+            timer.cancel()
+            self.node.destroy_timer(timer)
 
     def _publish_feedback(self, goal_handle, action_state):
         """Publish the reactive status through the action feedback (no status topic)."""
@@ -629,7 +649,9 @@ class ReactiveController(TrajectoryPlanner):
         try:
             pos = action_state.position
             if pos.dim() == 3:
-                pos = pos[:, -1, :]  # full-horizon action: report the last (current-target) point
+                pos = pos[:, -1, :]  # command window [1, n, dof]: report its end point
+            elif pos.dim() == 2 and pos.shape[0] > 1:
+                pos = pos[-1, :]     # unbatched window [n, dof]: last (current-target) point
             fb.joint_command.position = (pos[0] if pos.dim() > 1 else pos).cpu().tolist()
             fb.joint_command.name = list(getattr(self.solver, 'joint_names', []))
         except Exception:
@@ -643,6 +665,14 @@ class ReactiveController(TrajectoryPlanner):
     # ------------------------------------------------------------------
     # Shared helpers
     # ------------------------------------------------------------------
+
+    def _now(self) -> float:
+        """Seconds on the node's ROS clock (float) — never Python wall time.
+
+        All loop pacing, statistics and CSV timestamps use this so behavior
+        is identical under /use_sim_time and unaffected by clock drift.
+        """
+        return self.node.get_clock().now().nanoseconds * 1e-9
 
     def _read_state(self, robot_context) -> JointState:
         """Initial solver state from the robot's joint positions.
@@ -669,10 +699,12 @@ class ReactiveController(TrajectoryPlanner):
     def _state_from_action(self, action: JointState) -> JointState:
         """Build the next solver state from a commanded action (pos+vel+acc).
 
-        For a full-horizon action (position ``[1, horizon, dof]``, from MPC's
-        ``optimize_action_sequence``), only the LAST horizon point is used to
-        warm-start the next optimize call — matches cuRobo's own
-        reactive_control example's state-continuity pattern.
+        For a single command from the native MPC loop (next_action, position
+        ``[1, dof]``) the state is used as-is, warm-starting the next optimize
+        call from where the last window actually ended — matches cuRobo's own
+        reactive_control example's state-continuity pattern. (The stacked
+        send-window shape ``[1, horizon, dof]`` was removed with the paced
+        producer/consumer loop.)
         """
         pos, vel, acc = action.position, getattr(action, 'velocity', None), getattr(action, 'acceleration', None)
         if pos.dim() == 3:
@@ -736,19 +768,23 @@ class ReactiveController(TrajectoryPlanner):
         )
 
     def _send_command(self, robot_context, action_state: JointState):
-        """Push a control action to the robot.
+        """Push a control action to the robot. Two shapes, from one solve each:
 
-        Two shapes are supported:
           - Single point: position ``[dof]`` or ``[1, dof]`` -> one
-            JointTrajectory point (open-loop planners, RetargetController).
-          - Full horizon: position ``[1, horizon, dof]`` (from MPC's
-            optimize_action_sequence) -> ALL horizon points are streamed as a
-            multi-point JointTrajectory. optimize_action_sequence re-optimizes
-            fully every call (slow, ~1s on this hardware); sending only a
-            single point per call left the robot idle between calls then
-            jumping to a very different velocity — a discontinuity that
-            tripped the Doosan's acceleration limit. Streaming the whole
-            horizon gives it a smooth sequence to execute in between.
+            JointTrajectory point (open-loop planners, RetargetController,
+            and the free-running MPC loop popping native commands via
+            optimize_next_action).
+          - Command window: position ``[1, n, dof]`` — the multi-point
+            command window of ONE solve (MPCController.step_paced, an
+            optimize_action_sequence result; n = 2*interpolation_steps) -> ALL
+            n points streamed as one multi-point JointTrajectory so the robot
+            plays one full plan segment smoothly between re-plans. Never a
+            stack of several solves' outputs.
+
+        The old polluted multi-point shape — commands stacked from several
+        solver pops by the paced producer/consumer send tick (_stack_actions)
+        combined with the solver's own stacked horizon — was removed together
+        with that loop.
         """
         pos_t, vel_t, acc_t = action_state.position, action_state.velocity, action_state.acceleration
 

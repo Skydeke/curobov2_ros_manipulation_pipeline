@@ -23,9 +23,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-# Sourced from curobo_ros/planners/mpc_planner.py: the MPPI boundary-velocity
-# feedback cap, and the Doosan SpeedJ acceleration limit seen tripping alarms
-# on real hardware (dsr_controller2 "[SpeedJ] Acceleration is over max value").
+# Doosan SpeedJ acceleration limit seen tripping alarms on real hardware
+# (dsr_controller2 "[SpeedJ] Acceleration is over max value"). The historical
+# MPPI boundary-velocity cap (vbc_max_dps) was removed when the controller
+# moved to cuRobo's native optimize_next_action loop; old CSVs that still carry
+# the column are handled conditionally below.
 VBC_CAP_DPS_DEFAULT = 5.0
 ACCEL_LIMIT_DPS2_DEFAULT = 70.0
 CONVERGENCE_THRESHOLD_DEFAULT = 0.01  # meters, matches mpc_planner.py default
@@ -66,8 +68,10 @@ def plot_raw(df: pd.DataFrame, out_path: str, accel_limit: float, vbc_cap: float
     ax = axes[1]
     ax.plot(t, df["vfirst_max_dps"], label="vfirst_max_dps")
     ax.plot(t, df["vlast_max_dps"], label="vlast_max_dps")
-    ax.plot(t, df["vbc_max_dps"], label="vbc_max_dps")
-    ax.axhline(vbc_cap, color="gray", linestyle="--", linewidth=1, label=f"vbc cap ({vbc_cap} dps)")
+    if "vbc_max_dps" in df.columns:
+        ax.plot(t, df["vbc_max_dps"], label="vbc_max_dps")
+        ax.axhline(vbc_cap, color="gray", linestyle="--", linewidth=1,
+                   label=f"vbc cap ({vbc_cap} dps)")
     ax.set_ylabel("deg/s")
     ax.legend(loc="upper right", fontsize=8)
     ax.set_title("Global commanded velocities")
@@ -218,10 +222,11 @@ def analyze(df: pd.DataFrame, convergence_threshold: float, accel_limit: float,
         verdict = "[OK]"
     section("Timing", verdict, body)
 
-    pct_cap = 100.0 * np.isclose(df.vbc_max_dps, vbc_cap, atol=0.05).mean()
-    body = [f"vbc_max_dps at cap ({vbc_cap} dps) in {pct_cap:.0f}% of steps"]
-    verdict = "[INFO]" if pct_cap > 0 else "[OK]"
-    section("Velocity-continuity cap saturation", verdict, body)
+    if "vbc_max_dps" in df.columns:
+        pct_cap = 100.0 * np.isclose(df.vbc_max_dps, vbc_cap, atol=0.05).mean()
+        body = [f"vbc_max_dps at cap ({vbc_cap} dps) in {pct_cap:.0f}% of steps"]
+        verdict = "[INFO]" if pct_cap > 0 else "[OK]"
+        section("Velocity-continuity cap saturation", verdict, body)
 
     nan_cols = [c for c in df.columns if df[c].isna().all()]
     if nan_cols:

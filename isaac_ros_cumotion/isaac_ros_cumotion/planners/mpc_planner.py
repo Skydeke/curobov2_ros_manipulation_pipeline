@@ -3,7 +3,6 @@
 
 import copy
 import math
-import time
 from typing import Any
 
 import torch
@@ -35,16 +34,6 @@ from isaac_ros_cumotion.core.diagnostics import open_diag_csv
 # (backward of acceleration integration kernel not implemented), so MPPI is the only
 # viable optimizer.
 _MPPI_CSPACE_REGULARIZATION = [0.3, 1.0, 0.0, 0.0, 0.0]  # [vel, acc, jerk, torque, energy]
-
-# Velocity boundary feedback cap (continuity → smoother motion).
-# REQUIRED: in ACCELERATION mode the plan integrates beyond the boundary, so
-# reinjecting planned velocity causes ratcheting (runaway 6→80°/s without cap, cf.
-# debug 2026-07-15). In sandbox, a LOW cap (~5°/s) converges, a high cap (>=8)
-# overshoots and diverges. Intentionally low value = safe (slow motion, can be
-# canceled even if deviating) + smoother than zero boundary.
-#   _VBC_CAP_DPS = 0.0  -> zero boundary (current robust behavior, jerky)
-#   higher            -> more continuity (smooth) BUT risk of overshoot
-_VBC_CAP_DPS = 5.0
 
 
 def _build_mppi_transition_model(step_dt: float, horizon: int, interpolation_steps: int = 4) -> dict:
@@ -209,7 +198,6 @@ class MPCController(ReactiveController):
         )
 
         self._use_mppi_acceleration = (solver_type == 'mppi_acceleration')
-        self._vel_feedback_alpha = node.get_parameter('mpc_vel_feedback_alpha').get_parameter_value().double_value
         self._step_dt = step_dt  # For debug CSV (point-to-point interval in the loop)
         # Fixed-interval command pacing (s); 0.0 = off. Read by the servo loop
         # (ReactiveController.execute) to hold each command window for its full
@@ -247,6 +235,9 @@ class MPCController(ReactiveController):
         # CuroboTrajectoryDisplay (trajectory_msgs/JointTrajectory makes the
         # custom display animate the full robot body through the horizon).
         self._path_pub = node.create_publisher(JointTrajectory, pub_prefix + 'mpc_predicted_path', 10)
+        # Throttle for the predicted-path publisher: native pops return in ms,
+        # so without a gate the display would be flooded with identical frames.
+        self._last_path_pub_at = 0.0
         self._goal_marker_pub = node.create_publisher(Marker, pub_prefix + 'mpc_goal_marker', 10)
         # Cost/constraint breakdown, for live inspection via rqt_plot (each
         # named field is individually plottable). See _cost_breakdown().
@@ -260,7 +251,6 @@ class MPCController(ReactiveController):
         return solver
 
     def setup(self, start_state: JointState, goal_request: Any) -> bool:
-        self._v_bc = None  # New goal = new velocity continuity baseline
         self._csv_init()
         gset = list(getattr(goal_request, 'goalsets', None) or [])
         if not (len(gset) == 1 and len(gset[0].poses) == 1):
@@ -313,7 +303,7 @@ class MPCController(ReactiveController):
             return
         self._csv = open_diag_csv(self.node, "mpc_diag")
         if self._csv is not None:
-            self._csv_t0 = time.monotonic()
+            self._csv_t0 = self._now()
             self._csv_t_prev = self._csv_t0
             self._csv_last_vlast = None
 
@@ -325,32 +315,36 @@ class MPCController(ReactiveController):
     def _csv_write(self, result, solve_ms, breakdown: dict):
         if getattr(self, '_csv', None) is None:
             return
-        seq = result.action_sequence
-        now = time.monotonic()
+        # Native loop: one command per step (next_action) instead of a
+        # full-horizon action_sequence, so the CSV is per-command velocity
+        # continuity rather than per-window.
+        seq = result.next_action
+        now = self._now()
         dt_step_ms = (now - self._csv_t_prev) * 1000.0  # Loop period: captures 248ms AND pauses ~10s
         self._csv_t_prev = now
         dt = self._step_dt
         deg = math.degrees
-        vel = seq.velocity[0]  # [npts, dof]
+        vel = seq.velocity if getattr(seq, 'velocity', None) is not None else seq.position
+        if vel.dim() > 2:
+            vel = vel[:, -1, :]
         npts, dof = vel.shape
         vfirst = vel[0].cpu().tolist()
         vlast = vel[-1].cpu().tolist()
-        # Intra-window accel: max over (i,j) of |v[i+1]-v[i]|/dt (MPPI plan noise)
-        accel_win = deg((vel[1:] - vel[:-1]).abs().max().item() / dt) if npts > 1 else 0.0
-        # Batch boundary accel: |vfirst - vlast_prev|/dt (stop-start discontinuity)
+        # Accel per command: single native command per step, so no intra-window
+        # term; only the batch-boundary term (velocity change vs previous step).
+        accel_win = 0.0
         if self._csv_last_vlast is not None:
             accel_bd = deg(max(abs(a - b) for a, b in zip(vfirst, self._csv_last_vlast)) / dt)
         else:
             accel_bd = 0.0
         self._csv_last_vlast = vlast
-        vbc = self._v_bc[0].cpu().tolist() if getattr(self, '_v_bc', None) is not None else [0.0] * dof
         pos_err = getattr(result, 'position_error', None)
         rot_err = getattr(result, 'rotation_error', None)
         pose_pos_err = float(pos_err.reshape(-1)[0].item()) if pos_err is not None else float('nan')
         pose_rot_err = float(rot_err.reshape(-1)[0].item()) if rot_err is not None else float('nan')
         self._csv.write_header_once(
             ["t_s", "dt_step_ms", "solve_ms", "fk_err_m", "vfirst_max_dps", "vlast_max_dps",
-             "accel_win_max_dps2", "accel_boundary_dps2", "vbc_max_dps",
+             "accel_win_max_dps2", "accel_boundary_dps2",
              "pose_pos_err_m", "pose_rot_err_rad", "cost_tool_pose_pos", "cost_tool_pose_orient",
              "cost_cspace", "con_self_collision", "con_scene_collision", "con_cspace_bound"]
             + [f"vfirst_j{i+1}_dps" for i in range(dof)]
@@ -359,7 +353,6 @@ class MPCController(ReactiveController):
             [f"{now - self._csv_t0:.3f}", f"{dt_step_ms:.1f}", f"{solve_ms:.1f}",
              f"{self._last_position_error:.5f}", f"{deg(max(abs(v) for v in vfirst)):.2f}",
              f"{deg(max(abs(v) for v in vlast)):.2f}", f"{accel_win:.1f}", f"{accel_bd:.1f}",
-             f"{deg(max(abs(v) for v in vbc)):.2f}",
              f"{pose_pos_err:.5f}", f"{pose_rot_err:.5f}",
              f"{breakdown.get('cost_tool_pose_pos', float('nan')):.4f}",
              f"{breakdown.get('cost_tool_pose_orient', float('nan')):.4f}",
@@ -381,19 +374,32 @@ class MPCController(ReactiveController):
         ``result.robot_state_sequence`` instead.  Its joint positions power
         the custom CuroboTrajectoryDisplay RViz plugin, which animates the
         full robot body through the horizon.
+
+        ``robot_state_sequence`` is a cuRobo ``RobotState`` (not a
+        ``JointState``): the trajectory lives in its ``.joint_state`` field.
+        Reading ``.position`` straight off the ``RobotState`` raises
+        `'RobotState' object has no attribute 'position'` — the
+        `[MPC DIAG] predicted path FK failed` warning seen in the logs.
         """
         if getattr(self, '_path_pub', None) is None:
             return
+        now = self._now()
+        if now - getattr(self, '_last_path_pub_at', 0.0) < 0.1:
+            return
+        self._last_path_pub_at = now
         try:
             state_seq = getattr(result, 'robot_state_sequence', None)
-            if state_seq is None or state_seq.position is None:
+            if state_seq is None:
                 return
-            position = state_seq.position
+            joint_state = getattr(state_seq, 'joint_state', None)
+            if joint_state is None or joint_state.position is None:
+                return
+            position = joint_state.position
             while position.ndim > 2:
                 position = position[0]
             if position.ndim == 1:
                 position = position.unsqueeze(0)
-            full_names = list(getattr(state_seq, 'joint_names', None) or [])
+            full_names = list(getattr(joint_state, 'joint_names', None) or [])
             pos_rows = position.cpu().tolist()
             if not pos_rows:
                 return
@@ -497,34 +503,33 @@ class MPCController(ReactiveController):
         self._cost_pub.publish(msg)
 
     def step(self, current_state: JointState) -> JointState:
+        # Native cuRobo reactive loop: plan ahead once, pop single commands off
+        # the internal buffer, and re-optimize ONLY when the buffer runs dry
+        # (ModelPredictiveControl.optimize_next_action). This replaces the old
+        # optimize_action_sequence flow, which re-optimized the FULL horizon
+        # every step with fresh MPPI noise and reinjected a fake boundary
+        # velocity (_v_bc). The re-plans disagreed with each other and with the
+        # real motion, so the command stream could be far off from correct —
+        # the arm jumped. Continuity here is the solver's own shifted action
+        # buffer plus the exact current_state (real position + the plan's own
+        # velocity, see ReactiveController._close_state_loop); no external
+        # velocity injection.
+        t_solve = self._now()
+        result = self.solver.optimize_next_action(current_state)
+        solve_ms = (self._now() - t_solve) * 1000.0
 
-        if getattr(self, '_use_mppi_acceleration', False):
-            # Velocity continuity (fewer jerks): reinjecting planned velocity from last point,
-            # filtered with EMA and CAPPED. The cap is required — without it, in ACCELERATION
-            # mode the plan integrates beyond the boundary → ratchet/runaway (cf. _VBC_CAP_DPS, debug 2026-07-15).
-            if self._v_bc is None:
-                self._v_bc = torch.zeros_like(current_state.position)
-            current_state = current_state.clone()
-            current_state.velocity = self._v_bc
-
-        t_solve = time.monotonic()
-        result = self.solver.optimize_action_sequence(current_state)
-        solve_ms = (time.monotonic() - t_solve) * 1000.0
-        seq = result.action_sequence
-        if seq is not None and seq.position.shape[1] > 0:
-            action = seq.clone()
-            if getattr(self, '_use_mppi_acceleration', False):
-                a = self._vel_feedback_alpha
-                cap = math.radians(_VBC_CAP_DPS)
-                self._v_bc = ((1.0 - a) * self._v_bc + a * seq.velocity[:, -1, :]).clamp(-cap, cap)
-        else:
-
+        action = result.next_action
+        if action is None or action.position is None:
+            # No command ready (cold-start solve not complete yet) — hold.
             action = current_state.clone()
             action.velocity = torch.zeros_like(action.position)
             action.acceleration = torch.zeros_like(action.position)
+        else:
+            action = action.clone()
 
         self._last_position_error = self._fk_position_error(current_state)
-        if seq is not None and seq.position.shape[1] > 0:
+
+        if result.next_action is not None:
             if self._debug_enabled():
                 breakdown = self._cost_breakdown(result)
                 self._csv_write(result, solve_ms, breakdown)
@@ -548,12 +553,85 @@ class MPCController(ReactiveController):
 
         return action
 
-    def apply_live_goal(self, raw_goal) -> bool:
+    def step_paced(self, current_state: JointState) -> JointState:
+        """One full-horizon solve -> the single-plan command window (paced mode).
+
+        The paced solve-and-shoot loop (ReactiveController._execute_paced)
+        sends one plan's command window and only re-plans after the robot has
+        fully executed it, so the window MUST come from a single coherent
+        solve. optimize_action_sequence re-solves the full horizon from
+        current_state every call (no execution-manager pops) and its command
+        sequence is exactly the manager's command window
+        (command_start_idx .. command_end_idx = 2*interpolation_steps
+        commands) — the points the robot should execute over the next
+        interval, all from ONE plan. cf. debug 2026-09-13: the old paced send
+        tick instead stacked optimize_next_action pops from several re-plans
+        into one window, and the arm visibly jumped between re-plans.
+        """
+        result = self.solver.optimize_action_sequence(current_state)
+        action = result.action_sequence
+        if action is None or action.position is None:
+            action = current_state.clone()
+            action.velocity = torch.zeros_like(action.position)
+            action.acceleration = torch.zeros_like(action.position)
+        else:
+            action = action.clone()
+
+        self._last_position_error = self._fk_position_error(current_state)
+
+        if self._debug_enabled():
+            try:
+                self._publish_predicted_path(result)
+            except Exception as e:
+                self.node.get_logger().warn(
+                    f"[MPC DIAG] step_paced path publish failed: {e}",
+                    throttle_duration_sec=5.0,
+                )
+        return action
+
+    def apply_live_goal(self, raw_goal, current_js=None) -> bool:
         goal = self._set_target(raw_goal)
         applied = self._apply_goal(goal, raw_goal)
+        if applied:
+            self._reseed_toward_goal(raw_goal, current_js)
         self.goal = goal
         self._publish_goal_marker(raw_goal, applied)
         return applied
+
+    def _reseed_toward_goal(self, raw, current_js=None):
+        """Re-point the optimizer's warm-start toward the new goal pose.
+
+        cuRobo MPPI resets its distribution mean to the (shifted) previous
+        action buffer at every optimize() call (ParticleOptCore.optimize ->
+        update_seed -> update_mean). Once the arm has parked on a target that
+        buffer is a "hold" trajectory, the covariance has converged, and the
+        fixed sample cloud clusters at the OLD end-effector pose - where the
+        cost of ANY newer goal is nearly flat, so the softmax-weighted mean
+        update has no signal and the arm appears to "keep the old target".
+        Rebuilding the seed trajectory from the NEW goal's joint state (IK
+        from the current pose, see _solve_goal_state) recenters the sample
+        cloud around the new target so the next solve can actually pull
+        toward it. cf. debug 2026-09-13.
+
+        Only re-seeds when a goal change is applied; with no change the
+        warm-start already points at the target. Runs under gpu_lock (IK).
+        """
+        if current_js is None:
+            return
+        try:
+            goal_js = self._solve_goal_state(raw, current_js)
+            if goal_js is not None:
+                self.solver.update_seed_trajectory_from_goal_state(goal_js)
+            else:
+                self.node.get_logger().warn(
+                    "MPC: live retarget re-seed skipped (no IK solution for new pose)",
+                    throttle_duration_sec=1.0,
+                )
+        except Exception as e:
+            self.node.get_logger().error(
+                f"MPC: live retarget re-seed failed: {e}",
+                throttle_duration_sec=1.0,
+            )
 
     def _publish_goal_marker(self, raw, applied: bool = True):
         """Publish a sphere Marker at the current Cartesian goal, for RViz.

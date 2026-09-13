@@ -102,7 +102,7 @@ class RetargetController(ReactiveController):
         self._last_position_error = self._fk_position_error(result.joint_state)
         return result.joint_state
 
-    def apply_live_goal(self, raw_goal) -> bool:
+    def apply_live_goal(self, raw_goal, current_js=None) -> bool:
         # Replace the tracked goal; the next solve_frame warm-starts from the
         # current solution (local IK) for a smooth transition.
         self.goal = self._set_target(raw_goal)

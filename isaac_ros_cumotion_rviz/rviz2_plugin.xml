@@ -19,10 +19,10 @@
     <description>Add Objects Display</description>
   </class>
 
-  <class name="isaac_ros_cumotion_rviz/ArrowInteractionDisplay"
-        type="isaac_ros_cumotion_rviz::ArrowInteractionDisplay"
+  <class name="isaac_ros_cumotion_rviz/MPCTargetDisplay"
+        type="isaac_ros_cumotion_rviz::MPCTargetDisplay"
         base_class_type="rviz_common::Display">
-    <description>Interactive 6-DOF Arrow Marker for Target Pose</description>
+    <description>Interactive 6-DOF MPC target with Start/Stop, rendered in-place (no Interactive Markers display needed).</description>
   </class>
 
   <class name="isaac_ros_cumotion_rviz/SparseVoxelGridDisplay"

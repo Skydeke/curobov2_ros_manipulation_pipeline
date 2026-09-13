@@ -25,30 +25,44 @@ The plugin registers four components (`rviz2_plugin.xml`):
 | `RvizArgsPanel` ("Curobo Rviz Panel") | Panel | Target pose, planner/strategy selection, parameters, plan/execute buttons |
 | `AddObjectsPanel` | Panel | Add and remove collision obstacles |
 | `AddObjectsDisplay` | Display | Renders the obstacles added from the panel |
-| `ArrowInteractionDisplay` | Display | Interactive 6-DOF arrow marker for the target pose |
+| `MPCTargetDisplay` | Display | Interactive 6-DOF target pose + Start/Stop MPC |
 
-### Target pose — the interactive arrow
+### Target pose — the interactive marker
 
-`ArrowInteractionDisplay` shows a draggable 6-DOF arrow in the 3D view. The `RvizArgsPanel` pose spin boxes (X/Y/Z, Roll/Pitch/Yaw) stay synchronized with the arrow in both directions: drag the arrow or type coordinates, whichever is easier. The pose is expressed in the robot base frame (from the robot descriptor / model).
+`MPCTargetDisplay` shows a draggable 6-DOF target in the 3D view. The
+`RvizArgsPanel` pose spin boxes (X/Y/Z, quaternion X/Y/Z/W) stay synchronized
+with the target in both directions: drag the marker or type coordinates,
+whichever is easier. The pose is expressed in the robot base frame.
+
+While in MPC mode the display also owns the reactive loop: **Start MPC** sends
+an `execute_trajectory` goal, streams the target pose to `/<planner>/mpc_goal`
+at 10 Hz as you drag, and **Stop MPC** cancels the goal. The panel hands off
+to the display automatically when "Generate and Send" is clicked in MPC mode.
 
 ### Main panel (`RvizArgsPanel`)
 
 ![Control panel](img/control_panel.png)
 
-- **Target position** — the six pose spin boxes, synced with the arrow.
+- **Target position** — the six pose spin boxes, synced with the target marker.
 - **Robot** — a combo box for the control strategy (`joint_speed`, `emulator`, `joint_pose`), wired to `set_robot_strategy`.
 - **Trajectory type** — a combo box for the planner, wired to `set_planner`. The combo index maps directly to the `SetPlanner` enum: 0 Classic, 1 MPC, 2 Batch, 3 Constrained. Batch and Constrained are **not implemented** in the node — selecting them makes the switch fail (and the multi-point/joint-space/retarget planners are only reachable from the CLI).
 - **Obstacle Update** — "Update Obstacles" calls `get_voxel_grid` and publishes the result as a marker on `/visualise_voxel_grid`; the "Auto-update (Hz)" spin box repeats it periodically.
 - **Speed (Time dilatation)** — sets the `time_dilation_factor` parameter; now a real speed control (stamped dt = `interpolation_dt / tdf`, so the RViz slider speeds up / slows down every sent trajectory).
 - **Voxel size** — sets the `voxel_size` parameter and then calls `update_motion_gen_config` for you (expect the ~20 s blocking rebuild).
-- **Generate Trajectory** — calls `generate_trajectory` with the arrow pose; the result is previewed by the ghost robot.
+- **Generate Trajectory** — calls `generate_trajectory` with the target pose; the result is previewed by the ghost robot.
 - **Send Trajectory** — sends the `execute_trajectory` action goal (reusing the cached plan when possible).
 - **Generate and send** — both in one click.
 - **Stop robot** — cancels the active action goal.
 
 ### MPC live tracking
 
-When the planner combo is on **MPC** and a goal is sent, the panel starts publishing the arrow pose to `/unified_planner/mpc_goal` at 10 Hz. Dragging the arrow then retargets the robot **live** while it moves — this is the quickest way to feel what closed-loop control does. Stopping the robot (or switching planner) stops the stream. See [MPC Implementation](mpc-implementation.md).
+When the planner combo is on **MPC**, "Generate and Send" (or the display's own
+**Start MPC** button) hands the reactive loop to the `MPCTargetDisplay`: it sends
+the `execute_trajectory` action goal with the target as the goal set and starts
+streaming the target pose to `/<planner>/mpc_goal` at 10 Hz. Dragging the target
+then retargets the robot **live** while it moves — this is the quickest way to
+feel what closed-loop control does. Stopping the robot (or the display's **Stop
+MPC**, or disabling the display) cancels the goal. See [MPC Implementation](mpc-implementation.md).
 
 ### Objects panel (`AddObjectsPanel`)
 
@@ -77,7 +91,7 @@ Planned trajectories are replayed by a translucent "preview" robot (namespace `p
 ## Troubleshooting
 
 - **Panels stay grey / buttons do nothing** — the planner is still warming up, or the node crashed; check `ros2 param get /unified_planner node_is_available` and the launch terminal.
-- **No arrow in the 3D view** — add the `ArrowInteractionDisplay` display (Displays → Add → By display type); the panel logs a warning until it finds one.
+- **No target in the 3D view** — add or enable the `MPCTargetDisplay` display (Displays → Add → By display type); the panel logs a warning until it finds one.
 - **"Trajectory type" switch fails** — you selected Batch or Constrained; both are unimplemented in the node.
 - **Voxel size change froze the GUI** — that is the blocking ~20 s solver rebuild; wait for it to finish.
 

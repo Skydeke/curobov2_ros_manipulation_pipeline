@@ -21,6 +21,8 @@ v2 notes:
   self-collision and scene collision.
 """
 
+import contextlib
+
 import torch
 from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Pose
@@ -88,7 +90,10 @@ class FKServices:
     ):
         batch_size = max(1, request.batch_size)
         try:
-            self._init(batch_size)
+            # Model construction + warmup batch run CUDA kernels — must not
+            # race a CUDA graph capture (see _gpu_guard).
+            with self._gpu_guard():
+                self._init(batch_size)
             response.success = True
             response.message = f"FK model ready (batch_size={batch_size})"
         except Exception as e:
@@ -101,6 +106,26 @@ class FKServices:
     # Services
     # ------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _gpu_guard(self):
+        """Serialise this callback's CUDA work against CUDA graph captures.
+
+        Every solver/graph capture in the node runs under ``node.gpu_lock``
+        (see its docstring in unified_planner_node): a CUDA graph capture is
+        process-global, so ANY other CUDA op — including this FK model's
+        compute_kinematics kernels and the ``.cpu().numpy()`` host syncs that
+        extract the result — issued from another executor thread while a
+        capture is in progress invalidates it (cudaErrorStreamCaptureInvalidated).
+        Acquired blocking (rather than dropping the request) so on-demand
+        service calls stay correct: the caller waits out the brief capture.
+        """
+        gpu_lock = getattr(self._node, "gpu_lock", None)
+        if gpu_lock is None:
+            yield
+        else:
+            with gpu_lock:
+                yield
+
     def _fk_callback(self, request: Fk.Request, response: Fk.Response):
         if self._fk_model is None:
             self._node.get_logger().error("FK not initialized. Call warmup_fk first.")
@@ -111,18 +136,19 @@ class FKServices:
             return response
 
         qs = [list(js.position) for js in request.joint_states]
-        ok, poses = self._compute_poses(qs)
-        if not ok:
-            return response
+        with self._gpu_guard():
+            ok, poses = self._compute_poses(qs)
+            if not ok:
+                return response
 
-        response.poses = poses
+            response.poses = poses
 
-        # Fk.srv also declares poses_valid; populate it from the same validator
-        # (joint limits, self-collision, scene collision).
-        for v in self._validate(qs):
-            b = Bool()
-            b.data = bool(v)
-            response.poses_valid.append(b)
+            # Fk.srv also declares poses_valid; populate it from the same validator
+            # (joint limits, self-collision, scene collision).
+            for v in self._validate(qs):
+                b = Bool()
+                b.data = bool(v)
+                response.poses_valid.append(b)
         return response
 
     def _fk_batch_callback(self, request: FkBatch.Request, response: FkBatch.Response):
@@ -142,22 +168,23 @@ class FKServices:
 
         qs = [list(js.position) for js in request.joint_states]
 
-        ok, poses = self._compute_poses(qs)
-        if not ok:
-            response.success = False
-            response.error_msg = String(data="FK batch solve failed")
-            return response
+        with self._gpu_guard():
+            ok, poses = self._compute_poses(qs)
+            if not ok:
+                response.success = False
+                response.error_msg = String(data="FK batch solve failed")
+                return response
 
-        # Validate each configuration: joint limits, self-collision, scene
-        # collision (see RobotCollisionChecker.validate()).
-        valid = self._validate(qs)
+            # Validate each configuration: joint limits, self-collision, scene
+            # collision (see RobotCollisionChecker.validate()).
+            valid = self._validate(qs)
 
-        response.poses = poses
-        for v in valid:
-            b = Bool()
-            b.data = bool(v)
-            response.poses_valid.append(b)
-        response.success = True
+            response.poses = poses
+            for v in valid:
+                b = Bool()
+                b.data = bool(v)
+                response.poses_valid.append(b)
+            response.success = True
         return response
 
     # ------------------------------------------------------------------

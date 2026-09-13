@@ -16,7 +16,7 @@ namespace isaac_ros_cumotion_rviz
     , motion_gen_config_request_{nullptr}
     , time_dilation_factor_{0.0}
     , voxel_size_{0.0}
-    , arrow_interaction_{nullptr}
+    , mpc_target_display_{nullptr}
     , user_editing_pose_{false}
     , last_displayed_x_{std::numeric_limits<double>::quiet_NaN()}
     , last_displayed_y_{std::numeric_limits<double>::quiet_NaN()}
@@ -48,8 +48,8 @@ namespace isaac_ros_cumotion_rviz
     const std::string planner_node = node_->get_parameter("planner_node_name").as_string();
     const std::string planner_ns = "/" + planner_node + "/";
 
-    // Try to find ArrowInteractionDisplay, will be set by timer if not immediately available
-    this->arrow_interaction_ = nullptr;
+    // Try to find MPCTargetDisplay, will be set by timer if not immediately available
+    this->mpc_target_display_ = nullptr;
 
     // AsyncParametersClient -- never SyncParametersClient, which builds its own
     // temporary executor per call and would fight the background NodeSpinner (see
@@ -160,9 +160,9 @@ namespace isaac_ros_cumotion_rviz
     connect(poseUpdateTimer, &QTimer::timeout, this, &RvizArgsPanel::updateMarkerPoseDisplay);
     poseUpdateTimer->start(100); // Update pose display every 100ms
 
-    // Timer to find ArrowInteractionDisplay
+    // Timer to find MPCTargetDisplay
     QTimer* findDisplayTimer = new QTimer(this);
-    connect(findDisplayTimer, &QTimer::timeout, this, &RvizArgsPanel::findArrowInteractionDisplay);
+    connect(findDisplayTimer, &QTimer::timeout, this, &RvizArgsPanel::findMPCTargetDisplay);
     findDisplayTimer->start(500); // Check every 500ms until found
 
     // Connect obstacle update controls
@@ -185,13 +185,10 @@ namespace isaac_ros_cumotion_rviz
     // Connect stop robot button
     connect(ui_->stopRobot, &QPushButton::clicked, this, &RvizArgsPanel::on_stopRobot_clicked);
 
-    // Create MPC goal publisher for real-time tracking
-    this->mpc_goal_pub_ = node_->create_publisher<geometry_msgs::msg::Pose>("/unified_planner/mpc_goal", 10);
-
-    // Create timer for MPC goal publishing (10Hz), but don't start it yet
-    mpc_goal_publisher_timer_ = new QTimer(this);
-    connect(mpc_goal_publisher_timer_, &QTimer::timeout, this, &RvizArgsPanel::publishMpcGoal);
-    is_mpc_tracking_active_ = false;
+    // NOTE: MPC live-goal streaming moved out of the panel and into the
+    // MPCTargetDisplay (it publishes the drag pose to /<planner>/mpc_goal at
+    // 10 Hz while a goal is active). Live MPC retargeting now works by adding
+    // that display and pressing its "Start MPC" button.
 
     // Spin node_ on a background thread for the rest of this panel's lifetime, so
     // every async_send_request/AsyncParametersClient callback below actually gets
@@ -394,37 +391,35 @@ namespace isaac_ros_cumotion_rviz
     void RvizArgsPanel::on_sendTrajectory_clicked(){
       auto goal_request = isaac_ros_cumotion_interfaces::action::SendTrajectory::Goal();
 
-      // Publish marker pose ONCE to MPC goal topic
-      if (arrow_interaction_) {
-        auto marker_pose = arrow_interaction_->get_pose();
-        mpc_goal_pub_->publish(marker_pose);
-        RCLCPP_INFO(node_->get_logger(), "Published goal pose once for execution");
-
-        // REQUIRED for the open-loop path, and it used to be missing: the goal
-        // went out default-constructed, i.e. an empty goalsets entry -- the
-        // dsr01/world origin, inside the robot's own base.
-        //
-        // The panel relied on the server reusing the plan the "generate" button
-        // had just cached (allow_cached defaults to true). But that reuse is
-        // gated by _pending_plan_matches(), whose signature INCLUDES goalsets
-        // and compares positions to 1 mm (unified_planner_node.py
-        // _target_signature/_poses_match). Cached signature = the real marker
-        // pose, incoming goal = the origin -> guaranteed mismatch, so the server
-        // silently re-planned toward the robot's own base, burned its 10
-        // max_attempts, failed, and aborted the goal without logging anything.
-        // Net effect: "generate" returned a trajectory, "execute" did nothing.
-        //
-        // MPC never showed this because the reactive path gets its target from
-        // mpc_goal_pub_ (republished at 10 Hz by mpc_goal_publisher_timer_),
-        // which overrides the empty goalset. The open-loop path has no such
-        // second source -- the cache was its only route, and it was unreachable.
+      // REQUIRED for the open-loop path, and it used to be missing: the goal
+      // went out default-constructed, i.e. an empty goalsets entry -- the
+      // dsr01/world origin, inside the robot's own base.
+      //
+      // The panel relied on the server reusing the plan the "generate" button
+      // had just cached (allow_cached defaults to true). But that reuse is
+      // gated by _pending_plan_matches(), whose signature INCLUDES goalsets
+      // and compares positions to 1 mm (unified_planner_node.py
+      // _target_signature/_poses_match). Cached signature = the real marker
+      // pose, incoming goal = the origin -> guaranteed mismatch, so the server
+      // silently re-planned toward the robot's own base, burned its 10
+      // max_attempts, failed, and aborted the goal without logging anything.
+      // Net effect: "generate" returned a trajectory, "execute" did nothing.
+      //
+      // MPC never showed this because the reactive path gets its target from
+      // the /<planner>/mpc_goal topic (streamed at 10 Hz by the MPCTargetDisplay
+      // while active), which overrides the empty goalset. The open-loop path
+      // has no such second source -- the cache was its only route, and it was
+      // unreachable.
+      if (mpc_target_display_) {
+        auto target_pose = mpc_target_display_->getPose();
         isaac_ros_cumotion_interfaces::msg::Goalset gset;
-        gset.poses.push_back(marker_pose);
+        gset.poses.push_back(target_pose);
         goal_request.goalsets.push_back(gset);
       } else {
         RCLCPP_WARN(node_->get_logger(),
-                    "Arrow marker not available - goal sent WITHOUT a target pose "
-                    "(open-loop planning will fail; add ArrowInteractionDisplay to RViz)");
+                    "MPC target display not available - goal sent WITHOUT a target "
+                    "pose (open-loop planning will fail; add "
+                    "MPCTargetDisplay to RViz)");
       }
 
       auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
@@ -458,11 +453,6 @@ namespace isaac_ros_cumotion_rviz
       }
 
       runOnGuiThread([this]() {
-        if (is_mpc_tracking_active_) {
-          mpc_goal_publisher_timer_->stop();
-          is_mpc_tracking_active_ = false;
-          RCLCPP_INFO(node_->get_logger(), "Stopped MPC tracking mode");
-        }
         goal_active_ = false;
         updateActionButtons();
       });
@@ -492,8 +482,8 @@ namespace isaac_ros_cumotion_rviz
       // Always called from the GUI thread (button slots), so early-return failure
       // paths can invoke on_done() directly; only the async completion below
       // (which fires on the background spin thread) needs runOnGuiThread.
-      if (!arrow_interaction_) {
-        RCLCPP_WARN(node_->get_logger(), "Arrow marker not available yet. Please add ArrowInteractionDisplay to RViz.");
+      if (!mpc_target_display_) {
+        RCLCPP_WARN(node_->get_logger(), "MPC target display not available yet. Please add MPCTargetDisplay to RViz.");
         if (on_done) { on_done(false); }
         return;
       }
@@ -505,7 +495,7 @@ namespace isaac_ros_cumotion_rviz
 
       auto goal_request = std::make_shared<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request>();
       isaac_ros_cumotion_interfaces::msg::Goalset gset;
-      gset.poses.push_back(this->arrow_interaction_->get_pose());
+      gset.poses.push_back(this->mpc_target_display_->getPose());
       goal_request->goalsets.push_back(gset);
 
       trajectory_generation_client_->async_send_request(goal_request,
@@ -531,83 +521,38 @@ namespace isaac_ros_cumotion_rviz
     }
 
     void RvizArgsPanel::on_generateAndSend_clicked(){
-      if (!arrow_interaction_) {
-        RCLCPP_WARN(node_->get_logger(), "Arrow marker not available");
+      // Check if MPC planner is selected (planner_type == 1)
+      if (current_planner_type_ == 1) {
+        // MPC Mode: delegate to the MPCTargetDisplay, which owns the reactive
+        // flow (SetPlanner MPC -> execute_trajectory action -> live mpc_goal
+        // streaming while the gizmo is dragged). The panel no longer keeps its
+        // own 10 Hz goal publisher.
+        if (!mpc_target_display_) {
+          RCLCPP_WARN(node_->get_logger(), "MPC target display not available; add MPCTargetDisplay to RViz to start MPC tracking");
+          return;
+        }
+        RCLCPP_INFO(node_->get_logger(), "Starting MPC tracking via MPCTargetDisplay");
+        mpc_target_display_->startMpc();
         return;
       }
 
-      // Check if MPC planner is selected (planner_type == 1)
-      if (current_planner_type_ == 1) {
-        // MPC Mode: Start continuous tracking
-        RCLCPP_INFO(node_->get_logger(), "Starting MPC tracking mode (10Hz goal updates)");
-
-        if (!trajectory_generation_client_->service_is_ready()) {
-          RCLCPP_ERROR(node_->get_logger(), "generate_trajectory service not available");
-          return;
+      // Classic Mode: generate, then chain into send once generation actually
+      // succeeds (previously a QTimer::singleShot(500, ...) guess resting on
+      // on_generateTrajectory_clicked's old blocking behavior -- now a real
+      // completion callback, since that call is fully async).
+      RCLCPP_INFO(node_->get_logger(), "Classic mode: generate and execute once");
+      generateTrajectoryAsync([this](bool success) {
+        if (success) {
+          on_sendTrajectory_clicked();
+        } else {
+          RCLCPP_ERROR(node_->get_logger(), "Trajectory generation failed; not sending");
         }
-
-        auto gen_request = std::make_shared<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request>();
-        isaac_ros_cumotion_interfaces::msg::Goalset gset;
-        gset.poses.push_back(arrow_interaction_->get_pose());
-        gen_request->goalsets.push_back(gset);
-
-        trajectory_generation_client_->async_send_request(gen_request,
-          [this](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedFuture future) {
-            bool success = false;
-            std::string message;
-            try {
-              auto response = future.get();
-              success = response->success;
-              message = response->message;
-            } catch (const std::exception & e) {
-              message = e.what();
-            }
-
-            // Everything below touches ui_/QTimer/goal_active_ -- hop back to the
-            // GUI thread as one block rather than cherry-picking individual lines.
-            runOnGuiThread([this, success, message]() {
-              if (success) {
-                RCLCPP_INFO(node_->get_logger(), "MPC initialized successfully");
-
-                is_mpc_tracking_active_ = true;
-                mpc_goal_publisher_timer_->start(100); // 100ms = 10Hz
-                publishMpcGoal(); // Publish first goal immediately
-
-                auto goal_request = isaac_ros_cumotion_interfaces::action::SendTrajectory::Goal();
-                auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
-                send_goal_options.goal_response_callback = std::bind(&RvizArgsPanel::goal_response_callback, this, std::placeholders::_1);
-                send_goal_options.result_callback = std::bind(&RvizArgsPanel::result_callback, this, std::placeholders::_1);
-                action_ptr_->async_send_goal(goal_request, send_goal_options);
-
-                goal_active_ = true;
-                updateActionButtons();
-              } else {
-                RCLCPP_ERROR(node_->get_logger(), "MPC initialization failed: %s", message.c_str());
-              }
-            });
-          });
-
-      } else {
-        // Classic Mode: generate, then chain into send once generation actually
-        // succeeds (previously a QTimer::singleShot(500, ...) guess resting on
-        // on_generateTrajectory_clicked's old blocking behavior -- now a real
-        // completion callback, since that call is fully async).
-        RCLCPP_INFO(node_->get_logger(), "Classic mode: generate and execute once");
-        generateTrajectoryAsync([this](bool success) {
-          if (success) {
-            on_sendTrajectory_clicked();
-          } else {
-            RCLCPP_ERROR(node_->get_logger(), "Trajectory generation failed; not sending");
-          }
-        });
-      }
+      });
     }
     void RvizArgsPanel::on_stopRobot_clicked(){
-      // Stop MPC tracking timer if active
-      if (is_mpc_tracking_active_) {
-        mpc_goal_publisher_timer_->stop();
-        is_mpc_tracking_active_ = false;
-        RCLCPP_INFO(node_->get_logger(), "Stopped MPC tracking mode");
+      // Stop live MPC tracking if the target display is running it
+      if (mpc_target_display_) {
+        mpc_target_display_->stopMpc();
       }
 
       // Cancel the action goal if it exists and is still active
@@ -627,9 +572,9 @@ namespace isaac_ros_cumotion_rviz
       updateActionButtons();
     }
 
-    void RvizArgsPanel::findArrowInteractionDisplay(){
+    void RvizArgsPanel::findMPCTargetDisplay(){
       // If already found, stop searching
-      if (arrow_interaction_ != nullptr) {
+      if (mpc_target_display_ != nullptr) {
         return;
       }
 
@@ -645,18 +590,16 @@ namespace isaac_ros_cumotion_rviz
         return;
       }
 
-      // Search for ArrowInteractionDisplay
+      // Search for MPCTargetDisplay
       for (int i = 0; i < root_display->numDisplays(); ++i) {
         auto display = root_display->getDisplayAt(i);
         if (display) {
-          // Try to cast to ArrowInteractionDisplay
-          auto arrow_display = dynamic_cast<ArrowInteractionDisplay*>(display);
-          if (arrow_display) {
+          // Try to cast to MPCTargetDisplay
+          auto mpc_display = dynamic_cast<MPCTargetDisplay*>(display);
+          if (mpc_display) {
             // Found it!
-            arrow_interaction_ = arrow_display->getArrowInteraction();
-            if (arrow_interaction_) {
-              RCLCPP_INFO(node_->get_logger(), "Found ArrowInteractionDisplay, using its marker");
-            }
+            mpc_target_display_ = mpc_display;
+            RCLCPP_INFO(node_->get_logger(), "Found MPCTargetDisplay, using its target");
             return;
           }
         }
@@ -703,8 +646,8 @@ namespace isaac_ros_cumotion_rviz
     }
 
     void RvizArgsPanel::applyPoseFromSpinboxes(){
-      if (!arrow_interaction_) {
-        RCLCPP_WARN(node_->get_logger(), "ArrowInteraction not available yet");
+      if (!mpc_target_display_) {
+        RCLCPP_WARN(node_->get_logger(), "MPC target display not available yet");
         return;
       }
 
@@ -721,7 +664,7 @@ namespace isaac_ros_cumotion_rviz
       eulerToQuaternion(roll, pitch, yaw, pose.orientation);
 
       // Apply the new pose to the marker
-      arrow_interaction_->setPoseWithOrientation(pose);
+      mpc_target_display_->setPose(pose);
 
       // Update last displayed values to match what we just set
       last_displayed_x_ = pose.position.x;
@@ -749,11 +692,11 @@ namespace isaac_ros_cumotion_rviz
 
     void RvizArgsPanel::updateMarkerPoseDisplay(){
       // Don't update if marker not found yet or if user is editing
-      if (!arrow_interaction_ || user_editing_pose_) {
+      if (!mpc_target_display_ || user_editing_pose_) {
         return;
       }
 
-      auto pose = arrow_interaction_->get_pose();
+      auto pose = mpc_target_display_->getPose();
 
       // Convert quaternion to Euler angles
       double roll, pitch, yaw;
@@ -1090,19 +1033,9 @@ namespace isaac_ros_cumotion_rviz
         });
     }
 
-    void RvizArgsPanel::publishMpcGoal() {
-      if (!is_mpc_tracking_active_ || !arrow_interaction_) {
-        return;
-      }
-
-      // Get current marker pose and publish to MPC goal topic
-      auto marker_pose = arrow_interaction_->get_pose();
-      mpc_goal_pub_->publish(marker_pose);
-
-      // Debug log (can be verbose, use sparingly)
-      // RCLCPP_DEBUG(node_->get_logger(), "Published MPC goal at 10Hz");
-    }
-
+    // MPC live-goal streaming is owned by the MPCTargetDisplay (it publishes the
+    // drag pose to /<planner>/mpc_goal at 10 Hz while a goal is active) -- the
+    // panel's old publishMpcGoal/timer/mpc_goal_pub_ were removed with it.
 
 } // isaac_ros_cumotion_rviz
 

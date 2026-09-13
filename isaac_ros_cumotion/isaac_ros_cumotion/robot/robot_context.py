@@ -17,7 +17,7 @@ from isaac_ros_cumotion.robot.robot_description import load_robot_description
 #   gpu_lock (node, RLock)  >  strategy_lock (RobotContext)  >  buffer_lock
 #   (per-strategy, RLock, see JointCommandStrategy)
 #
-#   _pending_lock / _live_goal_lock / _goal_lock (reactive_controller.py /
+#   _live_goal_lock / _goal_lock (reactive_controller.py /
 #   unified_planner_node.py) are leaves: never held while acquiring another
 #   lock.
 #

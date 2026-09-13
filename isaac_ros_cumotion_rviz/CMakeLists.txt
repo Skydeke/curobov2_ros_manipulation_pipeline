@@ -63,8 +63,7 @@ set(${PROJECT_NAME}_SRCS
   src/add_objects_display.cpp
   src/add_objects_panel.cpp
   src/isaac_ros_cumotion_rviz.cpp
-  src/arrow_interaction.cpp
-  src/arrow_interaction_display.cpp
+  src/mpc_target_display.cpp
   src/sparse_voxel_grid_display.cpp
   src/curobo_trajectory_display.cpp
   src/reachability_map_display.cpp
@@ -77,8 +76,7 @@ set(${PROJECT_NAME}_HDRS
   include/${PROJECT_NAME}/isaac_ros_cumotion_rviz.hpp
   include/${PROJECT_NAME}/add_objects_display.hpp
   include/${PROJECT_NAME}/add_objects_panel.hpp
-  include/${PROJECT_NAME}/arrow_interaction.hpp
-  include/${PROJECT_NAME}/arrow_interaction_display.hpp
+  include/${PROJECT_NAME}/mpc_target_display.hpp
   include/${PROJECT_NAME}/sparse_voxel_grid_display.hpp
   include/${PROJECT_NAME}/node_spinner.hpp
   include/${PROJECT_NAME}/curobo_trajectory_display.hpp

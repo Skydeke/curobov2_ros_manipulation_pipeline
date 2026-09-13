@@ -16,6 +16,7 @@ v2 notes:
 - load_from_robot_config(...) replaced by Cfg.create(robot=<yaml_path>, scene_model=<Scene>, ...).
 """
 
+import contextlib
 import threading
 
 import torch
@@ -77,7 +78,10 @@ class IKServices:
     ):
         batch_size = max(1, request.batch_size)
         try:
-            self._init(batch_size)
+            # Solver construction + warmup run CUDA kernels (solve for a batch
+            # of random configs) — must not race a CUDA graph capture.
+            with self._gpu_guard():
+                self._init(batch_size)
             response.success = True
             response.message = f"IK solver ready (batch_size={batch_size})"
         except Exception as e:
@@ -90,22 +94,43 @@ class IKServices:
     # Services
     # ------------------------------------------------------------------
 
+    @contextlib.contextmanager
+    def _gpu_guard(self):
+        """Serialise this callback's CUDA work against CUDA graph captures.
+
+        Every solver/graph capture in the node runs under ``node.gpu_lock``
+        (see its docstring in unified_planner_node): a CUDA graph capture is
+        process-global, so ANY other CUDA op — including this solver's eager
+        solve kernels and the ``.cpu()`` host syncs that extract the result —
+        issued from another executor thread while a capture is in progress
+        invalidates it (cudaErrorStreamCaptureInvalidated). Acquiring the lock
+        blocking (rather than dropping the request) keeps on-demand service
+        calls correct: the caller simply waits for the brief capture window.
+        """
+        gpu_lock = getattr(self._node, "gpu_lock", None)
+        if gpu_lock is None:
+            yield
+        else:
+            with gpu_lock:
+                yield
+
     def _ik_callback(self, request: Ik.Request, response: Ik.Response):
         if self._ik_solver is None:
             response.success = False
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
-        ok, result = self._solve([request.pose])
-        if not ok:
-            response.success = False
-            response.error_msg.data = "IK solve failed"
-            return response
+        with self._gpu_guard():
+            ok, result = self._solve([request.pose])
+            if not ok:
+                response.success = False
+                response.error_msg.data = "IK solve failed"
+                return response
 
-        js = JointState()
-        js.position = result.solution.cpu().numpy()[0][0].tolist()
-        valid = std_msgs.msg.Bool()
-        valid.data = bool(result.success.cpu().numpy()[0][0])
+            js = JointState()
+            js.position = result.solution.cpu().numpy()[0][0].tolist()
+            valid = std_msgs.msg.Bool()
+            valid.data = bool(result.success.cpu().numpy()[0][0])
         response.joint_states = js
         response.joint_states_valid = valid
         response.success = True
@@ -117,20 +142,21 @@ class IKServices:
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
-        ok, result = self._solve(request.poses)
-        if not ok:
-            response.success = False
-            response.error_msg.data = "IK batch solve failed"
-            return response
+        with self._gpu_guard():
+            ok, result = self._solve(request.poses)
+            if not ok:
+                response.success = False
+                response.error_msg.data = "IK batch solve failed"
+                return response
 
-        for i, j in enumerate(result.solution.cpu().numpy()):
-            js = JointState()
-            js.position = j[0].tolist()
-            valid = std_msgs.msg.Bool()
-            valid.data = bool(result.success.cpu().numpy()[i][0])
-            response.joint_states.append(js)
-            response.joint_states_valid.append(valid)
-        response.success = True
+            for i, j in enumerate(result.solution.cpu().numpy()):
+                js = JointState()
+                js.position = j[0].tolist()
+                valid = std_msgs.msg.Bool()
+                valid.data = bool(result.success.cpu().numpy()[i][0])
+                response.joint_states.append(js)
+                response.joint_states_valid.append(valid)
+            response.success = True
         return response
 
     # ------------------------------------------------------------------
@@ -289,12 +315,16 @@ class IKServices:
         if n == 0:
             return False, None, [], []
 
-        ok, result = self._solve(list(poses), num_seeds=num_seeds)
-        if not ok:
-            return False, None, [False] * n, []
+        # ReachabilityServices already holds gpu_lock when it calls us; the
+        # guard is reentrant (RLock) so the solve + extraction stay covered
+        # either way — the .cpu().numpy() host syncs must not race a capture.
+        with self._gpu_guard():
+            ok, result = self._solve(list(poses), num_seeds=num_seeds)
+            if not ok:
+                return False, None, [False] * n, []
 
-        sol = result.solution.detach().cpu().numpy()  # [B, seeds, D]
-        suc = result.success.detach().cpu().numpy()   # [B, seeds]
-        positions = [sol[i][0].tolist() for i in range(n)]
-        flags = [bool(suc[i][0]) for i in range(n)]
-        return True, positions, flags, list(self._ik_solver.kinematics.joint_names)
+            sol = result.solution.detach().cpu().numpy()  # [B, seeds, D]
+            suc = result.success.detach().cpu().numpy()   # [B, seeds]
+            positions = [sol[i][0].tolist() for i in range(n)]
+            flags = [bool(suc[i][0]) for i in range(n)]
+            return True, positions, flags, list(self._ik_solver.kinematics.joint_names)

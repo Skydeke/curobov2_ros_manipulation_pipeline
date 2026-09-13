@@ -6,6 +6,7 @@ from visualization_msgs.msg import MarkerArray, Marker
 from geometry_msgs.msg import Point
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy
 from isaac_ros_cumotion.core.collision_distance import _attributed_collisions
+from contextlib import contextmanager
 
 
 class RosServiceManager:
@@ -408,12 +409,44 @@ class RosServiceManager:
         return self.obstacle_manager.remove_all_objects(node, request, response)
 
     def _callback_get_voxel_grid(self, node, request: GetVoxelGrid, response):
-        """Delegate get_voxel_grid service to ObstacleManager"""
-        return self.obstacle_manager.get_voxel_grid(node, request, response)
+        """Delegate get_voxel_grid service to ObstacleManager.
+
+        The dense-voxel query rasterizes analytic primitives on the GPU and
+        syncs the result back to the host (a .cpu() read) — without guarding,
+        that concurrent CUDA work would invalidate a planner's in-progress CUDA
+        graph capture (cf. _publish_sparse_voxel_grid, which skips instead
+        because it is a timer). On-demand service, so it waits out the capture.
+        """
+        with self._gpu_guard(node):
+            return self.obstacle_manager.get_voxel_grid(node, request, response)
 
     def _callback_get_collision_distance(self, node, request: GetCollisionDistance, response):
-        """Delegate get_collision_distance service to ConfigWrapper"""
-        return self.config_wrapper.callback_get_collision_distance(node, request, response)
+        """Delegate get_collision_distance service to ConfigWrapper.
+
+        Runs FK + a GPU scene-collision query on the host-sync read path; the
+        gpu_lock guard keeps it from racing a CUDA graph capture (the planner's
+        own _collision_diagnostic already runs under the same lock).
+        """
+        with self._gpu_guard(node):
+            return self.config_wrapper.callback_get_collision_distance(node, request, response)
+
+    @contextmanager
+    def _gpu_guard(self, node):
+        """Blocking gpu_lock guard for on-demand (service) GPU callbacks.
+
+        Captures in this node are process-global and serialised under
+        gpu_lock (see its docstring in unified_planner_node), so every CUDA
+        op — including the host syncs that materialize results — must run
+        under the same lock or it invalidates the capture. Blocking (not
+        skipping) because a service must answer; the wait is bounded by the
+        lock holders' GPU-only work.
+        """
+        gpu_lock = getattr(node, 'gpu_lock', None)
+        if gpu_lock is None:
+            yield
+        else:
+            with gpu_lock:
+                yield
 
     def _callback_set_collision_cache(self, node, request: SetCollisionCache, response):
         """Delegate set_collision_cache service to ObstacleManager.

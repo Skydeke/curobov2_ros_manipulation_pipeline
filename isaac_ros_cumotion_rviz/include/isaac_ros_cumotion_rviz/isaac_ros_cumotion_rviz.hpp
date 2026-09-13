@@ -12,8 +12,7 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 
 // Projet
-#include "isaac_ros_cumotion_rviz/arrow_interaction.hpp"
-#include "isaac_ros_cumotion_rviz/arrow_interaction_display.hpp"
+#include "isaac_ros_cumotion_rviz/mpc_target_display.hpp"
 #include "isaac_ros_cumotion_rviz/node_spinner.hpp"
 #include "isaac_ros_cumotion_interfaces/srv/trajectory_generation.hpp"
 #include "isaac_ros_cumotion_interfaces/action/send_trajectory.hpp"
@@ -74,7 +73,7 @@ namespace isaac_ros_cumotion_rviz
 
     // Marker control slots
     void updateMarkerPoseDisplay();
-    void findArrowInteractionDisplay();
+    void findMPCTargetDisplay();
     void applyPoseFromSpinboxes();
 
     // Obstacle update slots
@@ -87,9 +86,6 @@ namespace isaac_ros_cumotion_rviz
 
     // Planner type slots
     void on_comboBoxTrajectoryType_currentIndexChanged(int index);
-
-    // MPC tracking slots
-    void publishMpcGoal();  // Timer callback for continuous goal publishing
 
     // Helper methods for quaternion <-> Euler conversion
     void quaternionToEuler(const geometry_msgs::msg::Quaternion& q, double& roll, double& pitch, double& yaw);
@@ -145,7 +141,9 @@ namespace isaac_ros_cumotion_rviz
     rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedPtr trajectory_generation_client_;
     rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::GoalHandle::SharedPtr goal_handle_;
     float time_dilation_factor_, voxel_size_;
-    std::shared_ptr<ArrowInteraction> arrow_interaction_;
+    // The MPCTargetDisplay owning the draggable 6-DOF target (self-contained;
+    // polling timer finds it lazily). Not owned by the panel.
+    MPCTargetDisplay* mpc_target_display_;
     bool user_editing_pose_; // Flag to prevent auto-update while user is editing
 
     // Last displayed pose to avoid unnecessary updates
@@ -181,11 +179,6 @@ namespace isaac_ros_cumotion_rviz
     // Planner type members
     rclcpp::Client<isaac_ros_cumotion_interfaces::srv::SetPlanner>::SharedPtr set_planner_client_;
     uint8_t current_planner_type_;
-
-    // MPC tracking members
-    rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr mpc_goal_pub_;
-    QTimer* mpc_goal_publisher_timer_;
-    bool is_mpc_tracking_active_;
 
     // Declared LAST so it is destroyed FIRST (members are torn down in reverse
     // declaration order): stops and joins the background spin thread before any

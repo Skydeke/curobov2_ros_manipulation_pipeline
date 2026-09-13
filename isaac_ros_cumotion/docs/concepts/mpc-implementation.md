@@ -60,7 +60,7 @@ A concrete controller implements only the cuRobo-specific hooks:
 | `build_solver()` | create the cuRobo solver from the shared context; publish `node.mpc` |
 | `setup(state, goal)` | set the initial goal on the solver |
 | `step(state)` | one optimization step → next action; update `_last_position_error` |
-| `apply_live_goal(raw)` | retarget the goal during execution |
+| `apply_live_goal(raw, current_js)` | retarget the goal during execution |
 | `is_converged()` | stop condition (default: position error < threshold) |
 
 ## `MPCController` — cuRobo lifecycle
@@ -141,7 +141,11 @@ Reactive control reuses the **unified** interface — no dedicated action:
 - `execute_trajectory` (`SendTrajectory` action) → drives the control loop with
   feedback / cancellation.
 - `mpc_goal` topic (`geometry_msgs/Pose`) → live retargeting during execution; this
-  is the ROS mapping of cuRobo's continuous `update_goal_tool_poses`.
+  is the ROS mapping of cuRobo's continuous `update_goal_tool_poses`. Each accepted
+  retarget also re-seeds the optimizer toward the new goal's joint state
+  (`_reseed_toward_goal` → `update_seed_trajectory_from_goal_state`): otherwise
+  MPPI warm-starts from the parked/old-target action buffer, whose converged sample
+  cloud sees a flat cost for the new pose and keeps the arm at the old target.
 
 ## ROS parameters
 

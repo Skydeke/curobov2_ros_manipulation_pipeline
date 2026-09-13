@@ -281,9 +281,13 @@ class UnifiedPlannerNode(Node):
         self.declare_parameter('mpc_horizon_steps', 30)
         # LBFGS iterations per optimize call. cuRobo's defaults (200 warm-start,
         # 300 cold-start) are tuned for the offline getting-started demo, not
-        # real-time control — they made optimize_action_sequence() take ~1-1.3s
-        # per call on this hardware (vs. optimization_dt=0.03s), so the arm went
-        # long stretches uncorrected then jumped, causing overshoot/oscillation.
+        # real-time control — the old per-tick full-horizon re-optimization
+        # (optimize_action_sequence, pre-2026-09) took ~1-1.3s per call on this
+        # hardware (vs. optimization_dt=0.03s), so the arm went long stretches
+        # uncorrected then jumped, causing overshoot/oscillation. The native
+        # optimize_next_action loop (plan-ahead, pop one command per solve)
+        # keeps the same iteration counts for the warm-start re-solves that
+        # refill its command buffer.
         # NOTE: cuRobo's LBFGS requires num_iters to be a MULTIPLE of its inner
         # loop size (25) — e.g. 25/50/75/100 are valid, 10 raises ValueError.
         # Isolated test (franka.yml, no real hardware): 25/100 -> ~18ms/call
@@ -303,6 +307,9 @@ class UnifiedPlannerNode(Node):
         # (see the note above), and 5/10 would leave it untuned.
         self.declare_parameter('mpc_solver_type', 'mppi_acceleration')
         self.declare_parameter('mpc_mppi_num_particles', 400)
+        # Deprecated (pre-2026-09 velocity feedback cap, _v_bc): the native
+        # optimize_next_action loop warm-starts internally, so this is declared
+        # only so existing configs that still set it keep loading.
         self.declare_parameter('mpc_vel_feedback_alpha', 1.0)
         # Fixed-interval command pacing (seconds). 0.0 = off (re-solve/re-send as
         # fast as the solve allows, ~70ms — replaces the previous window before the
@@ -563,53 +570,63 @@ class UnifiedPlannerNode(Node):
         self._warmup_reactive('mpc')
 
     def update_all_solvers_world(self, scene=None):
-        """Propagate scene updates to all initialized solvers."""
-        obstacle_manager = self.config_wrapper_motion.obstacle_manager
-        # Normalize whatever scene we're handed to the solver-supported types
-        # (sphere/cylinder/capsule -> mesh), or they're silently dropped from
-        # collision. See obstacle_manager.collision_world_scene().
-        scene = self._solver_bound_scene(scene, obstacle_manager)
+        """Propagate scene updates to all initialized solvers.
 
-        # DIAGNOSTIC (default off => normal behaviour). Withholds the perception
-        # ESDF voxel layer from the solvers so only analytic primitives remain,
-        # to test whether the voxel layer is what pegs con_scene_collision at its
-        # sentinel value. SAFETY: with this enabled the solvers do NOT see
-        # camera-observed obstacles, so run it only with a clear workspace.
-        if not self.get_parameter('push_esdf_to_solvers').get_parameter_value().bool_value:
-            scene = obstacle_manager.primitives_only_scene()
-            self.get_logger().warn(
-                "push_esdf_to_solvers=false: solvers see analytic primitives ONLY "
-                "(no camera obstacles) - diagnostic mode",
-                throttle_duration_sec=5.0)
-        elif obstacle_manager.collision_cache["voxel"] is None:
-            # No voxel cache pre-allocated in the solvers (SetCollisionCache
-            # blox=0) — a scene carrying an ESDF layer would raise "Voxel cache
-            # not initialized" inside update_world. Degrade gracefully: no
-            # camera-based collision avoidance instead of a hard planning failure.
-            scene = obstacle_manager.primitives_only_scene()
-            self.get_logger().warn(
-                "Voxel collision cache disabled (SetCollisionCache blox=0): "
-                "solvers see analytic primitives ONLY, no camera obstacles",
-                throttle_duration_sec=5.0)
+        The pushes upload the Scene to every solver's CUDA collision model —
+        a CUDA op, so it must be serialised against CUDA graph captures
+        (gpu_lock docstring). Holds gpu_lock (blocking, reentrant RLock): most
+        callers already run under it (refresh_perception_world, clear_voxel,
+        attachment), but add_object/remove_object reach us through the world-
+        changed observer WITHOUT a lock, and those run on a service thread that
+        can overlap a capture. RLock reentrancy makes the nested acquires free.
+        """
+        with self.gpu_lock:
+            obstacle_manager = self.config_wrapper_motion.obstacle_manager
+            # Normalize whatever scene we're handed to the solver-supported types
+            # (sphere/cylinder/capsule -> mesh), or they're silently dropped from
+            # collision. See obstacle_manager.collision_world_scene().
+            scene = self._solver_bound_scene(scene, obstacle_manager)
 
-        if self.motion_planner is not None:
-            self.motion_planner.update_world(scene)
+            # DIAGNOSTIC (default off => normal behaviour). Withholds the perception
+            # ESDF voxel layer from the solvers so only analytic primitives remain,
+            # to test whether the voxel layer is what pegs con_scene_collision at its
+            # sentinel value. SAFETY: with this enabled the solvers do NOT see
+            # camera-observed obstacles, so run it only with a clear workspace.
+            if not self.get_parameter('push_esdf_to_solvers').get_parameter_value().bool_value:
+                scene = obstacle_manager.primitives_only_scene()
+                self.get_logger().warn(
+                    "push_esdf_to_solvers=false: solvers see analytic primitives ONLY "
+                    "(no camera obstacles) - diagnostic mode",
+                    throttle_duration_sec=5.0)
+            elif obstacle_manager.collision_cache["voxel"] is None:
+                # No voxel cache pre-allocated in the solvers (SetCollisionCache
+                # blox=0) — a scene carrying an ESDF layer would raise "Voxel cache
+                # not initialized" inside update_world. Degrade gracefully: no
+                # camera-based collision avoidance instead of a hard planning failure.
+                scene = obstacle_manager.primitives_only_scene()
+                self.get_logger().warn(
+                    "Voxel collision cache disabled (SetCollisionCache blox=0): "
+                    "solvers see analytic primitives ONLY, no camera obstacles",
+                    throttle_duration_sec=5.0)
 
-        # Reactive controllers each own their collision model; delegate to the
-        # controller's update_world() override (no node dependency on internals).
-        if self.mpc is not None:
-            self.planner_manager.get_planner('mpc').update_world(scene)
-        if self.retargeter is not None:
-            self.planner_manager.get_planner('retarget').update_world(scene)
+            if self.motion_planner is not None:
+                self.motion_planner.update_world(scene)
 
-        self.ik_services.update_world()
-        self.fk_services.update_world()
+            # Reactive controllers each own their collision model; delegate to the
+            # controller's update_world() override (no node dependency on internals).
+            if self.mpc is not None:
+                self.planner_manager.get_planner('mpc').update_world(scene)
+            if self.retargeter is not None:
+                self.planner_manager.get_planner('retarget').update_world(scene)
 
-        # Every update_world above clears + re-adds all obstacles with enable=1,
-        # which wipes the flag cuRobo set for an attached obstacle — re-assert
-        # the disabled set now or the static copy collides with the attached
-        # spheres again.
-        obstacle_manager.reapply_attached_disables(self)
+            self.ik_services.update_world()
+            self.fk_services.update_world()
+
+            # Every update_world above clears + re-adds all obstacles with enable=1,
+            # which wipes the flag cuRobo set for an attached obstacle — re-assert
+            # the disabled set now or the static copy collides with the attached
+            # spheres again.
+            obstacle_manager.reapply_attached_disables(self)
 
     def _solver_bound_scene(self, scene, obstacle_manager):
         """Resolve/normalize a scene before it is pushed to the solvers.
