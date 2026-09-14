@@ -1652,6 +1652,20 @@ def main(args=None):
             destroy = getattr(strategy, 'destroy', None)
             if destroy is not None:
                 destroy()
+    # Same for the laser workers: stop each projection thread and the batched
+    # lidar-integration thread before the node is torn down
+    # (laser_pointcloud_strategy.py / laser_context.py).
+    laser_mgr = getattr(getattr(node, 'config_wrapper_motion', None),
+                        'laser_system_manager', None)
+    laser_context = getattr(laser_mgr, 'laser_context', None)
+    if laser_context is not None:
+        for strategy in laser_context.lasers.values():
+            destroy = getattr(strategy, 'destroy', None)
+            if destroy is not None:
+                destroy()
+        context_destroy = getattr(laser_context, 'destroy', None)
+        if context_destroy is not None:
+            context_destroy()
     node.destroy_node()
     # rclpy's own SIGINT handler already shuts the context down, so calling
     # shutdown() unconditionally raises "rcl_shutdown already called" and the

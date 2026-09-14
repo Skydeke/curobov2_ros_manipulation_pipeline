@@ -331,18 +331,30 @@ class ObstacleManager:
             )
         return decay
 
-    def setup_perception(self, num_cameras: int = 1, total_frame_rate_hz: float = 0.0):
+    def setup_perception(
+        self,
+        num_cameras: int = 1,
+        total_frame_rate_hz: float = 0.0,
+        num_lasers: int = 0,
+        lidar_image_height: int = 0,
+        lidar_image_width: int = 0,
+    ):
         """Create the v2 Mapper and expose it as `node.mapper`.
 
         Idempotent: if a Mapper already exists on the node (e.g. created by
         another ConfigWrapper sharing this node), adopt it instead of building
-        a second one. No-op when `use_mapper` is False.
+        a second one. No-op when `use_mapper` is False. The Mapper is created as
+        soon as ANY perception source (camera or laser) is configured.
 
         Args:
             num_cameras: number of cameras feeding the shared Mapper (sizes the
-                projective scratch buffer).
-            total_frame_rate_hz: combined integrate() rate of those cameras, used
-                to normalise the decay (see _resolve_time_decay).
+                camera projective scratch buffer).
+            total_frame_rate_hz: combined integrate() rate of cameras AND lasers,
+                used to normalise the decay (see _resolve_time_decay).
+            num_lasers: number of lasers feeding the shared Mapper (sizes the
+                lidar projective scratch buffer → `lidar_num_sensors`).
+            lidar_image_height/lidar_image_width: shared range-image resolution
+                of all lasers (ignored when ``num_lasers`` < 1).
         """
         if not self._use_mapper:
             self.mapper = None
@@ -350,30 +362,53 @@ class ObstacleManager:
             self.node.get_logger().info("Perception disabled (use_mapper=False)")
             return
 
-        if int(num_cameras) < 1:
-            # No camera feeds the Mapper → skip the GPU allocation entirely.
+        num_cameras = int(num_cameras)
+        num_lasers = int(num_lasers)
+        if num_cameras < 1 and num_lasers < 1:
+            # No perception source feeds the Mapper → skip the GPU allocation.
             self.mapper = None
             self.node.mapper = None
-            self.node.get_logger().info("Perception inactive (no cameras configured)")
+            self.node.get_logger().info(
+                "Perception inactive (no cameras or lasers configured)")
             return
 
         existing = getattr(self.node, 'mapper', None)
         if existing is not None:
             self.mapper = existing
         else:
-            self._build_mapper(num_cameras, total_frame_rate_hz)
+            self._build_mapper(
+                num_cameras,
+                total_frame_rate_hz,
+                num_lasers=num_lasers,
+                lidar_image_height=lidar_image_height,
+                lidar_image_width=lidar_image_width,
+            )
 
         self._arm_mapper_stats_timer()
 
-    def _build_mapper(self, num_cameras, total_frame_rate_hz):
+    def _build_mapper(
+        self,
+        num_cameras,
+        total_frame_rate_hz,
+        num_lasers: int = 0,
+        lidar_image_height: int = 0,
+        lidar_image_width: int = 0,
+    ):
         """Construct the v2 Mapper and expose it as `node.mapper`."""
         # num_cameras is the per-integrate batch size. Each camera strategy
         # integrates ONE frame per ROS callback, so the Mapper is built for a
         # single-camera frame; multiple cameras simply call integrate() in turn
         # and the shared TSDF fuses them. (All cameras must share image_height/
         # image_width since the projective buffer is sized once here.)
+        #
+        # Lasers batch ALL sensors into a single LidarObservation (leading dim
+        # num_lasers), so lidar_num_sensors = number of configured lasers. The
+        # lidar projective buffer is also sized once, hence the shared global
+        # lidar_image_height/width. lidar fields are only set when a laser is
+        # actually active: MapperCfg validation rejects lidar_image_height/width
+        # being set while lidar_num_sensors == 0.
         time_decay = self._resolve_time_decay(total_frame_rate_hz)
-        self.mapper = Mapper(MapperCfg(
+        mapper_cfg = dict(
             extent_meters_xyz=tuple(self._mapper_extent_xyz),
             # Pin the ESDF extent to the TSDF extent so the produced ESDF grid
             # dims match the pre-allocated voxel collision_cache exactly.
@@ -394,21 +429,33 @@ class ObstacleManager:
             # accumulates without bound and the occupied-voxel count grows
             # monotonically even on a static scene (edge noise gradually crossing
             # the threshold). It is NOT set by hand: it is derived from
-            # `decay_half_life_s` (seconds) and the combined camera rate, because
-            # cuRobo applies the decay ONCE PER integrate() CALL -- adding a
-            # camera or changing an fps would otherwise silently shift the
+            # `decay_half_life_s` (seconds) and the combined camera+laser rate,
+            # because cuRobo applies the decay ONCE PER integrate() CALL -- adding
+            # a source or changing an fps would otherwise silently shift the
             # forgetting horizon.
             decay_factor=time_decay,
             num_cameras=1,
-        ))
+        )
+        if num_lasers > 0:
+            mapper_cfg.update(
+                lidar_num_sensors=num_lasers,
+                lidar_image_height=int(lidar_image_height),
+                lidar_image_width=int(lidar_image_width),
+            )
+        self.mapper = Mapper(MapperCfg(**mapper_cfg))
         self.node.mapper = self.mapper
+        lidar_txt = ""
+        if num_lasers > 0:
+            lidar_txt = (f", lidar={int(lidar_image_width)}x{int(lidar_image_height)} "
+                         f"({num_lasers} sensor(s) feeding the shared TSDF)")
         self.node.get_logger().info(
             f"Mapper configured: extent={self._mapper_extent_xyz}m, "
             f"tsdf={self._mapper_voxel_size}m (trunc={self._mapper_truncation_distance}m), "
             f"esdf={self._esdf_voxel_size}m, seeding={self._mapper_seeding_method}, "
             f"block={self._mapper_block_size}, "
             f"image={self._mapper_image_width}x{self._mapper_image_height} "
-            f"({int(num_cameras)} camera(s) feeding the shared TSDF), "
+            f"({int(num_cameras)} camera(s) feeding the shared TSDF)"
+            f"{lidar_txt}, "
             f"decay: half_life={self._decay_half_life_s}s @ R={total_frame_rate_hz}Hz "
             f"-> time_decay={time_decay:.4f}"
         )

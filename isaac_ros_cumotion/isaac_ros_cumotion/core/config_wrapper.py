@@ -6,6 +6,7 @@ from isaac_ros_cumotion.core.config_manager import ConfigManager
 from isaac_ros_cumotion.core.robot_model_manager import RobotModelManager
 from isaac_ros_cumotion.core.obstacle_manager import ObstacleManager
 from isaac_ros_cumotion.core.camera_system_manager import CameraSystemManager
+from isaac_ros_cumotion.core.laser_system_manager import LaserSystemManager
 from isaac_ros_cumotion.core.ros_service_manager import RosServiceManager
 
 
@@ -121,6 +122,12 @@ class ConfigWrapper(ABC):
                 "camera_info_topic instead.")
         self.camera_system_manager = CameraSystemManager(node)
 
+        # Phase 5b: LaserSystemManager - one range-image laser per `laser_*`
+        # array entry (point clouds → curobo lidar range image → shared Mapper
+        # TSDF). Global `laser_image_height`/`laser_image_width` size the lidar
+        # projective buffer; 0 disables the whole block.
+        self.laser_system_manager = LaserSystemManager(node)
+
         # Phase 3: RosServiceManager - Manage ROS services (last, depends on others)
         self.ros_service_manager = RosServiceManager(
             node,
@@ -132,9 +139,10 @@ class ConfigWrapper(ABC):
         )
 
         # Phase 6: Perception (Mapper) + propagation observers.
-        # The Mapper turns camera data into an ESDF voxel grid used for
+        # The Mapper turns camera + laser data into an ESDF voxel grid used for
         # collision. The observers ensure every scene/cache mutation reaches
         # the solvers regardless of the caller (ROS service OR direct Python).
+        # The Mapper is created when ANY source (camera or laser) is active.
         num_cameras = 0
         total_frame_rate_hz = 0.0
         camera_context = self.camera_system_manager.camera_context
@@ -142,10 +150,24 @@ class ConfigWrapper(ABC):
             num_cameras = len(camera_context.cameras)
             # Combined integrate() rate: the TSDF decay fires once per call, so
             # this is what turns `decay_half_life_s` into a per-call factor.
-            total_frame_rate_hz = camera_context.get_total_frame_rate_hz()
+            total_frame_rate_hz += camera_context.get_total_frame_rate_hz()
+        num_lasers = 0
+        lidar_image_height = 0
+        lidar_image_width = 0
+        laser_context = self.laser_system_manager.laser_context
+        if laser_context is not None:
+            num_lasers = self.laser_system_manager.num_lasers
+            lidar_image_height = self.laser_system_manager.lidar_image_height
+            lidar_image_width = self.laser_system_manager.lidar_image_width
+            # Lasers integrate from the same shared TSDF, so their declared rate
+            # joins the camera rate in the decay normalisation.
+            total_frame_rate_hz += laser_context.get_total_frame_rate_hz()
         self.obstacle_manager.setup_perception(
             num_cameras=num_cameras,
             total_frame_rate_hz=total_frame_rate_hz,
+            num_lasers=num_lasers,
+            lidar_image_height=lidar_image_height,
+            lidar_image_width=lidar_image_width,
         )
 
         self._register_world_observers(node)
@@ -237,6 +259,11 @@ class ConfigWrapper(ABC):
     def camera_context(self):
         """Get camera context from CameraSystemManager"""
         return self.camera_system_manager.camera_context
+
+    @property
+    def laser_context(self):
+        """Get laser context from LaserSystemManager (None when no laser active)"""
+        return self.laser_system_manager.laser_context
 
     @property
     def _ops_dtype(self):
