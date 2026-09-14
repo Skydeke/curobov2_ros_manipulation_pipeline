@@ -506,69 +506,92 @@ class RosServiceManager:
         if not self.collision_spheres_enabled:
             return
 
-        # Source spheres from the MotionPlanner's kinematics when available — it
-        # carries attaches (our robot_model_manager kin_model does not), so the
-        # fitted attached-object spheres show and ride the arm. attached_mask
-        # flags them for a distinct colour. Fall back to robot_model_manager.
-        kin = self._attachment_kinematics()
-        if kin is not None:
-            try:
-                robot_spheres, attached_mask = \
-                    self.robot_model_manager.get_collision_spheres_with_attached(kin)
-            except Exception as e:
-                self.node.get_logger().debug(
-                    f"attached-sphere viz fallback: {e}", throttle_duration_sec=5.0)
+        # This timer does REAL GPU work (torch.tensor host->device copies in
+        # get_collision_spheres*, cuda core kinematics, blocking .cpu() reads,
+        # and the sphere collision queries) and must never overlap a CUDA graph
+        # capture. A capture is a process-global CUDA state: any other thread
+        # issuing host<->device copies or kernels while the solver re-captures
+        # its graphs (the rebuild holds gpu_lock) performs capture-illegal ops
+        # (cudaErrorStreamCaptureUnsupported) that invalidate the in-flight
+        # capture — the node then crashes at the next solver launch with a
+        # misleading CUDA_ERROR_STREAM_CAPTURE_INVALIDATED. Skip this publish
+        # cycle when the lock is busy, mirroring _publish_sparse_voxel_grid.
+        # RLock: the nested _spheres_in_collision guard below re-acquires on
+        # this same thread.
+        gpu_lock = getattr(node, 'gpu_lock', None)
+        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+            self.node.get_logger().debug(
+                "gpu_lock busy (CUDA graph capture) - skipping sphere publish cycle",
+                throttle_duration_sec=5.0)
+            return
+
+        try:
+            # Source spheres from the MotionPlanner's kinematics when available — it
+            # carries attaches (our robot_model_manager kin_model does not), so the
+            # fitted attached-object spheres show and ride the arm. attached_mask
+            # flags them for a distinct colour. Fall back to robot_model_manager.
+            kin = self._attachment_kinematics()
+            if kin is not None:
+                try:
+                    robot_spheres, attached_mask = \
+                        self.robot_model_manager.get_collision_spheres_with_attached(kin)
+                except Exception as e:
+                    self.node.get_logger().debug(
+                        f"attached-sphere viz fallback: {e}", throttle_duration_sec=5.0)
+                    robot_spheres = self.robot_model_manager.get_collision_spheres()
+                    attached_mask = [False] * len(robot_spheres)
+            else:
                 robot_spheres = self.robot_model_manager.get_collision_spheres()
                 attached_mask = [False] * len(robot_spheres)
-        else:
-            robot_spheres = self.robot_model_manager.get_collision_spheres()
-            attached_mask = [False] * len(robot_spheres)
 
-        # Determine per-sphere collision status so colliding spheres can be
-        # coloured red. Purely a visualization nicety — any failure falls back
-        # to "all green".
-        colliding = self._spheres_in_collision(node, kin)
-        red_indices = {r['index'] for r in colliding or []}
+            # Determine per-sphere collision status so colliding spheres can be
+            # coloured red. Purely a visualization nicety — any failure falls back
+            # to "all green".
+            colliding = self._spheres_in_collision(node, kin)
+            red_indices = {r['index'] for r in colliding or []}
 
-        # Prepend a DELETEALL so markers that are no longer re-published (e.g.
-        # an attached object's spheres after detach) do not linger. It must
-        # carry an EMPTY namespace: rviz's DELETEALL is namespace-scoped
-        # (ros2/rviz#685), so a namespaced DELETEALL would only clear markers
-        # in that namespace. The sphere markers all live under
-        # ns='collision_spheres', so an unset-ns DELETEALL cannot collide with
-        # any of them.
-        marker_array = MarkerArray()
-        clear = Marker()
-        clear.action = Marker.DELETEALL
-        marker_array.markers.append(clear)
+            # Prepend a DELETEALL so markers that are no longer re-published (e.g.
+            # an attached object's spheres after detach) do not linger. It must
+            # carry an EMPTY namespace: rviz's DELETEALL is namespace-scoped
+            # (ros2/rviz#685), so a namespaced DELETEALL would only clear markers
+            # in that namespace. The sphere markers all live under
+            # ns='collision_spheres', so an unset-ns DELETEALL cannot collide with
+            # any of them.
+            marker_array = MarkerArray()
+            clear = Marker()
+            clear.action = Marker.DELETEALL
+            marker_array.markers.append(clear)
 
-        for i, sphere in enumerate(robot_spheres):
-            if sphere[3] <= 0:  # skip disabled spheres (radius = -100)
-                continue
-            marker = Marker()
-            marker.ns = 'collision_spheres'
-            marker.header.frame_id = self.config_manager.base_link
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            marker.id = i
-            marker.pose.position.x = sphere[0]
-            marker.pose.position.y = sphere[1]
-            marker.pose.position.z = sphere[2]
-            marker.scale.x = sphere[3] * 2  # Diameter
-            marker.scale.y = sphere[3] * 2
-            marker.scale.z = sphere[3] * 2
-            marker.color.a = 0.5  # Transparency
-            is_colliding = colliding is not None and i in red_indices
-            if is_colliding:
-                marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0  # colliding = red
-            elif attached_mask[i]:  # attached object, not colliding = blue
-                marker.color.r, marker.color.g, marker.color.b = 0.0, 0.0, 1.0
-            else:
-                marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0  # collision-free = green
-            marker_array.markers.append(marker)
+            for i, sphere in enumerate(robot_spheres):
+                if sphere[3] <= 0:  # skip disabled spheres (radius = -100)
+                    continue
+                marker = Marker()
+                marker.ns = 'collision_spheres'
+                marker.header.frame_id = self.config_manager.base_link
+                marker.type = Marker.SPHERE
+                marker.action = Marker.ADD
+                marker.id = i
+                marker.pose.position.x = sphere[0]
+                marker.pose.position.y = sphere[1]
+                marker.pose.position.z = sphere[2]
+                marker.scale.x = sphere[3] * 2  # Diameter
+                marker.scale.y = sphere[3] * 2
+                marker.scale.z = sphere[3] * 2
+                marker.color.a = 0.5  # Transparency
+                is_colliding = colliding is not None and i in red_indices
+                if is_colliding:
+                    marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0  # colliding = red
+                elif attached_mask[i]:  # attached object, not colliding = blue
+                    marker.color.r, marker.color.g, marker.color.b = 0.0, 0.0, 1.0
+                else:
+                    marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0  # collision-free = green
+                marker_array.markers.append(marker)
 
-        # Publish marker array
-        self.publish_collision_spheres_pub.publish(marker_array)
+            # Publish marker array
+            self.publish_collision_spheres_pub.publish(marker_array)
+        finally:
+            if gpu_lock is not None:
+                gpu_lock.release()
 
     def _spheres_in_collision(self, node, kin):
         """

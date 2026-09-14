@@ -14,7 +14,9 @@ v2 notes:
   model directly.
 """
 
+from contextlib import nullcontext
 from functools import partial
+import os
 import rclpy
 
 from std_srvs.srv import Trigger
@@ -25,13 +27,36 @@ from isaac_ros_cumotion_interfaces.srv import GetCollisionDistance
 # change between plan calls (e.g. different interpolated trajectory lengths).
 # Without this, a second plan with a different horizon raises
 # "CUDA graph reset is not available." Requires CUDA 12.0+.
+# cuda_streams=False routes every cost/eval kernel onto the current (capture)
+# stream instead of per-cost workspace streams. On solver rebuild the planner
+# re-captures CUDA graphs; the workspace streams' record_event / wait_stream
+# and the cuda_core_backend launches that touch a capturing stream are illegal
+# and invalidate the capture (CUDA_ERROR_STREAM_CAPTURE_INVALIDATED), crashing
+# the node whenever the collision cache is rebuilt. Keeping cuda_streams=True
+# makes that rebuild crash nondeterministically.
 # Note: curobo.runtime re-exports (and shadows) curobo._src.runtime values at
 # import time — torch_util.is_cuda_graph_reset_available() reads from
-# curobo.runtime, so we must flip the flag on the public module too.
+# curobo.runtime and cuda_stream_util.cuda_stream_context() reads
+# curobo.runtime.cuda_streams, so we must flip the flags on the public module too.
 import curobo._src.runtime as _curobo_runtime
 _curobo_runtime.cuda_graph_reset = True
 import curobo.runtime as _curobo_runtime_public
 _curobo_runtime_public.cuda_graph_reset = True
+
+# Diagnostic only: CUROBO_DEBUG_CUDA_GRAPH=1 turns on PyTorch CUDA graph debug
+# mode (torch.cuda.CUDAGraph.enable_debug_mode) so a capture-illegal operation
+# is reported at the moment it happens — naming the exact culprit — instead of
+# surfacing a stale CUDA_ERROR_STREAM_CAPTURE_INVALIDATED from a later launch.
+# No effect when unset/0.
+if os.environ.get("CUROBO_DEBUG_CUDA_GRAPH", "").strip().lower() not in (
+    "",
+    "0",
+    "false",
+    "no",
+    "off",
+):
+    _curobo_runtime.debug_cuda_graphs = True
+    _curobo_runtime_public.debug_cuda_graphs = True
 
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 
@@ -61,7 +86,7 @@ class ConfigWrapperMotion(ConfigWrapper):
 
         self.motion_gen_srv = node.create_service(
             Trigger,
-            node.get_name() + '/update_motion_gen_config',
+            node.get_name() + "/update_motion_gen_config",
             partial(self.set_motion_gen_config, node),
         )
 
@@ -76,8 +101,10 @@ class ConfigWrapperMotion(ConfigWrapper):
         ``update_motion_gen_config`` so a runtime change takes effect on
         rebuild.
         """
-        if node.has_parameter('max_goalset'):
-            return int(node.get_parameter('max_goalset').get_parameter_value().integer_value)
+        if node.has_parameter("max_goalset"):
+            return int(
+                node.get_parameter("max_goalset").get_parameter_value().integer_value
+            )
         return 16
 
     def set_motion_gen_config(self, node, _, response):
@@ -86,67 +113,95 @@ class ConfigWrapperMotion(ConfigWrapper):
 
         Called at init and on demand via the `update_motion_gen_config` service.
         """
-        # No perception voxel layer at construction — collision_cache allocates
-        # the voxel storage and update_world fills it by copy. Passing the live
-        # layer aliases the solver's buffer onto our ESDF tensor, which the first
-        # update_world then clears to "solid". See primitives_only_scene().
-        scene = self.obstacle_manager.primitives_only_scene()
-        collision_activation_distance = node.get_parameter(
-            'collision_activation_distance'
-        ).get_parameter_value().double_value
+        # Rebuilding + warmup re-captures CUDA graphs, so the whole body must
+        # hold gpu_lock: a concurrent viz timer (collision spheres / sparse voxel
+        # grid) doing host->device copies or a depth-camera integrate while a
+        # stream is capturing invalidates the capture
+        # (cudaErrorStreamCaptureUnsupported then Invalidated) and crashes the
+        # node — the same invariant every other graph-capturing path in the node
+        # follows. RLock: reentrant when this is called from
+        # rebuild_solvers_for_cache_change (which already holds it). Standalone
+        # nodes without the lock fall back to a no-op context.
+        gpu_lock = getattr(node, "gpu_lock", None)
+        lock_ctx = gpu_lock if gpu_lock is not None else nullcontext()
+        with lock_ctx:
+            # No perception voxel layer at construction — collision_cache allocates
+            # the voxel storage and update_world fills it by copy. Passing the live
+            # layer aliases the solver's buffer onto our ESDF tensor, which the first
+            # update_world then clears to "solid". See primitives_only_scene().
+            scene = self.obstacle_manager.primitives_only_scene()
+            collision_activation_distance = (
+                node.get_parameter("collision_activation_distance")
+                .get_parameter_value()
+                .double_value
+            )
 
-        cfg = MotionPlannerCfg.create(
-            robot=self.robot_model_manager.robot_cfg,
-            scene_model=scene,
-            num_ik_seeds=self.num_ik_seeds,
-            num_trajopt_seeds=self.num_trajopt_seeds,
-            position_tolerance=self.position_tolerance,
-            orientation_tolerance=self.orientation_tolerance,
-            use_cuda_graph=self.use_cuda_graph,
-            self_collision_check=self.self_collision_check,
-            collision_cache=self.collision_cache,
-            optimizer_collision_activation_distance=collision_activation_distance,
-            max_batch_size=self.max_batch_size,
-            multi_env=self.multi_env,
-            max_goalset=self._resolve_max_goalset(node),
-        )
+            cfg = MotionPlannerCfg.create(
+                robot=self.robot_model_manager.robot_cfg,
+                scene_model=scene,
+                num_ik_seeds=self.num_ik_seeds,
+                num_trajopt_seeds=self.num_trajopt_seeds,
+                position_tolerance=self.position_tolerance,
+                orientation_tolerance=self.orientation_tolerance,
+                use_cuda_graph=self.use_cuda_graph,
+                self_collision_check=self.self_collision_check,
+                collision_cache=self.collision_cache,
+                optimizer_collision_activation_distance=collision_activation_distance,
+                max_batch_size=self.max_batch_size,
+                multi_env=self.multi_env,
+                max_goalset=self._resolve_max_goalset(node),
+            )
 
-        node.motion_planner = MotionPlanner(cfg)
-        # Legacy alias — some downstream code still references `node.motion_gen`.
-        node.motion_gen = node.motion_planner
+            node.motion_planner = MotionPlanner(cfg)
+            # Legacy alias — some downstream code still references `node.motion_gen`.
+            node.motion_gen = node.motion_planner
 
-        # Output sampling step of the interpolated plan. It's a trajopt config
-        # field (not a MotionPlannerCfg.create arg), so set it post-build, before
-        # warmup so the interpolation buffer picks it up. Guarded: the standalone
-        # node doesn't declare this param.
-        if node.has_parameter('interpolation_dt'):
-            interp_dt = node.get_parameter('interpolation_dt').get_parameter_value().double_value
+            # Output sampling step of the interpolated plan. It's a trajopt config
+            # field (not a MotionPlannerCfg.create arg), so set it post-build, before
+            # warmup so the interpolation buffer picks it up. Guarded: the standalone
+            # node doesn't declare this param.
+            if node.has_parameter("interpolation_dt"):
+                interp_dt = (
+                    node.get_parameter("interpolation_dt")
+                    .get_parameter_value()
+                    .double_value
+                )
+                try:
+                    node.motion_planner.trajopt_solver.config.interpolation_dt = interp_dt
+                    node.get_logger().info(f"interpolation_dt set to {interp_dt}s")
+                except AttributeError:
+                    node.get_logger().warn(
+                        "Could not set interpolation_dt on trajopt_solver"
+                    )
+
+            node.get_logger().info("warming up..")
+
+            self.node_is_available = False
+            node.set_parameters(
+                [
+                    rclpy.parameter.Parameter(
+                        "node_is_available", rclpy.Parameter.Type.BOOL, False
+                    )
+                ]
+            )
+
             try:
-                node.motion_planner.trajopt_solver.config.interpolation_dt = interp_dt
-                node.get_logger().info(f"interpolation_dt set to {interp_dt}s")
-            except AttributeError:
-                node.get_logger().warn("Could not set interpolation_dt on trajopt_solver")
+                node.motion_planner.warmup()
+            except Exception:
+                node.motion_planner = None
+                node.motion_gen = None
+                raise
 
-        node.get_logger().info("warming up..")
+            node.set_parameters(
+                [
+                    rclpy.parameter.Parameter(
+                        "node_is_available", rclpy.Parameter.Type.BOOL, True
+                    )
+                ]
+            )
+            self.node_is_available = True
 
-        self.node_is_available = False
-        node.set_parameters([
-            rclpy.parameter.Parameter('node_is_available', rclpy.Parameter.Type.BOOL, False)
-        ])
-
-        try:
-            node.motion_planner.warmup()
-        except Exception:
-            node.motion_planner = None
-            node.motion_gen = None
-            raise
-
-        node.set_parameters([
-            rclpy.parameter.Parameter('node_is_available', rclpy.Parameter.Type.BOOL, True)
-        ])
-        self.node_is_available = True
-
-        node.get_logger().info("Motion planner configured")
+            node.get_logger().info("Motion planner configured")
 
         if response is not None:
             response.success = True
@@ -159,9 +214,9 @@ class ConfigWrapperMotion(ConfigWrapper):
         # supported collision type (cuboid/mesh) or they are silently dropped
         # from collision checking. See collision_world_scene().
         scene = self.obstacle_manager.collision_world_scene()
-        if getattr(node, 'motion_planner', None) is not None:
+        if getattr(node, "motion_planner", None) is not None:
             node.motion_planner.update_world(scene)
-        if getattr(node, 'mpc', None) is not None:
+        if getattr(node, "mpc", None) is not None:
             # MPCSolver has no top-level update_world(); go through its checker.
             node.mpc.scene_collision_checker.load_collision_model(scene)
 
@@ -173,5 +228,7 @@ class ConfigWrapperMotion(ConfigWrapper):
             f"Updated world: {len(scene.cuboid)} cuboids, {len(scene.mesh)} meshes"
         )
 
-    def callback_get_collision_distance(self, node, request: GetCollisionDistance, response):
+    def callback_get_collision_distance(
+        self, node, request: GetCollisionDistance, response
+    ):
         return _compute_sphere_distance(self, node, response)
