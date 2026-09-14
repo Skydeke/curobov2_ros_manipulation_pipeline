@@ -14,7 +14,8 @@
 #
 # Per-suite timeouts are read from the generated test/run_all_tests.sh; the
 # tests loop runs the UR10e block of it. Regenerating the runner keeps the
-# timeouts in sync. The container exits non-zero iff any suite fails.
+# timeouts in sync. The tests service aborts on the first failure (exits
+# non-zero, so `--abort-on-container-exit` tears the server down too).
 #
 # Usage:
 #   docker compose -f docker/ur10e_tests.yaml up --build --abort-on-container-exit
@@ -89,7 +90,6 @@ services:
         cd /root/ros2_ws/src/isaac_ros_cumotion/test
         shopt -s nullglob
         COUNTER=0
-        FAILED=0
         for SPEC in test_test_*_$${ROBOT}.py; do
           NAME=$${SPEC%.py}
           TIMEOUT_S=$(grep -oP "timeout \K[0-9]+(?= launch_test .*$${NAME}\.py)" \
@@ -99,8 +99,8 @@ services:
           if timeout "$${TIMEOUT_S}" launch_test "$${SPEC}"; then
             echo "  PASSED $${NAME}"
           else
-            echo "  FAILED $${NAME}"
-            FAILED=1
+            echo "  FAILED $${NAME} — aborting remaining suites"
+            exit 1
           fi
           COUNTER=$((COUNTER + 1))
         done
@@ -109,4 +109,3 @@ services:
           exit 1
         fi
         echo "Ran $${COUNTER} $${ROBOT} suites (timeouts sourced from run_all_tests.sh)."
-        exit $${FAILED}

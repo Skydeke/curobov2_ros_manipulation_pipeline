@@ -76,7 +76,6 @@ services:
         cd /root/ros2_ws/src/isaac_ros_cumotion/test
         shopt -s nullglob
         COUNTER=0
-        FAILED=0
         for SPEC in test_test_*_$${ROBOT}.py; do
           NAME=$${SPEC%.py}
           TIMEOUT_S=$(grep -oP "timeout \K[0-9]+(?= launch_test .*$${NAME}\.py)" \
@@ -86,8 +85,8 @@ services:
           if timeout "$${TIMEOUT_S}" launch_test "$${SPEC}"; then
             echo "  PASSED $${NAME}"
           else
-            echo "  FAILED $${NAME}"
-            FAILED=1
+            echo "  FAILED $${NAME} — aborting remaining suites"
+            exit 1
           fi
           COUNTER=$((COUNTER + 1))
         done
@@ -96,4 +95,3 @@ services:
           exit 1
         fi
         echo "Ran $${COUNTER} $${ROBOT} suites (timeouts sourced from run_all_tests.sh)."
-        exit $${FAILED}
