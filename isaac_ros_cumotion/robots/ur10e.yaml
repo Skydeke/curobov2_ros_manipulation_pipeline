@@ -1,0 +1,17 @@
+# Robot descriptor — Universal Robots UR10e.
+#
+# The UR10e model (cuRobo config + URDF + meshes) ships with this package (see
+# config/ur10e.curobo.yml and config/urdf/ur10e/), converted from NVIDIA's
+# ur10e.xrdf.
+#
+# The emulator strategy is used under test: it follows joint commands and
+# publishes planned JointStates to /emulator/joint_states for visualization,
+# with no physical driver.
+name: ur10e
+display_name: "Universal Robots UR10e"
+curobo_config: package://isaac_ros_cumotion/config/ur10e.curobo.yml
+base_link: base_link
+
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states

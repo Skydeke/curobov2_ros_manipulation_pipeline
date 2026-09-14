@@ -1,0 +1,84 @@
+# Test trajectory generation for the Franka Emika Panda (franka).
+# The model resolves from the robots/franka.yaml descriptor via the
+# gen_traj_test_franka.launch.py launch file; joints below are the planner's active joints
+# (franka is planner-DOF without its locked finger joints).
+
+package: isaac_ros_cumotion
+environment:
+  launch:
+    - package: isaac_ros_cumotion
+      executable: gen_traj_test_franka.launch.py
+      name: gen_traj
+  # Readiness is probed, not guessed: the planner node blocks its executor for
+  # 25-35s building cuRobo solvers inside __init__ (it serves nothing until the
+  # constructor returns), so the former `startup_delay: 30.0` was racing it --
+  # measured margin ranged from +0.9s to -4.5s, which is exactly why `colcon
+  # test` failed on a different subset of suites every run.
+  # Waited for by *advertisement*, never called: the node creates this service
+  # only after _warmup_initial_planner returns (unified_planner_node.py), so its
+  # appearance in the graph is the readiness signal. There is deliberately no
+  # readiness service to call: the node exposes its state as the
+  # `node_is_available` parameter.
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+tests:
+  - name: "01 Set planner joint space"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data:
+      planner_type: 5
+    expect:
+      success: True
+
+  - name: "02 Generate trajectory joint space"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      target_joint_positions: [0.8, -1.5, 0.4, -2.2, 0.5, 2.0, 0.7]
+    expect:
+      success: True
+
+  - name: "03 Set planner classic"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data:
+      planner_type: 0
+    expect:
+      success: True
+
+  - name: "04 Generate trajectory cartesian"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+    expect:
+      success: True
+
+  - name: "05 Generate trajectory invalid target"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 10.0, y: 10.0, z: 10.0}
+              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    expect:
+      success: False

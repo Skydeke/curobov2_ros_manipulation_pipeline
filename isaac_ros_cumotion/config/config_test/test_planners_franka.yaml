@@ -1,0 +1,202 @@
+# Test planner management + unified generate/execute action (Franka Emika Panda / franka)
+#
+# Covers:
+# - planner switching (multipoint / classic / MPC)
+# - open-loop "preview" cache: generate_trajectory caches a plan, the execute
+#   action reuses it (matching target), and clear_trajectory drops it
+# - reactive (MPC): the execute action servos CONTINUOUSLY (does not self-
+#   terminate); it streams feedback and ends only on cancel (cancel_after)
+#
+# Every request carries an explicit start_pose over the planner's active joints
+# (franka is planner-DOF without locked finger joints): it keeps the solver
+# start well-defined regardless of what the emulator's current pose happens to
+# be.
+
+package: isaac_ros_cumotion
+environment:
+  launch:
+    - package: isaac_ros_cumotion
+      executable: gen_traj_test_franka.launch.py
+      name: gen_traj
+  # Readiness is probed, not guessed: the planner node blocks its executor for
+  # 25-35s building cuRobo solvers inside __init__ (it serves nothing until the
+  # constructor returns), so the former `startup_delay: 30.0` was racing it --
+  # measured margin ranged from +0.9s to -4.5s, which is exactly why `colcon
+  # test` failed on a different subset of suites every run.
+  # Waited for by *advertisement*, never called: the node creates this service
+  # only after _warmup_initial_planner returns (unified_planner_node.py), so its
+  # appearance in the graph is the readiness signal. There is deliberately no
+  # readiness service to call: the node exposes its state as the
+  # `node_is_available` parameter.
+  ready_service: "/unified_planner/generate_trajectory"
+  ready_wait: 180.0
+  startup_delay: 0.0
+  ready_timeout: 90.0  # ReadyToTest budget, loader-side (default is 15s)
+  allowable_exit_codes: [0, -2, -9]
+
+tests:
+  - name: "01 Get planners"
+    service: "/unified_planner/get_planners"
+    type: isaac_ros_cumotion_interfaces/srv/GetPlanners
+    data: {}
+    expect: {success: True}
+
+  - name: "02 Set planner multipoint"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 4}
+    expect: {success: True}
+
+  - name: "03 Generate trajectory multipoint"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+
+        - poses:
+            - position: {x: -0.1674, y: 0.1517, z: 0.7939}
+              orientation: {x: -0.6485, y: -0.5068, z: -0.493, w: 0.2822}
+    expect:
+      success: True
+
+  - name: "04 Set robot strategy emulator"
+    service: "/unified_planner/set_robot_strategy"
+    type: isaac_ros_cumotion_interfaces/srv/SetRobotStrategy
+    # Emulator follows joint commands so open-loop execution completes and the
+    # MPC servo loop actually drives the arm.
+    data: {robot_strategy: "emulator"}
+    expect: {success: True}
+
+  - name: "05 Set planner classic"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 0}
+    expect: {success: True}
+
+  # ---- Open-loop preview cache: generate (cache) -> execute (reuse) -> clear ----
+
+  - name: "06 Generate trajectory classic preview"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # Computes + caches the trajectory for an explicit start/goal pair.
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+    expect: {success: True}
+
+  - name: "07 Execute classic cached"
+    action: "/unified_planner/execute_trajectory"
+    type: isaac_ros_cumotion_interfaces/action/SendTrajectory
+    # Same start+target as the preview -> the node REUSES the cached plan (no
+    # recompute) and the open-loop action terminates on its own. This run also
+    # drives the emulator onto the planner's active joints, so the reactive
+    # cases below read back a consistent DOF.
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+    timeout: 90.0
+    expect: {success: True}
+
+  - name: "08 Clear trajectory"
+    service: "/unified_planner/clear_trajectory"
+    type: std_srvs/srv/Trigger
+    data: {}
+    expect: {success: True}
+
+  # ---- Reactive (MPC): continuous servoing, ends only on cancel ----
+
+  - name: "09 Set planner MPC"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 1}
+    expect: {success: True,
+             current_planner: "Model Predictive Control (MPC)"}
+
+  - name: "10 Execute MPC reactive"
+    action: "/unified_planner/execute_trajectory"
+    type: isaac_ros_cumotion_interfaces/action/SendTrajectory
+    # Target = the reachable FK pose B (exact FK configuration). With
+    # run_ik=False (pure pose tracking) the arm must servo toward it. The
+    # action servos CONTINUOUSLY: we let it run, then cancel; the generator
+    # asserts feedback was streamed (the servo loop ran).
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+    cancel_after: 6.0
+    timeout: 90.0
+    expect: {success: False}   # canceled (reactive never self-completes)
+
+  - name: "11 Set planner classic"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 0}
+    expect: {success: True}
+
+  - name: "12 Generate trajectory with constraint"
+    service: "/unified_planner/generate_trajectory"
+    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # Lock rotation about Z along the path (ToolPoseCriteria) — exercises the
+    # constraint code path; must still plan successfully and reset afterwards.
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+      trajectory_constraints: [0, 0, 1, 0, 0, 0]
+    expect: {success: True}
+
+  # ---- Reactive (Motion Retargeting / teleop): continuous, ends only on cancel ----
+
+  - name: "14 Set planner retarget"
+    service: "/unified_planner/set_planner"
+    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
+    data: {planner_type: 6}
+    expect: {success: True,
+             current_planner: "Motion Retargeting (Teleop)"}
+
+  - name: "15 Execute retarget reactive"
+    action: "/unified_planner/execute_trajectory"
+    type: isaac_ros_cumotion_interfaces/action/SendTrajectory
+    # Same reachable FK pose B. Reactive servoing is continuous: run, then
+    # cancel.
+    data:
+      start_pose:
+        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+      goalsets:
+        - poses:
+            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+    cancel_after: 6.0
+    timeout: 90.0
+    expect: {success: False}   # canceled (reactive never self-completes)

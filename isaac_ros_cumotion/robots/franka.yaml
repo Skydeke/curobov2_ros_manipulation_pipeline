@@ -1,0 +1,18 @@
+# Robot descriptor — Franka Emika Panda.
+#
+# The Panda model (cuRobo config + URDF + meshes) ships with this package (see
+# config/franka.curobo.yml and config/urdf/franka/), converted from NVIDIA's
+# franka.xrdf. The cuRobo config keeps the finger joints LOCKED, so the planner
+# operates on the 7 arm joints and the shipped cspace/limits reflect that.
+#
+# The emulator strategy is used under test: it follows joint commands and
+# publishes planned JointStates to /emulator/joint_states for visualization,
+# with no physical driver.
+name: franka
+display_name: "Franka Emika Panda"
+curobo_config: package://isaac_ros_cumotion/config/franka.curobo.yml
+base_link: panda_link0
+
+strategy: emulator
+strategy_params:
+  joint_states_topic: /emulator/joint_states

@@ -1,0 +1,112 @@
+# UR10e headless integration tests — server + tests in separate containers.
+#
+# The `server` service runs the full gen_traj.launch.py stack (planner +
+# robot/joint_state_publishers) exactly once, so every suite in the `tests`
+# service talks to the SAME persistent planner instead of launching (and
+# warming up) a new one per suite. This separates `docker logs` cleanly:
+#
+#   docker logs isaac_cumotion_ur10e_server   # planner, CUDA graph, voxels
+#   docker logs isaac_cumotion_ur10e_tests    # pass/fail per suite
+#
+# The test files (test/test_test_*_ur10e.py) still include the same launch
+# file, but CUROMOTION_EXTERNAL_PLANNER=1 disables the in-process planner
+# stack: only the launch_test drivers run.
+#
+# Per-suite timeouts are read from the generated test/run_all_tests.sh; the
+# tests loop runs the UR10e block of it. Regenerating the runner keeps the
+# timeouts in sync. The container exits non-zero iff any suite fails.
+#
+# Usage:
+#   docker compose -f docker/ur10e_tests.yaml up --build --abort-on-container-exit
+#   # after the run:
+#   docker logs isaac_cumotion_ur10e_server   # (stays up if tests exited early)
+#   docker logs isaac_cumotion_ur10e_tests
+#   docker compose -f docker/ur10e_tests.yaml down
+#
+#   # rerun tests against a still-running server:
+#   docker compose -f docker/ur10e_tests.yaml up --abort-on-container-exit tests
+#
+#   # single suite directly:
+#   docker compose -f docker/ur10e_tests.yaml run --rm tests \
+#     launch_test test/test_test_trajectory_ur10e.py
+services:
+  server:
+    container_name: isaac_cumotion_ur10e_server
+    image: isaac_ros_cumotion:ur10e
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cumotion
+    restart: "no"
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+    volumes:
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        source /opt/ros/jazzy/setup.bash
+        source /root/ros2_ws/install/setup.bash
+        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py \
+          robot:=ur10e gui:=false \
+          voxel_size:=0.05 \
+          mapper_extent_xyz:="[2.0, 2.0, 2.0]" enable_curobo_debug_mode:=true
+
+  tests:
+    container_name: isaac_cumotion_ur10e_tests
+    image: isaac_ros_cumotion:ur10e
+    depends_on:
+      - server
+    restart: "no"
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+      CUROMOTION_EXTERNAL_PLANNER: "1"
+    volumes:
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        source /opt/ros/jazzy/setup.bash
+        source /root/ros2_ws/install/setup.bash
+        ROBOT=ur10e
+        cd /root/ros2_ws/src/isaac_ros_cumotion/test
+        shopt -s nullglob
+        COUNTER=0
+        FAILED=0
+        for SPEC in test_test_*_$${ROBOT}.py; do
+          NAME=$${SPEC%.py}
+          TIMEOUT_S=$(grep -oP "timeout \K[0-9]+(?= launch_test .*$${NAME}\.py)" \
+            run_all_tests.sh | head -1)
+          TIMEOUT_S=$${TIMEOUT_S:-60}
+          echo "== $${NAME} (timeout $${TIMEOUT_S}s) =="
+          if timeout "$${TIMEOUT_S}" launch_test "$${SPEC}"; then
+            echo "  PASSED $${NAME}"
+          else
+            echo "  FAILED $${NAME}"
+            FAILED=1
+          fi
+          COUNTER=$((COUNTER + 1))
+        done
+        if [ "$${COUNTER}" -eq 0 ]; then
+          echo "No $${ROBOT} suites found under test/" >&2
+          exit 1
+        fi
+        echo "Ran $${COUNTER} $${ROBOT} suites (timeouts sourced from run_all_tests.sh)."
+        exit $${FAILED}

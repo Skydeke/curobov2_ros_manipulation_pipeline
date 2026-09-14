@@ -14,12 +14,18 @@ and hardware-free:
                           here instead of tracking whatever production picks.
 - mapper_extent_xyz       [2.0, 2.0, 2.0], which at 0.05 m gives a 40^3 = 64000
                           voxel grid -- the count case 04 expects
-- robot:=emulator         no real arm is present under test
-- robot_config_file       the test configs are Kortex-shaped, so the model comes
-                          from the kortex repo (iki_kortex_moveit_config) rather
-                          than being baked into this robot-abstract package.
-                          Override with robot_config_file:=<path> to run against
-                          a different robot.
+- robot:=<robot>          the robot under test. The test configs are per-robot
+                          (config/config_test/test_*_<robot>.yaml), so the
+                          suite launch file always pins the robot explicit.
+                          Default 'franka'; override with robot:=ur10e to run
+                          the suites against the UR10e.
+- robot_config_file       empty: the cuRobo model derives from the robot
+                          descriptor (robots/<robot>.yaml -> package:// URI),
+                          so suites never point at an external repo. An
+                          explicit value overrides the descriptor.
+
+Each per-robot suite pinning uses a tiny dedicated wrapper
+(gen_traj_test_<robot>.launch.py) that forwards to this one.
 """
 
 import os
@@ -30,33 +36,67 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
+# Set (any non-empty value) to run the suites against a planner already running
+# in ANOTHER process/container instead of spawning one per suite. Docker compose
+# splits the two: the `server` service runs gen_traj.launch.py (same pins as
+# below), the `tests` service runs only the launch_test drivers, so each
+# container's logs are attributable via `docker logs`. Two planners on one ROS
+# domain would clash on node names, hence this switch.
+EXTERNAL_PLANNER_ENV = 'CUROMOTION_EXTERNAL_PLANNER'
+
+
+def _gen_traj_pins(robot, robot_config_file):
+    """The planner-stack launch args the suites pin, identically in-process
+    and when launched separately as the compose `server`."""
+    return {
+        'gui': 'false',
+        'voxel_size': '0.05',
+        'mapper_extent_xyz': '[2.0, 2.0, 2.0]',
+        'robot': robot,
+        'robot_config_file': robot_config_file,
+    }
+
 
 def generate_launch_description():
     isaac_ros_cumotion_launch_dir = os.path.join(
         get_package_share_directory('isaac_ros_cumotion'), 'launch')
 
-    # Default model for the Kortex-shaped test configs, resolved from the kortex
-    # repo's installed share. Overridable to run the suites against any robot.
-    default_robot_config = os.path.join(
-        get_package_share_directory('iki_kortex_moveit_config'),
-        'config', 'kortex.curobo.yml')
+    # When connected to an external planner, this launch adds NO nodes: the
+    # generated suite's readiness probe (service /unified_planner/
+    # generate_trajectory) and its service/topic calls all resolve to the
+    # planner in the other container via the shared ROS domain / host network.
+    if os.environ.get(EXTERNAL_PLANNER_ENV):
+        return LaunchDescription([
+            DeclareLaunchArgument(
+                'robot',
+                default_value='franka',
+                description='Robot descriptor name (robots/<robot>.yaml) under test',
+            ),
+            DeclareLaunchArgument(
+                'robot_config_file',
+                default_value='',
+                description='cuRobo config override (default: derived from robot descriptor)',
+            ),
+        ])
 
     return LaunchDescription([
         DeclareLaunchArgument(
+            'robot',
+            default_value='franka',
+            description='Robot descriptor name (robots/<robot>.yaml) to test',
+        ),
+        DeclareLaunchArgument(
             'robot_config_file',
-            default_value=default_robot_config,
-            description='cuRobo robot config for the test suites (default: Kortex model)',
+            default_value='',
+            description='cuRobo config override (default: derived from robot descriptor)',
         ),
         IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
                 os.path.join(isaac_ros_cumotion_launch_dir, 'gen_traj.launch.py')
             ),
-            launch_arguments={
-                'gui': 'false',
-                'voxel_size': '0.05',
-                'mapper_extent_xyz': '[2.0, 2.0, 2.0]',
-                'robot': 'emulator',
-                'robot_config_file': LaunchConfiguration('robot_config_file'),
-            }.items()
+            launch_arguments=_gen_traj_pins(
+                LaunchConfiguration('robot'),
+                LaunchConfiguration('robot_config_file'),
+            ).items()
         ),
     ])

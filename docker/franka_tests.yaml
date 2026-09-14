@@ -1,0 +1,98 @@
+# Franka headless integration tests — server + tests in separate containers.
+#
+# Identical structure to ur10e_tests.yaml: the `server` service runs the full
+# gen_traj.launch.py stack (planner + robot/joint_state_publishers) once, and
+# the `tests` service runs only the launch_test drivers, so each container's
+# logs are attributable via `docker logs`:
+#
+#   docker logs isaac_cumotion_franka_server
+#   docker logs isaac_cumotion_franka_tests
+#
+# Usage:
+#   docker compose -f docker/franka_tests.yaml up --build --abort-on-container-exit
+#   docker compose -f docker/franka_tests.yaml down
+#
+#   # single suite:
+#   docker compose -f docker/franka_tests.yaml run --rm tests \
+#     launch_test test/test_test_trajectory_franka.py
+services:
+  server:
+    container_name: isaac_cumotion_franka_server
+    image: isaac_ros_cumotion:franka
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cumotion
+    restart: "no"
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+    volumes:
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        source /opt/ros/jazzy/setup.bash
+        source /root/ros2_ws/install/setup.bash
+        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py \
+          robot:=franka gui:=false \
+          voxel_size:=0.05 \
+          mapper_extent_xyz:="[2.0, 2.0, 2.0]"
+
+  tests:
+    container_name: isaac_cumotion_franka_tests
+    image: isaac_ros_cumotion:franka
+    depends_on:
+      - server
+    restart: "no"
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+      CUROMOTION_EXTERNAL_PLANNER: "1"
+    volumes:
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        source /opt/ros/jazzy/setup.bash
+        source /root/ros2_ws/install/setup.bash
+        ROBOT=franka
+        cd /root/ros2_ws/src/isaac_ros_cumotion/test
+        shopt -s nullglob
+        COUNTER=0
+        FAILED=0
+        for SPEC in test_test_*_$${ROBOT}.py; do
+          NAME=$${SPEC%.py}
+          TIMEOUT_S=$(grep -oP "timeout \K[0-9]+(?= launch_test .*$${NAME}\.py)" \
+            run_all_tests.sh | head -1)
+          TIMEOUT_S=$${TIMEOUT_S:-60}
+          echo "== $${NAME} (timeout $${TIMEOUT_S}s) =="
+          if timeout "$${TIMEOUT_S}" launch_test "$${SPEC}"; then
+            echo "  PASSED $${NAME}"
+          else
+            echo "  FAILED $${NAME}"
+            FAILED=1
+          fi
+          COUNTER=$((COUNTER + 1))
+        done
+        if [ "$${COUNTER}" -eq 0 ]; then
+          echo "No $${ROBOT} suites found under test/" >&2
+          exit 1
+        fi
+        echo "Ran $${COUNTER} $${ROBOT} suites (timeouts sourced from run_all_tests.sh)."
+        exit $${FAILED}

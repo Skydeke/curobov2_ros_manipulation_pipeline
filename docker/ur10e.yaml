@@ -1,0 +1,48 @@
+# Interactive Universal Robots UR10e session: RViz + cuRobo planner.
+#
+# Launches the fork's own gen_traj.launch.py against the UR10e (robot:=ur10e):
+# unified_planner (cuRobo solvers run on the GPU), the emulator strategy as the
+# joint-state source, robot_state_publisher / joint_state_publisher, and RViz
+# (gui:=true). The robot model resolves in-package (robots/ur10e.yaml ->
+# package://isaac_ros_cumotion/config/ur10e.curobo.yml).
+#
+# The image is built from this fork's own public Dockerfile.cumotion (default
+# BASE_IMAGE, no private repo involved). The fork root is bind-mounted at the
+# ROS workspace src, so launch/config/robots edits apply live (colcon build
+# uses --symlink-install).
+#
+# Usage:
+#   docker compose -f docker/ur10e.yaml up --build
+#   # hard-recreate the container:
+#   docker compose -f docker/ur10e.yaml up --build --force-recreate
+services:
+  curobo:
+    container_name: isaac_cumotion_ur10e
+    image: isaac_ros_cumotion:ur10e
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cumotion
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: $DISPLAY
+      QT_X11_NO_MITSHM: "1"
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        source /opt/ros/jazzy/setup.bash
+        source /root/ros2_ws/install/setup.bash
+        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py robot:=ur10e gui:=true

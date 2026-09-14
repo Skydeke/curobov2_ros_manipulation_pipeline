@@ -125,6 +125,14 @@ def launch_setup(context, *args, **kwargs):
     camera_topics = _camera_argv('camera_topic')
     camera_info_topics = _camera_argv('camera_info_topic')
 
+    # launch_ros cannot carry an EMPTY array as a Node parameter: an empty
+    # list normalizes to `()`, which evaluate_parameter_dict then rejects
+    # ('Expected value ... but got ()'). The node's own declared defaults are
+    # non-empty arrays, so mirror that here when no cameras are configured
+    # (an empty-string slot = an inactive camera).
+    camera_topics = camera_topics or ['']
+    camera_info_topics = camera_info_topics or ['']
+
     nodes = [
         # The state publishers are declared inline rather than pulled in from
         # another launch file, so they receive the URDF resolved above for the
@@ -279,13 +287,13 @@ def generate_launch_description():
     )
     declare_camera_topic = DeclareLaunchArgument(
         'camera_topic',
-        default_value='[]',
+        default_value="['']",
         description='Raw depth streams (sensor_msgs/Image), one array entry per camera, '
                     'as a Python repr e.g. [\'/depth/image\']; empty = no cameras'
     )
     declare_camera_info_topic = DeclareLaunchArgument(
         'camera_info_topic',
-        default_value='[]',
+        default_value="['']",
         description='CameraInfo topics carrying the camera intrinsics (sensor_msgs/CameraInfo), '
                     'one array entry per camera'
     )

@@ -352,13 +352,19 @@ class UnifiedPlannerNode(Node):
         if self.get_parameter('enable_robot_segmentation').value:
             camera_cfgs = (self.config_wrapper_motion.camera_system_manager
                            .camera_cfgs) or []
-            seg_cfgs = [c for c in camera_cfgs if c.for_segmentation]
+            # An empty-topic camera slot (the [''] default when no camera is
+            # configured) is INACTIVE: it must not reach RobotSegmentation,
+            # which would subscribe to its (empty) camera-info topic and crash.
+            seg_cfgs = [
+                c for c in camera_cfgs
+                if c.for_segmentation and c.depth_topic
+            ]
             if not seg_cfgs:
-                self.get_logger().error(
+                self.get_logger().warn(
                     "enable_robot_segmentation requires at least one camera "
-                    "with a camera_purpose of 'all' or 'segmentation': set "
-                    "'camera_topic' (and camera_info_topic) at launch. "
-                    "Segmentation disabled.")
+                    "with a depth topic and a camera_purpose of 'all' or "
+                    "'segmentation': set 'camera_topic' (and camera_info_topic) "
+                    "at launch. Segmentation disabled.")
             else:
                 self.robot_segmentation = RobotSegmentation(
                     self,
