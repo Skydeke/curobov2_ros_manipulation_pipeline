@@ -31,7 +31,7 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       ROS_DOMAIN_ID: $ROS_DOMAIN_ID
-      CUROBO_DEBUG_CUDA_GRAPH: "1"
+      # CUROBO_DEBUG_CUDA_GRAPH: "1"
     volumes:
       - /dev/shm:/dev/shm
       - ..:/root/ros2_ws/src
