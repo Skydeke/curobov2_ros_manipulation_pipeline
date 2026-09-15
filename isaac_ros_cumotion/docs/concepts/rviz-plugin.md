@@ -41,7 +41,7 @@ The display is planner-agnostic — all planner/MPC logic lives in the panel.
 ![Control panel](img/control_panel.png)
 
 - **Target position** — the six pose spin boxes, synced with the target marker.
-- **Trajectory type** — a combo box for the planner, wired to `set_planner`. The combo index maps directly to the `SetPlanner` enum: 0 Classic, 1 MPC, 2 Batch, 3 Constrained. Batch and Constrained are **not implemented** in the node — selecting them makes the switch fail (and the multi-point/joint-space/retarget planners are only reachable from the CLI).
+- **Trajectory type** — a combo box for the planner, wired to `set_planner`: Classic, MPC, Multipoint. The indexes map to the `SetPlanner` enums (0 Classic, 1 MPC, 2 → `MULTIPOINT` = 4), so the multipoint option really drives the node's `MultiPointPlanner`.
 - **Planner node** — the planner node the panel's clients bind to (default `unified_planner`). Changing it immediately rebinds every client (parameters, `set_planner`, `generate_trajectory`, `execute_trajectory`, `mpc_goal`) and re-probes readiness. Saved to the RViz config as `planner_node_name`.
 - **Speed (Time dilatation)** — sets the `time_dilation_factor` parameter; now a real speed control (stamped dt = `interpolation_dt / tdf`, so the RViz slider speeds up / slows down every sent trajectory).
 - **Generate Trajectory** — calls `generate_trajectory` with the target pose; the result is previewed by the ghost robot.
@@ -59,6 +59,17 @@ target as the goal set and starts streaming the target pose to
 **live** while it moves — this is the quickest way to feel what closed-loop
 control does. Stopping the robot cancels the goal. See [MPC
 Implementation](mpc-implementation.md).
+
+### Multipoint planning
+
+With **Multipoint** selected, every `TargetDisplay` in the display tree
+becomes a waypoint: `goalsets[i]` is the i-th display's pose, in display-tree
+order (add / reorder displays in the Displays panel to control the path). The
+panel finds all displays automatically, including ones nested inside display
+Groups, and keeps scanning so displays added later are picked up without
+reloading. The generated multipoint trajectory replans toward each waypoint in
+sequence. Classic and MPC ignore the extra displays and use only the first
+(primary) one.
 
 ### Objects panel (`AddObjectsPanel`)
 
@@ -88,7 +99,7 @@ Planned trajectories are replayed by a translucent "preview" robot (namespace `p
 
 - **Panels stay grey / buttons do nothing** — the planner is still warming up, or the node crashed; check `ros2 param get /unified_planner node_is_available` and the launch terminal.
 - **No target in the 3D view** — add or enable the `TargetDisplay` display (Displays → Add → By display type); the panel logs a warning until it finds one.
-- **"Trajectory type" switch fails** — you selected Batch or Constrained; both are unimplemented in the node.
+- **"Trajectory type" switch fails** — only the Classic, MPC and Multipoint options are wired to a real planner; the node's other planners (joint-space, retarget) are reachable from the CLI only.
 - **Wrong planner being driven** — the panel binds to the node listed in the panel's "Planner node" combo; make sure it matches the running planner.
 
 ## Related pages

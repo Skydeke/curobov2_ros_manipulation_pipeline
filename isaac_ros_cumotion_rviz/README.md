@@ -33,8 +33,8 @@ displays at a running planner node (default `unified_planner`).
 
 ### Current state
 Control panel for trajectory planning. Retrieves parameters at launch; time
-dilation is applied live. Exposes trajectory type (Classic / MPC / Batch /
-Constrained), planner node selection, the target pose (synced with the
+dilation is applied live. Exposes trajectory type (Classic / MPC / Multipoint),
+planner node selection, the target pose (synced with the
 `TargetDisplay` gizmo), and the plan / send / stop actions.
 
 **Planner node selection:** the dropdown binds the panel's service/action
@@ -46,6 +46,13 @@ saved config.
 **MPC mode:** selecting "MPC (Real-time)" and pressing "Generate and send"
 switches the planner to MPC, sends an `execute_trajectory` goal, and streams
 the target pose to `/<planner>/mpc_goal` at 10 Hz while the gizmo is dragged.
+
+**Multipoint mode:** selecting "Multipoint (Multiple traj)" makes every
+`TargetDisplay` in the display tree a waypoint, in display-tree order (reorder
+displays to change the path). Displays are found automatically — including
+ones nested inside display Groups — and the panel keeps scanning, so a display
+added later is used without reloading. Classic and MPC act on the first
+(primary) display only.
 
 ### Future development
 - [ ] Save and load the system's state

@@ -65,7 +65,7 @@ namespace isaac_ros_cumotion_rviz
 
     // Marker control slots
     void updateMarkerPoseDisplay();
-    void findTargetDisplay();
+    void refreshTargetDisplays();
     void applyPoseFromSpinboxes();
 
     // Planner node slots
@@ -104,6 +104,15 @@ namespace isaac_ros_cumotion_rviz
     // async completion instead).
     void generateTrajectoryAsync(std::function<void(bool)> on_done);
 
+    // Build the goalset list from the TargetDisplays currently in RViz. For the
+    // multipoint planner one Goalset (single pose) is emitted PER display, in
+    // display-tree order -- the waypoint order -- matching what MultiPointPlanner
+    // expects (goalsets[i] = i-th waypoint) and what the server's cached-plan
+    // signature compares against. Classic and MPC keep the single-target
+    // behaviour: only the first (primary) display feeds the goalset.
+    // Returns an empty vector when no TargetDisplay is available.
+    std::vector<isaac_ros_cumotion_interfaces::msg::Goalset> buildGoalsets();
+
     // (Re)creates every planner-facing client/publisher against the given planner
     // node name. Called from the constructor and from on_comboBoxPlannerNode_*
     // when the user switches planner node.
@@ -136,13 +145,19 @@ namespace isaac_ros_cumotion_rviz
     rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::GoalHandle::SharedPtr goal_handle_;
     float time_dilation_factor_;
     // The TargetDisplay owning the draggable 6-DOF target (self-contained;
-    // polling timer finds it lazily). Not owned by the panel.
+    // polling timer refreshes it lazily). Not owned by the panel. For multiple
+    // TargetDisplays, `target_display_` is the FIRST one (the one MPC/classic
+    // and the pose spin boxes act on); `target_displays_` carries ALL of them in
+    // display-tree order for multipoint planning.
     TargetDisplay* target_display_;
+    std::vector<TargetDisplay*> target_displays_;
 
-    // Depth-first search below `group` for a TargetDisplay. The shipped rviz
-    // configs place it inside a display Group (e.g. "Curobo Planning"), which a
-    // root-level scan misses — so the lookup must descend into subgroups.
-    TargetDisplay* findTargetDisplayInGroup(rviz_common::DisplayGroup* group);
+    // Collects every TargetDisplay under `group` (in display-tree order) into
+    // `out`. Used by refreshTargetDisplays(); the shipped rviz configs place the
+    // display inside a Group (e.g. "Curobo Planning"), so the scan must descend
+    // into subgroups.
+    void collectTargetDisplaysInGroup(rviz_common::DisplayGroup* group,
+                                      std::vector<TargetDisplay*>& out);
     bool user_editing_pose_; // Flag to prevent auto-update while user is editing
 
     // Last displayed pose to avoid unnecessary updates

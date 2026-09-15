@@ -301,12 +301,7 @@
     </item>
     <item>
      <property name="text">
-      <string>Batch (Multiple traj)</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>Constrained</string>
+      <string>Multipoint (Multiple traj)</string>
      </property>
     </item>
    </widget>
