@@ -2,14 +2,16 @@
 
 > **Fork notice:** This repository is a fork of NVIDIA's `isaac_ros_cumotion`
 > and related packages, forked because NVIDIA did not ship a ROS-ready version
-> of cuRobo v2. It retains NVIDIA's original licensing terms (see `LICENSE`
-> files in each submodule). The code merged here is built on top of NVIDIA's
-> cuRobo library and Isaac ROS framework — respect the original copyrights and
-> license obligations when distributing or modifying.
+> of cuRobo v2.
 >
-> Much of the ROS wrapping of cuRobo in this repository is derived from
-> <https://github.com/Lab-CORO/curobo_ros>; see that project's license for the
-> terms of that portion.
+> Licensing:
+> - `isaac_ros_cumotion`, `isaac_ros_cumotion_interfaces`,
+>   `isaac_ros_cumotion_extra`, and `isaac_ros_cumotion_rviz` are
+>   **Apache License 2.0** (see `LICENSE` in each package).
+> - `isaac_ros_cumotion_moveit` is from NVIDIA and retains the
+>   **NVIDIA Isaac ROS Software License**.
+> - `curobo_core` vendors NVIDIA's cuRobo library, which carries its own
+>   license terms.
 
 NVIDIA cuRobo v2 wrapped as a single GPU-accelerated ROS 2 node (`curobo_trajectory_planner`)
 for arm motion planning, IK/FK, collision checking, world management,
@@ -52,7 +54,43 @@ management are exposed via the `Ik`/`IkBatch`, `Fk`/`FkBatch`,
 `AddObject`/`AttachObject`/`RemoveObject`, `GetVoxelGrid`, and
 `GetCollisionDistance` services.
 
+## Quickstart (Docker)
+
+The fastest way to try the fork is the interactive compose sessions: RViz +
+cuRobo planner, with an emulated robot and no physical driver. Both robots use
+the same pipeline-built image (`ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest`),
+selected by `robot:=...` at launch; `--build` instead rebuilds locally from
+`docker/Dockerfile.cumotion`.
+
+```bash
+# On the host: let the container's root user reach your X server (for RViz)
+xhost +local:root
+
+# Franka Emika Panda
+docker compose -f docker/franka.yaml pull
+docker compose -f docker/franka.yaml up
+
+# Universal Robots UR10e
+docker compose -f docker/ur10e.yaml pull
+docker compose -f docker/ur10e.yaml up
+```
+
+Pull the freshest pipeline image first (`pull`), then start the session (`up`).
+Requires the NVIDIA container runtime, X11 forwarding via `xhost +local:root`,
+and a working `ROS_DOMAIN_ID`/`DISPLAY`.
+
 ## Documentation
 
 - `isaac_ros_cumotion/docs/` — user guide (concepts, getting started, tutorials)
   and `MIGRATION_V2.md` for the v1 → v2 transition.
+
+## Acknowledgements
+
+This project builds on the work of:
+
+- **[NVIDIA cuRobo](https://github.com/NVlabs/curobo)** — the motion-planning
+  library at the core of this node (vendored under `curobo_core/`).
+- **[Isaac ROS](https://github.com/isaac-ros/isaac_ros_common)** — the ROS 2
+  framework the package integrates with.
+- **[curobo_ros](https://github.com/Lab-CORO/curobo_ros)** — the ROS wrapping of
+  cuRobo that much of this repository's ROS-side integration is derived from.
