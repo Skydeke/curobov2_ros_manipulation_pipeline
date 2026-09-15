@@ -10,9 +10,7 @@
 #include <rviz_common/ros_integration/ros_node_abstraction_iface.hpp>
 #include <rviz_common/validate_floats.hpp>
 
-#include <isaac_ros_cumotion_interfaces/msg/goalset.hpp>
-
-#include <isaac_ros_cumotion_rviz/mpc_target_display.hpp>
+#include <isaac_ros_cumotion_rviz/target_display.hpp>
 
 namespace
 {
@@ -44,9 +42,8 @@ namespace isaac_ros_cumotion_rviz
 // Construction / destruction
 // ============================================================================
 
-MPCTargetDisplay::MPCTargetDisplay()
-  : service_name_property_(nullptr)
-  , target_position_x_(nullptr)
+TargetDisplay::TargetDisplay()
+  : target_position_x_(nullptr)
   , target_position_y_(nullptr)
   , target_position_z_(nullptr)
   , target_orientation_x_(nullptr)
@@ -54,21 +51,16 @@ MPCTargetDisplay::MPCTargetDisplay()
   , target_orientation_z_(nullptr)
   , target_orientation_w_(nullptr)
   , gizmo_visible_property_(nullptr)
-  , start_mpc_property_(nullptr)
-  , stop_mpc_property_(nullptr)
 {
   const int instance = gizmo_instance_counter_++;
-  gizmo_name_ = (instance == 0) ? "mpc_target" :
-    "mpc_target_" + std::to_string(instance);
+  gizmo_name_ = (instance == 0) ? "target" :
+    "target_" + std::to_string(instance);
 }
 
-std::atomic<int> MPCTargetDisplay::gizmo_instance_counter_{0};
+std::atomic<int> TargetDisplay::gizmo_instance_counter_{0};
 
-MPCTargetDisplay::~MPCTargetDisplay()
+TargetDisplay::~TargetDisplay()
 {
-  if (mpc_active_) {
-    stopMpc();
-  }
   destroyGizmo();
 }
 
@@ -76,15 +68,9 @@ MPCTargetDisplay::~MPCTargetDisplay()
 // Display lifecycle
 // ============================================================================
 
-void MPCTargetDisplay::onInitialize()
+void TargetDisplay::onInitialize()
 {
   Display::onInitialize();
-
-  // --- Planner services/action ---
-  service_name_property_ = new rviz_common::properties::StringProperty(
-    "Planner Node Name", "curobo_server",
-    "Name of the curobo_server node providing set_planner / "
-    "execute_trajectory / mpc_goal.", this, SLOT(updateServiceName()));
 
   // --- Target pose (MoveIt-style: position + quaternion X, Y, Z, W) ---
   target_position_x_ = new rviz_common::properties::FloatProperty(
@@ -105,18 +91,9 @@ void MPCTargetDisplay::onInitialize()
 
   gizmo_visible_property_ = new rviz_common::properties::BoolProperty(
     "Gizmo Visible", true,
-    "Interactive 6-DOF marker for dragging the MPC target. Rendered in-place "
+    "Interactive 6-DOF marker for dragging the target pose. Rendered in-place "
     "by this display (no separate 'Interactive Markers' display needed).", this,
     SLOT(updateGizmoVisible()));
-
-  // --- MPC control ---
-  start_mpc_property_ = new rviz_common::properties::BoolProperty(
-    "Start MPC", false,
-    "Switch the planner to MPC and start the continuous servo loop toward the "
-    "target. While active, dragging the gizmo retargets the robot live.", this,
-    SLOT(updateStart()));
-  stop_mpc_property_ = new rviz_common::properties::BoolProperty(
-    "Stop MPC", false, "Cancel the active MPC loop.", this, SLOT(updateStop()));
 
   // --- Embedded interactive-marker client (self-contained gizmo rendering) ---
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
@@ -127,16 +104,16 @@ void MPCTargetDisplay::onInitialize()
       node, transformer, fixed_frame_.toStdString());
     gizmo_client_->setInitializeCallback(
       std::bind(
-        &MPCTargetDisplay::gizmoInitializeCallback, this,
+        &TargetDisplay::gizmoInitializeCallback, this,
         std::placeholders::_1));
     gizmo_client_->setUpdateCallback(
       std::bind(
-        &MPCTargetDisplay::gizmoUpdateCallback, this,
+        &TargetDisplay::gizmoUpdateCallback, this,
         std::placeholders::_1));
     gizmo_client_->setResetCallback(
-      std::bind(&MPCTargetDisplay::gizmoResetCallback, this));
+      std::bind(&TargetDisplay::gizmoResetCallback, this));
     gizmo_client_->setStatusCallback(
-      std::bind(&MPCTargetDisplay::gizmoStatusCallback, this,
+      std::bind(&TargetDisplay::gizmoStatusCallback, this,
         std::placeholders::_1, std::placeholders::_2));
   }
 
@@ -153,15 +130,13 @@ void MPCTargetDisplay::onInitialize()
   }
 }
 
-void MPCTargetDisplay::reset()
+void TargetDisplay::reset()
 {
   Display::reset();
-  stopMpc();
   eraseAllGizmoMarkers();
-  last_published_goal_ = target_pose_;
 }
 
-void MPCTargetDisplay::onEnable()
+void TargetDisplay::onEnable()
 {
   Display::onEnable();
   if (gizmo_visible_property_ && gizmo_visible_property_->getBool() && !gizmo_active_) {
@@ -170,9 +145,8 @@ void MPCTargetDisplay::onEnable()
   }
 }
 
-void MPCTargetDisplay::onDisable()
+void TargetDisplay::onDisable()
 {
-  stopMpc();
   if (gizmo_active_) {
     destroyGizmo();
     gizmo_active_ = false;
@@ -180,7 +154,7 @@ void MPCTargetDisplay::onDisable()
   Display::onDisable();
 }
 
-void MPCTargetDisplay::fixedFrameChanged()
+void TargetDisplay::fixedFrameChanged()
 {
   if (gizmo_client_) {
     gizmo_client_->setTargetFrame(fixed_frame_.toStdString());
@@ -192,12 +166,12 @@ void MPCTargetDisplay::fixedFrameChanged()
 // Panel interface
 // ============================================================================
 
-geometry_msgs::msg::Pose MPCTargetDisplay::getPose() const
+geometry_msgs::msg::Pose TargetDisplay::getPose() const
 {
   return target_pose_;
 }
 
-void MPCTargetDisplay::setPose(const geometry_msgs::msg::Pose & pose)
+void TargetDisplay::setPose(const geometry_msgs::msg::Pose & pose)
 {
   updatePoseProperties(pose);
 }
@@ -206,7 +180,7 @@ void MPCTargetDisplay::setPose(const geometry_msgs::msg::Pose & pose)
 // Target pose properties
 // ============================================================================
 
-geometry_msgs::msg::Pose MPCTargetDisplay::targetPoseFromProperties() const
+geometry_msgs::msg::Pose TargetDisplay::targetPoseFromProperties() const
 {
   geometry_msgs::msg::Pose pose;
   pose.position.x = target_position_x_->getFloat();
@@ -219,7 +193,7 @@ geometry_msgs::msg::Pose MPCTargetDisplay::targetPoseFromProperties() const
   return pose;
 }
 
-void MPCTargetDisplay::updateTargetPose()
+void TargetDisplay::updateTargetPose()
 {
   if (applying_gizmo_) {
     return;
@@ -228,7 +202,7 @@ void MPCTargetDisplay::updateTargetPose()
   gizmo_sync_pending_ = true;
 }
 
-void MPCTargetDisplay::updatePoseProperties(const geometry_msgs::msg::Pose & pose)
+void TargetDisplay::updatePoseProperties(const geometry_msgs::msg::Pose & pose)
 {
   target_pose_ = pose;
   // Suppress the property->pose echo for a moment: the next syncPropertiesToGizmo
@@ -246,260 +220,10 @@ void MPCTargetDisplay::updatePoseProperties(const geometry_msgs::msg::Pose & pos
 }
 
 // ============================================================================
-// ROS plumbing
-// ============================================================================
-
-void MPCTargetDisplay::updateServiceName()
-{
-  const std::string ns = "/" + service_name_property_->getStdString();
-  if (ns == clients_ns_ || service_name_property_->getStdString().empty()) {
-    return;
-  }
-
-  auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
-  if (!ros_node_abstraction) {
-    return;
-  }
-  auto node = ros_node_abstraction->get_raw_node();
-
-  // Drop any in-flight MPC goal so we never mix planner namespaces mid-run.
-  stopMpc();
-
-  set_planner_client_ = node->create_client<SetPlanner>(ns + "/set_planner");
-  action_client_ = rclcpp_action::create_client<SendTrajectory>(node, ns + "/execute_trajectory");
-  mpc_goal_pub_ = node->create_publisher<geometry_msgs::msg::Pose>(ns + "/mpc_goal", 10);
-
-  clients_ns_ = ns;
-  RCLCPP_INFO(node->get_logger(), "MPC target display using planner namespace %s", ns.c_str());
-}
-
-void MPCTargetDisplay::ensureClients()
-{
-  if (clients_ns_.empty()) {
-    updateServiceName();
-  }
-}
-
-// ============================================================================
-// MPC start / stop
-// ============================================================================
-
-void MPCTargetDisplay::updateStart()
-{
-  if (start_mpc_property_) {
-    // Momentary button: unwind the check (blocked) so it behaves like "Refresh".
-    start_mpc_property_->blockSignals(true);
-    start_mpc_property_->setBool(false);
-    start_mpc_property_->blockSignals(false);
-  }
-  startMpc();
-}
-
-void MPCTargetDisplay::updateStop()
-{
-  if (stop_mpc_property_) {
-    stop_mpc_property_->blockSignals(true);
-    stop_mpc_property_->setBool(false);
-    stop_mpc_property_->blockSignals(false);
-  }
-  stopMpc();
-}
-
-void MPCTargetDisplay::startMpc()
-{
-  if (mpc_active_ || mpc_starting_) {
-    return;
-  }
-  ensureClients();
-  if (!set_planner_client_ || !action_client_ || !mpc_goal_pub_) {
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Error, "MPC",
-      "Planner clients not created (planner node not reachable).");
-    return;
-  }
-
-  if (!action_client_->action_server_is_ready()) {
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Warn, "MPC",
-      "execute_trajectory action server not available yet.");
-    return;
-  }
-
-  // The planner must be on MPC for the reactive loop to consume mpc_goal.
-  auto request = std::make_shared<SetPlanner::Request>();
-  request->planner_type = SetPlanner::Request::MPC;
-  if (!set_planner_client_->service_is_ready()) {
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Warn, "MPC",
-      "set_planner service not available yet.");
-    return;
-  }
-  mpc_starting_ = true;
-  set_planner_client_->async_send_request(
-    request,
-    [this](rclcpp::Client<SetPlanner>::SharedFuture future) {
-      try {
-        auto response = future.get();
-        onPlannerSwitch(response);
-      } catch (const std::exception & e) {
-        mpc_starting_ = false;
-        setStatusStd(
-          rviz_common::properties::StatusProperty::Error, "MPC",
-          std::string("set_planner failed: ") + e.what());
-      }
-    });
-}
-
-void MPCTargetDisplay::onPlannerSwitch(SetPlanner::Response::SharedPtr response)
-{
-  if (!response->success) {
-    mpc_starting_ = false;
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Error, "MPC",
-      "Planner switch to MPC failed: " + response->message);
-    return;
-  }
-  sendMpcGoal();
-}
-
-void MPCTargetDisplay::sendMpcGoal()
-{
-  if (!action_client_ || !action_client_->action_server_is_ready()) {
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Warn, "MPC",
-      "execute_trajectory action server not available yet.");
-    return;
-  }
-
-  auto goal = SendTrajectory::Goal();
-  goal.allow_cached = false;
-
-  // start_pose intentionally left EMPTY so the server resolves the start state
-  // from robot_context.get_joint_pose() (the live, model-sized joint vector).
-  // The legacy panel/viser sent raw /joint_states here, which carries extra
-  // joints (e.g. a gripper) -- cuRobo's MPC rejects the oversized state
-  // ("current_state must have 7 columns, got 8") and zeros from a stale source
-  // produced the "0.0 joint state jump". The server's own resolution is both
-  // the right size and the real current pose.
-
-  isaac_ros_cumotion_interfaces::msg::Goalset gset;
-  gset.poses.push_back(target_pose_);
-  goal.goalsets.push_back(gset);
-
-  auto send_goal_options =
-    rclcpp_action::Client<SendTrajectory>::SendGoalOptions();
-  send_goal_options.goal_response_callback =
-    std::bind(&MPCTargetDisplay::onGoalResponse, this, std::placeholders::_1);
-  send_goal_options.feedback_callback =
-    std::bind(&MPCTargetDisplay::onFeedback, this,
-      std::placeholders::_1, std::placeholders::_2);
-  send_goal_options.result_callback =
-    std::bind(&MPCTargetDisplay::onResult, this, std::placeholders::_1);
-
-  action_client_->async_send_goal(goal, send_goal_options);
-}
-
-void MPCTargetDisplay::onGoalResponse(GoalHandle::SharedPtr goal_handle)
-{
-  if (!goal_handle) {
-    mpc_starting_ = false;
-    setStatusStd(
-      rviz_common::properties::StatusProperty::Error, "MPC",
-      "MPC goal was rejected by the server.");
-    return;
-  }
-  mpc_starting_ = false;
-  goal_handle_ = goal_handle;
-  mpc_active_ = true;
-  last_published_goal_ = target_pose_;
-  goal_publish_pending_ = true;
-  setStatusStd(
-    rviz_common::properties::StatusProperty::Ok, "MPC",
-    "MPC active - drag the target to retarget the robot live.");
-}
-
-void MPCTargetDisplay::onFeedback(
-  GoalHandle::SharedPtr,
-  const std::shared_ptr<const SendTrajectory::Feedback> feedback)
-{
-  if (!feedback) {
-    return;
-  }
-  std::string status = feedback->state;
-  if (!std::isnan(feedback->position_error)) {
-    status += " | err " + std::to_string(feedback->position_error) + " m";
-  }
-  if (feedback->on_target) {
-    status += " (on target)";
-  }
-  rviz_common::properties::StatusProperty::Level level =
-    feedback->on_target ?
-    rviz_common::properties::StatusProperty::Ok :
-    rviz_common::properties::StatusProperty::Warn;
-  setStatusStd(level, "MPC", status);
-}
-
-void MPCTargetDisplay::onResult(const GoalHandle::WrappedResult & result)
-{
-  mpc_active_ = false;
-  mpc_starting_ = false;
-  goal_handle_.reset();
-  switch (result.code) {
-    case rclcpp_action::ResultCode::SUCCEEDED:
-      setStatusStd(
-        rviz_common::properties::StatusProperty::Ok, "MPC",
-        "MPC goal succeeded.");
-      break;
-    case rclcpp_action::ResultCode::CANCELED:
-      setStatusStd(
-        rviz_common::properties::StatusProperty::Ok, "MPC",
-        "MPC stopped.");
-      break;
-    case rclcpp_action::ResultCode::ABORTED:
-      setStatusStd(
-        rviz_common::properties::StatusProperty::Warn, "MPC",
-        "MPC goal aborted: " +
-        ((result.result) ? result.result->message : std::string("no result message")));
-      break;
-    default:
-      setStatusStd(
-        rviz_common::properties::StatusProperty::Warn, "MPC",
-        "MPC goal ended.");
-      break;
-  }
-}
-
-void MPCTargetDisplay::stopMpc()
-{
-  mpc_starting_ = false;
-  if (!mpc_active_ || !action_client_) {
-    mpc_active_ = false;
-    return;
-  }
-  if (goal_handle_) {
-    action_client_->async_cancel_goal(goal_handle_);
-  }
-  mpc_active_ = false;
-  goal_handle_.reset();
-  setStatusStd(
-    rviz_common::properties::StatusProperty::Ok, "MPC", "Stopped.");
-}
-
-void MPCTargetDisplay::publishGoalPose()
-{
-  if (!mpc_goal_pub_ || !mpc_active_) {
-    return;
-  }
-  mpc_goal_pub_->publish(target_pose_);
-  last_published_goal_ = target_pose_;
-  goal_publish_pending_ = false;
-}
-
-// ============================================================================
 // Interactive target gizmo (self-contained MoveIt-style 6-DOF marker)
 // ============================================================================
 
-void MPCTargetDisplay::createGizmo()
+void TargetDisplay::createGizmo()
 {
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction) {
@@ -519,7 +243,7 @@ void MPCTargetDisplay::createGizmo()
       gizmo_name_, node.get());
     RCLCPP_INFO(
       node->get_logger(),
-      "MPC target gizmo on /%s/* (rendered via embedded "
+      "Target gizmo on /%s/* (rendered via embedded "
       "interactive-marker client).", gizmo_name_.c_str());
   }
   makeGizmoMarker(target_pose_);
@@ -527,7 +251,7 @@ void MPCTargetDisplay::createGizmo()
   connectGizmoClient();
 }
 
-void MPCTargetDisplay::destroyGizmo()
+void TargetDisplay::destroyGizmo()
 {
   disconnectGizmoClient();
   if (gizmo_server_) {
@@ -537,7 +261,7 @@ void MPCTargetDisplay::destroyGizmo()
   gizmo_server_.reset();
 }
 
-void MPCTargetDisplay::connectGizmoClient()
+void TargetDisplay::connectGizmoClient()
 {
   if (!gizmo_client_ || gizmo_client_connected_) {
     return;
@@ -546,7 +270,7 @@ void MPCTargetDisplay::connectGizmoClient()
   gizmo_client_connected_ = true;
 }
 
-void MPCTargetDisplay::disconnectGizmoClient()
+void TargetDisplay::disconnectGizmoClient()
 {
   if (gizmo_client_) {
     gizmo_client_->disconnect();
@@ -555,7 +279,7 @@ void MPCTargetDisplay::disconnectGizmoClient()
   eraseAllGizmoMarkers();
 }
 
-void MPCTargetDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & pose)
+void TargetDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & pose)
 {
   if (!gizmo_server_) {
     return;
@@ -571,7 +295,7 @@ void MPCTargetDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & pose)
   int_marker.pose = pose;
   int_marker.scale = 1.0;
   int_marker.name = gizmo_name_;
-  int_marker.description = "MPC target (6-DOF)";
+  int_marker.description = "Target (6-DOF)";
 
   // Grey arrow pointing along +X (the tool axis), plus a centre sphere.
   visualization_msgs::msg::Marker arrow;
@@ -632,10 +356,10 @@ void MPCTargetDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & pose)
   gizmo_server_->insert(
     int_marker,
     std::bind(
-      &MPCTargetDisplay::gizmoFeedback, this, std::placeholders::_1));
+      &TargetDisplay::gizmoFeedback, this, std::placeholders::_1));
 }
 
-void MPCTargetDisplay::gizmoFeedback(
+void TargetDisplay::gizmoFeedback(
   const visualization_msgs::msg::InteractiveMarkerFeedback::ConstSharedPtr & feedback)
 {
   if (!feedback) {
@@ -650,7 +374,7 @@ void MPCTargetDisplay::gizmoFeedback(
   gizmo_feedback_dirty_ = true;
 }
 
-void MPCTargetDisplay::syncGizmoToProperties()
+void TargetDisplay::syncGizmoToProperties()
 {
   geometry_msgs::msg::Pose pose;
   {
@@ -674,10 +398,9 @@ void MPCTargetDisplay::syncGizmoToProperties()
   target_orientation_w_->setFloat(pose.orientation.w);
   applying_gizmo_ = false;
   target_pose_ = pose;
-  goal_publish_pending_ = true;
 }
 
-void MPCTargetDisplay::syncPropertiesToGizmo()
+void TargetDisplay::syncPropertiesToGizmo()
 {
   gizmo_sync_pending_ = false;
   if (!gizmo_server_) {
@@ -691,7 +414,7 @@ void MPCTargetDisplay::syncPropertiesToGizmo()
 // Embedded interactive-marker client (renders the gizmo in this display)
 // ============================================================================
 
-void MPCTargetDisplay::gizmoInitializeCallback(
+void TargetDisplay::gizmoInitializeCallback(
   visualization_msgs::srv::GetInteractiveMarkers::Response::SharedPtr msg)
 {
   eraseAllGizmoMarkers();
@@ -700,7 +423,7 @@ void MPCTargetDisplay::gizmoInitializeCallback(
   }
 }
 
-void MPCTargetDisplay::gizmoUpdateCallback(
+void TargetDisplay::gizmoUpdateCallback(
   visualization_msgs::msg::InteractiveMarkerUpdate::ConstSharedPtr msg)
 {
   if (!msg) {
@@ -713,12 +436,12 @@ void MPCTargetDisplay::gizmoUpdateCallback(
   }
 }
 
-void MPCTargetDisplay::gizmoResetCallback()
+void TargetDisplay::gizmoResetCallback()
 {
   eraseAllGizmoMarkers();
 }
 
-void MPCTargetDisplay::gizmoStatusCallback(
+void TargetDisplay::gizmoStatusCallback(
   interactive_markers::InteractiveMarkerClient::Status status,
   const std::string & message)
 {
@@ -737,7 +460,7 @@ void MPCTargetDisplay::gizmoStatusCallback(
   setStatusStd(level, "Gizmo", message);
 }
 
-void MPCTargetDisplay::updateGizmoMarkers(
+void TargetDisplay::updateGizmoMarkers(
   const std::vector<visualization_msgs::msg::InteractiveMarker> & markers)
 {
   for (const visualization_msgs::msg::InteractiveMarker & marker : markers) {
@@ -787,7 +510,7 @@ void MPCTargetDisplay::updateGizmoMarkers(
   }
 }
 
-void MPCTargetDisplay::updateGizmoPoses(
+void TargetDisplay::updateGizmoPoses(
   const std::vector<visualization_msgs::msg::InteractiveMarkerPose> & poses)
 {
   for (const visualization_msgs::msg::InteractiveMarkerPose & pose : poses) {
@@ -798,12 +521,12 @@ void MPCTargetDisplay::updateGizmoPoses(
   }
 }
 
-void MPCTargetDisplay::eraseAllGizmoMarkers()
+void TargetDisplay::eraseAllGizmoMarkers()
 {
   interactive_markers_map_.clear();
 }
 
-void MPCTargetDisplay::publishGizmoFeedback(
+void TargetDisplay::publishGizmoFeedback(
   visualization_msgs::msg::InteractiveMarkerFeedback & feedback)
 {
   if (gizmo_client_) {
@@ -811,7 +534,7 @@ void MPCTargetDisplay::publishGizmoFeedback(
   }
 }
 
-void MPCTargetDisplay::gizmoStatusUpdate(
+void TargetDisplay::gizmoStatusUpdate(
   rviz_common::properties::StatusProperty::Level level,
   const std::string & name,
   const std::string & text)
@@ -819,7 +542,7 @@ void MPCTargetDisplay::gizmoStatusUpdate(
   setStatusStd(level, name, text);
 }
 
-void MPCTargetDisplay::updateGizmoVisible()
+void TargetDisplay::updateGizmoVisible()
 {
   const bool want = gizmo_visible_property_ && gizmo_visible_property_->getBool();
   if (want && !gizmo_active_) {
@@ -835,7 +558,7 @@ void MPCTargetDisplay::updateGizmoVisible()
 // Per-frame update
 // ============================================================================
 
-void MPCTargetDisplay::update(float wall_dt, float ros_dt)
+void TargetDisplay::update(float wall_dt, float ros_dt)
 {
   Display::update(wall_dt, ros_dt);
 
@@ -883,35 +606,9 @@ void MPCTargetDisplay::update(float wall_dt, float ros_dt)
   if (gizmo_active_ && !gizmo_server_) {
     createGizmo();
   }
-
-  // Stream the live MPC goal at ~10 Hz while the target changes (change-driven,
-  // throttled so a fast drag never floods the topic).
-  if (mpc_active_) {
-    if (goal_publish_pending_) {
-      publishGoalPose();
-    } else {
-      goal_publish_accum_ += wall_dt;
-      if (goal_publish_accum_ >= 0.1) {
-        goal_publish_accum_ = 0.0;
-        const geometry_msgs::msg::Pose & p = target_pose_;
-        const geometry_msgs::msg::Pose & l = last_published_goal_;
-        const bool changed =
-          p.position.x != l.position.x ||
-          p.position.y != l.position.y ||
-          p.position.z != l.position.z ||
-          p.orientation.x != l.orientation.x ||
-          p.orientation.y != l.orientation.y ||
-          p.orientation.z != l.orientation.z ||
-          p.orientation.w != l.orientation.w;
-        if (changed) {
-          publishGoalPose();
-        }
-      }
-    }
-  }
 }
 
 }  // namespace isaac_ros_cumotion_rviz
 
 #include <pluginlib/class_list_macros.hpp>
-PLUGINLIB_EXPORT_CLASS(isaac_ros_cumotion_rviz::MPCTargetDisplay, rviz_common::Display)
+PLUGINLIB_EXPORT_CLASS(isaac_ros_cumotion_rviz::TargetDisplay, rviz_common::Display)

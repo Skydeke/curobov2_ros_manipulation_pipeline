@@ -18,14 +18,46 @@ class EmulatorStrategy(JointCommandStrategy):
         joint_states_topic = self.params.get('joint_states_topic', '/emulator/joint_states')
         self.pub_joint_states = node.create_publisher(JointState, joint_states_topic, 10)
 
-        # Current simulated pose, sized to the robot's DOF (DOF-agnostic).
-        self.current_joint_positions = [0.0] * self.dof
+        # Current simulated pose: sized to the robot's DOF and seeded at the
+        # config's default (home) pose, NOT all-zeros — e.g. Franka's cspace
+        # excludes panda_joint4=0 (its range is [-3.072, -0.070]), so a zero
+        # start state is an outright cspace violation and the first plan fails
+        # before any command is sent. Without a configured default (e.g. a
+        # model-less emulator descriptor) it falls back to zeros.
+        self.current_joint_positions = self._default_home_pose() or [0.0] * self.dof
+
+        # Best-effort mirror of the seeded pose on the topic at startup (the
+        # message is volatile, so a subscribe-after-this subscriber may miss it
+        # — the launch-time latched home publisher covers that case).
+        self._publish_state(
+            list(self.joint_names), list(self.current_joint_positions), [0.0] * self.dof)
 
         # Thread for trajectory execution simulation
         self.execution_thread = None
         self.stop_execution = threading.Event()
 
         node.get_logger().info(f"Emulator strategy initialized - Publishing to {joint_states_topic}")
+
+    def _default_home_pose(self):
+        """Return the robot config's ``cspace.default_joint_position``, or None.
+
+        Read from the descriptor's full robot_cfg dict (the ConfigManager pops
+        ``cspace`` out of its own copy, so the descriptor is the source that
+        keeps it). Sized to the strategy's DOF; None when absent/mismatched.
+        """
+        try:
+            robot_cfg = (self.description.robot_cfg_dict
+                         if self.description is not None else {})
+            kin = robot_cfg.get('kinematics', {}) or {}
+            cspace = kin.get('cspace') or robot_cfg.get('cspace') or {}
+            home = cspace.get('default_joint_position')
+            if home:
+                home = [float(v) for v in home]
+                if len(home) == self.dof:
+                    return home
+        except Exception as e:
+            self.node.get_logger().warn(f"Could not read default home pose: {e}")
+        return None
 
     def _publish_state(self, names, positions, velocities):
         now = self.node.get_clock().now()

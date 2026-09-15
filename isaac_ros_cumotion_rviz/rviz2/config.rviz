@@ -31,9 +31,9 @@ Panels:
     Name: RvizArgsPanel
     collision_activation_distance: 0
     max_attempts: 0
+    planner_node_name: unified_planner
     time_dilation_factor: 1.0
     timeout: 0
-    voxel_size: 0
   - Class: add_objects_panel/AddObjectsPanel
     Name: AddObjectsPanel
 Visualization Manager:
@@ -57,13 +57,10 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-    - Class: isaac_ros_cumotion_rviz/MPCTargetDisplay
+    - Class: isaac_ros_cumotion_rviz/TargetDisplay
       Enabled: true
       Gizmo Visible: true
       Name: Target Pose Marker
-      Planner Node Name: curobo_server
-      Start MPC: false
-      Stop MPC: false
       Target Orientation W: 1.0
       Target Orientation X: 0.0
       Target Orientation Y: 0.0

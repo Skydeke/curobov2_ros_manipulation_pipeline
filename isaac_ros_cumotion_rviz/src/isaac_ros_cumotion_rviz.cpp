@@ -12,11 +12,11 @@ namespace isaac_ros_cumotion_rviz
     , planner_ready_{false}
     , planner_poll_in_flight_{false}
     , goal_active_{false}
-    , motion_gen_config_client_{nullptr}
-    , motion_gen_config_request_{nullptr}
-    , time_dilation_factor_{0.0}
-    , voxel_size_{0.0}
-    , mpc_target_display_{nullptr}
+    , action_ptr_{nullptr}
+    , trajectory_generation_client_{nullptr}
+    , goal_handle_{nullptr}
+    , time_dilation_factor_{1.0}
+    , target_display_{nullptr}
     , user_editing_pose_{false}
     , last_displayed_x_{std::numeric_limits<double>::quiet_NaN()}
     , last_displayed_y_{std::numeric_limits<double>::quiet_NaN()}
@@ -24,10 +24,13 @@ namespace isaac_ros_cumotion_rviz
     , last_displayed_roll_{std::numeric_limits<double>::quiet_NaN()}
     , last_displayed_pitch_{std::numeric_limits<double>::quiet_NaN()}
     , last_displayed_yaw_{std::numeric_limits<double>::quiet_NaN()}
-    , get_voxel_grid_client_{nullptr}
-    , voxel_marker_pub_{nullptr}
-    , obstacle_update_timer_{nullptr}
-    , obstacle_update_frequency_{0.0}
+    , planner_node_{"unified_planner"}
+    , mpc_goal_pub_{nullptr}
+    , mpc_active_{false}
+    , mpc_starting_{false}
+    , mpc_goal_timer_{nullptr}
+    , set_planner_client_{nullptr}
+    , current_planner_type_{0}
   {
     // Extend the widget with all attributes and children from UI file
     ui_->setupUi(this);
@@ -40,73 +43,27 @@ namespace isaac_ros_cumotion_rviz
     // Declare base_link parameter with default value
     node_->declare_parameter<std::string>("base_link", "base_0");
 
-    // Target planner node name is configurable (was hard-coded to "unified_planner").
-    // On the leeloo system the planner node is "curobo_trajectory_planner"; override
-    // with the "planner_node_name" parameter on this panel's node
-    // (/rviz_updata_parameters_node) if it differs.
-    node_->declare_parameter<std::string>("planner_node_name", "curobo_server");
-    const std::string planner_node = node_->get_parameter("planner_node_name").as_string();
-    const std::string planner_ns = "/" + planner_node + "/";
+    // The planner node the panel's clients bind to is configurable via the
+    // "planner_node_name" parameter on this panel's node
+    // (/rviz_updata_parameters_node) and, once built, via the "Planner Node"
+    // dropdown in this panel. The RViz config file overrides it on load().
+    node_->declare_parameter<std::string>("planner_node_name", "unified_planner");
+    planner_node_ = node_->get_parameter("planner_node_name").as_string();
 
-    // Try to find MPCTargetDisplay, will be set by timer if not immediately available
-    this->mpc_target_display_ = nullptr;
+    // Sync the dropdown with the configured planner node, THEN build the
+    // initial clients (before the change signal is connected, so the initial
+    // construction does not double-create them).
+    ui_->comboBoxPlannerNode->setCurrentText(QString::fromStdString(planner_node_));
+    createPlannerClients(planner_node_);
 
-    // AsyncParametersClient -- never SyncParametersClient, which builds its own
-    // temporary executor per call and would fight the background NodeSpinner (see
-    // spinner_ below) for ownership of node_.
-    param_client_ = std::make_shared<rclcpp::AsyncParametersClient>(node_, planner_node);
+    // Timer streaming the live MPC goal while the gizmo is dragged (10 Hz).
+    mpc_goal_timer_ = new QTimer(this);
+    mpc_goal_timer_->setInterval(100);
+    connect(mpc_goal_timer_, &QTimer::timeout, this, &RvizArgsPanel::streamMpcGoal);
 
-    motion_gen_config_client_ = node_->create_client<std_srvs::srv::Trigger>(planner_ns + "update_motion_gen_config");
-    motion_gen_config_request_ = std::make_shared<std_srvs::srv::Trigger::Request>();
-
-    // action client
-    this->action_ptr_ = rclcpp_action::create_client<isaac_ros_cumotion_interfaces::action::SendTrajectory>(
-      node_,
-      planner_ns + "execute_trajectory");
-
-    // create service client to generate traj
-    this->trajectory_generation_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>(planner_ns + "generate_trajectory");
-
-    // Create service client for getting voxel grid
-    this->get_voxel_grid_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::GetVoxelGrid>(planner_ns + "get_voxel_grid");
-
-    // Create publisher for voxel grid visualization
-    this->voxel_marker_pub_ = node_->create_publisher<visualization_msgs::msg::Marker>("/visualise_voxel_grid", 10);
-
-    // Frame the voxel grid markers are expressed in. The planner publishes voxel grids
-    // in dsr01/world (as seen in /curobo_trajectory_planner/voxel_grid_sparse), so use
-    // that as the default. Can be overridden via the "voxel_frame_id" ROS parameter.
-    node_->declare_parameter<std::string>("voxel_frame_id", "dsr01/world");
-    voxel_frame_id_ = node_->get_parameter("voxel_frame_id").as_string();
-
-    // MarkerArray publisher for the voxel grid, latched (transient_local) so an
-    // RViz MarkerArray display shows the last grid even if it connects afterwards.
-    this->voxel_marker_array_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-        "/visualise_voxel_grid_array", rclcpp::QoS(1).transient_local());
-
-    // Subscribe to the planner's sparse voxel grid stream for the auto-refresh path
-    // (see updateObstaclesFromTimer). Namespaced under planner_ns like the service
-    // clients above, so it follows the same planner_node_name override.
-    this->voxel_grid_sparse_sub_ = node_->create_subscription<isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid>(
-        planner_ns + "voxel_grid_sparse", rclcpp::QoS(10).transient_local(),
-        [this](isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid::ConstSharedPtr msg) { onSparseVoxelGrid(msg); });
-
-    // Create timer for automatic obstacle updates
-    obstacle_update_timer_ = new QTimer(this);
-    connect(obstacle_update_timer_, &QTimer::timeout, this, &RvizArgsPanel::updateObstaclesFromTimer);
-
-    // Create service client for setting robot strategy
-    this->set_robot_strategy_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::SetRobotStrategy>(planner_ns + "set_robot_strategy");
-    current_robot_strategy_ = "";
-
-    // Create service client for setting planner type
-    this->set_planner_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::SetPlanner>(planner_ns + "set_planner");
-    current_planner_type_ = 0; // Default to CLASSIC
-
-    // Connect SpinBox and DoubleSpinBox to slots
+    // Connect SpinBox for time dilation to its slot
     connect(ui_->doubleSpinBoxTimeDilationFactor, SIGNAL(valueChanged(double)), this, SLOT(updateTimeDilationFactor(double)));
-    connect(ui_->doubleSpinBoxVoxelSize, SIGNAL(valueChanged(double)), this, SLOT(updateVoxelSize(double)));
-    
+
     // Every planner-facing widget starts disabled and stays that way until
     // pollPlannerReady() confirms the planner is actually responding -- not just
     // discoverable (see setPlannerReady()/pollPlannerReady() for why that distinction
@@ -160,35 +117,31 @@ namespace isaac_ros_cumotion_rviz
     connect(poseUpdateTimer, &QTimer::timeout, this, &RvizArgsPanel::updateMarkerPoseDisplay);
     poseUpdateTimer->start(100); // Update pose display every 100ms
 
-    // Timer to find MPCTargetDisplay
+    // Timer to find the TargetDisplay (added to RViz as a display, not owned
+    // by this panel)
     QTimer* findDisplayTimer = new QTimer(this);
-    connect(findDisplayTimer, &QTimer::timeout, this, &RvizArgsPanel::findMPCTargetDisplay);
+    connect(findDisplayTimer, &QTimer::timeout, this, &RvizArgsPanel::findTargetDisplay);
     findDisplayTimer->start(500); // Check every 500ms until found
 
-    // Connect obstacle update controls
-    connect(ui_->pushButtonUpdateObstacles, &QPushButton::clicked, this, &RvizArgsPanel::on_pushButtonUpdateObstacles_clicked);
-    connect(ui_->spinBoxUpdateFrequency, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this, &RvizArgsPanel::updateObstacleFrequency);
-
-    // setupUi() applied the .ui file's default frequency before the connect above
-    // existed, so valueChanged never fired for it and the timer would sit stopped
-    // until the user nudged the spinbox. Apply the current value explicitly to arm
-    // it. Safe to start here: QTimer fires on the GUI event loop, which is not
-    // running yet during this constructor.
-    updateObstacleFrequency(ui_->spinBoxUpdateFrequency->value());
-
-    // Connect robot strategy controls
-    connect(ui_->comboBoxRobotStrategy, &QComboBox::currentTextChanged, this, &RvizArgsPanel::on_comboBoxRobotStrategy_currentTextChanged);
-
-    // Connect planner type controls
+    // Connect planner node / planner type controls
+    connect(ui_->comboBoxPlannerNode, &QComboBox::currentTextChanged, this, &RvizArgsPanel::on_comboBoxPlannerNode_currentTextChanged);
     connect(ui_->comboBoxTrajectoryType, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &RvizArgsPanel::on_comboBoxTrajectoryType_currentIndexChanged);
+
+    // Populate the Planner Node dropdown from the live graph (the data `ros2
+    // node list` reports) instead of a hardcoded list, and keep it refreshed so
+    // a planner (re)started later appears automatically.
+    refreshPlannerNodeList();
+    QTimer* nodeListTimer = new QTimer(this);
+    connect(nodeListTimer, &QTimer::timeout, this, &RvizArgsPanel::refreshPlannerNodeList);
+    nodeListTimer->start(2000);
 
     // Connect stop robot button
     connect(ui_->stopRobot, &QPushButton::clicked, this, &RvizArgsPanel::on_stopRobot_clicked);
 
-    // NOTE: MPC live-goal streaming moved out of the panel and into the
-    // MPCTargetDisplay (it publishes the drag pose to /<planner>/mpc_goal at
-    // 10 Hz while a goal is active). Live MPC retargeting now works by adding
-    // that display and pressing its "Start MPC" button.
+    // NOTE: the panel owns the planner-facing ROS plumbing (services, action,
+    // and the 10 Hz mpc_goal publisher). The TargetDisplay is a generic draggable
+    // 6-DOF marker with no planner knowledge; MPC live-tracking is started from
+    // the "Generate and send" button while "MPC (Real-time)" is selected.
 
     // Spin node_ on a background thread for the rest of this panel's lifetime, so
     // every async_send_request/AsyncParametersClient callback below actually gets
@@ -204,6 +157,34 @@ namespace isaac_ros_cumotion_rviz
     // it might still be invoking callbacks against is torn down.
   }
 
+  void RvizArgsPanel::createPlannerClients(const std::string & planner_node)
+  {
+    const std::string planner_ns = "/" + planner_node + "/";
+
+    // AsyncParametersClient -- never SyncParametersClient, which builds its own
+    // temporary executor per call and would fight the background NodeSpinner (see
+    // spinner_ below) for ownership of node_.
+    param_client_ = std::make_shared<rclcpp::AsyncParametersClient>(node_, planner_node);
+
+    // action client
+    this->action_ptr_ = rclcpp_action::create_client<isaac_ros_cumotion_interfaces::action::SendTrajectory>(
+      node_,
+      planner_ns + "execute_trajectory");
+
+    // create service client to generate traj
+    this->trajectory_generation_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>(planner_ns + "generate_trajectory");
+
+    // Create service client for setting planner type
+    this->set_planner_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::SetPlanner>(planner_ns + "set_planner");
+
+    // Publisher streaming the live MPC goal towards the current target pose.
+    this->mpc_goal_pub_ = node_->create_publisher<geometry_msgs::msg::Pose>(planner_ns + "mpc_goal", 10);
+
+    RCLCPP_INFO(node_->get_logger(),
+      "RvizArgsPanel clients bound to planner node '%s' (%s)",
+      planner_node.c_str(), planner_ns.c_str());
+  }
+
   void RvizArgsPanel::runOnGuiThread(std::function<void()> fn)
   {
     QMetaObject::invokeMethod(this, std::move(fn), Qt::QueuedConnection);
@@ -217,16 +198,9 @@ namespace isaac_ros_cumotion_rviz
     planner_ready_ = ready;
 
     ui_->doubleSpinBoxTimeDilationFactor->setEnabled(ready);
-    ui_->doubleSpinBoxVoxelSize->setEnabled(ready);
-    ui_->confirmPushButton->setEnabled(ready);
-    ui_->comboBoxRobotStrategy->setEnabled(ready);
     ui_->comboBoxTrajectoryType->setEnabled(ready);
-    // pushButtonUpdateObstacles calls the GetVoxelGrid *service*, so it stays gated.
-    // spinBoxUpdateFrequency drives updateObstaclesFromTimer(), which only re-renders
-    // the cached voxel_grid_sparse topic and makes no request of the planner -- it
-    // stays live so obstacles remain visible during the planner's GPU warmup, when
-    // node_is_available is still false.
-    ui_->pushButtonUpdateObstacles->setEnabled(ready);
+    // comboBoxPlannerNode stays live: repointing the dropdown at another planner
+    // node is always allowed, it just re-runs the readiness probe.
     updateActionButtons();
 
     RCLCPP_INFO(node_->get_logger(), "Planner is %s", ready ? "ready" : "not ready");
@@ -246,7 +220,7 @@ namespace isaac_ros_cumotion_rviz
     if (planner_poll_in_flight_) {
       return;
     }
-    if (!param_client_->service_is_ready()) {
+    if (!param_client_ || !param_client_->service_is_ready()) {
       setPlannerReady(false);
       return;
     }
@@ -279,10 +253,11 @@ namespace isaac_ros_cumotion_rviz
         ui_->doubleSpinBoxTimeDilationFactor->setValue(time_dilation_factor);
       }
 
-      float voxel_size;
-      if (config.mapGetFloat("voxel_size", &voxel_size)) {
-        voxel_size_ = voxel_size;
-        ui_->doubleSpinBoxVoxelSize->setValue(voxel_size);
+      QString planner_node;
+      if (config.mapGetString("planner_node_name", &planner_node)) {
+        // Rebinds the panel's clients to the stored planner node via the
+        // currentTextChanged slot.
+        ui_->comboBoxPlannerNode->setCurrentText(planner_node);
       }
     }
 
@@ -290,7 +265,7 @@ namespace isaac_ros_cumotion_rviz
     {
       Panel::save(config);
       config.mapSetValue("time_dilation_factor", time_dilation_factor_);
-      config.mapSetValue("voxel_size", voxel_size_);
+      config.mapSetValue("planner_node_name", QString::fromStdString(planner_node_));
     }
 
 
@@ -301,7 +276,7 @@ namespace isaac_ros_cumotion_rviz
         // This slot fires during RViz config load (spinbox setValue -> valueChanged),
         // so it must never block: set_parameters_atomically is called with a callback
         // (AsyncParametersClient), never the SyncParametersClient/blocking form.
-        if (!param_client_->service_is_ready()) {
+        if (!param_client_ || !param_client_->service_is_ready()) {
             RCLCPP_WARN(node_->get_logger(),
                 "Planner parameter service not available; skipping time_dilation_factor update");
             return;
@@ -323,71 +298,6 @@ namespace isaac_ros_cumotion_rviz
           });
     }
 
-    void RvizArgsPanel::updateVoxelSize(double value)
-    {
-        voxel_size_ = value;
-        RCLCPP_INFO(node_->get_logger(), "Voxel size changed to %.2f", voxel_size_);
-    }
-
-    void RvizArgsPanel::on_confirmPushButton_clicked()
-    {
-        if (!ui_->confirmPushButton->isEnabled()) {
-            return;
-          }
-        // Set ui to disable
-        ui_->doubleSpinBoxTimeDilationFactor->setEnabled(false);
-        ui_->doubleSpinBoxVoxelSize->setEnabled(false);
-        ui_->confirmPushButton->setEnabled(false);
-        RCLCPP_INFO(node_->get_logger(), "Confirm button clicked.");
-        if (!param_client_->service_is_ready()) {
-            RCLCPP_WARN(node_->get_logger(), "Planner parameter service not available");
-            setPlannerReady(false); // already on the GUI thread (button click slot)
-            return;
-        }
-
-        param_client_->set_parameters_atomically(
-          {rclcpp::Parameter("voxel_size", voxel_size_)},
-          [this](std::shared_future<rcl_interfaces::msg::SetParametersResult> future) {
-            try {
-              auto result = future.get();
-              if (result.successful) {
-                RCLCPP_INFO(node_->get_logger(), "Parameters set: voxel_size: %.2f", voxel_size_);
-              } else {
-                RCLCPP_ERROR(node_->get_logger(), "Failed to set voxel_size: %s", result.reason.c_str());
-              }
-            } catch (const std::exception & e) {
-              RCLCPP_ERROR(node_->get_logger(), "Exception setting voxel_size: %s", e.what());
-            }
-
-            if (!motion_gen_config_client_->service_is_ready()) {
-              RCLCPP_WARN(node_->get_logger(), "update_motion_gen_config service not available");
-              runOnGuiThread([this]() {
-                // Re-sync widget state with whatever planner_ready_ actually is
-                // rather than blindly re-enabling.
-                ui_->doubleSpinBoxTimeDilationFactor->setEnabled(planner_ready_);
-                ui_->doubleSpinBoxVoxelSize->setEnabled(planner_ready_);
-                ui_->confirmPushButton->setEnabled(planner_ready_);
-              });
-              return;
-            }
-
-            motion_gen_config_client_->async_send_request(motion_gen_config_request_,
-              [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture response_future) {
-                try {
-                  auto response = response_future.get();
-                  RCLCPP_INFO(node_->get_logger(), "Service call successful: %s", response->message.c_str());
-                } catch (const std::exception & e) {
-                  RCLCPP_ERROR(node_->get_logger(), "update_motion_gen_config call failed: %s", e.what());
-                }
-                runOnGuiThread([this]() {
-                  ui_->doubleSpinBoxTimeDilationFactor->setEnabled(planner_ready_);
-                  ui_->doubleSpinBoxVoxelSize->setEnabled(planner_ready_);
-                  ui_->confirmPushButton->setEnabled(planner_ready_);
-                });
-              });
-          });
-    }
-
     void RvizArgsPanel::on_sendTrajectory_clicked(){
       auto goal_request = isaac_ros_cumotion_interfaces::action::SendTrajectory::Goal();
 
@@ -406,20 +316,20 @@ namespace isaac_ros_cumotion_rviz
       // Net effect: "generate" returned a trajectory, "execute" did nothing.
       //
       // MPC never showed this because the reactive path gets its target from
-      // the /<planner>/mpc_goal topic (streamed at 10 Hz by the MPCTargetDisplay
-      // while active), which overrides the empty goalset. The open-loop path
+      // the /<planner>/mpc_goal topic (streamed at 10 Hz by this panel while
+      // MPC is active), which overrides the empty goalset. The open-loop path
       // has no such second source -- the cache was its only route, and it was
       // unreachable.
-      if (mpc_target_display_) {
-        auto target_pose = mpc_target_display_->getPose();
+      if (target_display_) {
+        auto target_pose = target_display_->getPose();
         isaac_ros_cumotion_interfaces::msg::Goalset gset;
         gset.poses.push_back(target_pose);
         goal_request.goalsets.push_back(gset);
       } else {
         RCLCPP_WARN(node_->get_logger(),
-                    "MPC target display not available - goal sent WITHOUT a target "
+                    "Target display not available - goal sent WITHOUT a target "
                     "pose (open-loop planning will fail; add "
-                    "MPCTargetDisplay to RViz)");
+                    "TargetDisplay to RViz)");
       }
 
       auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
@@ -453,6 +363,10 @@ namespace isaac_ros_cumotion_rviz
       }
 
       runOnGuiThread([this]() {
+        mpc_goal_timer_->stop();
+        mpc_active_ = false;
+        mpc_starting_ = false;
+        goal_handle_.reset();
         goal_active_ = false;
         updateActionButtons();
       });
@@ -465,8 +379,17 @@ namespace isaac_ros_cumotion_rviz
     } else {
       RCLCPP_INFO(node_->get_logger(), "Goal accepted by server, waiting for result");
     }
-    runOnGuiThread([this, goal_handle]() {
+    runOnGuiThread([this, goal_handle, accepted]() {
       this->goal_handle_ = goal_handle;
+      if (accepted && mpc_starting_) {
+        // MPC goal accepted: begin streaming the live target pose (~10 Hz).
+        mpc_starting_ = false;
+        mpc_active_ = true;
+        mpc_goal_timer_->start();
+        RCLCPP_INFO(node_->get_logger(), "MPC active - drag the target to retarget the robot live");
+      } else if (!accepted) {
+        mpc_starting_ = false;
+      }
     });
   }
 
@@ -482,8 +405,8 @@ namespace isaac_ros_cumotion_rviz
       // Always called from the GUI thread (button slots), so early-return failure
       // paths can invoke on_done() directly; only the async completion below
       // (which fires on the background spin thread) needs runOnGuiThread.
-      if (!mpc_target_display_) {
-        RCLCPP_WARN(node_->get_logger(), "MPC target display not available yet. Please add MPCTargetDisplay to RViz.");
+      if (!target_display_) {
+        RCLCPP_WARN(node_->get_logger(), "Target display not available yet. Please add TargetDisplay to RViz.");
         if (on_done) { on_done(false); }
         return;
       }
@@ -495,7 +418,7 @@ namespace isaac_ros_cumotion_rviz
 
       auto goal_request = std::make_shared<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request>();
       isaac_ros_cumotion_interfaces::msg::Goalset gset;
-      gset.poses.push_back(this->mpc_target_display_->getPose());
+      gset.poses.push_back(this->target_display_->getPose());
       goal_request->goalsets.push_back(gset);
 
       trajectory_generation_client_->async_send_request(goal_request,
@@ -523,16 +446,15 @@ namespace isaac_ros_cumotion_rviz
     void RvizArgsPanel::on_generateAndSend_clicked(){
       // Check if MPC planner is selected (planner_type == 1)
       if (current_planner_type_ == 1) {
-        // MPC Mode: delegate to the MPCTargetDisplay, which owns the reactive
-        // flow (SetPlanner MPC -> execute_trajectory action -> live mpc_goal
-        // streaming while the gizmo is dragged). The panel no longer keeps its
-        // own 10 Hz goal publisher.
-        if (!mpc_target_display_) {
-          RCLCPP_WARN(node_->get_logger(), "MPC target display not available; add MPCTargetDisplay to RViz to start MPC tracking");
+        // MPC Mode: the panel owns the reactive flow (SetPlanner MPC ->
+        // execute_trajectory action -> live mpc_goal streaming while the gizmo
+        // is dragged).
+        if (!target_display_) {
+          RCLCPP_WARN(node_->get_logger(), "Target display not available; add TargetDisplay to RViz to start MPC tracking");
           return;
         }
-        RCLCPP_INFO(node_->get_logger(), "Starting MPC tracking via MPCTargetDisplay");
-        mpc_target_display_->startMpc();
+        RCLCPP_INFO(node_->get_logger(), "Starting MPC tracking");
+        startMpc();
         return;
       }
 
@@ -549,11 +471,132 @@ namespace isaac_ros_cumotion_rviz
         }
       });
     }
-    void RvizArgsPanel::on_stopRobot_clicked(){
-      // Stop live MPC tracking if the target display is running it
-      if (mpc_target_display_) {
-        mpc_target_display_->stopMpc();
+
+    // --- MPC live-tracking (owned by the panel) ---
+
+    void RvizArgsPanel::startMpc()
+    {
+      if (mpc_starting_ || mpc_active_) {
+        return;
       }
+      if (!target_display_) {
+        RCLCPP_WARN(node_->get_logger(), "Target display not available yet");
+        return;
+      }
+      if (!set_planner_client_ || !set_planner_client_->service_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(), "set_planner service not available");
+        return;
+      }
+      if (!action_ptr_ || !action_ptr_->action_server_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(), "execute_trajectory action server not available");
+        return;
+      }
+
+      // The planner must be on MPC for the reactive loop to consume mpc_goal.
+      auto request = std::make_shared<isaac_ros_cumotion_interfaces::srv::SetPlanner::Request>();
+      request->planner_type = isaac_ros_cumotion_interfaces::srv::SetPlanner::Request::MPC;
+      mpc_starting_ = true;
+
+      set_planner_client_->async_send_request(request,
+        [this](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::SetPlanner>::SharedFuture future) {
+          bool success = false;
+          std::string message;
+          try {
+            auto response = future.get();
+            success = response->success;
+            message = response->message;
+          } catch (const std::exception & e) {
+            message = e.what();
+          }
+
+          if (!success) {
+            RCLCPP_ERROR(node_->get_logger(), "Planner switch to MPC failed: %s", message.c_str());
+            runOnGuiThread([this]() { mpc_starting_ = false; });
+            return;
+          }
+          RCLCPP_INFO(node_->get_logger(), "Switched planner to MPC");
+          runOnGuiThread([this]() { sendMpcGoal(); });
+        });
+    }
+
+    void RvizArgsPanel::sendMpcGoal()
+    {
+      mpc_starting_ = false;
+      if (!target_display_) {
+        RCLCPP_WARN(node_->get_logger(), "Target display not available; cannot start MPC goal");
+        return;
+      }
+      if (!action_ptr_ || !action_ptr_->action_server_is_ready()) {
+        RCLCPP_WARN(node_->get_logger(), "execute_trajectory action server not available yet");
+        return;
+      }
+
+      auto goal = isaac_ros_cumotion_interfaces::action::SendTrajectory::Goal();
+      goal.allow_cached = false;
+
+      // start_pose intentionally left EMPTY so the server resolves the start state
+      // from robot_context.get_joint_pose() (the live, model-sized joint vector).
+      // The legacy code sent raw /joint_states here, which carries extra joints
+      // (e.g. a gripper) -- cuRobo's MPC rejects the oversized state
+      // ("current_state must have 7 columns, got 8"). The server's own resolution
+      // is both the right size and the real current pose.
+
+      isaac_ros_cumotion_interfaces::msg::Goalset gset;
+      gset.poses.push_back(target_display_->getPose());
+      goal.goalsets.push_back(gset);
+
+      auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
+      send_goal_options.goal_response_callback = std::bind(&RvizArgsPanel::goal_response_callback, this, std::placeholders::_1);
+      send_goal_options.result_callback = std::bind(&RvizArgsPanel::result_callback, this, std::placeholders::_1);
+
+      action_ptr_->async_send_goal(goal, send_goal_options);
+
+      // await goal acceptance (goal_response_callback) before starting the stream
+      last_published_goal_ = target_display_->getPose();
+      goal_active_ = true;
+      updateActionButtons();
+    }
+
+    void RvizArgsPanel::streamMpcGoal()
+    {
+      if (!mpc_active_ || !mpc_goal_pub_ || !target_display_) {
+        return;
+      }
+      const geometry_msgs::msg::Pose & p = target_display_->getPose();
+      const geometry_msgs::msg::Pose & l = last_published_goal_;
+      const bool changed =
+        p.position.x != l.position.x ||
+        p.position.y != l.position.y ||
+        p.position.z != l.position.z ||
+        p.orientation.x != l.orientation.x ||
+        p.orientation.y != l.orientation.y ||
+        p.orientation.z != l.orientation.z ||
+        p.orientation.w != l.orientation.w;
+      if (changed) {
+        mpc_goal_pub_->publish(p);
+        last_published_goal_ = p;
+      }
+    }
+
+    void RvizArgsPanel::stopMpc()
+    {
+      mpc_starting_ = false;
+      if (mpc_goal_timer_) {
+        mpc_goal_timer_->stop();
+      }
+      if (mpc_active_ && goal_handle_) {
+        try {
+          action_ptr_->async_cancel_goal(goal_handle_);
+        } catch (const std::exception& e) {
+          RCLCPP_WARN(node_->get_logger(), "Exception during MPC cancel: %s", e.what());
+        }
+      }
+      mpc_active_ = false;
+    }
+
+    void RvizArgsPanel::on_stopRobot_clicked(){
+      // Stop live MPC tracking if active
+      stopMpc();
 
       // Cancel the action goal if it exists and is still active
       if (goal_handle_) {
@@ -572,9 +615,77 @@ namespace isaac_ros_cumotion_rviz
       updateActionButtons();
     }
 
-    void RvizArgsPanel::findMPCTargetDisplay(){
+    void RvizArgsPanel::on_comboBoxPlannerNode_currentTextChanged(const QString &text)
+    {
+      const std::string new_node = text.trimmed().toStdString();
+      if (new_node.empty()) {
+        ui_->comboBoxPlannerNode->setCurrentText(QString::fromStdString(planner_node_));
+        return;
+      }
+      if (new_node == planner_node_) {
+        return;
+      }
+
+      RCLCPP_INFO(node_->get_logger(), "Switching planner node to '%s'", new_node.c_str());
+
+      // Tear down any in-flight goal / MPC loop before repointing the clients.
+      stopMpc();
+      if (goal_active_ && goal_handle_) {
+        try {
+          action_ptr_->async_cancel_goal(goal_handle_);
+        } catch (const std::exception& e) {
+          RCLCPP_WARN(node_->get_logger(), "Exception during cancel: %s", e.what());
+        }
+      }
+      goal_active_ = false;
+      goal_handle_.reset();
+
+      planner_node_ = new_node;
+      createPlannerClients(new_node);
+
+      // The new planner node needs re-probing for readiness (it may still be
+      // warming up or simply not responding yet).
+      setPlannerReady(false);
+    }
+
+    void RvizArgsPanel::refreshPlannerNodeList()
+    {
+      // Same data `ros2 node list` reports, queried here via the node graph API
+      // (no hardcoded dropdown values). Raw names come back "/"-prefixed.
+      std::vector<std::string> names;
+      try {
+        for (auto n : node_->get_node_names()) {
+          if (!n.empty() && n.front() == '/') {
+            n.erase(n.begin());
+          }
+          names.push_back(n);
+        }
+      } catch (const std::exception & e) {
+        RCLCPP_WARN_THROTTLE(node_->get_logger(), *node_->get_clock(), 5000,
+          "Failed to list ROS nodes: %s", e.what());
+        return;
+      }
+
+      const std::set<std::string> seen(names.begin(), names.end());
+      if (seen == last_planner_nodes_) {
+        return;  // graph unchanged; don't churn the dropdown mid-interaction
+      }
+      last_planner_nodes_ = seen;
+
+      // Rebuild the items, preserving whatever the user currently has in the
+      // (editable) combo — even if it is not (yet) a live node.
+      const QString previous = ui_->comboBoxPlannerNode->currentText();
+      ui_->comboBoxPlannerNode->clear();
+      std::sort(names.begin(), names.end());
+      for (const auto & n : names) {
+        ui_->comboBoxPlannerNode->addItem(QString::fromStdString(n));
+      }
+      ui_->comboBoxPlannerNode->setCurrentText(previous);
+    }
+
+    void RvizArgsPanel::findTargetDisplay(){
       // If already found, stop searching
-      if (mpc_target_display_ != nullptr) {
+      if (target_display_ != nullptr) {
         return;
       }
 
@@ -590,20 +701,39 @@ namespace isaac_ros_cumotion_rviz
         return;
       }
 
-      // Search for MPCTargetDisplay
-      for (int i = 0; i < root_display->numDisplays(); ++i) {
-        auto display = root_display->getDisplayAt(i);
-        if (display) {
-          // Try to cast to MPCTargetDisplay
-          auto mpc_display = dynamic_cast<MPCTargetDisplay*>(display);
-          if (mpc_display) {
-            // Found it!
-            mpc_target_display_ = mpc_display;
-            RCLCPP_INFO(node_->get_logger(), "Found MPCTargetDisplay, using its target");
-            return;
+      // Search for the TargetDisplay, descending into display Groups: the
+      // shipped rviz configs (<robot>_curobo.rviz) place TargetDisplay inside a
+      // "Curobo Planning" group, so a scan of only root-level displays misses it
+      // whenever RViz reloads the config.
+      target_display_ = findTargetDisplayInGroup(root_display);
+      if (target_display_ != nullptr) {
+        RCLCPP_INFO(node_->get_logger(), "Found TargetDisplay, using its target");
+      }
+    }
+
+    TargetDisplay * RvizArgsPanel::findTargetDisplayInGroup(rviz_common::DisplayGroup * group)
+    {
+      for (int i = 0; i < group->numDisplays(); ++i) {
+        rviz_common::Display * child = group->getDisplayAt(i);
+        if (child == nullptr) {
+          continue;
+        }
+        TargetDisplay * target = dynamic_cast<TargetDisplay *>(child);
+        if (target != nullptr) {
+          return target;
+        }
+        // A DisplayGroup derives from Display, so subgroups appear as children
+        // of a group and must be descended into as well.
+        rviz_common::DisplayGroup * subgroup =
+          dynamic_cast<rviz_common::DisplayGroup *>(child);
+        if (subgroup != nullptr) {
+          TargetDisplay * found = findTargetDisplayInGroup(subgroup);
+          if (found != nullptr) {
+            return found;
           }
         }
       }
+      return nullptr;
     }
 
     void RvizArgsPanel::quaternionToEuler(const geometry_msgs::msg::Quaternion& q, double& roll, double& pitch, double& yaw) {
@@ -646,8 +776,8 @@ namespace isaac_ros_cumotion_rviz
     }
 
     void RvizArgsPanel::applyPoseFromSpinboxes(){
-      if (!mpc_target_display_) {
-        RCLCPP_WARN(node_->get_logger(), "MPC target display not available yet");
+      if (!target_display_) {
+        RCLCPP_WARN(node_->get_logger(), "Target display not available yet");
         return;
       }
 
@@ -664,7 +794,7 @@ namespace isaac_ros_cumotion_rviz
       eulerToQuaternion(roll, pitch, yaw, pose.orientation);
 
       // Apply the new pose to the marker
-      mpc_target_display_->setPose(pose);
+      target_display_->setPose(pose);
 
       // Update last displayed values to match what we just set
       last_displayed_x_ = pose.position.x;
@@ -692,11 +822,11 @@ namespace isaac_ros_cumotion_rviz
 
     void RvizArgsPanel::updateMarkerPoseDisplay(){
       // Don't update if marker not found yet or if user is editing
-      if (!mpc_target_display_ || user_editing_pose_) {
+      if (!target_display_ || user_editing_pose_) {
         return;
       }
 
-      auto pose = mpc_target_display_->getPose();
+      auto pose = target_display_->getPose();
 
       // Convert quaternion to Euler angles
       double roll, pitch, yaw;
@@ -760,218 +890,6 @@ namespace isaac_ros_cumotion_rviz
       ui_->spinBoxYaw->blockSignals(false);
     }
 
-    void RvizArgsPanel::on_pushButtonUpdateObstacles_clicked() {
-      RCLCPP_INFO(node_->get_logger(), "Update Obstacles button clicked");
-
-      // Check if service is available (pure graph-discovery check, no spin needed
-      // and no blocking wait -- see pollPlannerReady()/NodeSpinner for why this
-      // matters).
-      if (!get_voxel_grid_client_->service_is_ready()) {
-        RCLCPP_WARN(node_->get_logger(), "GetVoxelGrid service not available");
-        return;
-      }
-
-      // Create request
-      auto request = std::make_shared<isaac_ros_cumotion_interfaces::srv::GetVoxelGrid::Request>();
-
-      // Call service asynchronously
-      auto future = get_voxel_grid_client_->async_send_request(request,
-        [this](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::GetVoxelGrid>::SharedFuture future) {
-          try {
-            auto response = future.get();
-            auto& voxel_grid = response->voxel_grid;
-
-            // Build a MarkerArray with a single CUBE_LIST holding one cube per
-            // occupied voxel (efficient for the thousands a dense grid returns).
-            // A fixed ns+id means each new publish REPLACES the previous grid in
-            // place, so no DELETEALL is needed (and adding one would collide on the
-            // same (ns, id) and trip RViz's duplicate-marker check).
-            visualization_msgs::msg::MarkerArray marker_array;
-            const auto stamp = node_->get_clock()->now();
-            // Prefer the frame the service provides; fall back to the configured one.
-            std::string frame_id = voxel_grid.header.frame_id.empty()
-                                       ? voxel_frame_id_
-                                       : voxel_grid.header.frame_id;
-
-            visualization_msgs::msg::Marker marker;
-            marker.header.frame_id = frame_id;
-            marker.header.stamp = stamp;
-            marker.ns = "voxel_grid";
-            marker.id = 0;
-            marker.type = visualization_msgs::msg::Marker::CUBE_LIST;
-            marker.action = visualization_msgs::msg::Marker::ADD;
-            marker.pose.orientation.w = 1.0;
-            marker.scale.x = voxel_grid.resolutions.x;
-            marker.scale.y = voxel_grid.resolutions.y;
-            marker.scale.z = voxel_grid.resolutions.z;
-            marker.color.r = 0.0;
-            marker.color.g = 1.0;
-            marker.color.b = 0.0;
-            marker.color.a = 1.0;
-
-            // Dense C-order grid (linear = i*size_y*size_z + j*size_z + k).
-            size_t index = 0;
-            for (size_t i = 0; i < voxel_grid.size_x; i++) {
-              for (size_t j = 0; j < voxel_grid.size_y; j++) {
-                for (size_t k = 0; k < voxel_grid.size_z; k++) {
-                  if (index < voxel_grid.data.size() && voxel_grid.data[index] > 0) {
-                    geometry_msgs::msg::Point point;
-                    // Cube centre = origin + (idx + 0.5) * resolution.
-                    point.x = voxel_grid.origin.x + (i + 0.5) * voxel_grid.resolutions.x;
-                    point.y = voxel_grid.origin.y + (j + 0.5) * voxel_grid.resolutions.y;
-                    point.z = voxel_grid.origin.z + (k + 0.5) * voxel_grid.resolutions.z;
-                    marker.points.push_back(point);
-                  }
-                  index++;
-                }
-              }
-            }
-            marker_array.markers.push_back(marker);
-
-            // Publish MarkerArray (latched).
-            voxel_marker_array_pub_->publish(marker_array);
-            RCLCPP_INFO(node_->get_logger(),
-                "Published voxel grid MarkerArray in frame '%s' with %zu occupied voxels",
-                frame_id.c_str(), marker.points.size());
-
-          } catch (const std::exception& e) {
-            RCLCPP_ERROR(node_->get_logger(), "Failed to get voxel grid: %s", e.what());
-          }
-        });
-    }
-
-    void RvizArgsPanel::updateObstacleFrequency(double value) {
-      obstacle_update_frequency_ = value;
-
-      // Stop timer if frequency is 0
-      if (obstacle_update_frequency_ <= 0.0) {
-        obstacle_update_timer_->stop();
-        ui_->labelUpdateStatus->setText("Off");
-        RCLCPP_INFO(node_->get_logger(), "Obstacle auto-update disabled");
-      } else {
-        // Convert Hz to milliseconds
-        int interval_ms = static_cast<int>(1000.0 / obstacle_update_frequency_);
-        obstacle_update_timer_->start(interval_ms);
-        ui_->labelUpdateStatus->setText(QString("%1 Hz").arg(obstacle_update_frequency_, 0, 'f', 1));
-        RCLCPP_INFO(node_->get_logger(), "Obstacle auto-update set to %.1f Hz (every %d ms)",
-                    obstacle_update_frequency_, interval_ms);
-      }
-    }
-
-    void RvizArgsPanel::updateObstaclesFromTimer() {
-      // Deliberately NOT gated on planner_ready_. This path makes no request of
-      // the planner: it renders from whatever the sparse-topic subscription has
-      // cached (see voxel_grid_sparse_sub_) rather than round-tripping the
-      // GetVoxelGrid service on every tick. The planner publishes voxel_grid_sparse
-      // throughout its ~90s GPU warmup, while node_is_available is still false --
-      // which is exactly when seeing the obstacle grid is most useful. Only the
-      // service-calling paths (pushButtonUpdateObstacles) stay gated.
-      //
-      // The topic is server-paced by the planner (~7Hz); if the user's requested
-      // frequency exceeds that, we simply re-publish the same cached message more
-      // often than new data actually arrives.
-      isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid::ConstSharedPtr msg;
-      {
-        std::lock_guard<std::mutex> lock(latest_sparse_mutex_);
-        msg = latest_sparse_msg_;
-      }
-      if (!msg) {
-        RCLCPP_WARN_ONCE(node_->get_logger(),
-            "Auto-refresh timer fired but no voxel_grid_sparse message received yet");
-        return;
-      }
-      publishMarkerFromSparse(*msg);
-    }
-
-    void RvizArgsPanel::onSparseVoxelGrid(isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid::ConstSharedPtr msg) {
-      // Called on the background spin thread (spinner_). Just cache -- the GUI
-      // thread (updateObstaclesFromTimer) decides when to actually render.
-      std::lock_guard<std::mutex> lock(latest_sparse_mutex_);
-      latest_sparse_msg_ = msg;
-    }
-
-    void RvizArgsPanel::publishMarkerFromSparse(const isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid & msg) {
-      const uint32_t sy = msg.size_y;
-      const uint32_t sz = msg.size_z;
-      const uint32_t syz = sy * sz;
-      const float vs = msg.resolution;
-      const float half = vs / 2.0f;
-
-      visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = msg.header.frame_id.empty() ? voxel_frame_id_ : msg.header.frame_id;
-      marker.header.stamp = node_->get_clock()->now();
-      marker.ns = "voxel_grid";
-      marker.id = 0;
-      marker.type = visualization_msgs::msg::Marker::CUBE_LIST;
-      marker.action = visualization_msgs::msg::Marker::ADD;
-      marker.pose.orientation.w = 1.0;
-      marker.scale.x = marker.scale.y = marker.scale.z = vs;
-      marker.color.r = 0.0;
-      marker.color.g = 1.0;
-      marker.color.b = 0.0;
-      marker.color.a = 1.0;
-      marker.points.reserve(msg.occupied_indices.size());
-
-      for (int32_t linear : msg.occupied_indices) {
-        const uint32_t u = static_cast<uint32_t>(linear);
-        const uint32_t gx = u / syz;
-        const uint32_t rem = u % syz;
-        const uint32_t gy = rem / sz;
-        const uint32_t gz = rem % sz;
-
-        geometry_msgs::msg::Point point;
-        point.x = msg.origin.x + gx * vs + half;
-        point.y = msg.origin.y + gy * vs + half;
-        point.z = msg.origin.z + gz * vs + half;
-        marker.points.push_back(point);
-      }
-
-      visualization_msgs::msg::MarkerArray marker_array;
-      marker_array.markers.push_back(marker);
-      voxel_marker_array_pub_->publish(marker_array);
-    }
-
-    void RvizArgsPanel::on_comboBoxRobotStrategy_currentTextChanged(const QString &text) {
-      RCLCPP_INFO(node_->get_logger(), "Control strategy changed to: %s", text.toStdString().c_str());
-
-      std::string new_strategy = text.toStdString();
-
-      try {
-        // Call the set_robot_strategy service with the control-strategy KEY
-        // (emulator / joint_speed / joint_pose). The service also updates the
-        // node's `control_strategy` parameter, so no separate parameter set is
-        // needed here (the old `robot_type` parameter no longer exists).
-        if (!set_robot_strategy_client_->service_is_ready()) {
-          RCLCPP_WARN(node_->get_logger(), "SetRobotStrategy service not available");
-          return;
-        }
-
-        auto request = std::make_shared<isaac_ros_cumotion_interfaces::srv::SetRobotStrategy::Request>();
-        request->robot_strategy = new_strategy;
-
-        set_robot_strategy_client_->async_send_request(request,
-          [this, new_strategy](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::SetRobotStrategy>::SharedFuture future) {
-            try {
-              auto response = future.get();
-
-              if (response->success) {
-                RCLCPP_INFO(node_->get_logger(), "Successfully switched to strategy: %s", new_strategy.c_str());
-                RCLCPP_INFO(node_->get_logger(), "Service response: %s", response->message.c_str());
-                runOnGuiThread([this, new_strategy]() { current_robot_strategy_ = new_strategy; });
-              } else {
-                RCLCPP_ERROR(node_->get_logger(), "Failed to switch strategy: %s", response->message.c_str());
-              }
-
-            } catch (const std::exception& e) {
-              RCLCPP_ERROR(node_->get_logger(), "Exception calling set_robot_strategy service: %s", e.what());
-            }
-          });
-
-      } catch (const std::exception& e) {
-        RCLCPP_ERROR(node_->get_logger(), "Exception calling set_robot_strategy: %s", e.what());
-      }
-    }
-
     void RvizArgsPanel::on_comboBoxTrajectoryType_currentIndexChanged(int index) {
       RCLCPP_INFO(node_->get_logger(), "Planner type changed to index: %d", index);
 
@@ -1004,7 +922,7 @@ namespace isaac_ros_cumotion_rviz
       RCLCPP_INFO(node_->get_logger(), "Switching to planner: %s", planner_name.c_str());
 
       // Call the set_planner service
-      if (!set_planner_client_->service_is_ready()) {
+      if (!set_planner_client_ || !set_planner_client_->service_is_ready()) {
         RCLCPP_WARN(node_->get_logger(), "SetPlanner service not available");
         return;
       }
@@ -1032,10 +950,6 @@ namespace isaac_ros_cumotion_rviz
           }
         });
     }
-
-    // MPC live-goal streaming is owned by the MPCTargetDisplay (it publishes the
-    // drag pose to /<planner>/mpc_goal at 10 Hz while a goal is active) -- the
-    // panel's old publishMpcGoal/timer/mpc_goal_pub_ were removed with it.
 
 } // isaac_ros_cumotion_rviz
 

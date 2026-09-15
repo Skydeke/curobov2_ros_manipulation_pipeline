@@ -356,6 +356,13 @@
     <child link="tool0"/>
   </joint>
 
+  <link name="grasping_frame"/>
+  <joint name="grasping_frame_joint" type="fixed">
+    <parent link="flange"/>
+    <child link="grasping_frame"/>
+    <origin rpy="0 0 0" xyz="0 0 0"/>
+  </joint>
+
   <joint name="camera_mount_joint" type="fixed">
     <origin rpy="0 0 -3.14" xyz="0 0 0"/>
     <parent link="flange"/>

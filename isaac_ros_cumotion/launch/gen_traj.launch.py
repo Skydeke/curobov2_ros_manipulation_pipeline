@@ -1,5 +1,5 @@
 from launch import LaunchDescription
-from launch.actions import LogInfo, OpaqueFunction
+from launch.actions import ExecuteProcess, LogInfo, OpaqueFunction
 from launch_ros.actions import Node
 from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -9,6 +9,7 @@ from launch.conditions import IfCondition
 from ament_index_python.packages import get_package_share_directory
 import ast
 import os
+import sys
 import yaml
 
 
@@ -46,6 +47,70 @@ def get_base_link_from_config(config_file_path, default_base_link):
         print(f"Using default base_link: {default_base_link}")
 
     return default_base_link
+
+
+def get_default_pose_from_config(config_file_path):
+    """
+    Read the robot's default (home) joint position from the cuRobo robot config
+    YAML (kinematics.cspace.default_joint_position + joint_names). Returns
+    (joint_names, positions) or (None, None) when the config does not carry one.
+    """
+    try:
+        with open(config_file_path, 'r') as file:
+            config = yaml.safe_load(file)
+            cspace = config.get('robot_cfg', {}).get('kinematics', {}).get('cspace', {})
+            names = cspace.get('joint_names')
+            home = cspace.get('default_joint_position')
+            if names and home and len(names) == len(home):
+                return list(names), list(home)
+    except (FileNotFoundError, yaml.YAMLError, KeyError, AttributeError, TypeError) as e:
+        print(f"Warning: Could not load default pose from config file: {e}")
+
+    return None, None
+
+
+# Seeds RViz with the robot's configured home pose. Runs as a standalone process
+# (transient_local / latched) so joint_state_publisher — and anyone else sourcing
+# the descriptor's feedback topic — gets the default pose whenever it subscribes,
+# instead of the all-zero / joint-limit-violating pose that JSP publishes for a
+# topic with no messages yet. Publishes ONCE, then only stays alive to keep the
+# latched sample reachable; real emulator/driver states on the same topic
+# supersede it naturally, so it never fights live feedback.
+_HOME_POSE_PUBLISHER_SRC = r'''
+import sys
+import time
+import yaml
+import rclpy
+from rclpy.qos import DurabilityPolicy, QoSProfile
+from sensor_msgs.msg import JointState
+
+config_path, topic = sys.argv[1], sys.argv[2]
+cfg = yaml.safe_load(open(config_path))
+cspace = cfg.get('robot_cfg', cfg).get('kinematics', {}).get('cspace', {})
+names = cspace.get('joint_names')
+home = cspace.get('default_joint_position')
+if not names or not home or len(names) != len(home):
+    print(f'[home_pose_publisher] no default_joint_position in {config_path}; '
+          f'nothing to publish', flush=True)
+    sys.exit(0)
+
+rclpy.init()
+node = rclpy.create_node('home_pose_publisher')
+qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+pub = node.create_publisher(JointState, topic, qos)
+msg = JointState()
+msg.header.frame_id = ''
+msg.name = list(names)
+msg.position = [float(v) for v in home]
+msg.velocity = []
+msg.effort = []
+for _ in range(3):
+    msg.header.stamp = node.get_clock().now().to_msg()
+    pub.publish(msg)
+    time.sleep(0.2)
+print(f'[home_pose_publisher] published default pose on {topic}', flush=True)
+rclpy.spin(node)
+'''
 
 
 def launch_setup(context, *args, **kwargs):
@@ -245,11 +310,36 @@ def launch_setup(context, *args, **kwargs):
             arguments=['0', '0', '0', '0', '0', '0', 'world', 'preview/world']
         ),
 
-        # Log an informational message
-        LogInfo(
-            msg='All nodes and launch files are launched'
-        ),
-    ]
+# Log an informational message
+    LogInfo(
+        msg='All nodes and launch files are launched'
+    ),
+]
+
+    # Seed the descriptor feedback topic (joint_state_publisher's source) with
+    # the robot's configured default pose, so RViz shows the robot at home
+    # instead of an all-zero / joint-limit-violating pose before the first
+    # emulator or driver JointState arrives.
+    home_names, home_pose = get_default_pose_from_config(robot_config_file)
+    home_topic = descriptor_joint_states_topic
+    if home_names and home_pose and home_topic:
+        nodes.append(
+            ExecuteProcess(
+                cmd=[
+                    sys.executable, '-c', _HOME_POSE_PUBLISHER_SRC,
+                    robot_config_file, home_topic,
+                ],
+                output='screen',
+            )
+        )
+
+    # Forward the RViz config only when explicitly set: an empty string would
+    # override rviz_visualization.launch.py's own default and make RViz open
+    # with "-d ''" instead of the package's rviz_curobo.rviz.
+    rviz_args = {'base_link': base_link}
+    rviz_config_arg = LaunchConfiguration('rviz_config').perform(context)
+    if rviz_config_arg:
+        rviz_args['rviz_config'] = rviz_config_arg
 
     # RViz, included only when gui:=true
     nodes.append(
@@ -257,7 +347,7 @@ def launch_setup(context, *args, **kwargs):
             PythonLaunchDescriptionSource(
                 os.path.join(isaac_ros_cumotion_launch_dir, 'rviz_visualization.launch.py')
             ),
-            launch_arguments={'base_link': base_link}.items(),
+            launch_arguments=rviz_args.items(),
             condition=IfCondition(LaunchConfiguration('gui'))
         )
     )
@@ -304,6 +394,15 @@ def generate_launch_description():
         description="Launch the RViz GUI (true/false)"
     )
 
+    # RViz config passed through to rviz_visualization.launch.py. Empty =>
+    # rviz_visualization.launch.py's own default (rviz/rviz_curobo.rviz).
+    declare_rviz_config = DeclareLaunchArgument(
+        'rviz_config',
+        default_value='',
+        description='RViz config file (absolute path) used when gui:=true; '
+                    'empty = package default rviz/rviz_curobo.rviz'
+    )
+
     declare_world_file = DeclareLaunchArgument(
         'world_file',
         default_value='',
@@ -317,6 +416,7 @@ def generate_launch_description():
         declare_camera_topic,
         declare_camera_info_topic,
         declare_gui,
+        declare_rviz_config,
         declare_world_file,
         # The defaults below MUST stay aligned with the declare_parameter() calls
         # in unified_planner_node.py: they are forwarded to the node and therefore

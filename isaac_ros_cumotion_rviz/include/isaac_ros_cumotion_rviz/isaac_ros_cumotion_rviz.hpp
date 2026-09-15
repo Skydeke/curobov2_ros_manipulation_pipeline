@@ -5,24 +5,14 @@
 // ROS2
 #include <rclcpp/rclcpp.hpp>
 #include "rclcpp_action/rclcpp_action.hpp"
-#include <std_msgs/msg/bool.hpp>
-#include <std_msgs/msg/u_int8.hpp>
-#include <std_msgs/msg/float32.hpp>
-#include <std_srvs/srv/trigger.hpp>
-#include <rcl_interfaces/msg/set_parameters_result.hpp>
+#include <geometry_msgs/msg/pose.hpp>
 
 // Projet
-#include "isaac_ros_cumotion_rviz/mpc_target_display.hpp"
+#include "isaac_ros_cumotion_rviz/target_display.hpp"
 #include "isaac_ros_cumotion_rviz/node_spinner.hpp"
 #include "isaac_ros_cumotion_interfaces/srv/trajectory_generation.hpp"
 #include "isaac_ros_cumotion_interfaces/action/send_trajectory.hpp"
-#include "isaac_ros_cumotion_interfaces/srv/get_voxel_grid.hpp"
-#include "isaac_ros_cumotion_interfaces/msg/sparse_voxel_grid.hpp"
 #include "isaac_ros_cumotion_interfaces/srv/set_planner.hpp"
-#include "isaac_ros_cumotion_interfaces/srv/set_robot_strategy.hpp"
-#include "visualization_msgs/msg/marker.hpp"
-#include "visualization_msgs/msg/marker_array.hpp"
-#include "geometry_msgs/msg/point.hpp"
 
 // RVIZ2
 #include <rviz_common/panel.hpp>
@@ -33,8 +23,12 @@
 // Qt
 #include <QtWidgets>
 // STL
+#include <algorithm>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 /** 
  *  Include header generated from ui file
  *  Note that you will need to use add_library function first
@@ -60,9 +54,6 @@ namespace isaac_ros_cumotion_rviz
 
   private Q_SLOTS:
     void updateTimeDilationFactor(double value);
-    void updateVoxelSize(double value);
-    void updateParameters();
-    void on_confirmPushButton_clicked();
     void on_sendTrajectory_clicked();
     void on_generateTrajectory_clicked();
     void on_generateAndSend_clicked();
@@ -73,16 +64,12 @@ namespace isaac_ros_cumotion_rviz
 
     // Marker control slots
     void updateMarkerPoseDisplay();
-    void findMPCTargetDisplay();
+    void findTargetDisplay();
     void applyPoseFromSpinboxes();
 
-    // Obstacle update slots
-    void on_pushButtonUpdateObstacles_clicked();
-    void updateObstacleFrequency(double value);
-    void updateObstaclesFromTimer();
-
-    // Robot strategy slots
-    void on_comboBoxRobotStrategy_currentTextChanged(const QString &text);
+    // Planner node slots
+    void on_comboBoxPlannerNode_currentTextChanged(const QString &text);
+    void refreshPlannerNodeList();
 
     // Planner type slots
     void on_comboBoxTrajectoryType_currentIndexChanged(int index);
@@ -116,18 +103,20 @@ namespace isaac_ros_cumotion_rviz
     // async completion instead).
     void generateTrajectoryAsync(std::function<void(bool)> on_done);
 
-    // voxel_grid_sparse topic subscription callback (fires on the background spin
-    // thread, spinner_) -- just caches the latest message under a mutex. The
-    // auto-refresh timer (updateObstaclesFromTimer) reads that cache on the GUI
-    // thread at the user-configured cadence, decoupling arrival rate (capped by
-    // whatever the planner publishes at) from render rate.
-    void onSparseVoxelGrid(isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid::ConstSharedPtr msg);
+    // (Re)creates every planner-facing client/publisher against the given planner
+    // node name. Called from the constructor and from on_comboBoxPlannerNode_*
+    // when the user switches planner node.
+    void createPlannerClients(const std::string & planner_node);
 
-    // Builds a CUBE_LIST marker from a sparse grid's occupied_indices (C-order
-    // linear -> x,y,z) and publishes it, mirroring the dense-grid path in
-    // on_pushButtonUpdateObstacles_clicked but without the O(size_x*size_y*size_z)
-    // scan.
-    void publishMarkerFromSparse(const isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid & msg);
+    // --- MPC live-tracking (owned by the panel; the TargetDisplay is generic) ---
+    // Switch the planner to MPC, send an execute_trajectory goal toward the
+    // current target and stream the target pose to /<planner>/mpc_goal at 10 Hz
+    // while the gizmo is dragged.
+    void startMpc();
+    void stopMpc();
+    void streamMpcGoal();
+
+    void sendMpcGoal();
 
     std::unique_ptr<Ui::gui_parameters> ui_;
     rclcpp::Node::SharedPtr node_;
@@ -135,15 +124,18 @@ namespace isaac_ros_cumotion_rviz
     bool planner_ready_;
     bool planner_poll_in_flight_;
     bool goal_active_;
-    rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr motion_gen_config_client_;
-    std::shared_ptr<std_srvs::srv::Trigger::Request> motion_gen_config_request_;
     rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SharedPtr action_ptr_;
     rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedPtr trajectory_generation_client_;
     rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::GoalHandle::SharedPtr goal_handle_;
-    float time_dilation_factor_, voxel_size_;
-    // The MPCTargetDisplay owning the draggable 6-DOF target (self-contained;
+    float time_dilation_factor_;
+    // The TargetDisplay owning the draggable 6-DOF target (self-contained;
     // polling timer finds it lazily). Not owned by the panel.
-    MPCTargetDisplay* mpc_target_display_;
+    TargetDisplay* target_display_;
+
+    // Depth-first search below `group` for a TargetDisplay. The shipped rviz
+    // configs place it inside a display Group (e.g. "Curobo Planning"), which a
+    // root-level scan misses — so the lookup must descend into subgroups.
+    TargetDisplay* findTargetDisplayInGroup(rviz_common::DisplayGroup* group);
     bool user_editing_pose_; // Flag to prevent auto-update while user is editing
 
     // Last displayed pose to avoid unnecessary updates
@@ -154,27 +146,19 @@ namespace isaac_ros_cumotion_rviz
     double last_displayed_pitch_;
     double last_displayed_yaw_;
 
-    // Obstacle update members
-    rclcpp::Client<isaac_ros_cumotion_interfaces::srv::GetVoxelGrid>::SharedPtr get_voxel_grid_client_;
-    rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr voxel_marker_pub_;
-    rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr voxel_marker_array_pub_;
-    std::string voxel_frame_id_;
-    QTimer* obstacle_update_timer_;
-    double obstacle_update_frequency_;
+    // Planner node the panel's clients currently point at.
+    std::string planner_node_;
 
-    // Auto-refresh path: persistent subscription to the planner's voxel_grid_sparse
-    // topic (server-paced, currently ~7Hz) plus the latest message it delivered.
-    // updateObstaclesFromTimer() renders from this cache instead of round-tripping
-    // GetVoxelGrid on every tick; the manual "Update Obstacles" button still uses
-    // the service directly (see on_pushButtonUpdateObstacles_clicked), since that's
-    // a one-shot pull where paying for a fresh dense grid is fine.
-    rclcpp::Subscription<isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid>::SharedPtr voxel_grid_sparse_sub_;
-    std::mutex latest_sparse_mutex_;
-    isaac_ros_cumotion_interfaces::msg::SparseVoxelGrid::ConstSharedPtr latest_sparse_msg_;
+    // Last node set shown in the dropdown, so refreshPlannerNodeList() only
+    // rebuilds items when the graph actually changed.
+    std::set<std::string> last_planner_nodes_;
 
-    // Control strategy members (emulator / joint_speed / joint_pose — string key)
-    rclcpp::Client<isaac_ros_cumotion_interfaces::srv::SetRobotStrategy>::SharedPtr set_robot_strategy_client_;
-    std::string current_robot_strategy_;
+    // MPC live-tracking members.
+    rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr mpc_goal_pub_;
+    bool mpc_active_;
+    bool mpc_starting_;
+    geometry_msgs::msg::Pose last_published_goal_;
+    QTimer* mpc_goal_timer_;
 
     // Planner type members
     rclcpp::Client<isaac_ros_cumotion_interfaces::srv::SetPlanner>::SharedPtr set_planner_client_;

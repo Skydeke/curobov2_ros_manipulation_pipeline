@@ -295,6 +295,16 @@
     <child link="ee_link"/>
     <origin rpy="0 0.0 0" xyz="0.0 0. 0.1"/>
   </joint>
+
+  <!-- Kortex-style grasping frame: +X forward (approach), +Y left.
+       Ry(-90°) from panda_hand maps: X→-Z (approach), Y→Y (left), Z→X. -->
+  <link name="grasping_frame"/>
+  <joint name="grasping_frame_joint" type="fixed">
+    <parent link="panda_hand"/>
+    <child link="grasping_frame"/>
+    <origin rpy="0 -1.5707963267948966 0" xyz="0 0 0.1"/>
+  </joint>
+
   <link name="right_gripper">
     <inertial>
       <!-- Dummy inertial parameters to avoid link lumping-->

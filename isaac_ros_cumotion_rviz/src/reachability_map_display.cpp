@@ -671,15 +671,12 @@ void ReachabilityMapDisplay::updateMapPoints()
   const float alpha = cell_alpha_property_->getFloat();
 
   if (cell_style_property_->getOptionInt() == kCellStyleArrows) {
-    // One small arrow per cell, based on the *solved* end-effector pose rather
-    // than the requested goal: for solvable cells the cell's joint config is
-    // FK'd and the link pose landing on the goal is used, so the arrows line
-    // up with the "solution robot" ghosts (same FK, same URDF). The shaft
-    // points along the tool frame's +X — the axis the offset grasping_frame's
-    // end effector visibly extends along. The server composes every goal with
-    // +90deg about the plane's local Y (tool +X INTO the plane), so arrows and
-    // solved IKs agree and both look toward the plane.
-    // Unsolvable cells keep the requested goal pose and are coloured red.
+    // One arrow per cell rendering the EXACT pose sent to the IK solver
+    // (metrics_active_->goals[i]) — position and orientation, nothing FK'd or
+    // derived. The server composes every goal with +90deg about the plane's
+    // local Y, so tool +X (grasping_frame's physical approach axis) points
+    // INTO the plane and rotates with it. Unsolvable cells get the same goal
+    // pose but are coloured red.
     cell_arrows_.reserve(n);
     const float shaft_len = static_cast<float>(cell * 0.55);
     const float head_len = static_cast<float>(cell * 0.25);
@@ -690,32 +687,20 @@ void ReachabilityMapDisplay::updateMapPoints()
         metrics_active_->joint_states_valid[i].data;
       const Ogre::ColourValue & c = ok ? solved : failed;
 
-      Ogre::Quaternion q;
-      Ogre::Vector3 pos(
+      Ogre::Quaternion q(
+        goal.orientation.w, goal.orientation.x,
+        goal.orientation.y, goal.orientation.z);
+      if (std::abs(q.w) < 1e-6f && std::abs(q.x) < 1e-6f &&
+        std::abs(q.y) < 1e-6f && std::abs(q.z) < 1e-6f)
+      {
+        q = Ogre::Quaternion::IDENTITY;
+      } else {
+        q.normalise();
+      }
+      const Ogre::Vector3 pos(
         static_cast<float>(goal.position.x),
         static_cast<float>(goal.position.y),
         static_cast<float>(goal.position.z));
-      Eigen::Isometry3d solved_pose;
-      if (ok && solvedLinkPose(i, goal, solved_pose)) {
-        pos = Ogre::Vector3(
-          static_cast<float>(solved_pose.translation().x()),
-          static_cast<float>(solved_pose.translation().y()),
-          static_cast<float>(solved_pose.translation().z()));
-        const Eigen::Quaterniond q_eig(solved_pose.linear());
-        q = Ogre::Quaternion(
-          q_eig.w(), q_eig.x(), q_eig.y(), q_eig.z());
-      } else {
-        q = Ogre::Quaternion(
-          goal.orientation.w, goal.orientation.x,
-          goal.orientation.y, goal.orientation.z);
-        if (std::abs(q.w) < 1e-6f && std::abs(q.x) < 1e-6f &&
-          std::abs(q.y) < 1e-6f && std::abs(q.z) < 1e-6f)
-        {
-          q = Ogre::Quaternion::IDENTITY;
-        } else {
-          q.normalise();
-        }
-      }
 
       Ogre::Vector3 x_dir = q * Ogre::Vector3::UNIT_X;
       if (x_dir.length() < 1e-6f) {
@@ -904,45 +889,6 @@ void ReachabilityMapDisplay::updateSolutionAlphaInternal()
       entry.robot->setAlpha(alpha);
     }
   }
-}
-
-bool ReachabilityMapDisplay::solvedLinkPose(
-  size_t cell_index,
-  const geometry_msgs::msg::Pose & goal,
-  Eigen::Isometry3d & pose_out) const
-{
-  if (!robot_loaded_) {
-    return false;
-  }
-  std::map<std::string, Eigen::Isometry3d> transforms;
-  if (!fk_engine_.computeFK(jointMapForCell(cell_index), transforms) ||
-      transforms.empty())
-  {
-    return false;
-  }
-
-  const Eigen::Vector3d target(
-    goal.position.x, goal.position.y, goal.position.z);
-  const std::string * best_link = nullptr;
-  double best_dist = std::numeric_limits<double>::max();
-  for (const auto & [name, T] : transforms) {
-    const double dist = (T.translation() - target).norm();
-    if (dist < best_dist) {
-      best_dist = dist;
-      best_link = &name;
-    }
-  }
-
-  // The server solves each goal to within its position tolerance (0.05 m). A
-  // link landing well beyond that means the metrics' joint names don't line
-  // up with this URDF (or the config doesn't reach the goal), so the FK is
-  // not trustworthy for this cell.
-  constexpr double kMaxToolToGoalDistance = 0.25;
-  if (!best_link || best_dist > kMaxToolToGoalDistance) {
-    return false;
-  }
-  pose_out = transforms.at(*best_link);
-  return true;
 }
 
 void ReachabilityMapDisplay::rebuildVisualization()

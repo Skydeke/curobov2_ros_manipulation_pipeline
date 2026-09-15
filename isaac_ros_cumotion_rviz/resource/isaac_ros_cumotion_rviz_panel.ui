@@ -261,48 +261,10 @@
    <property name="title">
     <string/>
    </property>
-   <widget class="QLabel" name="labelRobotStrategy">
-    <property name="geometry">
-     <rect>
-      <x>10</x>
-      <y>10</y>
-      <width>121</width>
-      <height>20</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Robot :</string>
-    </property>
-   </widget>
-   <widget class="QComboBox" name="comboBoxRobotStrategy">
-    <property name="geometry">
-     <rect>
-      <x>0</x>
-      <y>30</y>
-      <width>141</width>
-      <height>25</height>
-     </rect>
-    </property>
-    <item>
-     <property name="text">
-      <string>joint_speed</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>emulator</string>
-     </property>
-    </item>
-    <item>
-     <property name="text">
-      <string>joint_pose</string>
-     </property>
-    </item>
-   </widget>
    <widget class="QLabel" name="labelTrajectoryType">
     <property name="geometry">
      <rect>
-      <x>170</x>
+      <x>10</x>
       <y>10</y>
       <width>121</width>
       <height>20</height>
@@ -315,7 +277,7 @@
    <widget class="QComboBox" name="comboBoxTrajectoryType">
     <property name="geometry">
      <rect>
-      <x>160</x>
+      <x>0</x>
       <y>30</y>
       <width>141</width>
       <height>25</height>
@@ -348,93 +310,42 @@
      </property>
     </item>
    </widget>
-  </widget>
-  <widget class="QGroupBox" name="obstacleUpdateGroupBox">
-   <property name="geometry">
-    <rect>
-     <x>0</x>
-     <y>140</y>
-     <width>454</width>
-     <height>65</height>
-    </rect>
-   </property>
-   <property name="title">
-    <string>Obstacle Update</string>
-   </property>
-   <widget class="QPushButton" name="pushButtonUpdateObstacles">
-    <property name="geometry">
-     <rect>
-      <x>10</x>
-      <y>30</y>
-      <width>150</width>
-      <height>30</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Update Obstacles</string>
-    </property>
-   </widget>
-   <widget class="QLabel" name="labelUpdateFrequency">
+   <widget class="QLabel" name="labelPlannerNode">
     <property name="geometry">
      <rect>
       <x>170</x>
-      <y>30</y>
-      <width>120</width>
+      <y>10</y>
+      <width>121</width>
       <height>20</height>
      </rect>
     </property>
     <property name="text">
-     <string>Auto-update (Hz):</string>
+     <string>Planner node</string>
     </property>
    </widget>
-   <widget class="QDoubleSpinBox" name="spinBoxUpdateFrequency">
+   <widget class="QComboBox" name="comboBoxPlannerNode">
     <property name="geometry">
      <rect>
-      <x>290</x>
-      <y>27</y>
-      <width>80</width>
+      <x>160</x>
+      <y>30</y>
+      <width>141</width>
       <height>25</height>
      </rect>
     </property>
-    <property name="decimals">
-     <number>1</number>
-    </property>
-    <property name="minimum">
-     <double>0.000000000000000</double>
-    </property>
-    <property name="maximum">
-     <double>10.000000000000000</double>
-    </property>
-    <property name="singleStep">
-     <double>0.100000000000000</double>
-    </property>
-    <property name="value">
-     <double>5.000000000000000</double>
-    </property>
-   </widget>
-   <widget class="QLabel" name="labelUpdateStatus">
-    <property name="geometry">
-     <rect>
-      <x>380</x>
-      <y>30</y>
-      <width>70</width>
-      <height>20</height>
-     </rect>
-    </property>
-    <property name="text">
-     <string>Off</string>
+    <property name="editable">
+     <bool>true</bool>
     </property>
    </widget>
   </widget>
-  <widget class="QWidget" name="gridLayoutWidget">
-   <property name="geometry">
-    <rect>
-     <x>0</x>
-     <y>200</y>
-     <width>451</width>
-     <height>161</height>
-    </rect>
-   </property>
+   <widget class="QWidget" name="gridLayoutWidget">
+    <property name="geometry">
+     <rect>
+      <x>0</x>
+      <y>145</y>
+      <width>451</width>
+      <height>161</height>
+     </rect>
+    </property>
    <layout class="QGridLayout" name="gridLayout">
     <property name="leftMargin">
      <number>5</number>
@@ -454,97 +365,67 @@
     <property name="verticalSpacing">
      <number>6</number>
     </property>
-    <item row="0" column="0">
-     <widget class="QLabel" name="labelTimeDilationFactor">
-      <property name="layoutDirection">
-       <enum>Qt::LeftToRight</enum>
-      </property>
-      <property name="text">
-       <string>Speed (Time dilatation)</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-      </property>
-      <property name="wordWrap">
-       <bool>true</bool>
-      </property>
-      <property name="margin">
-       <number>0</number>
-      </property>
-     </widget>
-    </item>
-    <item row="7" column="4">
-     <widget class="QPushButton" name="stopRobot">
-      <property name="text">
-       <string>Stop robot</string>
-      </property>
-     </widget>
-    </item>
-    <item row="7" column="0">
-     <widget class="QPushButton" name="sendTrajectory">
-      <property name="text">
-       <string>Send Trajectory</string>
-      </property>
-     </widget>
-    </item>
-    <item row="3" column="0">
-     <widget class="QLabel" name="labelVoxelSize">
-      <property name="text">
-       <string>Voxel size</string>
-      </property>
-      <property name="alignment">
-       <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
-      </property>
-      <property name="wordWrap">
-       <bool>true</bool>
-      </property>
-      <property name="margin">
-       <number>0</number>
-      </property>
-     </widget>
-    </item>
-    <item row="6" column="4">
-     <widget class="QPushButton" name="generateAndSend">
-      <property name="text">
-       <string>Generate and send</string>
-      </property>
-     </widget>
-    </item>
-    <item row="6" column="0">
-     <widget class="QPushButton" name="generateTrajectory">
-      <property name="text">
-       <string>Generate Trajectory</string>
-      </property>
-     </widget>
-    </item>
-    <item row="0" column="1">
-     <widget class="QDoubleSpinBox" name="doubleSpinBoxTimeDilationFactor">
-      <property name="maximum">
-       <double>1.000000000000000</double>
-      </property>
-      <property name="singleStep">
-       <double>0.100000000000000</double>
-      </property>
-     </widget>
-    </item>
-    <item row="3" column="1">
-     <widget class="QDoubleSpinBox" name="doubleSpinBoxVoxelSize">
-      <property name="maximum">
-       <double>50.000000000000000</double>
-      </property>
-      <property name="singleStep">
-       <double>0.020000000000000</double>
-      </property>
-     </widget>
-    </item>
-    <item row="3" column="4">
-     <widget class="QPushButton" name="confirmPushButton">
-      <property name="text">
-       <string>Confirm Change</string>
-      </property>
-     </widget>
-    </item>
-   </layout>
+<item row="0" column="0">
+      <widget class="QLabel" name="labelTimeDilationFactor">
+       <property name="layoutDirection">
+        <enum>Qt::LeftToRight</enum>
+       </property>
+       <property name="text">
+        <string>Speed (Time dilatation)</string>
+       </property>
+       <property name="alignment">
+        <set>Qt::AlignRight|Qt::AlignTrailing|Qt::AlignVCenter</set>
+       </property>
+       <property name="wordWrap">
+        <bool>true</bool>
+       </property>
+       <property name="margin">
+        <number>0</number>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="4">
+      <widget class="QPushButton" name="stopRobot">
+       <property name="text">
+        <string>Stop robot</string>
+       </property>
+      </widget>
+     </item>
+     <item row="1" column="0">
+      <widget class="QPushButton" name="sendTrajectory">
+       <property name="text">
+        <string>Send Trajectory</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="4">
+      <widget class="QPushButton" name="generateAndSend">
+       <property name="text">
+        <string>Generate and send</string>
+       </property>
+      </widget>
+     </item>
+     <item row="2" column="0">
+      <widget class="QPushButton" name="generateTrajectory">
+       <property name="text">
+        <string>Generate Trajectory</string>
+       </property>
+      </widget>
+     </item>
+     <item row="0" column="1">
+      <widget class="QDoubleSpinBox" name="doubleSpinBoxTimeDilationFactor">
+       <property name="maximum">
+        <double>1.000000000000000</double>
+       </property>
+       <property name="singleStep">
+        <double>0.100000000000000</double>
+       </property>
+       <property name="value">
+        <double>1.000000000000000</double>
+       </property>
+      </widget>
+     </item>
+    </layout>
   </widget>
  </widget>
  <resources/>

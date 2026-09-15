@@ -1,0 +1,327 @@
+Panels:
+  - Class: rviz_common/Displays
+    Help Height: 0
+    Name: Displays
+    Property Tree Widget:
+      Expanded:
+        - /Curobo CollisionDomain1/Mapper Workspace1/Namespaces1
+        - /Curobo Planning1
+      Splitter Ratio: 0.5
+    Tree Height: 405
+  - Class: rviz_common/Views
+    Expanded:
+      - /Current View1
+    Name: Views
+    Splitter Ratio: 0.5
+  - Class: rviz_common/Time
+    Experimental: false
+    Name: Time
+    SyncMode: 0
+    SyncSource: ""
+  - Class: isaac_ros_cumotion_rviz/RvizArgsPanel
+    Name: RvizArgsPanel
+    planner_node_name: unified_planner
+    time_dilation_factor: 1
+Visualization Manager:
+  Class: ""
+  Displays:
+    - Alpha: 0.5
+      Cell Size: 1
+      Class: rviz_default_plugins/Grid
+      Color: 128; 128; 128
+      Enabled: true
+      Line Style:
+        Line Width: 0.029999999329447746
+        Value: Lines
+      Name: Grid
+      Normal Cell Count: 0
+      Offset:
+        X: 0
+        Y: 0
+        Z: 0
+      Plane: XY
+      Plane Cell Count: 40
+      Reference Frame: <Fixed Frame>
+      Value: true
+    - Alpha: 1
+      Class: rviz_default_plugins/RobotModel
+      Collision Enabled: false
+      Description File: ""
+      Description Source: Topic
+      Description Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /robot_description
+      Enabled: true
+      Links:
+        All Links Enabled: true
+        Expand Joint Details: false
+        Expand Link Details: false
+        Expand Tree: false
+        Link Tree Style: Links in Alphabetic Order
+        base:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        base_link_inertia:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        camera_mount:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        flange:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        forearm_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        grasping_frame:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        shoulder_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        tool0:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        upper_arm_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_1_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_2_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_3_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+      Mass Properties:
+        Inertia: false
+        Mass: false
+      Name: RobotModel
+      TF Prefix: ""
+      Update Interval: 0
+      Value: true
+      Visual Enabled: true
+    - Class: rviz_default_plugins/TF
+      Enabled: false
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        {}
+      Update Interval: 0
+      Value: false
+    - Class: rviz_common/Group
+      Displays:
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Self-Collision Model
+          Namespaces:
+            collision_spheres: true
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/collision_spheres
+          Value: true
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Scene
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/scene_obstacles
+          Value: true
+        - Alpha: 1
+          Class: isaac_ros_cumotion_rviz/SparseVoxelGridDisplay
+          Color: 255; 50; 0
+          Enabled: true
+          Name: Mapper Voxels
+          Point Style: Boxes
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/voxel_grid_sparse
+          Value: true
+        - Class: rviz_default_plugins/Marker
+          Enabled: false
+          Name: Mapper Workspace
+          Namespaces:
+            {}
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            Filter size: 10
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/mapper_workspace
+          Value: false
+      Enabled: true
+      Name: Curobo CollisionDomain
+    - Class: rviz_common/Group
+      Displays:
+        - Class: isaac_ros_cumotion_rviz/TargetDisplay
+          Enabled: true
+          Gizmo Visible: true
+          Name: TargetDisplay
+          Target Orientation W: 1
+          Target Orientation X: 0
+          Target Orientation Y: 0
+          Target Orientation Z: 0
+          Target Position X: 0.9010480642318726
+          Target Position Y: 0
+          Target Position Z: 0.7498555183410645
+          Value: true
+        - Alpha: 0.800000011920929
+          Class: isaac_ros_cumotion_rviz/CuroboTrajectoryDisplay
+          Enabled: true
+          Loop Animation: false
+          Name: CuroboTrajectoryDisplay
+          Show Trail: false
+          Speed: 1
+          Trail Step Size: 10
+          Trajectory Topic: /unified_planner/trajectory
+          Value: true
+        - Auto Refresh: true
+          Cell Alpha: 1
+          Cell Style: Arrows
+          Class: isaac_ros_cumotion_rviz/ReachabilityMapDisplay
+          Enabled: false
+          Failed Color: 200; 0; 0
+          Gizmo Visible: true
+          Grid Cells X: 10
+          Grid Cells Y: 10
+          Name: ReachabilityMapDisplay
+          Plane Alpha: 0.4000000059604645
+          Plane Color: 190; 190; 190
+          Plane Orientation W: 1
+          Plane Orientation X: 0
+          Plane Orientation Y: 0
+          Plane Orientation Z: 0
+          Plane Position X: 0.6604286432266235
+          Plane Position Y: 0
+          Plane Position Z: 0
+          Plane Size X: 1
+          Plane Size Y: 1
+          Refresh: false
+          Selected Cell: 9
+          Service Name: /unified_planner/generate_rm
+          Show Solutions: All Solved Cells
+          Solution Alpha: 0.6000000238418579
+          Solved Color: 0; 200; 0
+          Value: false
+        - Class: rviz_default_plugins/Image
+          Enabled: true
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: PlanningPlot
+          Normalize Range: true
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/motion_plan_debug
+          Value: true
+      Enabled: true
+      Name: Curobo Planning
+  Enabled: true
+  Global Options:
+    Background Color: 48; 48; 48
+    Fixed Frame: base_link
+    Frame Rate: 30
+  Name: root
+  Tools:
+    - Class: rviz_default_plugins/Interact
+      Hide Inactive Objects: true
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/FocusCamera
+    - Class: rviz_default_plugins/Measure
+      Line color: 128; 128; 0
+  Transformation:
+    Current:
+      Class: rviz_default_plugins/TF
+  Value: true
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Distance: 3.848069190979004
+      Enable Stereo Rendering:
+        Stereo Eye Separation: 0.05999999865889549
+        Stereo Focal Distance: 1
+        Swap Stereo Eyes: false
+        Value: false
+      Focal Point:
+        X: 0.5524110198020935
+        Y: 0.09408499300479889
+        Z: 0.055175475776195526
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
+      Invert Z Axis: false
+      Name: Current View
+      Near Clip Distance: 0.009999999776482582
+      Pitch: 0.5953963994979858
+      Target Frame: <Fixed Frame>
+      Value: Orbit (rviz)
+      Yaw: 1.465409517288208
+    Saved: ~
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 991
+  Hide Left Dock: false
+  Hide Right Dock: false
+  PlanningPlot:
+    collapsed: false
+  QMainWindow State: 000000ff00000000fd00000002000000000000025300000389fc0200000003fb000000100044006900730070006c006100790073010000003b000001d0000000c700fffffffb0000001a005200760069007a004100720067007300500061006e0065006c01000002110000013f0000001600fffffffb0000000800540069006d006501000003560000006e0000003700ffffff000000010000014000000389fc0200000002fb0000000a00560069006500770073010000003b00000147000000a000fffffffb000000180050006c0061006e006e0069006e00670050006c006f007401000001880000023c0000001600ffffff000003b50000038900000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  RvizArgsPanel:
+    collapsed: false
+  Time:
+    collapsed: false
+  Views:
+    collapsed: false
+  Width: 1876
+  X: 22
+  Y: 67

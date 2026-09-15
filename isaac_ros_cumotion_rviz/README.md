@@ -14,18 +14,17 @@ ros2 launch isaac_ros_cumotion_rviz isaac_ros_cumotion_rviz.launch.py
 ```
 
 The launch forwards `max_attempts`, `timeout`, `time_dilation_factor`,
-`voxel_size`, `collision_activation_distance` and `base_link` as node
-parameters. Point the displays at a running `curobo_server` (e.g. as started by
-the kortex deployment's `moveit_cumotion.launch.py`).
+`collision_activation_distance` and `base_link` as node parameters. Point the
+displays at a running planner node (default `unified_planner`).
 
 ## Registered plugins (`rviz2_plugin.xml`)
 
 | Component | Kind | Role |
 |---|---|---|
-| `isaac_ros_cumotion_rviz/RvizArgsPanel` | Panel | Trajectory/planner parameters and plan/send controls |
+| `isaac_ros_cumotion_rviz/RvizArgsPanel` | Panel | Trajectory/planner parameters, planner-node selection and plan/send controls |
 | `add_objects_panel/AddObjectsPanel` | Panel | Add/remove scene obstacles |
 | `add_objects_display/AddObjectsDisplay` | Display | Renders the obstacles added from the panel |
-| `isaac_ros_cumotion_rviz/MPCTargetDisplay` | Display | Interactive 6-DOF target pose + Start/Stop MPC |
+| `isaac_ros_cumotion_rviz/TargetDisplay` | Display | Generic 6-DOF target pose (planner/MPC logic lives in the panel) |
 | `isaac_ros_cumotion_rviz/SparseVoxelGridDisplay` | Display | Renders the mapper's occupied voxels |
 | `isaac_ros_cumotion_rviz/CuroboTrajectoryDisplay` | Display | Animates a full robot body along a `JointTrajectory` |
 | `isaac_ros_cumotion_rviz/ReachabilityMapDisplay` | Display | Solves + visualises a reachability map on a plane |
@@ -33,14 +32,33 @@ the kortex deployment's `moveit_cumotion.launch.py`).
 ## RvizArgsPanel
 
 ### Current state
-Control panel for trajectory planning. Retrieves parameters at launch; some are
-updated live, others need the "Confirm Changes" button. Exposes planner and
-control-strategy selection, the target pose (synced with the MPCTargetDisplay
-gizmo), voxel size, time dilation, and the plan / send / stop actions.
+Control panel for trajectory planning. Retrieves parameters at launch; time
+dilation is applied live. Exposes trajectory type (Classic / MPC / Batch /
+Constrained), planner node selection, the target pose (synced with the
+`TargetDisplay` gizmo), and the plan / send / stop actions.
+
+**Planner node selection:** the dropdown binds the panel's service/action
+clients to a named planner node (default `unified_planner`). Changing the
+selection immediately rebinds all clients and re-probes readiness. The stored
+selection is persisted across RViz restarts via `planner_node_name` in the
+saved config.
+
+**MPC mode:** selecting "MPC (Real-time)" and pressing "Generate and send"
+switches the planner to MPC, sends an `execute_trajectory` goal, and streams
+the target pose to `/<planner>/mpc_goal` at 10 Hz while the gizmo is dragged.
 
 ### Future development
-- [ ] Multithread the "Confirm Changes" press (disable button while loading)
 - [ ] Save and load the system's state
+
+## TargetDisplay
+
+Generic 6-DOF target marker, planner-agnostic. All planner/MPC logic lives in
+`RvizArgsPanel`; this display only owns the gizmo and the draggable pose.
+
+Self-contained: the gizmo is rendered in-place by the display (no separate
+"Interactive Markers" display needed). The `RvizArgsPanel` pose spin boxes
+stay in sync with the target in both directions (the panel finds the display
+automatically and talks to it via `getPose`/`setPose`).
 
 ## AddObjectsPanel / AddObjectsDisplay
 
@@ -59,29 +77,6 @@ unreliable.
 - [ ] Show selected-object parameters in the boxes
 - [ ] Merge all panels into one with tabs
 - [ ] Select a mesh path with a file explorer
-
-## MPCTargetDisplay
-
-Interactive 6-DOF target marker that drives the cuRoBo MPC (reactive) controller,
-expressed in the robot base frame. Self-contained: the gizmo is rendered in-place
-by the display (no separate "Interactive Markers" display needed).
-
-The display owns the whole MPC flow, mirroring the viser `mpc_viser_node`:
-
-- setting the **Planner Node Name** (default `curobo_server`) points it at the
-  running planner's `set_planner` / `execute_trajectory` / `mpc_goal` interfaces;
-- **Start MPC** switches the planner to MPC and sends an `execute_trajectory` goal
-  with the current target as the goal set; the start state is left to the server
-  (it resolves the live robot pose itself — raw `/joint_states` carries extra
-  joints that cuRobo's MPC rejects);
-- while active, dragging the gizmo streams the target pose to `/<planner>/mpc_goal`
-  (10 Hz) so the robot retargets live;
-- **Stop MPC** (or disabling the display) cancels the goal.
-
-The `RvizArgsPanel` pose spin boxes stay in sync with the target in both directions
-(the panel finds the display automatically and talks to it via `getPose`/`setPose`).
-In MPC mode, the panel's "Generate and Send" button hands off to the display's
-"Start MPC"; "Stop Robot" cancels the active goal.
 
 ## SparseVoxelGridDisplay
 

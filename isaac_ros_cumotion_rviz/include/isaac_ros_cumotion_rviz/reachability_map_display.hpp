@@ -156,13 +156,6 @@ private:
   void destroySolutionRobot(size_t index);
   void updateSolutionAlphaInternal();
   std::map<std::string, double> jointMapForCell(size_t cell_index) const;
-  // FK the cell's solved joint config and return the link pose that lands at
-  // the requested goal. Returns false when the FK is unavailable or nothing
-  // lands near the goal (bad joint-name match / unsolved cell).
-  bool solvedLinkPose(
-    size_t cell_index,
-    const geometry_msgs::msg::Pose & goal,
-    Eigen::Isometry3d & pose_out) const;
 
   Ogre::Quaternion currentPlaneOrientation() const;
 

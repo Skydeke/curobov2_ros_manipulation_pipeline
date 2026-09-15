@@ -6,19 +6,25 @@
 # (gui:=true). The robot model resolves in-package (robots/ur10e.yaml ->
 # package://isaac_ros_cumotion/config/ur10e.curobo.yml).
 #
-# The image is built from this fork's own public Dockerfile.cumotion (default
-# BASE_IMAGE, no private repo involved). The fork root is bind-mounted at the
-# ROS workspace src, so launch/config/robots edits apply live (colcon build
-# uses --symlink-install).
+# The image is pulled from the pipeline-built fork image on GHCR by default,
+# or rebuilt locally from docker/Dockerfile.cumotion with --build. Franka and
+# UR10e sessions share the same image — only robot:=... selects the model, so
+# there is no per-robot tag. The fork root is bind-mounted at the ROS workspace
+# src, so launch/config/robots edits apply live (colcon build uses
+# --symlink-install) without rebuilding.
 #
 # Usage:
+#   docker compose -f docker/ur10e.yaml up
+#   # pull the freshest pipeline image, then start:
+#   docker compose -f docker/ur10e.yaml pull && docker compose -f docker/ur10e.yaml up
+#   # rebuild locally instead of pulling:
 #   docker compose -f docker/ur10e.yaml up --build
 #   # hard-recreate the container:
-#   docker compose -f docker/ur10e.yaml up --build --force-recreate
+#   docker compose -f docker/ur10e.yaml up --force-recreate
 services:
   curobo:
     container_name: isaac_cumotion_ur10e
-    image: isaac_ros_cumotion:ur10e
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -45,4 +51,5 @@ services:
         set -e
         source /opt/ros/jazzy/setup.bash
         source /root/ros2_ws/install/setup.bash
-        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py robot:=ur10e gui:=true
+        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py robot:=ur10e gui:=true \
+          rviz_config:=/root/ros2_ws/src/isaac_ros_cumotion/rviz/ur10e_curobo.rviz
