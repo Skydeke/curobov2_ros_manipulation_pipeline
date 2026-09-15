@@ -11,6 +11,7 @@ namespace isaac_ros_cumotion_rviz
     , param_client_{nullptr}
     , planner_ready_{false}
     , planner_poll_in_flight_{false}
+    , planner_poll_seq_{0}
     , goal_active_{false}
     , action_ptr_{nullptr}
     , trajectory_generation_client_{nullptr}
@@ -217,17 +218,32 @@ namespace isaac_ros_cumotion_rviz
 
   void RvizArgsPanel::pollPlannerReady()
   {
+    // Watchdog for wedged probes: rclcpp's async get_parameters has no timeout --
+    // if the planner never answers (still busy finishing an execution, GPU-bound
+    // on an MPC sweep, or warming up again after a respawn) the completion
+    // callback is simply never fired and planner_poll_in_flight_ would stay true
+    // forever, freezing planner_ready_ (and with it every Generate/Execute
+    // button, even after the execution is clearly done). Force-expire an
+    // outstanding probe after 2 s and send a fresh one; completions from a
+    // superseded probe are discarded via the sequence counter.
     if (planner_poll_in_flight_) {
-      return;
+      const auto outstanding_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - planner_poll_sent_at_).count();
+      if (outstanding_ms < 2000) {
+        return;
+      }
+      planner_poll_in_flight_ = false;
     }
     if (!param_client_ || !param_client_->service_is_ready()) {
       setPlannerReady(false);
       return;
     }
 
+    const uint64_t seq = ++planner_poll_seq_;
     planner_poll_in_flight_ = true;
+    planner_poll_sent_at_ = std::chrono::steady_clock::now();
     param_client_->get_parameters({"node_is_available"},
-      [this](std::shared_future<std::vector<rclcpp::Parameter>> future) {
+      [this, seq](std::shared_future<std::vector<rclcpp::Parameter>> future) {
         bool ready = false;
         try {
           auto params = future.get();
@@ -235,7 +251,12 @@ namespace isaac_ros_cumotion_rviz
         } catch (const std::exception & e) {
           RCLCPP_WARN(node_->get_logger(), "node_is_available check failed: %s", e.what());
         }
-        runOnGuiThread([this, ready]() {
+        runOnGuiThread([this, ready, seq]() {
+          // Only the newest probe may commit its answer; a completion arriving
+          // for a probe the watchdog already replaced is stale.
+          if (seq != planner_poll_seq_ || !planner_poll_in_flight_) {
+            return;
+          }
           planner_poll_in_flight_ = false;
           setPlannerReady(ready);
         });
@@ -368,6 +389,15 @@ namespace isaac_ros_cumotion_rviz
         mpc_starting_ = false;
         goal_handle_.reset();
         goal_active_ = false;
+
+        // The execution just finished; force-out a readiness probe that may be
+        // stranded from before (sent while the planner was busy) and re-probe
+        // immediately, so the Generate/Execute buttons recover as soon as the
+        // action completes rather than waiting out the poll watchdog.
+        if (planner_poll_in_flight_) {
+          planner_poll_in_flight_ = false;
+        }
+        pollPlannerReady();
         updateActionButtons();
       });
   }
@@ -521,7 +551,6 @@ namespace isaac_ros_cumotion_rviz
 
     void RvizArgsPanel::sendMpcGoal()
     {
-      mpc_starting_ = false;
       if (!target_display_) {
         RCLCPP_WARN(node_->get_logger(), "Target display not available; cannot start MPC goal");
         return;
@@ -549,6 +578,13 @@ namespace isaac_ros_cumotion_rviz
       send_goal_options.goal_response_callback = std::bind(&RvizArgsPanel::goal_response_callback, this, std::placeholders::_1);
       send_goal_options.result_callback = std::bind(&RvizArgsPanel::result_callback, this, std::placeholders::_1);
 
+      // Arm the MPC-start latch before sending: goal_response_callback consumes
+      // it on acceptance (`accepted && mpc_starting_`) to begin the live target
+      // stream. Clearing it here is the bug that silently killed MPC feature --
+      // the acceptance branch never fired, mpc_active_ stayed false, and every
+      // subsequent gizmo drag was ignored (MPC executed once toward the fixed
+      // start pose).
+      mpc_starting_ = true;
       action_ptr_->async_send_goal(goal, send_goal_options);
 
       // await goal acceptance (goal_response_callback) before starting the stream

@@ -52,4 +52,5 @@ services:
         source /opt/ros/jazzy/setup.bash
         source /root/ros2_ws/install/setup.bash
         exec ros2 launch isaac_ros_cumotion gen_traj.launch.py robot:=ur10e gui:=true \
+          publish_plan_debug_image:=true \
           rviz_config:=/root/ros2_ws/src/isaac_ros_cumotion/rviz/ur10e_curobo.rviz

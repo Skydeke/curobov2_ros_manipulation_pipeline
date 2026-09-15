@@ -271,6 +271,11 @@ def launch_setup(context, *args, **kwargs):
                 'mapper_image_height': 720,
                 # Sparse voxel topic publish rate (Hz); <= 0 disables it.
                 'sparse_voxel_publish_rate': 7.0,
+                # Per-plan joint-trajectory debug plot as an RGB Image on
+                # /<node>/motion_plan_debug (RViz/viser display). Off by default;
+                # the franka/ur10e compose demos enable it (:=true).
+                'publish_plan_debug_image': ParameterValue(
+                    LaunchConfiguration('publish_plan_debug_image'), value_type=bool),
             }]
         ),
 
@@ -444,6 +449,11 @@ def generate_launch_description():
             'collision_activation_distance', default_value='0.025',
             description='Distance (m) at which the collision cost activates. Build-time: '
                         'baked into the MotionPlanner, changing it at runtime needs a rebuild'
+        ),
+        DeclareLaunchArgument(
+            'publish_plan_debug_image', default_value='false',
+            description='Publish the per-plan joint-trajectory debug plot as an RGB image '
+                        'on /<node>/motion_plan_debug (RViz/viser demo display; off by default)'
         ),
 
         # OpaqueFunction defers the body until LaunchConfigurations can be resolved

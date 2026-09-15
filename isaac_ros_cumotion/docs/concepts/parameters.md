@@ -32,8 +32,9 @@ These are the launch arguments that actually configure the system:
 | `max_attempts` | `1` | Planning retries per request |
 | `time_dilation_factor` | `1.0` | Trajectory re-timing: 1.0 = nominal interpolation_dt pacing; <1.0 slows the motion, >1.0 speeds it up. Also gates execute() feedback re-reads |
 | `collision_activation_distance` | `0.025` | Distance (m) at which the collision cost activates |
+| `publish_plan_debug_image` | `false` | Publish the per-plan joint-trajectory plot as an RGB image on `/<node>/motion_plan_debug` (RViz/viser display). Enabled (`:=true`) in the franka/ur10e compose demos |
 
-The last four are forwarded straight to the node, so their defaults above are also the node's defaults — see the tables below for what each one does.
+The last five are forwarded straight to the node, so their defaults above are also the node's defaults — see the tables below for what each one does.
 
 There is no world floor added automatically at startup: if you want a ground plane, pass a `world_file` that contains one (the shipped `config/floor_world.yml` does).
 
@@ -50,6 +51,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `time_dilation_factor` | `1.0` | Trajectory RE-TIMING: the stamped per-point dt of every sent trajectory becomes `interpolation_dt / tdf` — 1.0 = nominal, <1.0 slower, >1.0 faster (cuRobo convention). Also gates how often execute() re-reads progression | Plan-time |
 | `trajectory_cache_ttl` | `30.0` | Lifetime (s) of a trajectory cached by `generate_trajectory` and reusable by the execute action (`allow_cached`) | Plan-time |
 | `sparse_voxel_publish_rate` | `7.0` | Publish rate (Hz) of `/unified_planner/voxel_grid_sparse`; `<= 0` disables | Startup |
+| `publish_plan_debug_image` | `false` | Publish the per-plan joint-trajectory pos/vel/acc/jerk plot as an RGB image on `/<node>/motion_plan_debug` (latched; independent of `enable_curobo_debug_mode`) | Plan-time |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |
 | `torch_sync` | `false` | Guard every `torch.cuda.synchronize()` (depth callback, IK service, MPC IK). Off by default — a per-frame sync blocks the executor thread on the GPU and starves the viz timers. Enable only for deterministic GPU/CPU ordering (race debugging) | Runtime |
 

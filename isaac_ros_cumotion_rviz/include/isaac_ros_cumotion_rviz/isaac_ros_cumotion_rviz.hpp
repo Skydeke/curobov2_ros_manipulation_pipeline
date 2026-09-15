@@ -24,6 +24,7 @@
 #include <QtWidgets>
 // STL
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -123,6 +124,12 @@ namespace isaac_ros_cumotion_rviz
     rclcpp::AsyncParametersClient::SharedPtr param_client_;
     bool planner_ready_;
     bool planner_poll_in_flight_;
+    // Timestamp the current readiness probe was sent at + a sequence counter,
+    // for the watchdog in pollPlannerReady(): an unanswered async
+    // get_parameters must not freeze planner_ready_ (and the Execute buttons
+    // with it) forever.
+    std::chrono::steady_clock::time_point planner_poll_sent_at_;
+    uint64_t planner_poll_seq_;
     bool goal_active_;
     rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SharedPtr action_ptr_;
     rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedPtr trajectory_generation_client_;
