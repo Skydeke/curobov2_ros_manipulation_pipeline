@@ -7,13 +7,9 @@ on:
       - docker/Dockerfile.cumotion
       - isaac_ros_cumotion/**
       - isaac_ros_cumotion_interfaces/**
-      - isaac_ros_goal_setter_interfaces/**
-      - isaac_ros_cumotion_robot_description/**
       - isaac_ros_cumotion_moveit/**
-      - isaac_ros_moveit_goal_setter/**
-      - isaac_ros_esdf_visualizer/**
-      - isaac_ros_cumotion_examples/**
-      - isaac_ros_cumotion_benchmark/**
+      - isaac_ros_cumotion_rviz/**
+      - isaac_ros_cumotion_extra/**
       - curobo_core/**
   workflow_dispatch:
 
