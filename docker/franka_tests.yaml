@@ -18,7 +18,7 @@
 services:
   server:
     container_name: isaac_cumotion_franka_server
-    image: isaac_ros_cumotion:franka
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -49,7 +49,7 @@ services:
 
   tests:
     container_name: isaac_cumotion_franka_tests
-    image: isaac_ros_cumotion:franka
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     depends_on:
       - server
     restart: "no"

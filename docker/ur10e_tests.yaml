@@ -33,7 +33,7 @@
 services:
   server:
     container_name: isaac_cumotion_ur10e_server
-    image: isaac_ros_cumotion:ur10e
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -64,7 +64,7 @@ services:
 
   tests:
     container_name: isaac_cumotion_ur10e_tests
-    image: isaac_ros_cumotion:ur10e
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     depends_on:
       - server
     restart: "no"
