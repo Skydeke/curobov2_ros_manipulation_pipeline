@@ -11,6 +11,7 @@ on:
       - isaac_ros_cumotion_rviz/**
       - isaac_ros_cumotion_extra/**
       - curobo_core/**
+      - .github/workflows/**
   workflow_dispatch:
 
 env:
