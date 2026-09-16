@@ -55,6 +55,16 @@ bool CuroboFK::initFromString(const std::string & urdf_xml)
       ji.axis.normalize();
     }
 
+    // URDF <mimic>: value = master_value * multiplier + offset. Joints that
+    // appear in the commanded set (e.g. a robotiq gripper's finger_joint)
+    // drive their coupled (mimicking) joints here, so the whole finger
+    // mechanism closes/opens together instead of the mimics staying at 0.
+    if (joint->mimic) {
+      ji.mimic_joint = joint->mimic->joint_name;
+      ji.mimic_multiplier = joint->mimic->multiplier;
+      ji.mimic_offset = joint->mimic->offset;
+    }
+
     joints_[name] = ji;
     joint_names_.push_back(name);
 
@@ -111,20 +121,26 @@ bool CuroboFK::computeFK(
       switch (ji.type) {
         case static_cast<int>(urdf::Joint::REVOLUTE):
         case static_cast<int>(urdf::Joint::CONTINUOUS): {
-          auto it = joint_positions.find(joint_name);
-          double angle = (it != joint_positions.end()) ? it->second : 0.0;
-          T_child.rotate(Eigen::AngleAxisd(angle, ji.axis));
+          T_child.rotate(
+            Eigen::AngleAxisd(resolveJointAngle(ji, joint_positions), ji.axis));
           break;
         }
         case static_cast<int>(urdf::Joint::PRISMATIC): {
-          auto it = joint_positions.find(joint_name);
-          double displacement = (it != joint_positions.end()) ? it->second : 0.0;
           // Axis is in the joint frame (after the origin transform); applying it
           // with pretranslate() is equivalent to right-multiplying by a
           // translation, i.e. displacement along the joint frame's axis.
-          T_child.pretranslate(ji.axis * displacement);
+          T_child.pretranslate(
+            ji.axis * resolveJointAngle(ji, joint_positions));
           break;
         }
+        case static_cast<int>(urdf::Joint::PLANAR):
+          // Planar joints (2 in-plane translations + 1 rotation about the
+          // plane's normal) cannot be driven by the single-scalar
+          // joint_positions map this engine receives from the trajectory.
+          // The child link stays at its URDF origin pose (no motion applied).
+        case static_cast<int>(urdf::Joint::FLOATING):
+          // Floating (free 6-DOF) joints likewise have no single-scalar
+          // representation in a trajectory point; child stays at URDF origin.
         case static_cast<int>(urdf::Joint::FIXED):
         default:
           break;
@@ -136,6 +152,34 @@ bool CuroboFK::computeFK(
   }
 
   return true;
+}
+
+double CuroboFK::resolveJointAngle(
+  const JointInfo & joint,
+  const std::map<std::string, double> & joint_positions,
+  unsigned depth) const
+{
+  if (depth > 64) {
+    // Mimic cycle guard: pathological self-referential URDF should not hang
+    // the animation.
+    return 0.0;
+  }
+  if (joint.mimic_joint.empty()) {
+    // Commanded joint: use the trajectory value if present, else the URDF's
+    // implicit (0.0) pose.
+    auto it = joint_positions.find(joint.name);
+    return (it != joint_positions.end()) ? it->second : 0.0;
+  }
+  auto master_it = joints_.find(joint.mimic_joint);
+  if (master_it == joints_.end()) {
+    return 0.0;
+  }
+  const JointInfo & master = master_it->second;
+  if (master.name == joint.name) {
+    return joint.mimic_offset;  // self-mimic: offset only
+  }
+  const double master_value = resolveJointAngle(master, joint_positions, depth + 1);
+  return master_value * joint.mimic_multiplier + joint.mimic_offset;
 }
 
 }  // namespace isaac_ros_cumotion_rviz

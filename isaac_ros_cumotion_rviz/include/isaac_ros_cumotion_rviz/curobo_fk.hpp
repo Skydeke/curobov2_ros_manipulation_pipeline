@@ -46,9 +46,15 @@ private:
     std::string name;
     std::string parent_link;
     std::string child_link;
-    int type;  // urdf::Joint::REVOLUTE / CONTINUOUS / PRISMATIC / FIXED, as int
+    int type;  // urdf::Joint type code: REVOLUTE / CONTINUOUS / PRISMATIC are
+               // driven, PLANAR / FLOATING / FIXED / UNKNOWN are pose-only
     Eigen::Vector3d axis{0, 0, 0};  // local joint axis (normalised for revolute)
     Eigen::Isometry3d origin{Eigen::Isometry3d::Identity()};  // parent -> joint frame
+    // URDF <mimic> relationship: this joint's value is
+    //   master_value * multiplier + offset  (mimic_joint empty => commanded).
+    std::string mimic_joint;
+    double mimic_multiplier = 1.0;
+    double mimic_offset = 0.0;
   };
 
   struct LinkInfo
@@ -57,6 +63,14 @@ private:
     std::string parent_joint;       // empty for root
     std::vector<std::string> child_joints;
   };
+
+  /** Resolve a joint's angle, following URDF <mimic> chains to their root.
+   *  Returns 0.0 for joints with no entry in joint_positions and no reachable
+   *  commanded master. */
+  double resolveJointAngle(
+    const JointInfo & joint,
+    const std::map<std::string, double> & joint_positions,
+    unsigned depth = 0) const;
 
   bool initialised_ = false;
   std::string root_link_;
