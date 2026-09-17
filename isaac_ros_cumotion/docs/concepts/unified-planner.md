@@ -12,7 +12,7 @@ The **unified planner** is the central node of `curobo_ros` (node name `unified_
 | `joint_space` | 5 | Open-loop | Goal expressed directly in joint space |
 | `retarget` | 6 | Closed-loop | IK-based pose-stream follower for teleoperation |
 
-Enum IDs 2 (`BATCH`) and 3 (`CONSTRAINED`) exist in `SetPlanner.srv` but are **not implemented** — switching to them fails. Orientation/position constraints are available on the classic planner through the `trajectory_constraints` request field instead.
+Enum IDs 2 (`BATCH`) and 3 (`CONSTRAINED`) exist in `SetPlanner.srv` but are **not implemented** — switching to them fails. Orientation/position constraints are available on the classic planner through the `Goalset.trajectory_constraints` field instead.
 
 The catalog lives in one place, `PlannerFactory._PLANNER_CATALOG` (`curobo_ros/planners/planner_factory.py`); `GetPlanners` reflects it at runtime, so the service is always authoritative:
 

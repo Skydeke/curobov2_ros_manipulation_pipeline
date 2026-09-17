@@ -32,20 +32,31 @@ class JointSpacePlanner(SinglePlanner):
         goal_request,
         config: dict,
     ):
-        if not hasattr(goal_request, 'target_joint_positions'):
+        goalsets = list(getattr(goal_request, 'goalsets', None) or [])
+        goal_joint_positions = list(getattr(goalsets[0], 'target_joint_positions', None) or []) \
+            if goalsets else []
+        if not goal_joint_positions:
             raise ValueError(
-                "JointSpacePlanner requires 'target_joint_positions' in the request."
+                "JointSpacePlanner requires a non-empty 'target_joint_positions' "
+                "in goalsets[0] (the srv/action no longer expose a top-level "
+                "joint array)."
             )
 
-        goal_joint_positions = goal_request.target_joint_positions
-        if not goal_joint_positions:
-            raise ValueError("target_joint_positions is empty.")
-
         robot_dof = self.motion_planner.kinematics.get_dof()
-        if len(goal_joint_positions) != robot_dof:
+        if len(goal_joint_positions) > robot_dof:
             raise ValueError(
                 f"Joint count mismatch: received {len(goal_joint_positions)} joints, "
                 f"but robot has {robot_dof} DOF"
+            )
+        if len(goal_joint_positions) < robot_dof:
+            # Short joint target (e.g. an arm-only MoveIt goal covering only the
+            # manipulator's DOF): keep the trailing end-effector DOF (gripper)
+            # at its current/start value instead of rejecting the request.
+            start_tail = start_state.position[0][len(goal_joint_positions):].cpu().tolist()
+            goal_joint_positions = goal_joint_positions + start_tail
+            self.node.get_logger().info(
+                f"Joint target shorter than robot DOF ({robot_dof}): padded "
+                f"trailing DOF with start-state values {[f'{x:.3f}' for x in start_tail]}"
             )
         if any(not (-1e6 < x < 1e6) or x != x for x in goal_joint_positions):
             raise ValueError(
@@ -73,9 +84,26 @@ class JointSpacePlanner(SinglePlanner):
             f"enable_graph_attempt={enable_graph_attempt}"
         )
 
-        return self.motion_planner.plan_cspace(
-            goal_state,
-            start_state,
-            max_attempts=max_attempts,
-            enable_graph_attempt=enable_graph_attempt,
-        )
+        # Contact allowance rides on the goalset (the SetLinkCollision service
+        # is no longer used for this): disable the listed links' collision
+        # spheres for the solve only, then re-enable (exception-safe).
+        allowed = list(getattr(goalsets[0], 'allowed_collisions', None) or [])
+        if allowed:
+            self.motion_planner.disable_link_collision(allowed)
+            self.node.get_logger().info(
+                f"Disabled collision spheres for contact links: {allowed}"
+            )
+
+        try:
+            return self.motion_planner.plan_cspace(
+                goal_state,
+                start_state,
+                max_attempts=max_attempts,
+                enable_graph_attempt=enable_graph_attempt,
+            )
+        finally:
+            if allowed:
+                self.motion_planner.enable_link_collision(allowed)
+                self.node.get_logger().info(
+                    f"Re-enabled collision spheres for contact links: {allowed}"
+                )

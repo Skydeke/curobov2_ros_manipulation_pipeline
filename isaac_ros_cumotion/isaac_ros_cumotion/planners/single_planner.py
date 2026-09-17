@@ -262,15 +262,23 @@ class SinglePlanner(TrajectoryPlanner):
     def _apply_pose_constraints(self, goal_request) -> bool:
         """Hold Cartesian axes along the whole path, if requested.
 
-        Reads ``goal_request.trajectory_constraints`` (int8[6], order
-        ``[theta_x, theta_y, theta_z, x, y, z]``; 1 = lock that axis along the
-        path) and sets ``ToolPoseCriteria.non_terminal_pose_axes_weight_factor``
+        Reads the first non-empty ``Goalset.trajectory_constraints`` (int8[6],
+        order ``[theta_x, theta_y, theta_z, x, y, z]``; 1 = lock that axis along
+        the path) and sets ``ToolPoseCriteria.non_terminal_pose_axes_weight_factor``
         (order ``[x, y, z, roll, pitch, yaw]``) on the shared MotionPlanner.
-        This is the v2 replacement for the removed PoseCostMetric.
+        This is the v2 replacement for the removed PoseCostMetric. Per-waypoint
+        ``trajectories_contraints`` (flattened per-waypoint holds) are not
+        expressible in v2 — only the whole-path span is.
 
         Returns True if constraints were applied (caller must reset afterwards).
         """
-        constraints = list(getattr(goal_request, 'trajectory_constraints', []) or [])
+        constraints = []
+        goalsets = list(getattr(goal_request, 'goalsets', None) or [])
+        for g in goalsets:
+            c = list(getattr(g, 'trajectory_constraints', None) or [])
+            if c:
+                constraints = c
+                break
         if not any(c == 1 for c in constraints):
             return False
         if len(constraints) != 6:
@@ -402,7 +410,7 @@ class SinglePlanner(TrajectoryPlanner):
         Args:
             start_state: Initial joint configuration
             goal_request: TrajectoryGeneration request containing goal specification
-                         Child classes extract what they need (goalsets or target_joint_positions)
+                         Child classes extract what they need (goalsets)
             config: Dictionary with planner-specific parameters
                    Common parameters:
                    - max_attempts: Number of planning attempts

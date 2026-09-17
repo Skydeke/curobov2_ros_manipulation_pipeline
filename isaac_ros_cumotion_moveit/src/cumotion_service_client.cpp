@@ -195,8 +195,9 @@ bool CumotionServiceClient::plan(
       return false;
     }
     // A joint-space goal can only be planned by the JOINT_SPACE planner; the
-    // pose planners (Classic/Multipoint) consume `goalsets`, not
-    // target_joint_positions, and would silently plan toward an empty goal.
+    // pose planners (Classic/Multipoint) read candidate `poses` from goalsets,
+    // not `target_joint_positions`, and would silently plan toward an empty
+    // goal. The joint target rides inside a Goalset (Goalset.target_joint_positions).
     // Force JointSpace regardless of the requested planner_id.
     if (!auto_planner) {
       RCLCPP_WARN(node_->get_logger(),
@@ -208,7 +209,9 @@ bool CumotionServiceClient::plan(
       RCLCPP_ERROR_STREAM(node_->get_logger(), "setPlanner failed: " << planner_msg);
       return false;
     }
-    req.target_joint_positions = std::move(joint_positions);
+    isaac_ros_cumotion_interfaces::msg::Goalset joint_gset;
+    joint_gset.target_joint_positions = std::move(joint_positions);
+    req.goalsets.push_back(joint_gset);
   } else if (!constraint.position_constraints.empty() || !constraint.orientation_constraints.empty()) {
     // POSE goal -> classic (Cartesian) planner by default.
     // Collect waypoints from the position constraints the way MoveIt's

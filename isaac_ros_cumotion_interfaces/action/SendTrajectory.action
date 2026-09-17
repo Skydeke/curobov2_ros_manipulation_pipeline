@@ -2,14 +2,17 @@
 # Mirrors TrajectoryGeneration.srv so the action can plan if no cached plan is
 # reused. The active planner decides which field(s) it consumes.
 sensor_msgs/JointState start_pose
-Goalset[] goalsets       # the Cartesian goal path (one entry per segment) —
-                         #   len(poses)==1 -> fixed waypoint
+Goalset[] goalsets       # the goal path (one Goalset entry per segment) —
+                         #   len(poses)==1 -> fixed Cartesian waypoint
                          #   len(poses)==N -> candidate set, planner picks best
-float64[] target_joint_positions
+                         #   target_joint_positions set -> joint-space segment
 bool allow_cached true   # reuse a matching, non-expired pre-planned trajectory
 ---
 bool success
 string message
+# Collision diagnostics (populated on failure) — mirrors TrajectoryGeneration.srv.
+StateCollisions start_state_collisions
+StateCollisions end_state_collisions
 ---
 # Feedback — status carried ONLY by the action feedback (no status topic).
 string state              # PLANNING | EXECUTING | TRACKING | ON_TARGET | FAILED

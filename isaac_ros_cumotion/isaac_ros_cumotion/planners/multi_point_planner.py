@@ -1,17 +1,34 @@
-#!/usr/bin/env python3
 """
-Multi-point trajectory planner (v2: MotionPlanner.plan_pose).
+Multi-point trajectory planner (v2: MotionPlanner.plan_pose / plan_cspace).
 
 v2 notes:
-- PoseCostMetric is removed; whole-path axis constraints (`trajectory_constraints`)
-  are re-wired via ToolPoseCriteria and applied to every segment. Per-waypoint
-  `trajectories_contraints` remain unsupported (a single criteria spans the plan).
+- PoseCostMetric is removed; whole-path axis constraints
+  (``Goalset.trajectory_constraints``) are re-wired via ToolPoseCriteria and
+  applied to the whole plan.  Per-segment ``trajectories_contraints`` remain
+  unsupported (a single criteria spans the plan); those goalset segments that
+  set it will be warned once.
 - MotionGenPlanConfig is gone; per-call params become kwargs on plan_pose().
 - Kunz-Stilman retiming path is dropped (v2 exposes retiming differently and
   the v1 code was already falling back to raw stacked segments in practice).
   v2 users that need smoother blending can switch to a single goalset call.
+
+Per-segment allowed collisions:
+- A segment may carry ``allowed_collisions`` (link names) to disable the
+  corresponding collision spheres for the duration of that segment's solve
+  (re-enabled afterwards, exception-safe). Used e.g. to allow the gripper
+  fingers to contact the grasped object during a grasp approach/lift segment.
+
+Per-segment joint targets:
+- A goalset segment that carries ``target_joint_positions`` (and no/empty
+  ``poses``) is dispatched to ``plan_cspace()`` (joint-space planning).
+  A segment that carries ``poses`` is dispatched to ``plan_pose()``
+  (Cartesian planning). The two may be interleaved freely. After each
+  segment the end-state is projected back onto the active-DOF joint names
+  so the next segment's IK seed / start state matches the solver's action
+  dimensions.
 """
 
+import torch
 from curobo.types import JointState, Pose, GoalToolPose
 from curobo._src.state.state_joint_ops import stack_joint_states
 
@@ -29,34 +46,80 @@ class MultiPointPlanner(SinglePlanner):
     def get_planner_name(self) -> str:
         return "Multi-Point Motion Generation"
 
+    def _build_segment_goal(self, gset, start_state):
+        """Build the solver goal and tag for one Goalset entry.
+
+        Returns ``('joint', JointState)`` when ``target_joint_positions`` is
+        non-empty, else ``('pose', GoalToolPose)``.  ``None`` is returned when
+        the segment is empty (zero poses AND zero joint targets) — the node
+        rejects such requests before planning, so this is a defensive backstop.
+        """
+        joint_targets = list(getattr(gset, 'target_joint_positions', None) or [])
+        if joint_targets:
+            # Short joint target (arm-only): keep the trailing end-effector DOF
+            # (gripper) at its current/start value, mirroring JointSpacePlanner.
+            robot_dof = self.motion_planner.kinematics.get_dof()
+            if len(joint_targets) < robot_dof:
+                start_tail = start_state.position[0][len(joint_targets):].cpu().tolist()
+                joint_targets = joint_targets + start_tail
+                self.node.get_logger().info(
+                    f"Joint target shorter than robot DOF ({robot_dof}): padded "
+                    f"trailing DOF with start-state values "
+                    f"{[f'{x:.3f}' for x in start_tail]}"
+                )
+            goal_state = JointState.from_position(
+                torch.tensor(
+                    [joint_targets],
+                    dtype=start_state.position.dtype,
+                    device=start_state.position.device,
+                ),
+            )
+            return ('joint', goal_state, len(joint_targets))
+
+        poses = [
+            [p.position.x, p.position.y, p.position.z,
+             p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
+            for p in gset.poses
+        ]
+        if not poses:
+            return None
+        tool_frame = self.motion_planner.tool_frames[0]
+        pose = Pose.from_batch_list(poses)
+        goal = GoalToolPose.from_poses({tool_frame: pose}, num_goalset=len(poses))
+        return ('pose', goal, len(poses))
+
     def _plan_trajectory(
         self,
         start_state: JointState,
         goal_request,
         config: dict,
     ):
-        # Waypoint segments come from `goalsets`: entry i is the candidate set
-        # (one GoalToolPose; N poses => goalset solve, 1 pose => fixed waypoint)
-        # for the i-th segment. Node validation guarantees >= 1 non-empty entry.
-        waypoints = self._build_goal_segments(goal_request)
-        if not waypoints:
+        goalsets = list(getattr(goal_request, 'goalsets', None) or [])
+        if not goalsets:
             self.node.get_logger().warn(
                 "MultiPointPlanner: goalsets is empty - nothing to plan to"
             )
             return None
 
+        # Per-segment allowed collisions (toggle collision spheres around each solve).
+        allowed_per_seg = [
+            list(getattr(g, 'allowed_collisions', None) or []) for g in goalsets
+        ]
+
         max_attempts = config.get('max_attempts', 1)
 
-        # v2: a single ToolPoseCriteria applies to the whole plan, so per-waypoint
-        # axis constraints can't be honored — only the whole-path
-        # `trajectory_constraints` (applied to every segment below).
-        if (hasattr(goal_request, 'trajectories_contraints')
-                and goal_request.trajectories_contraints
-                and any(c == 1 for c in goal_request.trajectories_contraints)):
-            self.node.get_logger().warn(
-                "MultiPointPlanner: per-waypoint `trajectories_contraints` are not "
-                "supported in cuRobo v2 - use `trajectory_constraints` (whole path)."
-            )
+        # v2: per-segment ``trajectories_contraints`` (flattened per-waypoint
+        # holds) are not expressible — a single ToolPoseCriteria spans the
+        # whole plan.  Warn once if any segment tries to set them.
+        for i, g in enumerate(goalsets):
+            c = list(getattr(g, 'trajectories_contraints', None) or [])
+            if c and any(x == 1 for x in c):
+                self.node.get_logger().warn(
+                    f"MultiPointPlanner: per-waypoint `trajectories_contraints` "
+                    f"on segment {i} are not honoured in cuRobo v2 — use "
+                    f"`trajectory_constraints` on segment 0 (whole path) instead."
+                )
+                break  # warn once
 
         # Hold the requested Cartesian axes along every segment; reset after
         # (the MotionPlanner is shared across planners).
@@ -68,31 +131,63 @@ class MultiPointPlanner(SinglePlanner):
             self._combined_trajectory = None
             last_result = None
 
-            for i, goal in enumerate(waypoints):
+            for i, gset in enumerate(goalsets):
+                seg = self._build_segment_goal(gset, current_state)
+                if seg is None:
+                    self.node.get_logger().warn(
+                        f"MultiPointPlanner: segment {i} has neither poses nor "
+                        f"target_joint_positions — skipping"
+                    )
+                    continue
+
+                kind, goal, _size = seg
                 current_state.velocity[:] = 0.0
                 current_state.acceleration[:] = 0.0
 
-                result = self.motion_planner.plan_pose(
-                    goal,
-                    current_state.clone(),
-                    max_attempts=max_attempts,
-                )
-                # Per-segment winner index: -1 on a failed/absent solve keeps the
-                # response aligned with goalsets (index of the segment itself).
+                # Per-segment allowed collisions: disable before solve, re-enable after.
+                links = allowed_per_seg[i] if i < len(allowed_per_seg) else []
+                if links:
+                    self.motion_planner.disable_link_collision(links)
+                    self.node.get_logger().info(
+                        f"Segment {i} ({kind}): disabled collision spheres for {links}"
+                    )
+
+                try:
+                    if kind == 'joint':
+                        enable_graph_attempt = config.get('enable_graph_attempt', 1)
+                        result = self.motion_planner.plan_cspace(
+                            goal,
+                            current_state.clone(),
+                            max_attempts=max_attempts,
+                            enable_graph_attempt=enable_graph_attempt,
+                        )
+                    else:
+                        result = self.motion_planner.plan_pose(
+                            goal,
+                            current_state.clone(),
+                            max_attempts=max_attempts,
+                        )
+                finally:
+                    if links:
+                        self.motion_planner.enable_link_collision(links)
+                        self.node.get_logger().info(
+                            f"Segment {i}: re-enabled collision spheres for {links}"
+                        )
+
                 selected.append(self._select_goal_index(result))
 
-                # v2: plan_pose() returns None when no solution is found.
                 if result is None:
                     self._selected_goal_indexes = selected
                     self.node.get_logger().error(
-                        f"Failed to plan to waypoint {i}: no solution found (plan_pose returned None)"
+                        f"Failed to plan segment {i} ({kind}): no solution found"
                     )
                     return None
 
                 if not result.success.item():
                     self._selected_goal_indexes = selected
+                    status = getattr(result, 'status', None) or "unknown"
                     self.node.get_logger().error(
-                        f"Failed to plan to waypoint {i}: {result.status}"
+                        f"Failed to plan segment {i} ({kind}): {status}"
                     )
                     return result
 
@@ -105,18 +200,6 @@ class MultiPointPlanner(SinglePlanner):
                         combined_trajectory, segment.clone())
 
                 # Build the next start state from the final waypoint of the segment.
-                # segment.position is [B, T, D]; plan_pose requires a 2D [B, D]
-                # current_state, so slice out the last timestep.
-                #
-                # The interpolated plan is in FULL joint space: when the robot
-                # config locks a joint (e.g. a gripper `finger_joint`), cuRobo
-                # augments the trajectory with the locked joints via
-                # get_full_dof_from_solution(), so D can exceed the active DOF
-                # that plan_pose()/the IK seed solver expects. Project the last
-                # step back onto the active joints by name (get_active_js) so the
-                # next waypoint's seed matches the solver's action dims — feeding
-                # the full-DOF state into the seed IK fails with
-                # "Sizes of tensors must match ... Expected size 8 but got size 7".
                 last_pos = segment.position[..., -1, :]
                 while last_pos.ndim > 2:
                     last_pos = last_pos[0]

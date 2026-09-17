@@ -425,7 +425,7 @@ class RosServiceManager:
 
         Runs FK + a GPU scene-collision query on the host-sync read path; the
         gpu_lock guard keeps it from racing a CUDA graph capture (the planner's
-        own _collision_diagnostic already runs under the same lock).
+        own collision diagnostics already run under the same lock).
         """
         with self._gpu_guard(node):
             return self.config_wrapper.callback_get_collision_distance(node, request, response)

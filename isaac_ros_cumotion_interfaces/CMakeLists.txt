@@ -49,6 +49,10 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/GenerateRM.srv"
   "msg/MpcCosts.msg"
   "msg/ReachabilityMetrics.msg"
+  "msg/WorldCollisionContact.msg"
+  "msg/SelfCollisionContact.msg"
+  "msg/JointLimitViolation.msg"
+  "msg/StateCollisions.msg"
   DEPENDENCIES geometry_msgs nav2_msgs sensor_msgs std_msgs trajectory_msgs moveit_msgs
 )
 

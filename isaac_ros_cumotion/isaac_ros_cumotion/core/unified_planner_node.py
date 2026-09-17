@@ -41,6 +41,12 @@ from sensor_msgs.msg import JointState as JointStateMsg
 from std_srvs.srv import Trigger
 from isaac_ros_cumotion_interfaces.srv import TrajectoryGeneration, SetPlanner, GetPlanners
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
+from isaac_ros_cumotion_interfaces.msg import (
+    WorldCollisionContact,
+    SelfCollisionContact,
+    JointLimitViolation,
+    StateCollisions,
+)
 
 from curobo.types import DeviceCfg, JointState
 from curobo.logging import setup_logger as setup_curobo_logger
@@ -795,6 +801,10 @@ class UnifiedPlannerNode(Node):
                     trajectory_msgs.append(waypoint)
                 response.trajectory = trajectory_msgs
 
+                # Clear diagnostics on success.
+                response.start_state_collisions = StateCollisions()
+                response.end_state_collisions = StateCollisions()
+
                 self.get_logger().info(
                     f"Planning succeeded: {result.message} "
                     f"(trajectory: {n_waypoints} waypoints, dt: {response.dt}s)"
@@ -805,15 +815,20 @@ class UnifiedPlannerNode(Node):
                 if result.success:
                     self.get_logger().info(f"Planning succeeded: {result.message}")
                 else:
-                    goal_joints = getattr(request, 'target_joint_positions', None)
-                    diag = self._collision_diagnostic(
-                        planner,
+                    goal_joints = self._goalset_joint_target(request)
+                    # Structured diagnostics ride on the response; log the same
+                    # data as a readable block instead of a one-line text wall
+                    # (and keep response.message compact — the fields carry the
+                    # collision detail for clients that read them).
+                    self._fill_collision_diagnostics(
+                        response, planner=planner,
                         start_joints=self._diagnostic_joints(start_state),
                         goal_joints=list(goal_joints) if goal_joints else None)
-                    if diag:
-                        response.message = f"{response.message} | {diag}"
                     self.get_logger().error(
-                        f"Planning failed: {response.message}")
+                        f"Planning failed: {response.message}\n"
+                        + self._format_collision_feedback(
+                            response.start_state_collisions,
+                            response.end_state_collisions))
 
             return response
 
@@ -825,6 +840,21 @@ class UnifiedPlannerNode(Node):
             response.trajectory = []
             response.dt = 0.0
             return response
+
+    @staticmethod
+    def _goalset_joint_target(request):
+        """Last non-empty per-segment joint target (the plan's end state), if any.
+
+        Joint-space segments carry their target in ``Goalset.target_joint_positions``
+        (the srv/action no longer expose a top-level joint array). The last such
+        segment is the plan's end configuration.
+        """
+        joints = None
+        for g in (getattr(request, 'goalsets', None) or []):
+            gt = getattr(g, 'target_joint_positions', None)
+            if gt:
+                joints = list(gt)
+        return joints
 
     @staticmethod
     def _diagnostic_joints(state):
@@ -845,32 +875,16 @@ class UnifiedPlannerNode(Node):
         except Exception:
             return None
 
-    def _collision_diagnostic(self, planner=None, start_joints=None, goal_joints=None) -> str:
-        """Describe, as collision tuples, what the robot currently collides with.
+    def _build_collision_diagnostics(self, planner=None, start_joints=None, goal_joints=None):
+        """Build structured collision diagnostics for a srv Response or action Result.
 
-        Queries the shared collision_distance harness with the SAME activation
-        margin the planner's optimizer uses (``collision_activation_distance``),
-        so the diagnostic agrees with the failure ("start/end in collision")
-        that produced it — nothing is reported that the planner wouldn't have
-        rejected, and nothing the planner rejected is silently skipped. Unlike
-        the raw per-sphere cost it names the offending links AND the scene
-        obstacles involved (cuboids matched exactly against the same OBB SDF the
-        GPU kernel uses; mesh/voxel involvement flagged by name when it can't be
-        pinned down). Reports also carry ``(link, obstacle, depth_m)`` tuples for
-        the message string, plus a human-readable summary. Best-effort: returns
-        an empty string on any failure.
-
-        "Start or End state in collision" failures never say WHICH state, and a
-        live-pose check alone is blind to a colliding goal — so when the request
-        carries joint-space positions, both the start configuration (defaulting
-        to the live pose when no explicit start is given) and the goal
-        configuration are evaluated and reported, each labelled.
+        Returns ``(start_state_collisions, end_state_collisions)`` — two
+        StateCollisions messages (each wrapping world/self/cspace contact
+        arrays), labelled for the plan's start and goal (end) configurations.
+        Best-effort: returns two empty StateCollisions on any failure.
         """
         try:
             wrapper = self.config_wrapper_motion
-            # Use the MotionPlanner's kinematics when attached so the fitted
-            # payload spheres are included (same source the RViz colouring
-            # uses); attribution shares the same sphere ordering.
             kin = None
             attach_svc = getattr(self, 'attachment_services', None)
             if attach_svc is not None:
@@ -879,124 +893,119 @@ class UnifiedPlannerNode(Node):
                 except Exception:
                     kin = None
 
-            def _fmt(label, at):
-                clauses = []
+            def _eval_state(label, at):
+                sc = StateCollisions()
+                if at is None:
+                    return sc
+                # World collisions
                 reports = _attributed_collisions(
                     wrapper, self, kin=kin, solver=planner, at_joints=at)
                 if reports:
-                    act = reports[0].get('activation')
-                    if act is None:
-                        act = (
-                            self.get_parameter('collision_activation_distance')
-                            .get_parameter_value().double_value
-                            if self.has_parameter('collision_activation_distance')
-                            else 0.0)
+                    sc.world_contacts = [
+                        WorldCollisionContact(
+                            state_label=label,
+                            link=r['link'],
+                            obstacle=((", ".join(r['obstacles']) if r['obstacles']
+                                       else r['clobber_note']) or "unknown-obstacle"),
+                            depth=round(r['depth'], 6),
+                        )
+                        for r in sorted(reports, key=lambda r: -r['depth'])
+                    ]
 
-                    parts = []
-                    tuples = []
-                    for r in sorted(reports, key=lambda r: -r['depth']):
-                        what = ", ".join(r['obstacles']) if r['obstacles'] \
-                            else r['clobber_note']
-                        what = what if what else "unknown-obstacle"
-                        depth_m = r['depth']
-                        tuples.append((r['link'], what, round(depth_m, 4)))
-                        if depth_m > act:  # beyond the inflated surface => real contact
-                            parts.append(
-                                f"{r['link']} hard-collides {what} "
-                                f"({depth_m * 1000:.1f} mm past surface)")
-                        else:
-                            parts.append(
-                                f"{r['link']} within {act * 1000:.1f} mm margin of {what}"
-                                f" ({depth_m * 1000:.1f} mm past margin surface)")
-                    scope = f"{label} in collision" if label else "In collision"
-                    human = scope + " (margin " \
-                        + (f"{act * 1000:.1f} mm" if act else "none") \
-                        + "): " + "; ".join(parts)
-                    clauses.append(f"{human} | collision_contacts={tuples}")
-
-                # World-obstacle checks can't see robot-self contacts (the scene
-                # collision checker is never queried with robot-vs-robot sphere
-                # pairs). Report those separately — a closed gripper / folded
-                # arm tripping "Start or End state in collision" shows up here,
-                # not in collision_contacts. Self-collision uses no activation
-                # margin (that is scene-collision-only), so every report is a
-                # hard contact at the configured per-link padding.
+                # Self-collisions
                 selfs = _attributed_self_collisions(
                     wrapper, self, kin=kin, at_joints=at)
                 if selfs:
-                    parts = []
-                    tuples = []
-                    for r in sorted(selfs, key=lambda r: -r['depth']):
-                        tuples.append((r['link'], r['link_b'], round(r['depth'], 4)))
-                        parts.append(
-                            f"{r['link']} hard self-collides {r['link_b']} "
-                            f"({r['depth'] * 1000:.1f} mm penetration)")
-                    scope = f"{label} self-collision" if label else "Self-collision"
-                    clauses.append(
-                        f"{scope}: " + "; ".join(parts)
-                        + f" | self_collision_contacts={tuples}")
+                    sc.self_contacts = [
+                        SelfCollisionContact(
+                            state_label=label,
+                            link_a=r['link'],
+                            link_b=r['link_b'],
+                            depth=round(r['depth'], 6),
+                        )
+                        for r in sorted(selfs, key=lambda r: -r['depth'])
+                    ]
 
-                # The graph feasibility check treats the cspace boundary as a
-                # hard constraint: a joint value outside its position limits
-                # fails in a way that prints the SAME "Start or End state in
-                # collision" warning as a contact, with no sphere involved (so
-                # nothing turns red in RViz).
+                # Joint-limit violations
                 limits = _attributed_joint_limit_violations(
                     wrapper, self, kin=kin, at_joints=at)
                 if limits:
-                    parts = []
-                    tuples = []
-                    for r in limits:
-                        tuples.append((r['joint'], round(r['value'], 4),
-                                       round(r['lower'], 4), round(r['upper'], 4)))
-                        parts.append(
-                            f"{r['joint']}={r['value']:.3f} outside "
-                            f"[{r['lower']:.3f}, {r['upper']:.3f}]")
-                    scope = (f"{label} joint-limit (cspace) violation"
-                             if label else "Joint-limit (cspace) violation")
-                    clauses.append(
-                        f"{scope}: " + "; ".join(parts)
-                        + f" | cspace_bound_contacts={tuples}")
+                    sc.cspace_violations = [
+                        JointLimitViolation(
+                            state_label=label,
+                            joint=r['joint'],
+                            value=round(r['value'], 6),
+                            lower=round(r['lower'], 6),
+                            upper=round(r['upper'], 6),
+                        )
+                        for r in limits
+                    ]
+                return sc
 
-                if not clauses:
-                    # Never return a bare None here: an empty result must be
-                    # distinguishable from "the diagnostic never ran". If one
-                    # of the three checks bailed it is named explicitly;
-                    # otherwise claim the decisive clean marker for exactly the
-                    # situation where the planner rejects a state but none of
-                    # the sphere checks or the joint-limit check sees anything.
-                    missing = []
-                    if reports is None:
-                        missing.append("world(collision_contacts)")
-                    if selfs is None:
-                        missing.append("self(self_collision_contacts)")
-                    if limits is None:
-                        missing.append("cspace(cspace_bound_contacts)")
-                    if missing:
-                        scope = label if label else "State"
-                        return (f"{scope}: diagnostics incomplete — checks "
-                                f"unavailable: {', '.join(missing)}")
-                    if label:
-                        return (f"{label}: no sphere collisions (world + self) "
-                                "and within joint limits")
-                    return ("No sphere collisions (world + self) "
-                            "and within joint limits")
-                return " | ".join(clauses)
+            start_sc = _eval_state("start", start_joints)
+            end_sc = _eval_state("goal", list(goal_joints)) if goal_joints \
+                else StateCollisions()
+            return start_sc, end_sc
 
-            pieces = []
-            start = _fmt("Start state", start_joints)
-            if start:
-                pieces.append(start)
-            if goal_joints:
-                g = _fmt("Goal state", list(goal_joints))
-                if g:
-                    pieces.append(g)
-            return " | ".join(pieces)
         except Exception as e:
             self.get_logger().warn(
-                f"collision diagnostic unavailable: {e}\n{traceback.format_exc()}",
+                f"collision diagnostics unavailable: {e}\n{traceback.format_exc()}",
                 throttle_duration_sec=5.0)
-            return ""
+            return StateCollisions(), StateCollisions()
+
+    def _fill_collision_diagnostics(self, response, planner=None, start_joints=None, goal_joints=None):
+        """Populate start/end StateCollisions on a Response or Result."""
+        start_sc, end_sc = self._build_collision_diagnostics(
+            planner=planner, start_joints=start_joints, goal_joints=goal_joints)
+        response.start_state_collisions = start_sc
+        response.end_state_collisions = end_sc
+
+    def _format_collision_feedback(self, start_sc, end_sc):
+        """Render start/goal StateCollisions messages as a readable multi-line
+        block for node-side failure logs (mirrors the grasp orchestrator's
+        formatter so both sides print the same layout)."""
+        return "\n".join([
+            "collision feedback:",
+            self._format_state_collisions("start", start_sc),
+            self._format_state_collisions("goal", end_sc),
+        ])
+
+    @staticmethod
+    def _format_state_collisions(label, sc):
+        """Multi-line summary of a StateCollisions message, one row per
+        contact, aligned columns, deepest contact first (joint-limit rows
+        sort last)."""
+        if sc is None:
+            return f"  {label}: not evaluated"
+        rows = []
+        for c in sc.world_contacts:
+            rows.append(
+                (c.depth, c.link, "->", c.obstacle, f"{c.depth * 1000:.1f} mm past surface")
+            )
+        for c in sc.self_contacts:
+            rows.append(
+                (c.depth, c.link_a, "<->", c.link_b, f"{c.depth * 1000:.1f} mm penetration")
+            )
+        for c in sc.cspace_violations:
+            rows.append(
+                (
+                    float("-inf"),
+                    c.joint,
+                    "limit",
+                    f"outside [{c.lower:.3f}, {c.upper:.3f}] (value {c.value:.3f})",
+                    "",
+                )
+            )
+        if not rows:
+            return f"  {label}: clear (no world/self contacts, within joint limits)"
+        rows.sort(key=lambda r: r[0], reverse=True)
+        width = max(len(r[1]) for r in rows)
+        body = "\n".join(
+            f"    {a:<{width}}  {op}  {b}  {suffix}".rstrip()
+            for _, a, op, b, suffix in rows
+        )
+        noun = "contact" if len(rows) == 1 else "contacts"
+        return f"  {label}: {len(rows)} {noun}\n{body}"
 
     def execute_callback(self, goal_handle):
         """Unified 'generate + execute' action for every controller.
@@ -1048,16 +1057,16 @@ class UnifiedPlannerNode(Node):
                     with self._plan_lock():
                         result = planner.plan(start_state, goal, config, self.robot_context)
                     if not result.success:
-                        goal_joints = getattr(goal, 'target_joint_positions', None)
-                        diag = self._collision_diagnostic(
-                            planner,
+                        goal_joints = self._goalset_joint_target(goal)
+                        self._fill_collision_diagnostics(
+                            result_msg, planner=planner,
                             start_joints=self._diagnostic_joints(start_state),
                             goal_joints=list(goal_joints) if goal_joints else None)
-                        suffix = f" | {diag}" if diag \
-                            else " | collision-diagnostic(empty)"
                         self.get_logger().error(
-                            f"Planning failed in execute path: {result.message}"
-                            + suffix)
+                            f"Planning failed in execute path: {result.message}\n"
+                            + self._format_collision_feedback(
+                                result_msg.start_state_collisions,
+                                result_msg.end_state_collisions))
                         result_msg.success = False
                         result_msg.message = f"Planning failed: {result.message}"
                         goal_handle.abort()
@@ -1069,12 +1078,14 @@ class UnifiedPlannerNode(Node):
                 self.get_logger().info(f"Planning with {planner.get_planner_name()}")
                 result = planner.plan(start_state, goal, config, self.robot_context)
                 if not result.success:
-                    diag = self._collision_diagnostic(planner)
-                    suffix = f" | {diag}" if diag \
-                        else " | collision-diagnostic(empty)"
+                    self._fill_collision_diagnostics(
+                        result_msg, planner=planner,
+                        start_joints=self._diagnostic_joints(start_state))
                     self.get_logger().error(
-                        f"Planning failed in execute path: {result.message}"
-                        + suffix)
+                        f"Planning failed in execute path: {result.message}\n"
+                        + self._format_collision_feedback(
+                            result_msg.start_state_collisions,
+                            result_msg.end_state_collisions))
                     result_msg.success = False
                     result_msg.message = f"Planning failed: {result.message}"
                     goal_handle.abort()
@@ -1207,9 +1218,11 @@ class UnifiedPlannerNode(Node):
         Enforced here (shared by the generate_trajectory srv and the execute
         action) so invalid requests never reach MotionGen:
 
-        - All Cartesian planners read `goalsets`. An empty request is only legal
-          for the joint-space planner (target_joint_positions).
-        - Every `goalsets[i]` must hold >= 1 pose (a zero-pose set would break
+        - All planners read `goalsets` (one Goalset per segment). The joint-space
+          planner's target lives in `Goalset.target_joint_positions`; the
+          Cartesian planners read `Goalset.poses`.
+        - Every `goalsets[i]` must hold >= 1 pose OR a non-empty
+          `target_joint_positions` (a zero-pose, zero-joint set would break
           winner/segment index alignment).
         - Reactive controllers (MPC / retarget) track a single pose: exactly one
           set of one pose.
@@ -1221,19 +1234,21 @@ class UnifiedPlannerNode(Node):
         planner_name = planner.get_planner_name()
         goalsets = list(getattr(request, 'goalsets', None) or [])
         sizes = [len(getattr(g, 'poses', [])) for g in goalsets]
+        joint_sizes = [
+            len(getattr(g, 'target_joint_positions', []) or []) for g in goalsets
+        ]
 
         if not goalsets:
-            if not getattr(request, 'target_joint_positions', None):
-                return False, (
-                    f"{planner_name}: request must provide `goalsets` "
-                    f"(or `target_joint_positions` for joint-space planning)"
-                )
-            return True, None
-
-        if any(n == 0 for n in sizes):
             return False, (
-                f"{planner_name}: every goalset entry must hold >= 1 pose "
-                f"(got sizes {sizes})"
+                f"{planner_name}: request must provide `goalsets` "
+                f"(one Goalset entry per segment)"
+            )
+
+        if any(n == 0 and joint_sizes[i] == 0 for i, n in enumerate(sizes)):
+            return False, (
+                f"{planner_name}: every goalset entry must hold >= 1 pose or a "
+                f"non-empty target_joint_positions (got pose sizes {sizes}, "
+                f"joint sizes {joint_sizes})"
             )
 
         if not planner.is_open_loop():
@@ -1469,14 +1484,21 @@ class UnifiedPlannerNode(Node):
         Shared by the generate_trajectory service and the execute action.
         """
         start_pose = getattr(src, 'start_pose', None)
+        current = list(self.robot_context.get_joint_pose())
         if start_pose is not None and len(start_pose.position) > 0:
             start_joint_pose = list(start_pose.position)
+            # A short start pose (e.g. the MoveIt arm group sends only its 7
+            # DOF) pads the trailing DOF (wrist-mounted gripper) from the
+            # robot's current pose so the planner always gets a full-DOF
+            # start state.
+            if len(start_joint_pose) < len(current):
+                start_joint_pose = start_joint_pose + current[len(start_joint_pose):]
             self.get_logger().info(
                 f"Using start position from request: "
                 f"{[f'{x:.3f}' for x in start_joint_pose]}"
             )
         else:
-            start_joint_pose = self.robot_context.get_joint_pose()
+            start_joint_pose = current
             self.get_logger().info(
                 f"Using robot current position: "
                 f"{[f'{x:.3f}' for x in start_joint_pose]}"
@@ -1523,10 +1545,21 @@ class UnifiedPlannerNode(Node):
             [self._pose_tuple(p) for p in g.poses]
             for g in (getattr(req, 'goalsets', None) or [])
         ]
+        allowed = [
+            list(getattr(g, 'allowed_collisions', None) or [])
+            for g in (getattr(req, 'goalsets', None) or [])
+        ]
+        # Joint targets are per-segment (Goalset.target_joint_positions); each
+        # entry stays aligned with its goalset ([] for Cartesian segments).
+        joints = [
+            [float(x) for x in (getattr(g, 'target_joint_positions', None) or [])]
+            for g in (getattr(req, 'goalsets', None) or [])
+        ]
         return {
             'start': start,
             'goalsets': goalsets,
-            'target_joints': [float(x) for x in (getattr(req, 'target_joint_positions', []) or [])],
+            'allowed_collisions': allowed,
+            'target_joints': joints,
         }
 
     @staticmethod
@@ -1545,8 +1578,13 @@ class UnifiedPlannerNode(Node):
                 abs(x - y) > joint_tol for x, y in zip(a['start'], b['start'])):
             return False
         aj, bj = a['target_joints'], b['target_joints']
-        if len(aj) != len(bj) or any(abs(x - y) > joint_tol for x, y in zip(aj, bj)):
+        if len(aj) != len(bj):
             return False
+        for aj_seg, bj_seg in zip(aj, bj):
+            if len(aj_seg) != len(bj_seg):
+                return False
+            if any(abs(x - y) > joint_tol for x, y in zip(aj_seg, bj_seg)):
+                return False
         ag, bg = a['goalsets'], b['goalsets']
         if len(ag) != len(bg):
             return False

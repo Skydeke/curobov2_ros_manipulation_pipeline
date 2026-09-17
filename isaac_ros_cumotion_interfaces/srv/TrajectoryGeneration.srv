@@ -1,11 +1,9 @@
 sensor_msgs/JointState start_pose
 
-Goalset[] goalsets  # The Cartesian goal path. One entry per segment.
-                    #   len(poses)==1 -> fixed waypoint (single-goal plan)
-                    #   len(poses)==N -> candidate set, planner picks the best
-float64[] target_joint_positions  # Target joint configuration for joint-space planning
-int8[] trajectory_constraints # [theta_x, theta_y, theta_z, x, y, z]
-int8[] trajectories_contraints # Flattened: [theta_x0, theta_y0, theta_z0, x0, y0, z0, theta_x1, theta_y1, theta_z1, x1, y1, z1, ...]
+Goalset[] goalsets  # The goal path. One entry (Goalset) per segment —
+                    #   len(poses)==1   -> fixed Cartesian waypoint
+                    #   len(poses)==N   -> Cartesian candidate set, planner picks best
+                    #   target_joint_positions set -> joint-space segment (plan_cspace)
 
 ---
 
@@ -15,3 +13,7 @@ sensor_msgs/JointState[] trajectory  # Trajectory waypoints (position, velocity)
 float64 dt  # Time step between waypoints (seconds)
 int16[] selected_goal_index  # Winner candidate index per `goalsets` entry;
                              # -1 when `goalsets` is empty or a segment failed.
+
+# Collision diagnostics (populated on failure)
+StateCollisions start_state_collisions
+StateCollisions end_state_collisions

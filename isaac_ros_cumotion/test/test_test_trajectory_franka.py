@@ -150,7 +150,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'], 'position': [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'target_joint_positions': [0.8, -1.5, 0.4, -2.2, 0.5, 2.0, 0.7]})
+        set_message_fields(request, {'start_pose': {'name': ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'], 'position': [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'target_joint_positions': [0.8, -1.5, 0.4, -2.2, 0.5, 2.0, 0.7]}]})
 
         # Call service
         future = client.call_async(request)

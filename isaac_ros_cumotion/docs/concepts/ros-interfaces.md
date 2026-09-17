@@ -22,10 +22,7 @@ Request:
 | Field | Type | Used by |
 |---|---|---|
 | `start_pose` | `sensor_msgs/JointState` | All planners. Empty = current robot state |
-| `goalsets` | `Goalset[]` | Cartesian planners. One entry per segment; `Goalset.poses` is a candidate set (Classic resolves `poses` inside one solve, Multi-point uses one per waypoint) |
-| `target_joint_positions` | `float64[]` | Joint-space planner |
-| `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags for the single goal |
-| `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo) |
+| `goalsets` | `Goalset[]` | One entry per segment. Cartesian segments hold `Goalset.poses` (candidate set; Classic resolves it inside one solve, Multi-point uses one per waypoint); joint-space segments hold `Goalset.target_joint_positions` |
 
 Response:
 
@@ -36,8 +33,28 @@ Response:
 | `trajectory` | `sensor_msgs/JointState[]` | Waypoints with position and velocity |
 | `dt` | `float64` | Time step between waypoints (seconds) |
 | `selected_goal_index` | `int16[]` | Winner per `goalsets[i]` (empty when `goalsets` is empty; `-1` for a failed/empty segment) |
+| `start_state_collisions` | `StateCollisions` | Collision diagnostics for the plan's start configuration (populated on failure) |
+| `end_state_collisions` | `StateCollisions` | Collision diagnostics for the goal/end configuration (joint-space plans only) |
 
-`Goalset` is a `geometry_msgs/Pose[]` wrapper: a set of `1` is a fixed waypoint, a set of `N > 1` candidate poses is resolved by cuRobo inside a single plan (capped by the `max_goalset` parameter). Sending `goalsets` while the joint-space planner is active will not do what you expect. Switch planners first with `set_planner`.
+`Goalset` is the per-segment unit, holding:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `poses` | `geometry_msgs/Pose[]` | Candidate set: `1` = fixed waypoint, `N > 1` = resolved by cuRobo inside a single plan (capped by the `max_goalset` parameter) |
+| `allowed_collisions` | `string[]` | Link names whose collision spheres are disabled for this segment only (re-enabled afterwards) |
+| `target_joint_positions` | `float64[]` | Joint-space target for this segment (dispatches to `plan_cspace`) |
+| `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags applied to the whole path (v2 reads the first segment's) |
+| `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo; not honoured in v2) |
+
+`StateCollisions` wraps the three contact arrays for one state:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `world_contacts` | `WorldCollisionContact[]` | Link-vs-obstacle contacts |
+| `self_contacts` | `SelfCollisionContact[]` | Link-vs-link self collisions |
+| `cspace_violations` | `JointLimitViolation[]` | Joint values outside position limits |
+
+Sending `goalsets` while the joint-space planner is active will not do what you expect. Switch planners first with `set_planner`.
 
 ```bash
 ros2 service call /unified_planner/generate_trajectory curobo_msgs/srv/TrajectoryGeneration \
@@ -222,8 +239,7 @@ Goal (mirrors `TrajectoryGeneration`; the active planner decides which fields it
 | Field | Type | Notes |
 |---|---|---|
 | `start_pose` | `sensor_msgs/JointState` | Empty = current state |
-| `goalsets` | `Goalset[]` | Cartesian: one segment per waypoint; `poses` = candidate set (Classic resolves, Multi-point loops, MPC/Retarget require exactly one pose) |
-| `target_joint_positions` | `float64[]` | Joint-space |
+| `goalsets` | `Goalset[]` | One segment per waypoint; `poses` = candidate set (Classic resolves, Multi-point loops, MPC/Retarget require exactly one pose), `target_joint_positions` = joint-space segment |
 | `allow_cached` | `bool` (default `true`) | Reuse a matching, non-expired trajectory from a previous `generate_trajectory` call |
 
 Feedback (status is carried only here — there is no separate status topic):
@@ -236,7 +252,7 @@ Feedback (status is carried only here — there is no separate status topic):
 | `on_target` | `bool` | Reactive planners keep servoing after reaching the target |
 | `joint_command` | `sensor_msgs/JointState` | Command currently streamed |
 
-Result: `success`, `message`.
+Result: `success`, `message`, and collision diagnostics `start_state_collisions`/`end_state_collisions` (StateCollisions, mirrors the srv; populated on failure).
 
 With an **open-loop** planner (classic, multi-point, joint-space) the action plans once, streams the trajectory, and succeeds when it ends. With a **closed-loop** planner (MPC, retarget) the action keeps running and servoing; retarget the goal live via `/unified_planner/mpc_goal`, and stop by cancelling the goal.
 

@@ -41,7 +41,8 @@ tests:
         name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
         position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
         velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      target_joint_positions: [1.2, -1.6, 1.4, -1.0, -1.6, 0.5]
+      goalsets:
+        - target_joint_positions: [1.2, -1.6, 1.4, -1.0, -1.6, 0.5]
     expect:
       success: True
 

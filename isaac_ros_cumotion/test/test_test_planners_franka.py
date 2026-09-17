@@ -544,7 +544,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'], 'position': [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.0255, 'y': 0.1521, 'z': 0.8555}, 'orientation': {'x': -0.8049, 'y': -0.3629, 'z': -0.4516, 'w': 0.1288}}]}], 'trajectory_constraints': [0, 0, 1, 0, 0, 0]})
+        set_message_fields(request, {'start_pose': {'name': ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'], 'position': [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.0255, 'y': 0.1521, 'z': 0.8555}, 'orientation': {'x': -0.8049, 'y': -0.3629, 'z': -0.4516, 'w': 0.1288}}], 'trajectory_constraints': [0, 0, 1, 0, 0, 0]}]})
 
         # Call service
         future = client.call_async(request)
