@@ -1,0 +1,13 @@
+# TrajectoryGenerationBatch.srv — array → array batch surface (DRY).
+# One TrajectoryGoal per problem; ONE batched whole-task solve across the
+# array (problems × goalsets × seeds), §4.3.  Each `responses` entry is
+# populated for its problem — ALWAYS, success or failure — and `total_stats`
+# is the cross-problem rollup (also always populated when the batch was
+# dispatched, even when every problem reports a failure).
+# The typo'd goalset-side field name is DRY-preserved inside Goalset.msg.
+TrajectoryGoal[] requests
+---
+bool success                       # dispatch-level success: all problems planned
+string error_msg                   # non-empty when dispatch failed wholesale
+TrajectoryResult[] responses       # per-problem results (always populated)
+PlanningStats total_stats          # cross-problem rollup (always populated)

@@ -1,19 +1,9 @@
-sensor_msgs/JointState start_pose
-
-Goalset[] goalsets  # The goal path. One entry (Goalset) per segment —
-                    #   len(poses)==1   -> fixed Cartesian waypoint
-                    #   len(poses)==N   -> Cartesian candidate set, planner picks best
-                    #   target_joint_positions set -> joint-space segment (plan_cspace)
-
+# TrajectoryGeneration.srv — DRY single surface.  Core schema is embedded
+# (TrajectoryGoal → TrajectoryResult), not mirrored by hand.  Additional
+# ROS-level fields (start_state_collisions / StateCollisions) preserved so
+# failures carry the structured scene diagnostics the node always populates.
+TrajectoryGoal request    # start_pose + goalsets + PlanningOptions (§5 DRY)
 ---
-
-bool success
-string message
-sensor_msgs/JointState[] trajectory  # Trajectory waypoints (position, velocity)
-float64 dt  # Time step between waypoints (seconds)
-int16[] selected_goal_index  # Winner candidate index per `goalsets` entry;
-                             # -1 when `goalsets` is empty or a segment failed.
-
-# Collision diagnostics (populated on failure)
-StateCollisions start_state_collisions
-StateCollisions end_state_collisions
+TrajectoryResult response # success / message / trajectory / stats / collisions
+StateCollisions start_state_collisions   # collision diagnostics (populated on failure)
+StateCollisions end_state_collisions     # collision diagnostics (populated on failure)

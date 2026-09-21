@@ -125,6 +125,15 @@ class MultiPointPlanner(SinglePlanner):
         # (the MotionPlanner is shared across planners).
         applied = self._apply_pose_constraints(goal_request)
         selected = []
+        # Per-segment insight accumulators (consumed by plan()'s
+        # _result_metadata): winner seed + reached flag per segment, the
+        # cross-segment candidate tally, and the gated considered rows.
+        selected_seeds = []
+        statuses = []
+        tally = {'generated': 0, 'solved': 0, 'pruned': 0}
+        considered = []
+        tolerance = self._waypoint_tolerance
+        log_considered = self._log_considered
         try:
             current_state = start_state.clone()
             combined_trajectory = None
@@ -175,9 +184,26 @@ class MultiPointPlanner(SinglePlanner):
                         )
 
                 selected.append(self._select_goal_index(result))
+                seg_ok = False
+                if result is not None:
+                    succ = result.success
+                    seg_ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+                seed_id = self._select_seed_index(result)
+                selected_seeds.append(seed_id)
+                statuses.append(self._segment_reached(
+                    result, seed_id, tolerance, seg_ok))
+                seg_tally = self._tally_candidates(result)
+                for k in tally:
+                    tally[k] += seg_tally.get(k, 0)
+                considered.extend(self._segment_considered_rows(
+                    result, i, selected[-1] if selected else 0, log_considered))
 
                 if result is None:
                     self._selected_goal_indexes = selected
+                    self._selected_seed_index = selected_seeds
+                    self._waypoint_status = statuses
+                    self._candidate_tally = tally
+                    self._considered_rows = considered
                     self.node.get_logger().error(
                         f"Failed to plan segment {i} ({kind}): no solution found"
                     )
@@ -185,6 +211,10 @@ class MultiPointPlanner(SinglePlanner):
 
                 if not result.success.item():
                     self._selected_goal_indexes = selected
+                    self._selected_seed_index = selected_seeds
+                    self._waypoint_status = statuses
+                    self._candidate_tally = tally
+                    self._considered_rows = considered
                     status = getattr(result, 'status', None) or "unknown"
                     self.node.get_logger().error(
                         f"Failed to plan segment {i} ({kind}): {status}"
@@ -217,6 +247,10 @@ class MultiPointPlanner(SinglePlanner):
                 last_result = result
 
             self._selected_goal_indexes = selected
+            self._selected_seed_index = selected_seeds
+            self._waypoint_status = statuses
+            self._candidate_tally = tally
+            self._considered_rows = considered
             self._combined_trajectory = combined_trajectory
             return last_result
         finally:

@@ -362,12 +362,212 @@ class SinglePlanner(TrajectoryPlanner):
         except (TypeError, ValueError, IndexError):
             return -1
 
-    def _result_metadata(self, result=None, num_wp=None) -> dict:
-        """Metadata block for PlannerResult; includes per-segment goalset winners.
+    @staticmethod
+    def _flat_values(value, default=None):
+        """Flatten a solver-result field to a plain Python list.
 
-        ``selected_goal_index`` rides here (a plain int list) so the node can
-        copy it straight into the service response, and is shaped by the child
-        planner in ``_plan_trajectory`` (one entry per ``goalsets[i]`` segment).
+        Handles None (returns ``default``), 0-dim tensors / scalars
+        (single-item list), and tensors of any rank (detached, CPU,
+        flattened). Used to read seed-ordered ``[B, S]`` result rows
+        defensively.
+        """
+        if value is None:
+            return default
+        if hasattr(value, 'detach'):
+            try:
+                flat = value.detach().cpu()
+            except Exception:
+                flat = value
+            return flat.reshape(-1).tolist()
+        if isinstance(value, (list, tuple)):
+            return [x.item() if hasattr(x, 'item') else x for x in value]
+        if hasattr(value, 'item'):
+            return [value.item()]
+        return [value]
+
+    @staticmethod
+    def _select_seed_index(result) -> int:
+        """Winner restart (seed) index of a plan solve.
+
+        cuRobo ranks seeds by total cost (successful seeds first) in
+        ``result.seed_rank`` (``[B, S]``; row 0 holds the winner's seed).
+        Fall back to the argmin of ``seed_cost`` (row 0) when the rank is
+        missing, then to 0 for a single-seed solve. ``-1`` signals a
+        failed/absent solve.
+        """
+        if result is None:
+            return -1
+        succ = getattr(result, 'success', None)
+        if succ is None:
+            return -1
+        try:
+            ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+            if not ok:
+                return -1
+        except Exception:
+            return -1
+        rank = getattr(result, 'seed_rank', None)
+        if rank is not None:
+            try:
+                row0 = rank[0]
+                winner = row0.argmin().item() if hasattr(row0, 'argmin') else row0[0]
+                return int(winner)
+            except Exception:
+                pass
+        cost = getattr(result, 'seed_cost', None)
+        if cost is not None:
+            try:
+                row0 = cost[0]
+                winner = row0.argmin().item() if hasattr(row0, 'argmin') else row0
+                return int(winner)
+            except Exception:
+                pass
+        return 0
+
+    @staticmethod
+    def _segment_reached(result, winner_seed, tolerance, segment_success) -> int:
+        """Per-waypoint reached flag (int 0/1) for one segment.
+
+        1 when the winner seed's ``position_error`` is within ``tolerance`` (m;
+        ``tolerance > 0`` enables the FK check), else 0. With no tolerance or
+        no per-seed error the flag falls back to the segment's solve success.
+        """
+        if tolerance and tolerance > 0 and winner_seed >= 0:
+            perr = getattr(result, 'position_error', None)
+            if perr is not None:
+                try:
+                    errs = SinglePlanner._flat_values(perr)
+                    if winner_seed < len(errs):
+                        return 1 if float(errs[winner_seed]) <= tolerance else 0
+                except Exception:
+                    pass
+        return 1 if segment_success else 0
+
+    @staticmethod
+    def _tally_candidates(result) -> dict:
+        """Candidate (seed) accounting for one solver call.
+
+        Named distinctly from the ``_candidate_tally`` INSTANCE attribute
+        (the per-plan accumulator): ``plan()`` resets ``self._candidate_tally
+        = None`` before the child ``_plan_trajectory`` runs, which would
+        shadow a same-named method on the instance.
+
+        ``generated`` = the solver's ``num_seeds`` for this problem/segment
+        (all seeds restarted; 1 when the result carries no per-seed count),
+        ``solved`` = the seeds whose solve succeeded, ``pruned`` = 0 — the
+        per-segment machinery spills nothing (whole-task caps would report a
+        nonzero pruned count).
+        """
+        success = getattr(result, 'success', None)
+        n_seeds = int(getattr(result, 'num_seeds', 0) or 0)
+        if n_seeds <= 0:
+            n_seeds = 1
+        solved = 0
+        if success is not None:
+            try:
+                vals = SinglePlanner._flat_values(success)
+                solved = sum(1 for v in vals if v)
+            except Exception:
+                solved = 0
+        return {'generated': n_seeds, 'solved': solved, 'pruned': 0}
+
+    @staticmethod
+    def _segment_considered_rows(result, segment_i, fallback_candidate, log_flag) -> list:
+        """One considered-trajectory row per seed of a solved segment.
+
+        Row shape ``[problem=0, segment, goalset_candidate, seed]``; fields
+        filled from the solver result's per-seed data (``success`` /
+        ``seed_cost`` / ``position_error`` / ``goalset_index`` /
+        ``solve_time``). The whole-task-only fields (``waypoint_cost`` /
+        ``path_length`` / ``clearance``) are measured by the task solver, not
+        by the per-segment machinery, so they stay 0 and the node's defensive
+        mapping stays truthful. Empty unless ``log_flag``.
+        """
+        if not log_flag:
+            return []
+        success = SinglePlanner._flat_values(getattr(result, 'success', None))
+        costs = SinglePlanner._flat_values(getattr(result, 'seed_cost', None))
+        perr = SinglePlanner._flat_values(getattr(result, 'position_error', None))
+        gidx = getattr(result, 'goalset_index', None)
+        gidx_flat = SinglePlanner._flat_values(gidx)
+        # goalset_index is [B, S, L]: seed s's candidate rides at flat index s*L.
+        n_links = 1
+        if gidx is not None and getattr(gidx, 'ndim', 0) >= 3:
+            try:
+                n_links = int(gidx.shape[-1])
+            except Exception:
+                n_links = 1
+        n_seeds = len(success) if success else 1
+        if n_seeds <= 0:
+            n_seeds = 1
+        solve_time = getattr(result, 'solve_time', 0.0)
+        rows = []
+        for s in range(n_seeds):
+            ok = bool(success[s]) if s < len(success) else False
+            cost = float(costs[s]) if costs and s < len(costs) else 0.0
+            err = float(perr[s]) if perr and s < len(perr) else 0.0
+            cand = 0
+            if gidx_flat and s * n_links < len(gidx_flat):
+                try:
+                    cand = int(gidx_flat[s * n_links])
+                except (TypeError, ValueError):
+                    cand = 0
+            elif not ok:
+                cand = int(fallback_candidate)
+            rows.append({
+                'problem': 0,
+                'segment': segment_i,
+                'goalset_candidate': cand,
+                'seed': s,
+                'success': ok,
+                'cost': cost,
+                'waypoint_cost': 0.0,
+                'path_length': 0.0,
+                'clearance': 0.0,
+                'max_waypoint_error': err,
+                'solve_time': solve_time,
+            })
+        return rows
+
+    @staticmethod
+    def _request_waypoint_tolerance(goal_request) -> float:
+        """Per-request waypoint FK tolerance (m) from ``PlanningOptions``.
+
+        0.0 when unset (the node leaves the reached-flag fallback to the
+        segment's solve success).
+        """
+        opts = getattr(goal_request, 'options', None)
+        if opts is None:
+            return 0.0
+        try:
+            return float(getattr(opts, 'waypoint_tolerance', 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _request_log_considered(goal_request) -> bool:
+        """Whether considered-trajectory rows should be computed.
+
+        Gates per-segment ``_segment_considered_rows`` collection on the
+        request's ``PlanningOptions.log_considered_trajectories``.
+        """
+        opts = getattr(goal_request, 'options', None)
+        if opts is None:
+            return False
+        try:
+            return bool(getattr(opts, 'log_considered_trajectories', False))
+        except Exception:
+            return False
+
+    def _result_metadata(self, result=None, num_wp=None) -> dict:
+        """Metadata block for PlannerResult; includes per-segment insight.
+
+        ``selected_goal_index`` / ``selected_seed_index`` / ``waypoint_status``
+        ride here (plain int lists) so the node can copy them straight into
+        the service/action response; they are shaped by the child planner in
+        ``_plan_trajectory`` (one entry per ``goalsets[i]`` segment). The
+        candidate tally and gated ``considered`` rows ride here for the
+        ``PlanningStats`` block.
         """
         metadata = {
             'planner_type': self.get_planner_name(),
@@ -379,6 +579,20 @@ class SinglePlanner(TrajectoryPlanner):
         sel = getattr(self, '_selected_goal_indexes', None)
         if sel is not None:
             metadata['selected_goal_index'] = [int(x) for x in sel]
+        seeds = getattr(self, '_selected_seed_index', None)
+        if seeds is not None:
+            metadata['selected_seed_index'] = [int(x) for x in seeds]
+        status = getattr(self, '_waypoint_status', None)
+        if status is not None:
+            metadata['waypoint_status'] = [int(x) for x in status]
+        tally = getattr(self, '_candidate_tally', None)
+        if tally is not None:
+            metadata['candidates_generated'] = int(tally.get('generated', 0))
+            metadata['candidates_solved'] = int(tally.get('solved', 0))
+            metadata['candidates_pruned'] = int(tally.get('pruned', 0))
+        rows = getattr(self, '_considered_rows', None)
+        if rows:
+            metadata['considered'] = list(rows)
         return metadata
 
     def cancel(self):
@@ -440,6 +654,16 @@ class SinglePlanner(TrajectoryPlanner):
         # MultiPointPlanner) set this in _plan_trajectory; plan() reports it as
         # metadata['selected_goal_index'] so the node can fill the response.
         self._selected_goal_indexes = None
+        # Per-request insight metadata (rooted in PlanningOptions): winner seed
+        # + per-segment reached flags + candidate tally + the gated considered
+        # rows. Children set these in _plan_trajectory; plan() reports them via
+        # _result_metadata so the node can fill TrajectoryResult / PlanningStats.
+        self._selected_seed_index = None
+        self._waypoint_status = None
+        self._candidate_tally = None
+        self._considered_rows = None
+        self._waypoint_tolerance = self._request_waypoint_tolerance(goal_request)
+        self._log_considered = self._request_log_considered(goal_request)
 
         try:
             # Let child class generate the trajectory using MotionGen

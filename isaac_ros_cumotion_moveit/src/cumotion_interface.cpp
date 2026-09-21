@@ -108,9 +108,9 @@ void CumotionInterface::solve(
     return;
   }
 
-  if (!res.success) {
+  if (!res.response.success) {
     RCLCPP_ERROR_STREAM(
-      node_->get_logger(), "cuRobo planning failed: " << res.message);
+      node_->get_logger(), "cuRobo planning failed: " << res.response.message);
     response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
     planner_busy = false;
     return;
@@ -124,7 +124,7 @@ void CumotionInterface::solve(
   response.processing_time.push_back(
     std::chrono::duration<double>(plan_end - plan_start).count());
 
-  if (res.trajectory.empty()) {
+  if (res.response.trajectory.empty()) {
     RCLCPP_ERROR(node_->get_logger(), "cuRobo returned an empty trajectory");
     response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
     planner_busy = false;
@@ -137,7 +137,8 @@ void CumotionInterface::solve(
   moveit::core::RobotState robot_state(planning_scene->getRobotModel());
   moveit::core::robotStateMsgToRobotState(request.start_state, robot_state);
 
-  trajectory_msgs::msg::JointTrajectory jt = toJointTrajectory(res.trajectory, res.dt);
+  trajectory_msgs::msg::JointTrajectory jt = toJointTrajectory(
+    res.response.trajectory, res.response.dt);
   result_traj->setRobotTrajectoryMsg(robot_state, jt);
 
   response.trajectory.clear();

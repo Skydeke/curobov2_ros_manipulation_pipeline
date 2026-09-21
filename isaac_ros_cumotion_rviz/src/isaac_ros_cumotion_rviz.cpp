@@ -346,7 +346,7 @@ namespace isaac_ros_cumotion_rviz
       // one goalset per TargetDisplay, in display order -- matching what the
       // "generate" step sent is what lets the server reuse the cached plan
       // (_pending_plan_matches). buildGoalsets() warns when no display exists.
-      goal_request.goalsets = buildGoalsets();
+      goal_request.goal.goalsets = buildGoalsets();
 
       auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
 
@@ -446,7 +446,7 @@ namespace isaac_ros_cumotion_rviz
       }
 
       auto goal_request = std::make_shared<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request>();
-      goal_request->goalsets = goalsets;
+      goal_request->request.goalsets = goalsets;
 
       trajectory_generation_client_->async_send_request(goal_request,
         [this, on_done](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration>::SharedFuture future) {
@@ -454,8 +454,8 @@ namespace isaac_ros_cumotion_rviz
           std::string message;
           try {
             auto response = future.get();
-            success = response->success;
-            message = response->message;
+            success = response->response.success;
+            message = response->response.message;
           } catch (const std::exception & e) {
             message = e.what();
           }
@@ -569,7 +569,7 @@ namespace isaac_ros_cumotion_rviz
 
       isaac_ros_cumotion_interfaces::msg::Goalset gset;
       gset.poses.push_back(target_display_->getPose());
-      goal.goalsets.push_back(gset);
+      goal.goal.goalsets.push_back(gset);
 
       auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
       send_goal_options.goal_response_callback = std::bind(&RvizArgsPanel::goal_response_callback, this, std::placeholders::_1);

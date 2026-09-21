@@ -123,6 +123,18 @@ class ClassicPlanner(SinglePlanner):
                 )
 
         self._selected_goal_indexes = [self._select_goal_index(result)]
+        # Per-segment insight metadata (one entry for this single segment).
+        seg_ok = False
+        if result is not None:
+            succ = result.success
+            seg_ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+        seed_id = self._select_seed_index(result)
+        self._selected_seed_index = [seed_id]
+        self._waypoint_status = [self._segment_reached(
+            result, seed_id, self._waypoint_tolerance, seg_ok)]
+        self._candidate_tally = self._tally_candidates(result)
+        self._considered_rows = self._segment_considered_rows(
+            result, 0, self._selected_goal_indexes[0], self._log_considered)
         return result
 
     # _process_trajectory(): default (no-op) from SinglePlanner is fine.

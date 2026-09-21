@@ -39,13 +39,22 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_srvs.srv import Trigger
-from isaac_ros_cumotion_interfaces.srv import TrajectoryGeneration, SetPlanner, GetPlanners
+from isaac_ros_cumotion_interfaces.srv import (
+    TrajectoryGeneration,
+    TrajectoryGenerationBatch,
+    SetPlanner,
+    GetPlanners,
+)
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
 from isaac_ros_cumotion_interfaces.msg import (
     WorldCollisionContact,
     SelfCollisionContact,
     JointLimitViolation,
     StateCollisions,
+    PlanningStats,
+    ConsideredTrajectory,
+    TrajectoryGoal,
+    TrajectoryResult,
 )
 
 from curobo.types import DeviceCfg, JointState
@@ -208,7 +217,6 @@ class UnifiedPlannerNode(Node):
         self.robot_context = RobotContext(self)
 
         self.declare_parameter('planner_type', 'classic')
-        self.declare_parameter('max_attempts', 1)
         # torch.cuda.synchronize() bridges the executor's Python threads to the
         # GPU but blocks the calling thread every frame/kernel — off by default
         # so the depth callback and viz timers keep running while the GPU works
@@ -456,6 +464,12 @@ class UnifiedPlannerNode(Node):
             TrajectoryGeneration,
             f'{self.get_name()}/generate_trajectory',
             self.generate_trajectory_callback,
+            callback_group=MutuallyExclusiveCallbackGroup(),
+        )
+        self.trajectory_generation_batch_srv = self.create_service(
+            TrajectoryGenerationBatch,
+            f'{self.get_name()}/trajectory_generation_batch',
+            self.trajectory_generation_batch_callback,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
         self.set_planner_srv = self.create_service(
@@ -710,23 +724,71 @@ class UnifiedPlannerNode(Node):
     # ------------------------------------------------------------------
 
     def generate_trajectory_callback(self, request: TrajectoryGeneration, response):
+        """Single-request trajectory generation (preview workflow).
+
+        DRY schema: the core request rides in ``request.request``
+        (TrajectoryGoal) and the core result in ``response.response``
+        (TrajectoryResult); the srv-level ``start/end_state_collisions``
+        siblings mirror the embedded ones.
+        """
         try:
             planner = self.planner_manager.get_current_planner()
             if planner is None:
-                response.success = False
-                response.message = "No planner selected"
+                response.response = TrajectoryResult()
+                response.response.success = False
+                response.response.message = "No planner selected"
+                response.response.stats = self._empty_stats()
+                response.start_state_collisions = StateCollisions()
+                response.end_state_collisions = StateCollisions()
                 return response
 
-            ok, reason = self._check_goal_request(planner, request)
+            result = self._plan_trajectory_goal(planner, request.request)
+            response.response = result
+            # srv-level StateCollisions siblings mirror the embedded ones.
+            response.start_state_collisions = result.start_state_collisions
+            response.end_state_collisions = result.end_state_collisions
+
+            # Preview workflow: cache a successful open-loop trajectory so the
+            # execute action can reuse it (matching target) without recomputing.
+            # Reactive controllers have no trajectory to cache.
+            if result.success and planner.is_open_loop():
+                _, start_state = self._resolve_start_state(request.request)
+                self._store_pending_plan(start_state, request.request)
+            elif not planner.is_open_loop():
+                self._pending_plan = None
+            return response
+        except Exception as e:
+            self.get_logger().error(f"Trajectory generation error: {e}")
+            self.get_logger().error(traceback.format_exc())
+            response.response = TrajectoryResult()
+            response.response.success = False
+            response.response.message = f"Error: {e}"
+            response.response.stats = self._empty_stats()
+            response.start_state_collisions = StateCollisions()
+            response.end_state_collisions = StateCollisions()
+            return response
+
+    def _plan_trajectory_goal(self, planner, goal: TrajectoryGoal) -> TrajectoryResult:
+        """Plan one TrajectoryGoal and produce its TrajectoryResult.
+
+        Shared by the generate_trajectory srv and the trajectory_generation_batch
+        srv (one call per problem) so every surface serializes results
+        identically: stats + winner/per-waypoint insight are ALWAYS populated,
+        trajectory/dt on success (empty otherwise), StateCollisions diagnostics
+        on failure.
+        """
+        result_msg = TrajectoryResult()
+        try:
+            ok, reason = self._check_goal_request(planner, goal)
             if not ok:
-                response.success = False
-                response.message = reason
-                response.trajectory = []
-                response.dt = 0.0
-                return response
+                result_msg.success = False
+                result_msg.message = reason
+                result_msg.trajectory = []
+                result_msg.dt = 0.0
+                result_msg.stats = self._build_planning_stats(goal, {}, problems=1)
+                return result_msg
 
-            _, start_state = self._resolve_start_state(request)
-
+            _, start_state = self._resolve_start_state(goal)
             config = self._get_planner_config(planner)
             self._setup_planner(planner)
 
@@ -740,106 +802,283 @@ class UnifiedPlannerNode(Node):
             # (reset_shape from _prepare_goal_buffer), which races with the viz
             # timer if no lock is held (see _plan_lock docstring, 2026-09-11).
             with self._plan_lock():
-                result = planner.plan(start_state, request, config, self.robot_context)
+                result = planner.plan(start_state, goal, config, self.robot_context)
 
-            response.success = result.success
-            response.message = result.message
-
-            # Goalset winners ride back via metadata: one int per `goalsets`
-            # entry (the resolved candidate index in that segment; -1 marks a
-            # failed/empty segment so the response stays aligned with the request).
-            sel = (result.metadata or {}).get('selected_goal_index')
-            response.selected_goal_index = [int(x) for x in sel] if sel is not None else []
-
-            # Preview workflow: cache a successful open-loop trajectory so the
-            # execute action can reuse it (matching target) without recomputing.
-            # Reactive controllers have no trajectory to cache.
-            if result.success and planner.is_open_loop():
-                self._store_pending_plan(start_state, request)
-            elif not planner.is_open_loop():
-                self._pending_plan = None
-
-            if result.success and result.trajectory is not None:
-                traj = result.trajectory
-
-                # v2: MotionPlanner no longer exposes `interpolation_dt` directly —
-                # it lives on the trajopt solver config. Fall back to the node's
-                # configured interpolation_dt param (curobo_ros's own authority
-                # on dt) if we can't reach it, rather than an unrelated literal.
-                response.dt = self.get_parameter(
-                    'interpolation_dt').get_parameter_value().double_value
-                mp = getattr(planner, 'motion_planner', None)
-                trajopt = getattr(mp, 'trajopt_solver', None) if mp is not None else None
-                trajopt_cfg = getattr(trajopt, 'config', None)
-                dt_val = getattr(trajopt_cfg, 'interpolation_dt', None)
-                if dt_val is not None:
-                    response.dt = float(dt_val)
-
-                # v2: traj.position may be [B, T, D]; the trajectory message
-                # wants one JointState per waypoint (T messages, D floats each).
-                pos_tensor = traj.position
-                vel_tensor = traj.velocity
-                while pos_tensor.ndim > 2:
-                    pos_tensor = pos_tensor[0]
-                    if vel_tensor is not None:
-                        vel_tensor = vel_tensor[0]
-
-                trajectory_msgs = []
-                n_waypoints = pos_tensor.shape[0]
-                pos_list = pos_tensor.detach().cpu().tolist()
-                vel_list = (
-                    vel_tensor.detach().cpu().tolist()
-                    if vel_tensor is not None else None
-                )
-                for i in range(n_waypoints):
-                    waypoint = JointStateMsg()
-                    if hasattr(traj, 'joint_names') and traj.joint_names is not None:
-                        waypoint.name = list(traj.joint_names)
-                    waypoint.position = pos_list[i]
-                    if vel_list is not None:
-                        waypoint.velocity = vel_list[i]
-                    trajectory_msgs.append(waypoint)
-                response.trajectory = trajectory_msgs
-
-                # Clear diagnostics on success.
-                response.start_state_collisions = StateCollisions()
-                response.end_state_collisions = StateCollisions()
-
-                self.get_logger().info(
-                    f"Planning succeeded: {result.message} "
-                    f"(trajectory: {n_waypoints} waypoints, dt: {response.dt}s)"
-                )
-            else:
-                response.trajectory = []
-                response.dt = 0.0
-                if result.success:
-                    self.get_logger().info(f"Planning succeeded: {result.message}")
-                else:
-                    goal_joints = self._goalset_joint_target(request)
-                    # Structured diagnostics ride on the response; log the same
-                    # data as a readable block instead of a one-line text wall
-                    # (and keep response.message compact — the fields carry the
-                    # collision detail for clients that read them).
-                    self._fill_collision_diagnostics(
-                        response, planner=planner,
-                        start_joints=self._diagnostic_joints(start_state),
-                        goal_joints=list(goal_joints) if goal_joints else None)
-                    self.get_logger().error(
-                        f"Planning failed: {response.message}\n"
-                        + self._format_collision_feedback(
-                            response.start_state_collisions,
-                            response.end_state_collisions))
-
-            return response
+            return self._fill_result_insight(
+                result_msg, planner, goal, result, start_state)
 
         except Exception as e:
             self.get_logger().error(f"Trajectory generation error: {e}")
             self.get_logger().error(traceback.format_exc())
-            response.success = False
-            response.message = f"Error: {e}"
-            response.trajectory = []
-            response.dt = 0.0
+            result_msg.success = False
+            result_msg.message = f"Error: {e}"
+            result_msg.trajectory = []
+            result_msg.dt = 0.0
+            result_msg.start_state_collisions = StateCollisions()
+            result_msg.end_state_collisions = StateCollisions()
+            result_msg.stats = self._build_planning_stats(goal, {}, problems=1)
+            return result_msg
+
+    def trajectory_generation_batch_callback(self, request, response):
+        """Batch trajectory generation: plan every problem, rollup total_stats.
+
+        Always produces one ``responses[i]`` (TrajectoryResult) per problem —
+        success or failure — and a cross-problem ``total_stats`` rollup
+        (always populated once dispatched, even when every problem fails).
+        """
+        try:
+            planner = self.planner_manager.get_current_planner()
+            if planner is None:
+                response.success = False
+                response.error_msg = "No planner selected"
+                response.responses = []
+                response.total_stats = self._empty_stats()
+                return response
+
+            response.responses = [
+                self._plan_trajectory_goal(planner, g)
+                for g in (getattr(request, 'requests', None) or [])
+            ]
+            response.success = all(r.success for r in response.responses)
+            response.error_msg = ""
+            response.total_stats = self._rollup_stats(response.responses)
+            self.get_logger().info(
+                f"Batch trajectory generation: {len(response.responses)} "
+                f"problem(s), success={response.success} "
+                f"(total_stats: problems={response.total_stats.problems}, "
+                f"candidates generated={response.total_stats.candidates_generated}, "
+                f"solved={response.total_stats.candidates_solved}, "
+                f"pruned={response.total_stats.candidates_pruned}, "
+                f"waypoints={response.total_stats.waypoints_planned})"
+            )
             return response
+        except Exception as e:
+            self.get_logger().error(f"Batch trajectory generation error: {e}")
+            self.get_logger().error(traceback.format_exc())
+            response.success = False
+            response.error_msg = f"Error: {e}"
+            response.responses = []
+            response.total_stats = self._empty_stats()
+            return response
+
+    # ------------------------------------------------------------------
+    # Result → TrajectoryResult / PlanningStats serialization (DRY schema)
+    # ------------------------------------------------------------------
+
+    def _fill_result_insight(self, result_msg: TrajectoryResult, planner, goal,
+                             result, start_state, *, fill_arrays: bool = True
+                             ) -> TrajectoryResult:
+        """Populate a TrajectoryResult from a fresh PlannerResult.
+
+        Writes success/message, the winner goal+seed / per-waypoint status
+        arrays, always-populated stats (with gated considered rows) and the
+        StateCollisions diagnostics (cleared on success, populated on failure).
+        ``fill_arrays`` toggles the trajectory/dt serialization — kept off for
+        the execute action, which only executes the plan.
+        """
+        meta = result.metadata or {}
+        self._fill_insight_fields(
+            result_msg, goal, meta, planner,
+            success=result.success, message=result.message,
+            start_state=start_state)
+
+        if not result.success:
+            self.get_logger().error(
+                f"Planning failed: {result.message}\n"
+                + self._format_collision_feedback(
+                    result_msg.start_state_collisions,
+                    result_msg.end_state_collisions))
+            return result_msg
+
+        if fill_arrays and result.trajectory is not None:
+            waypoints, dt, n = self._result_trajectory(planner, result)
+            result_msg.trajectory = waypoints
+            result_msg.dt = dt
+            result_msg.start_state_collisions = StateCollisions()
+            result_msg.end_state_collisions = StateCollisions()
+            self.get_logger().info(
+                f"Planning succeeded: {result.message} "
+                f"(trajectory: {n} waypoints, dt: {dt}s)")
+        else:
+            self.get_logger().info(f"Planning succeeded: {result.message}")
+        return result_msg
+
+    def _fill_insight_fields(self, result_msg: TrajectoryResult, goal,
+                             meta: dict, planner, *, success: bool,
+                             message: str, start_state=None) -> TrajectoryResult:
+        """Write winner arrays + stats + collision diagnostics from ``meta``.
+
+        Shared by the fresh-plan and cached-preview-execute paths: every field
+        (except trajectory/dt, filled by the caller) is written from a metadata
+        block whose keys match the planner layer's ``_result_metadata``.
+        """
+        result_msg.success = bool(success)
+        result_msg.message = message
+
+        sel = meta.get('selected_goal_index')
+        result_msg.selected_goal_index = [int(x) for x in sel] if sel is not None else []
+        seeds = meta.get('selected_seed_index')
+        result_msg.selected_seed_index = [int(x) for x in seeds] if seeds is not None else []
+        status = meta.get('waypoint_status')
+        result_msg.waypoint_status = [int(x) for x in status] if status is not None else []
+
+        result_msg.stats = self._build_planning_stats(goal, meta, problems=1)
+
+        if not success:
+            goal_joints = self._goalset_joint_target(goal)
+            self._fill_collision_diagnostics(
+                result_msg, planner=planner,
+                start_joints=self._diagnostic_joints(start_state),
+                goal_joints=list(goal_joints) if goal_joints else None)
+        return result_msg
+
+    def _result_trajectory(self, planner, result):
+        """Flip a successful PlannerResult trajectory into ([JointState], dt, n).
+
+        Shared by every surface so the trajectory serialization (interpolated
+        [B, T, D] → one JointState per waypoint, dt from the planner's trajopt
+        config) stays identical across the single srv, batch srv, and action.
+        Returns ``([], 0.0, 0)`` when the result carries no trajectory.
+        """
+        traj = result.trajectory
+        if traj is None or getattr(traj, 'position', None) is None:
+            return [], 0.0, 0
+        dt = self.get_parameter('interpolation_dt').get_parameter_value().double_value
+        mp = getattr(planner, 'motion_planner', None)
+        trajopt = getattr(mp, 'trajopt_solver', None) if mp is not None else None
+        trajopt_cfg = getattr(trajopt, 'config', None)
+        dt_val = getattr(trajopt_cfg, 'interpolation_dt', None)
+        if dt_val is not None:
+            dt = float(dt_val)
+
+        pos_tensor = traj.position
+        vel_tensor = traj.velocity
+        while pos_tensor.ndim > 2:
+            pos_tensor = pos_tensor[0]
+            if vel_tensor is not None:
+                vel_tensor = vel_tensor[0]
+
+        n_waypoints = pos_tensor.shape[0]
+        pos_list = pos_tensor.detach().cpu().tolist()
+        vel_list = (
+            vel_tensor.detach().cpu().tolist()
+            if vel_tensor is not None else None
+        )
+        trajectory_msgs = []
+        for i in range(n_waypoints):
+            waypoint = JointStateMsg()
+            if hasattr(traj, 'joint_names') and traj.joint_names is not None:
+                waypoint.name = list(traj.joint_names)
+            waypoint.position = pos_list[i]
+            if vel_list is not None:
+                waypoint.velocity = vel_list[i]
+            trajectory_msgs.append(waypoint)
+        return trajectory_msgs, dt, n_waypoints
+
+    def _build_planning_stats(self, goal, meta: dict, problems: int = 1) -> PlanningStats:
+        """PlanningStats for one problem — ALWAYS populated.
+
+        ``waypoints_planned`` = the number of goal segments solved (one per
+        ``goalsets`` entry); the candidate accounting and considered rows ride
+        the planner metadata when reported (considered rows gated on the
+        request's ``log_considered_trajectories``).
+        """
+        stats = PlanningStats()
+        stats.problems = int(problems)
+        stats.waypoints_planned = len(getattr(goal, 'goalsets', None) or [])
+        stats.candidates_generated = int(meta.get('candidates_generated', 0))
+        stats.candidates_solved = int(meta.get('candidates_solved', 0))
+        stats.candidates_pruned = int(meta.get('candidates_pruned', 0))
+        if self._log_considered_requested(goal) and meta.get('considered'):
+            for row in meta['considered']:
+                stats.considered.append(self._to_considered_trajectory(row))
+        return stats
+
+    @staticmethod
+    def _rollup_stats(responses) -> PlanningStats:
+        """Cross-problem PlanningStats rollup for the batch response.
+
+        Sums the scalar counts across problems and concatenates the considered
+        rows, preserving each row's per-problem ``problem`` attribution.
+        """
+        total = PlanningStats()
+        total.problems = len(responses)
+        total.candidates_generated = sum(
+            int(r.stats.candidates_generated) for r in responses)
+        total.candidates_solved = sum(int(r.stats.candidates_solved) for r in responses)
+        total.candidates_pruned = sum(int(r.stats.candidates_pruned) for r in responses)
+        total.waypoints_planned = sum(int(r.stats.waypoints_planned) for r in responses)
+        for r in responses:
+            total.considered.extend(r.stats.considered)
+        return total
+
+    @staticmethod
+    def _empty_stats() -> PlanningStats:
+        """Truly-empty PlanningStats (no problems were dispatched)."""
+        return PlanningStats()
+
+    @staticmethod
+    def _log_considered_requested(goal) -> bool:
+        """Whether the request asked for the considered-trajectory rows."""
+        opts = getattr(goal, 'options', None)
+        if opts is None:
+            return False
+        try:
+            return bool(getattr(opts, 'log_considered_trajectories', False))
+        except Exception:
+            return False
+
+    def _to_considered_trajectory(self, row) -> ConsideredTrajectory:
+        """Map one planner metadata 'considered' row onto ConsideredTrajectory.
+
+        Defensive: every field is read via ``.get()`` so a row that lacks a
+        whole-task-only measurement (``waypoint_cost`` / ``path_length`` /
+        ``clearance`` — the per-segment machinery provides none) serializes as
+        0 instead of raising.
+        """
+        if isinstance(row, ConsideredTrajectory):
+            return row
+        c = ConsideredTrajectory()
+        c.problem = int(row.get('problem', 0))
+        c.segment = int(row.get('segment', 0))
+        c.goalset_candidate = int(row.get('goalset_candidate', 0))
+        c.seed = int(row.get('seed', 0))
+        c.success = bool(row.get('success', False))
+        c.cost = float(row.get('cost', 0.0))
+        c.waypoint_cost = float(row.get('waypoint_cost', 0.0))
+        c.path_length = float(row.get('path_length', 0.0))
+        c.clearance = float(row.get('clearance', 0.0))
+        c.max_waypoint_error = float(row.get('max_waypoint_error', 0.0))
+        c.solve_time = float(row.get('solve_time', 0.0))
+        return c
+
+    @staticmethod
+    def _result_meta_from_planner(planner) -> dict:
+        """Planner-layer metadata block from the planner's CURRENT per-plan attrs.
+
+        Used when the execute action reuses a cached preview plan: the
+        planner's selected-index / status / tally attrs still hold the values
+        the preview plan() call wrote (the signature matched, so they describe
+        exactly the plan being executed).
+        """
+        meta = {}
+        for key, attr in (
+            ('selected_goal_index', '_selected_goal_indexes'),
+            ('selected_seed_index', '_selected_seed_index'),
+            ('waypoint_status', '_waypoint_status'),
+        ):
+            val = getattr(planner, attr, None)
+            if val is not None:
+                meta[key] = list(val)
+        tally = getattr(planner, '_candidate_tally', None)
+        if tally:
+            meta['candidates_generated'] = int(tally.get('generated', 0))
+            meta['candidates_solved'] = int(tally.get('solved', 0))
+            meta['candidates_pruned'] = int(tally.get('pruned', 0))
+        considered = getattr(planner, '_considered_rows', None)
+        if considered:
+            meta['considered'] = list(considered)
+        return meta
 
     @staticmethod
     def _goalset_joint_target(request):
@@ -1014,17 +1253,23 @@ class UnifiedPlannerNode(Node):
         execute it to completion (terminates on its own).
         Reactive: set the goal then servo continuously; terminates only on cancel
         or error, signalling `on_target` through the action feedback.
+
+        DRY schema: ``goal_handle.request`` is SendTrajectory.Goal wrapping the
+        core TrajectoryGoal (``.goal``); the core result rides in
+        ``result_msg.result`` (TrajectoryResult).
         """
         result_msg = SendTrajectory.Result()
         try:
             planner = self.planner_manager.get_current_planner()
             if planner is None:
-                result_msg.success = False
-                result_msg.message = "No planner selected"
+                result_msg.result = TrajectoryResult()
+                result_msg.result.success = False
+                result_msg.result.message = "No planner selected"
+                result_msg.result.stats = self._empty_stats()
                 goal_handle.abort()
                 return result_msg
 
-            goal = goal_handle.request
+            goal = goal_handle.request.goal
             return self._execute_goal(goal_handle, goal, planner, result_msg)
         finally:
             with self._goal_lock:
@@ -1035,8 +1280,10 @@ class UnifiedPlannerNode(Node):
             ok, reason = self._check_goal_request(planner, goal)
             if not ok:
                 self.get_logger().error(f"Invalid execution goal: {reason}")
-                result_msg.success = False
-                result_msg.message = f"Invalid goal: {reason}"
+                result_msg.result = TrajectoryResult()
+                result_msg.result.success = False
+                result_msg.result.message = f"Invalid goal: {reason}"
+                result_msg.result.stats = self._build_planning_stats(goal, {}, problems=1)
                 goal_handle.abort()
                 return result_msg
 
@@ -1044,8 +1291,9 @@ class UnifiedPlannerNode(Node):
             config = self._get_planner_config(planner)
             self._setup_planner(planner)
 
+            result = None
             if planner.is_open_loop():
-                reuse = (bool(getattr(goal, 'allow_cached', True))
+                reuse = (bool(getattr(goal_handle.request, 'allow_cached', True))
                          and self._pending_plan_matches(start_state, goal))
                 if reuse:
                     self.get_logger().info("Reusing cached (pre-planned) trajectory")
@@ -1057,18 +1305,16 @@ class UnifiedPlannerNode(Node):
                     with self._plan_lock():
                         result = planner.plan(start_state, goal, config, self.robot_context)
                     if not result.success:
-                        goal_joints = self._goalset_joint_target(goal)
-                        self._fill_collision_diagnostics(
-                            result_msg, planner=planner,
-                            start_joints=self._diagnostic_joints(start_state),
-                            goal_joints=list(goal_joints) if goal_joints else None)
+                        self._fill_result_insight(
+                            result_msg.result, planner, goal, result, start_state,
+                            fill_arrays=False)
                         self.get_logger().error(
                             f"Planning failed in execute path: {result.message}\n"
                             + self._format_collision_feedback(
-                                result_msg.start_state_collisions,
-                                result_msg.end_state_collisions))
-                        result_msg.success = False
-                        result_msg.message = f"Planning failed: {result.message}"
+                                result_msg.result.start_state_collisions,
+                                result_msg.result.end_state_collisions))
+                        result_msg.result.success = False
+                        result_msg.result.message = f"Planning failed: {result.message}"
                         goal_handle.abort()
                         return result_msg
                 self._pending_plan = None  # consumed
@@ -1078,31 +1324,45 @@ class UnifiedPlannerNode(Node):
                 self.get_logger().info(f"Planning with {planner.get_planner_name()}")
                 result = planner.plan(start_state, goal, config, self.robot_context)
                 if not result.success:
-                    self._fill_collision_diagnostics(
-                        result_msg, planner=planner,
-                        start_joints=self._diagnostic_joints(start_state))
+                    self._fill_result_insight(
+                        result_msg.result, planner, goal, result, start_state,
+                        fill_arrays=False)
                     self.get_logger().error(
                         f"Planning failed in execute path: {result.message}\n"
                         + self._format_collision_feedback(
-                            result_msg.start_state_collisions,
-                            result_msg.end_state_collisions))
-                    result_msg.success = False
-                    result_msg.message = f"Planning failed: {result.message}"
+                            result_msg.result.start_state_collisions,
+                            result_msg.result.end_state_collisions))
+                    result_msg.result.success = False
+                    result_msg.result.message = f"Planning failed: {result.message}"
                     goal_handle.abort()
                     return result_msg
+
+            if result is not None:
+                # Winner-per-waypoint insight + stats for the fresh plan.
+                self._fill_result_insight(
+                    result_msg.result, planner, goal, result, start_state,
+                    fill_arrays=False)
+            else:
+                # Reused a matching cached preview: report the planner's own
+                # (preview-plan) insight fields.
+                meta = self._result_meta_from_planner(planner)
+                self._fill_insight_fields(
+                    result_msg.result, goal, meta, planner,
+                    success=True, message="Execution completed",
+                    start_state=start_state)
 
             self.get_logger().info(f"Executing with {planner.get_planner_name()}")
             success = planner.execute(self.robot_context, goal_handle)
 
             # Cancel takes precedence over the planner's return value.
             if goal_handle.is_cancel_requested:
-                result_msg.success = False
-                result_msg.message = "Execution canceled"
+                result_msg.result.success = False
+                result_msg.result.message = "Execution canceled"
                 goal_handle.canceled()
                 return result_msg
 
-            result_msg.success = bool(success)
-            result_msg.message = "Execution completed" if success else "Execution failed"
+            result_msg.result.success = bool(success)
+            result_msg.result.message = "Execution completed" if success else "Execution failed"
             if success:
                 goal_handle.succeed()
             else:
@@ -1112,8 +1372,10 @@ class UnifiedPlannerNode(Node):
         except Exception as e:
             self.get_logger().error(f"Execution error: {e}")
             self.get_logger().error(traceback.format_exc())
-            result_msg.success = False
-            result_msg.message = f"Error: {e}"
+            result_msg.result = TrajectoryResult()
+            result_msg.result.success = False
+            result_msg.result.message = f"Error: {e}"
+            result_msg.result.stats = self._build_planning_stats(goal, {}, problems=1)
             if goal_handle.is_active:
                 goal_handle.abort()
             return result_msg
@@ -1257,6 +1519,9 @@ class UnifiedPlannerNode(Node):
                     f"{planner_name}: requires exactly one goalset entry with a "
                     f"single pose, got {len(goalsets)} set(s) of sizes {sizes}"
                 )
+            options_reason = self._validate_planning_options(planner, request)
+            if options_reason is not None:
+                return False, options_reason
             return True, None
 
         max_goalset = self.get_parameter(
@@ -1267,7 +1532,84 @@ class UnifiedPlannerNode(Node):
                 f"max_goalset={max_goalset} (per-segment cap; the goalset buffer "
                 f"is sized at solver build)"
             )
+        options_reason = self._validate_planning_options(planner, request)
+        if options_reason is not None:
+            return False, options_reason
         return True, None
+
+    def _validate_planning_options(self, planner, request) -> str | None:
+        """Validate the request's PlanningOptions; None when acceptable.
+
+        DRY contract (PlanningOptions = num_seeds / waypoint_tolerance /
+        exact_joints / log_considered_trajectories):
+
+        - Classic planners and every non-open-loop (reactive) controller carry
+          ZERO options: any non-default value is rejected verbatim.
+        - Per-segment open-loop planners (multi-point / joint-space) accept only
+          num_seeds == 0 (no multi-seed axis in the per-segment machinery),
+          waypoint_tolerance >= 0, and exact_joints drawn from the robot's
+          published joint names.
+
+        Returns a human-readable rejection reason string, or None when the
+        options are acceptable (missing/default options always pass).
+        """
+        opts = getattr(request, 'options', None)
+        if opts is None or self._options_are_default(opts):
+            return None
+        planner_name = planner.get_planner_name()
+        if type(planner).__name__ == 'ClassicPlanner' or not planner.is_open_loop():
+            return (
+                f"{planner_name}: planning options must stay at defaults "
+                f"(classic/reactive planners carry zero options); got num_seeds="
+                f"{opts.num_seeds}, waypoint_tolerance={opts.waypoint_tolerance}, "
+                f"exact_joints={list(getattr(opts, 'exact_joints', None) or [])}, "
+                f"log_considered_trajectories="
+                f"{opts.log_considered_trajectories}"
+            )
+        if int(getattr(opts, 'num_seeds', 0)) != 0:
+            return (
+                f"{planner_name}: num_seeds must be 0 (default) — the "
+                f"per-segment open-loop planners have no multi-seed axis"
+            )
+        tol = float(getattr(opts, 'waypoint_tolerance', 0.0))
+        if tol < 0:
+            return (
+                f"{planner_name}: waypoint_tolerance must be >= 0, got {tol}"
+            )
+        exact = list(getattr(opts, 'exact_joints', None) or [])
+        if exact:
+            try:
+                known = set(self.robot_context.get_joint_name())
+            except Exception:
+                known = None
+            if known is not None:
+                unknown = [j for j in exact if j not in known]
+                if unknown:
+                    return (
+                        f"{planner_name}: exact_joints contains unknown joint(s) "
+                        f"{unknown}; known joints are {sorted(known)}"
+                    )
+        return None
+
+    @staticmethod
+    def _options_are_default(opts) -> bool:
+        """True when opts is at defaults (or missing) — nothing to enforce.
+
+        All four PlanningOptions fields at their msg defaults: num_seeds == 0
+        (node/planner default), waypoint_tolerance == 0.0 (no tolerance-based
+        waypoint gating), no exact_joints, log_considered_trajectories off.
+        """
+        if opts is None:
+            return True
+        try:
+            return (
+                int(getattr(opts, 'num_seeds', 0)) == 0
+                and float(getattr(opts, 'waypoint_tolerance', 0.0)) == 0.0
+                and not (getattr(opts, 'exact_joints', None) or [])
+                and not bool(getattr(opts, 'log_considered_trajectories', False))
+            )
+        except Exception:
+            return True
 
     def _setup_planner(self, planner):
         # Held under gpu_lock, same invariant as every other graph-capturing path
@@ -1462,10 +1804,11 @@ class UnifiedPlannerNode(Node):
     def _get_planner_config(self, planner) -> dict:
         if isinstance(planner, SinglePlanner):
             # plan_pose only honors max_attempts in v2 (timeout / time_dilation
-            # are not solver args anymore — speed lives in the robot YAML cspace).
-            return {
-                'max_attempts': self.get_parameter('max_attempts').value,
-            }
+            # are not solver args anymore — speed lives in the robot YAML
+            # cspace). max_attempts was removed from the node; the planners
+            # fall back to their own default (config.get('max_attempts', 1))
+            # when the key is absent.
+            return {}
         if isinstance(planner, ReactiveController):
             return {
                 'convergence_threshold': self.get_parameter('convergence_threshold').value,
@@ -1555,11 +1898,22 @@ class UnifiedPlannerNode(Node):
             [float(x) for x in (getattr(g, 'target_joint_positions', None) or [])]
             for g in (getattr(req, 'goalsets', None) or [])
         ]
+        # Planning options shape the plan (waypoint_tolerance gates waypoint
+        # status, log_considered_trajectories gates the considered rows), so a
+        # cache reuse must not cross an options boundary. Sorted exact_joints so
+        # the signature ignores ordering.
+        opts = getattr(req, 'options', None)
         return {
             'start': start,
             'goalsets': goalsets,
             'allowed_collisions': allowed,
             'target_joints': joints,
+            'options': (
+                int(getattr(opts, 'num_seeds', 0)),
+                float(getattr(opts, 'waypoint_tolerance', 0.0)),
+                tuple(sorted(getattr(opts, 'exact_joints', None) or [])),
+                bool(getattr(opts, 'log_considered_trajectories', False)),
+            ) if opts is not None else (0, 0.0, (), False),
         }
 
     @staticmethod
@@ -1574,6 +1928,11 @@ class UnifiedPlannerNode(Node):
         return (1.0 - abs(dot)) < ori_tol
 
     def _signatures_match(self, a, b, pos_tol=1e-3, ori_tol=1e-2, joint_tol=1e-3) -> bool:
+        # Options must be identical (exact tuple equality); a signature stored
+        # before options were part of the signature has no key -> None != a
+        # tuple, so that cache never replays across the migration boundary.
+        if a.get('options') != b.get('options'):
+            return False
         if len(a['start']) != len(b['start']) or any(
                 abs(x - y) > joint_tol for x, y in zip(a['start'], b['start'])):
             return False

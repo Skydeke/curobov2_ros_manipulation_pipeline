@@ -156,15 +156,15 @@ bool CumotionServiceClient::plan(
         have_start = false;
         break;
       }
-      req.start_pose.name.push_back(name);
-      req.start_pose.position.push_back(
+      req.request.start_pose.name.push_back(name);
+      req.request.start_pose.position.push_back(
         js.position[static_cast<std::size_t>(std::distance(js.name.begin(), it))]);
     }
-    if (have_start && !req.start_pose.name.empty()) {
-      req.start_pose.header = request.start_state.joint_state.header;
+    if (have_start && !req.request.start_pose.name.empty()) {
+      req.request.start_pose.header = request.start_state.joint_state.header;
     } else {
-      req.start_pose.name.clear();
-      req.start_pose.position.clear();
+      req.request.start_pose.name.clear();
+      req.request.start_pose.position.clear();
     }
   }
 
@@ -211,7 +211,7 @@ bool CumotionServiceClient::plan(
     }
     isaac_ros_cumotion_interfaces::msg::Goalset joint_gset;
     joint_gset.target_joint_positions = std::move(joint_positions);
-    req.goalsets.push_back(joint_gset);
+    req.request.goalsets.push_back(joint_gset);
   } else if (!constraint.position_constraints.empty() || !constraint.orientation_constraints.empty()) {
     // POSE goal -> classic (Cartesian) planner by default.
     // Collect waypoints from the position constraints the way MoveIt's
@@ -265,7 +265,7 @@ bool CumotionServiceClient::plan(
     for (const auto & wp : waypoints) {
       isaac_ros_cumotion_interfaces::msg::Goalset gset;
       gset.poses.push_back(wp);
-      req.goalsets.push_back(gset);
+      req.request.goalsets.push_back(gset);
     }
     if (!setPlanner(planner_type, planner_msg)) {
       RCLCPP_ERROR_STREAM(node_->get_logger(), "setPlanner failed: " << planner_msg);
@@ -286,7 +286,7 @@ bool CumotionServiceClient::plan(
     return false;
   }
   res = *res_ptr;
-  return res.success;
+  return res.response.success;
 }
 
 bool CumotionServiceClient::syncPlanningScene(

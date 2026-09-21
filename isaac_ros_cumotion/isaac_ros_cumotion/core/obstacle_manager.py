@@ -218,19 +218,6 @@ class ObstacleManager:
         # dilated seed band) or "scatter" (exactly one ESDF voxel at the TSDF
         # surface, but the ESDF launch runs eager - not graph-captured).
         self._mapper_seeding_method = self._declare_param('mapper_seeding_method', 'gather')
-        # Post-process the computed ESDF: flip any free cell whose down neighbour
-        # and all four horizontal neighbours are occupied — a hole in an
-        # otherwise-solid, horizontally-extended surface. The ESDF sign kernel
-        # marks every cell whose TSDF voxel is absent/low-weight as FREE
-        # (compute_esdf_from_min_tsdf_kernel writes +edt_dist when the sampled
-        # SDF is infinite), so tabletop cells the camera never integrated
-        # (masked shadow, depth hole, surface-band sign speckle) become free
-        # "caves". This pass rewrites them to the occupied value from below.
-        # The up neighbour is deliberately NOT required to be occupied, so
-        # genuine open-top cavities (a cup, a box opening) keep their free
-        # column — only cells embedded in a solid surface are sealed.
-        self._mapper_esdf_seal_tabletop_holes = self._declare_param(
-            'mapper_esdf_seal_tabletop_holes', True)
         # Min total TSDF weight before a block is recycled as empty.
         self._mapper_minimum_tsdf_weight = self._declare_param('mapper_minimum_tsdf_weight', 0.1)
         # Per-camera support pixels kept per visible block for RGB/feature
@@ -614,10 +601,6 @@ class ObstacleManager:
         # here rather than crash the whole node mid-plan.
         if not self._inspect_esdf(vg):
             return False
-        # Close free "caves" (never-integrated cells are forced free by the ESDF
-        # sign kernel) that poke through an otherwise-solid surface.
-        if self._mapper_esdf_seal_tabletop_holes:
-            self._seal_tabletop_holes(vg)
         # Single perception voxel grid in the Scene (replaces any previous one).
         self.scene.voxel = [vg]
         self._esdf_voxel_name = vg.name
@@ -731,69 +714,6 @@ class ObstacleManager:
             self.node.get_logger().warn(
                 f"ESDF inspection skipped (error: {e})", throttle_duration_sec=5.0)
             return True
-
-    def _seal_tabletop_holes(self, vg) -> int:
-        """Close free "caves" poking through an otherwise-solid surface.
-
-        A free (sdf > 0) ESDF cell whose down neighbour and all four horizontal
-        neighbours are occupied marks a hole in a horizontally-extended surface
-        (a tabletop): the camera never integrated that cell — robot-masked
-        shadow, a depth hole, or a surface-band sign speckle. CuRobo's sign
-        kernel forces any cell with an absent/low-weight TSDF voxel to FREE
-        (``compute_esdf_from_min_tsdf_kernel`` writes ``+edt_dist`` when the
-        sampled SDF is ~1e10), so those cells read as passable "caves". This
-        pass rewrites them to the occupied value of the cell directly below.
-
-        The up neighbour is deliberately ignored: a surface hole sits at the
-        bottom of a free column, so its up neighbour is free even though the
-        cell is embedded in solid. Requiring all 6 would seal nothing useful;
-        requiring only `down + 4 horizontal` keeps the free column above/inside
-        genuine open-top cavities (a cup, a box opening) intact — cells there
-        do not have all four horizontal neighbours occupied below the rim. Some
-        shallow cavity bottoms can still seal (the cell just above a cup floor
-        is surrounded by walls) — acceptable since cavities at this voxel scale
-        are handled conservatively (occupied).
-
-        Far-field free space is untouched (its neighbours are free too), cells
-        at the grid border are skipped (no confirmation), and the ESDF values
-        actually seeded in the far field are never modified. The pass mutates
-        ``vg.feature_tensor`` (the integrator's live ``_dist_field``), which the
-        next ``compute_esdf()`` fully rewrites, so it is safe between refreshes
-        and against CUDA-graph replay.
-
-        Returns the number of cells rewritten.
-        """
-        ft = getattr(vg, 'feature_tensor', None)
-        if ft is None or ft.ndim != 3:
-            return 0
-        nx, ny, nz = ft.shape
-        if nx < 3 or ny < 3 or nz < 3:
-            return 0
-        occ = ft <= 0.0
-        pos = ft > 0.0
-
-        # Neighbour-occupied masks, edge-padded with False (unconfirmed).
-        down = torch.zeros_like(occ)        # -Z (dim 2): cell z's z-1 neighbour
-        down[:, :, 1:] = occ[:, :, :-1]
-        west = torch.zeros_like(occ)        # -Y (dim 1)
-        west[:, 1:, :] = occ[:, :-1, :]
-        east = torch.zeros_like(occ)        # +Y (dim 1)
-        east[:, :ny - 1, :] = occ[:, 1:, :]
-        south = torch.zeros_like(occ)       # -X (dim 0)
-        south[1:, :, :] = occ[:nx - 1, :, :]
-        north = torch.zeros_like(occ)       # +X (dim 0)
-        north[:nx - 1, :, :] = occ[1:, :, :]
-
-        enclosed = pos & down & west & east & south & north
-        n = int(enclosed.sum().item())
-        if n > 0:
-            down_val = torch.zeros_like(ft)
-            down_val[:, :, 1:] = ft[:, :, :-1]
-            ft[enclosed] = down_val[enclosed]
-            self.node.get_logger().info(
-                f"Sealed {n} tabletop ESDF cave cell(s) into occupied",
-                throttle_duration_sec=10.0)
-        return n
 
     # ---- Services ----
 
