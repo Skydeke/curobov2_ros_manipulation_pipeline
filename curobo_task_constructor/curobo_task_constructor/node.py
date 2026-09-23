@@ -60,11 +60,6 @@ from curobo_task_constructor.graph.spec import StageSpec
 from curobo_task_constructor.robot import CuroboServerInterface
 from curobo_task_constructor.robot.curobo import _SERVICE_TIMEOUT
 
-#: Default wall-clock budget for the planning phase of one task (see the
-#: ``plan_timeout`` parameter). 180 s is ample for a full pick task (the
-#: observed plan phase is ~15 s) while still bounding a wedged solve.
-_PLAN_TIMEOUT = 180.0
-
 #: solution_id carried by failed attempts (uint32 field; 0xFFFFFFFF = none).
 NO_SOLUTION_ID = 0xFFFFFFFF
 
@@ -83,14 +78,6 @@ class TaskConstructorNode(rclpy.node.Node):
         self.declare_parameter("planner", -1)
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("service_timeout", _SERVICE_TIMEOUT)
-        #: Wall-clock budget (s) for the whole task PLANNING phase. Every
-        #: stage's robot.plan() call already has the per-call service_timeout
-        #: budget, but the executor's compute loop can outlive those (reconnect
-        #: re-plans, stall before the first root solution): while it runs, the
-        #: action server holds _solve_in_progress and rejects every new task
-        #: goal ("another solve is in progress"). This bounds that window so a
-        #: wedged solve cannot park the node for minutes.
-        self.declare_parameter("plan_timeout", _PLAN_TIMEOUT)
 
         self._robot_config_path = str(
             self.get_parameter("robot_config_path").value)
@@ -98,7 +85,6 @@ class TaskConstructorNode(rclpy.node.Node):
             self.get_parameter("joint_states_topic").value)
         planner_param = int(self.get_parameter("planner").value)
         service_timeout = float(self.get_parameter("service_timeout").value)
-        self._plan_timeout = float(self.get_parameter("plan_timeout").value)
 
         #: newest /joint_states reading, consumed by the adapter's
         #: get_current_joint_state (CurrentState seeds the task from here).
@@ -274,7 +260,7 @@ class TaskConstructorNode(rclpy.node.Node):
         self._publish_task_description(executor)
         self._publish_feedback("planning", "", hint="task accepted")
 
-        ok = executor.plan(deadline=self._plan_timeout)
+        ok = executor.plan()
         self._publish_stage_statistics(executor)
 
         if not ok:

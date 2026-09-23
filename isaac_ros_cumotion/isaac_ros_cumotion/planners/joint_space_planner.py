@@ -9,6 +9,8 @@ v2 notes:
   enable_graph/enable_opt — those tunables live on the trajopt YAML.
 """
 
+import time
+
 import torch
 from curobo.types import JointState
 
@@ -63,6 +65,8 @@ class JointSpacePlanner(SinglePlanner):
                 f"Invalid joint positions (NaN/Inf): {goal_joint_positions}"
             )
 
+        start_pos = start_state.position[0].cpu().tolist()
+
         goal_state = JointState.from_position(
             torch.tensor(
                 [goal_joint_positions],
@@ -74,39 +78,33 @@ class JointSpacePlanner(SinglePlanner):
         max_attempts = config.get('max_attempts', 1)
         enable_graph_attempt = config.get('enable_graph_attempt', 1)
 
-        start_pos = start_state.position[0].cpu().tolist()
-        goal_pos = list(goal_joint_positions)
         self.node.get_logger().info("Planning joint space trajectory:")
         self.node.get_logger().info(f"  Start: {[f'{x:.3f}' for x in start_pos]}")
-        self.node.get_logger().info(f"  Goal:  {[f'{x:.3f}' for x in goal_pos]}")
+        self.node.get_logger().info(f"  Goal:  {[f'{x:.3f}' for x in goal_joint_positions]}")
         self.node.get_logger().info(
             f"  Config: max_attempts={max_attempts}, "
             f"enable_graph_attempt={enable_graph_attempt}"
         )
 
-        # Contact allowance rides on the goalset (the SetLinkCollision service
-        # is no longer used for this): disable the listed links' collision
-        # spheres for the solve only, then re-enable (exception-safe).
-        allowed = list(getattr(goalsets[0], 'allowed_collisions', None) or [])
-        if allowed:
-            self.motion_planner.disable_link_collision(allowed)
-            self.node.get_logger().info(
-                f"Disabled collision spheres for contact links: {allowed}"
-            )
-
-        try:
-            result = self.motion_planner.plan_cspace(
-                goal_state,
-                start_state,
-                max_attempts=max_attempts,
-                enable_graph_attempt=enable_graph_attempt,
-            )
-        finally:
-            if allowed:
-                self.motion_planner.enable_link_collision(allowed)
-                self.node.get_logger().info(
-                    f"Re-enabled collision spheres for contact links: {allowed}"
-                )
+        # Collision/contact allowance is the task constructor's responsibility
+        # (it applies the goalsets' allowed links around each solve via the
+        # server's set_link_collision service); the planning interface no
+        # longer mutates the shared motion-planner collision state.
+        _t_solve = time.monotonic()
+        result = self.motion_planner.plan_cspace(
+            goal_state,
+            start_state,
+            max_attempts=max_attempts,
+            enable_graph_attempt=enable_graph_attempt,
+        )
+        _elapsed = (time.monotonic() - _t_solve) * 1e3
+        n_seeds = getattr(self.config_wrapper, 'num_trajopt_seeds', None) or 0
+        per_seed = f", ~{_elapsed / n_seeds:.0f} ms/seed" if n_seeds > 0 else ""
+        self.node.get_logger().info(
+            f"  plan_cspace: {_elapsed:.1f} ms (num_trajopt_seeds={n_seeds}"
+            f"{per_seed}, max_attempts={max_attempts}, "
+            f"enable_graph_attempt={enable_graph_attempt})"
+        )
 
         # Per-segment insight metadata (one entry for this single segment;
         # goalset candidate is 0/N/A for a joint-space solve).

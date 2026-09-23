@@ -38,6 +38,7 @@ from isaac_ros_cumotion_interfaces.srv import (
     Fk,
     Ik,
     RemoveObject,
+    SetLinkCollision,
     SetPlanner,
     TrajectoryGeneration,
     TrajectoryGenerationBatch,
@@ -123,6 +124,8 @@ class CuroboServerInterface(RobotInterface):
                                            "/curobo_server/attach_object")
         self._detach_client = self._client(Trigger, "/curobo_server/detach_object")
         self._planner_client = self._client(SetPlanner, self._planner_service)
+        self._link_collision_client = self._client(
+            SetLinkCollision, "/curobo_server/set_link_collision")
         self._exec_client = ActionClient(node, SendTrajectory,
                                          "/curobo_server/execute_trajectory")
 
@@ -131,6 +134,7 @@ class CuroboServerInterface(RobotInterface):
         #: the warm-up batch size is owned by the client that configures it.
         self._ready_services = [
             ("set_planner", self._planner_client),
+            ("set_link_collision", self._link_collision_client),
             ("generate_trajectory", self._traj_client),
             ("trajectory_generation_batch", self._batch_client),
             ("ik", self._ik_client),
@@ -355,37 +359,75 @@ class CuroboServerInterface(RobotInterface):
             return
         self.set_planner(key)
 
+    def _set_links_collision(self, requests: list, enabled: bool) -> None:
+        """Enable/disable collision spheres for the goalsets' allowed links.
+
+        Contact/collision allowance lives ENTIRELY in the task constructor:
+        stages derive it from the scene (``GoalsetSpec.allowed_collisions``)
+        and this adapter applies it via the server's ``set_link_collision``
+        service for the duration of each solve — spheres OFF
+        (``enabled=False``) allows contact, spheres ON (``enabled=True``)
+        restores the check. The wire ``Goalset`` carries no collision concept;
+        the planning interfaces never see it.
+        """
+        links = sorted({
+            link
+            for r in (requests or [])
+            for gs in (r.goalsets or [])
+            for link in (gs.allowed_collisions or [])
+        })
+        if not links:
+            return
+        req = SetLinkCollision.Request()
+        req.link_names = links
+        req.enabled = enabled
+        res = self._call(self._link_collision_client, req)
+        if not res.success:
+            raise ServiceError(f"set_link_collision failed: {res.message}")
+
     def plan(self, request: PlanRequest) -> PlanResult:
         self._ensure_planner(request.planner)
-        # TrajectoryGeneration.srv embeds the goal as `TrajectoryGoal request`
-        # (§5 DRY). The bare goal is NOT the srv Request type, and rclpy's
-        # Client.call_async isinstance-checks it and raises a BARE TypeError()
-        # (empty str, repr exactly "TypeError()") when handed one — the
-        # "plan call failed: TypeError()" everyone saw. Wrap it in the srv
-        # Request like every other client call builds one.
-        req = TrajectoryGeneration.Request()
-        req.request = self._to_goal(request)
-        res = self._call(self._traj_client, req)
-        # TrajectoryGeneration.srv embeds the result as `TrajectoryResult
-        # response`.
-        return self._from_result(res.response)
+        # Apply the goalset's allowed links (spheres OFF) for the duration of
+        # the solve and restore (spheres ON) right after — exception-safe.
+        self._set_links_collision([request], False)
+        try:
+            # TrajectoryGeneration.srv embeds the goal as `TrajectoryGoal request`
+            # (§5 DRY). The bare goal is NOT the srv Request type, and rclpy's
+            # Client.call_async isinstance-checks it and raises a BARE TypeError()
+            # (empty str, repr exactly "TypeError()") when handed one — the
+            # "plan call failed: TypeError()" everyone saw. Wrap it in the srv
+            # Request like every other client call builds one.
+            req = TrajectoryGeneration.Request()
+            req.request = self._to_goal(request)
+            res = self._call(self._traj_client, req)
+            # TrajectoryGeneration.srv embeds the result as `TrajectoryResult
+            # response`.
+            return self._from_result(res.response)
+        finally:
+            self._set_links_collision([request], True)
 
     def plan_batch(self, requests: list) -> list:
         planners = {r.planner for r in requests if r.planner is not None}
         for p in planners:
             self.set_planner(p)
-        batch = TrajectoryGenerationBatch.Request()
-        for r in requests:
-            batch.requests.append(self._to_goal(r))
-        res = self._call(self._batch_client, batch)
-        if not res.success and not res.responses:
-            return [PlanResult(False, res.error_msg or "plan_batch failed")
-                    for _ in requests]
-        out = [self._from_result(r) for r in res.responses]
-        if len(out) < len(requests):
-            out += [PlanResult(False, "missing batch response")
-                    for _ in range(len(requests) - len(out))]
-        return out
+        # Apply the goalsets' allowed links (spheres OFF) for the duration of
+        # the solve and restore (spheres ON) right after — exception-safe.
+        self._set_links_collision(requests, False)
+        try:
+            batch = TrajectoryGenerationBatch.Request()
+            for r in requests:
+                batch.requests.append(self._to_goal(r))
+            res = self._call(self._batch_client, batch)
+            if not res.success and not res.responses:
+                return [PlanResult(False, res.error_msg or "plan_batch failed")
+                        for _ in requests]
+            out = [self._from_result(r) for r in res.responses]
+            if len(out) < len(requests):
+                out += [PlanResult(False, "missing batch response")
+                        for _ in range(len(requests) - len(out))]
+            return out
+        finally:
+            self._set_links_collision(requests, True)
 
     def execute(self, request: PlanRequest) -> PlanResult:
         self._ensure_planner(request.planner)
@@ -487,7 +529,6 @@ class CuroboServerInterface(RobotInterface):
         for pose in gs.poses or []:
             g.poses.append(parse_pose_msg(pose, self.pose_cls))
         g.target_joint_positions = [float(v) for v in (gs.target_joint_positions or [])]
-        g.allowed_collisions = list(gs.allowed_collisions or [])
         return g
 
     @staticmethod

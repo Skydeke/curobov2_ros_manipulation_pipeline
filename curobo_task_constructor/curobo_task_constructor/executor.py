@@ -26,7 +26,6 @@ records the action server publishes on the introspection topics.
 
 from __future__ import annotations
 
-import time
 from typing import Optional
 
 from curobo_task_constructor.core.container import GENERATE_INTERFACE
@@ -101,16 +100,11 @@ class TaskExecutor:
     # ------------------------------------------------------------------
     # Plan
     # ------------------------------------------------------------------
-    def plan(self, max_iterations: int = 0,
-             deadline: Optional[float] = None) -> bool:
+    def plan(self, max_iterations: int = 0) -> bool:
         """Run the compute loop until no stage can make progress.
 
         Returns True when at least one full root solution was found.
         ``max_iterations`` (0 = unlimited) guards against pathological graphs.
-        ``deadline`` bounds the WHOLE plan phase in wall-clock seconds
-        (0/None = unlimited): the solve may otherwise outlive every per-call
-        service budget while the action server keeps ``_solve_in_progress``
-        set, rejecting every new task goal (another solve is in progress).
 
         The loop also stops the moment the FIRST complete root solution
         exists. Without that, a serial container sitting above a fallbacks /
@@ -129,7 +123,6 @@ class TaskExecutor:
         if not self._valid:
             return False
         iterations = 0
-        limit = None if deadline is None or deadline <= 0 else time.monotonic() + deadline
         while any(s.can_compute() for s in self.root.subtree_stages()):
             self.root.run_compute()
             iterations += 1
@@ -139,8 +132,6 @@ class TaskExecutor:
                 # solution — best() ranks it later.
                 break
             if max_iterations and iterations >= max_iterations:
-                break
-            if limit is not None and time.monotonic() >= limit:
                 break
         return bool(self.root.solutions)
 

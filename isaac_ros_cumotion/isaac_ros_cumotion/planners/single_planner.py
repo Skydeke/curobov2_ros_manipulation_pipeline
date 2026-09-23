@@ -667,11 +667,21 @@ class SinglePlanner(TrajectoryPlanner):
         self._waypoint_tolerance = self._request_waypoint_tolerance(goal_request)
         self._log_considered = self._request_log_considered(goal_request)
 
+        _t_plan_start = time.monotonic()
         try:
             # Let child class generate the trajectory using MotionGen
             result = self._plan_trajectory(start_state, goal_request, config)
-            return self._finalize_plan_result(
+            _t_solve_end = time.monotonic()
+            planner_result = self._finalize_plan_result(
                 result, goal_request, config, robot_context)
+            _t_final_end = time.monotonic()
+            self.node.get_logger().info(
+                f"{self.get_planner_name()} timing: "
+                f"solve {(_t_solve_end - _t_plan_start) * 1e3:.1f} ms, "
+                f"finalize {(_t_final_end - _t_solve_end) * 1e3:.1f} ms, "
+                f"total {(_t_final_end - _t_plan_start) * 1e3:.1f} ms"
+            )
+            return planner_result
 
         except Exception as e:
             self.node.get_logger().error(f"Planning exception: {e}")
@@ -959,10 +969,8 @@ class SinglePlanner(TrajectoryPlanner):
         robot_dof = self.motion_planner.kinematics.get_dof()
         max_attempts = config.get('max_attempts', 1)
         enable_graph_attempt = config.get('enable_graph_attempt', 1)
-
         goal_rows = []
         start_rows = []
-        allowed_links = set()
         for s, g in zip(start_states, goal_requests):
             goalset = list(getattr(g, 'goalsets', None) or [])[0]
             target = list(getattr(goalset, 'target_joint_positions', None) or [])
@@ -982,8 +990,6 @@ class SinglePlanner(TrajectoryPlanner):
             goal_rows.append(torch.tensor(
                 target, dtype=s.position.dtype, device=s.position.device))
             start_rows.append(s.position[0])
-            allowed_links.update(
-                list(getattr(goalset, 'allowed_collisions', None) or []))
 
         goal_state = JointState.from_position(torch.stack(goal_rows))
         current_state = JointState.from_position(torch.stack(start_rows))
@@ -993,25 +999,22 @@ class SinglePlanner(TrajectoryPlanner):
             f"one solve (max_attempts={max_attempts}, "
             f"enable_graph_attempt={enable_graph_attempt})")
 
-        # Contact allowance rides on each goalset: disable the union of the
-        # listed links' collision spheres for the solve only (exception-safe).
-        disabled = sorted(allowed_links)
-        if disabled:
-            self.motion_planner.disable_link_collision(disabled)
-            self.node.get_logger().info(
-                f"Disabled collision spheres for contact links: {disabled}")
-        try:
-            result = self.motion_planner.plan_cspace(
-                goal_state,
-                current_state,
-                max_attempts=max_attempts,
-                enable_graph_attempt=enable_graph_attempt,
-            )
-        finally:
-            if disabled:
-                self.motion_planner.enable_link_collision(disabled)
-                self.node.get_logger().info(
-                    f"Re-enabled collision spheres for contact links: {disabled}")
+        # Collision/contact allowance is the task constructor's responsibility
+        # (it applies the goalsets' allowed links around each solve via the
+        # server's set_link_collision service); the planning interface no
+        # longer mutates the shared motion-planner collision state.
+        _t_batch = time.monotonic()
+        result = self.motion_planner.plan_cspace(
+            goal_state,
+            current_state,
+            max_attempts=max_attempts,
+            enable_graph_attempt=enable_graph_attempt,
+        )
+        self.node.get_logger().info(
+            f"  Batched plan_cspace: {len(goal_rows)} problem(s) in "
+            f"{(time.monotonic() - _t_batch) * 1e3:.1f} ms "
+            f"(max_attempts={max_attempts}, "
+            f"enable_graph_attempt={enable_graph_attempt})")
 
         if result is None:
             return [

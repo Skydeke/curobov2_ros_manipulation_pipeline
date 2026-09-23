@@ -177,20 +177,43 @@ class IKServices:
         """Recreate the IK solver after a collision-cache change.
 
         The collision cache is fixed at solver creation, so a cache change
-        requires a rebuild (reusing the last batch size). No-op if the solver
-        was never initialized.
+        requires a rebuild (reusing the last batch size; seeds re-resolve from
+        the current ``num_ik_seeds`` param). No-op if the solver was never
+        initialized.
         """
         if self._ik_solver is None:
             return
-        self._init(max(1, self._ik_batch_size), num_seeds=max(1, self._ik_num_seeds))
+        self._init(max(1, self._ik_batch_size), num_seeds=None)
         self._node.get_logger().info("IKServices: solver rebuilt after cache change")
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _init(self, batch_size: int, num_seeds: int = 20):
+    def _resolve_num_seeds(self) -> int:
+        """Shared per-pose IK seed budget, read from the node's ``num_ik_seeds``.
+
+        Mirrors the planner's internal IK (``ConfigWrapperMotion``): the
+        standalone ``/ik`` / ``/ik_batch`` services resolve a goal pose with
+        the SAME seed count the MotionPlanner's IK uses for pose/goalset
+        goals, so both IK paths behave identically. ``num_seeds`` / VRAM scale
+        as batch x seeds. Overridable per call via ``_solve(..., num_seeds=)``.
+        """
+        if self._node.has_parameter("num_ik_seeds"):
+            return max(
+                1,
+                int(
+                    self._node.get_parameter("num_ik_seeds")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        return 32
+
+    def _init(self, batch_size: int, num_seeds: int | None = None):
         """Create (or recreate) the IK solver for the given batch size/seeds."""
+        if num_seeds is None:
+            num_seeds = self._resolve_num_seeds()
         # Primitives only at construction; update_world() pushes the perception
         # layer by copy afterwards. See primitives_only_scene().
         scene = self._config.obstacle_manager.primitives_only_scene()
@@ -234,19 +257,21 @@ class IKServices:
 
         self._node.get_logger().info("IK solver ready")
 
-    def _solve(self, poses, num_seeds: int = 20):
+    def _solve(self, poses, num_seeds: int | None = None):
         """
         Solve IK for a list of geometry_msgs/Pose.
         Reinitializes the solver if the batch size or seed count has changed.
         Returns (success: bool, result).
         """
+        if num_seeds is None:
+            num_seeds = self._resolve_num_seeds()
         with self._solve_lock:
             if not poses:
                 self._node.get_logger().error("IK: empty pose list")
                 return False, None
             return self._solve_locked(poses, num_seeds)
 
-    def _solve_locked(self, poses, num_seeds: int = 20):
+    def _solve_locked(self, poses, num_seeds: int):
         """Must run with ``_solve_lock`` held (see ``_solve``)."""
 
         n = len(poses)
@@ -293,16 +318,17 @@ class IKServices:
             torch.cuda.synchronize()
         return True, result
 
-    def solve_poses(self, poses, num_seeds: int = 20):
+    def solve_poses(self, poses, num_seeds: int | None = None):
         """Batch IK for a list of geometry_msgs/Pose (programmatic API).
 
         Convenience wrapper used by the reachability service: returns the
         solved joint positions and per-pose convergence flags without building
         ROS service responses.
 
-        ``num_seeds`` controls the solver's seed count and defaults to the
-        same value as the interactive /ik services so the reachability map
-        gets identical solve quality. Note it scales VRAM as batch x seeds.
+        ``num_seeds`` controls the solver's seed count and defaults to
+        ``num_ik_seeds`` (the node param shared with the planner's internal IK)
+        so the reachability map gets identical solve quality to the interactive
+        /ik services. Note it scales VRAM as batch x seeds.
 
         Returns (ok, positions, ok_flags, joint_names) where ``ok`` is False if
         the solver could not be (re)initialised for this batch size;

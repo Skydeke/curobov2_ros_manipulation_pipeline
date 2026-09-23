@@ -41,7 +41,6 @@ Response:
 | Field | Type | Meaning |
 |---|---|---|
 | `poses` | `geometry_msgs/Pose[]` | Candidate set: `1` = fixed waypoint, `N > 1` = resolved by cuRobo inside a single plan (capped by the `max_goalset` parameter) |
-| `allowed_collisions` | `string[]` | Link names whose collision spheres are disabled for this segment only (re-enabled afterwards) |
 | `target_joint_positions` | `float64[]` | Joint-space target for this segment (dispatches to `plan_cspace`) |
 | `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags applied to the whole path (v2 reads the first segment's) |
 | `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo; not honoured in v2) |

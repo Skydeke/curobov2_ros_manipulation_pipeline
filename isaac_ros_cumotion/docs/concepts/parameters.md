@@ -54,6 +54,11 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `publish_plan_debug_image` | `false` | Publish the per-plan joint-trajectory pos/vel/acc/jerk plot as an RGB image on `/<node>/motion_plan_debug` (latched; independent of `enable_curobo_debug_mode`) | Plan-time |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |
 | `torch_sync` | `false` | Guard every `torch.cuda.synchronize()` (depth callback, IK service, MPC IK). Off by default — a per-frame sync blocks the executor thread on the GPU and starves the viz timers. Enable only for deterministic GPU/CPU ordering (race debugging) | Runtime |
+| `num_trajopt_seeds` | `12` | Trajectory-optimization seed trajectories per problem — the motion-planning seed axis. Each seed is a full solve, so per-plan latency scales ~linearly (the kortex launch runs 4) | Build-time |
+| `num_ik_seeds` | `32` | IK seeds per goal pose — SHARED by the planner's internal IK (pose/goalset goals) and the standalone `/ik`, `/ik_batch` services, so both IK paths behave identically | Build-time |
+| `graph_new_nodes_per_iteration` | `20` | PRM graph planner (first plan attempt, `enable_graph_attempt`): nodes sampled per iteration — the graph-search "seed" axis (no per-plan seed count exists in v2) | Build-time |
+| `graph_max_path_finding_iterations` | `10` | PRM graph planner: path-finding iteration cap | Build-time |
+| `graph_max_nodes` | `20000` | PRM graph planner: graph-size cap in nodes | Build-time |
 
 ## Node parameters — perception (Mapper)
 

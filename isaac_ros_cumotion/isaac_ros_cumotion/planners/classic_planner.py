@@ -71,16 +71,10 @@ class ClassicPlanner(SinglePlanner):
         # whole path). Reset afterwards since the MotionPlanner is shared.
         applied = self._apply_pose_constraints(goal_request)
 
-        # Contact allowance rides on the goalset (same contract as
-        # JointSpace): disable the listed links' collision spheres for the
-        # solve only, then re-enable (exception-safe).
-        allowed = list(getattr(goal_request.goalsets[0], 'allowed_collisions', None) or [])
-        if allowed:
-            self.motion_planner.disable_link_collision(allowed)
-            self.node.get_logger().info(
-                f"Disabled collision spheres for contact links: {allowed}"
-            )
-
+        # Collision/contact allowance is the task constructor's responsibility
+        # (same contract as JointSpace: it applies the goalsets' allowed links
+        # around each solve via the set_link_collision service); the planning
+        # interface no longer mutates the shared motion-planner collision state.
         try:
             if num_goalset > 1:
                 # Goalset solve: cuRobo's _plan_pose_goalset path resolves all
@@ -116,11 +110,6 @@ class ClassicPlanner(SinglePlanner):
         finally:
             if applied:
                 self._reset_pose_criteria()
-            if allowed:
-                self.motion_planner.enable_link_collision(allowed)
-                self.node.get_logger().info(
-                    f"Re-enabled collision spheres for contact links: {allowed}"
-                )
 
         self._selected_goal_indexes = [self._select_goal_index(result)]
         # Per-segment insight metadata (one entry for this single segment).

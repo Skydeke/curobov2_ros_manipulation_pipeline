@@ -281,6 +281,21 @@ class UnifiedPlannerNode(Node):
         # the update_motion_gen_config rebuild (same caveat as max_goalset).
         # Read by ConfigWrapperMotion; the launch sets the deployment default.
         self.declare_parameter('num_trajopt_seeds', 12)
+        # Per-pose IK seeds: planner-internal IK for pose/goalset goals AND the
+        # standalone /ik, /ik_batch services read the SAME param — one seed
+        # budget for both IK paths (previously hardcoded 32/20 split). Baked
+        # into solver buffers / the CUDA graph at build time (same caveat as
+        # num_trajopt_seeds). Read by ConfigWrapperMotion and IKServices.
+        self.declare_parameter('num_ik_seeds', 32)
+        # PRM graph-planner search budget for the first plan attempt
+        # (enable_graph_attempt): nodes sampled per iteration x path-finding
+        # iterations, capped by max_nodes. There is NO per-plan "seed count" in
+        # the v2 graph planner — these are the effort knobs, merged over
+        # graph_planner/exact_graph_planner.yml at build time (same caveat as
+        # num_trajopt_seeds). Read by ConfigWrapperMotion.
+        self.declare_parameter('graph_new_nodes_per_iteration', 20)
+        self.declare_parameter('graph_max_path_finding_iterations', 10)
+        self.declare_parameter('graph_max_nodes', 20000)
         # Diagnostic toggle (see update_all_solvers_world): set false to withhold
         # the perception ESDF from the solvers. Leave true for normal operation —
         # false disables camera-based collision avoidance.
@@ -793,6 +808,7 @@ class UnifiedPlannerNode(Node):
         on failure.
         """
         result_msg = TrajectoryResult()
+        _t_total = time.monotonic()
         try:
             ok, reason = self._check_goal_request(planner, goal)
             if not ok:
@@ -806,10 +822,12 @@ class UnifiedPlannerNode(Node):
             _, start_state = self._resolve_start_state(goal)
             config = self._get_planner_config(planner)
             self._setup_planner(planner)
+            _t_setup = time.monotonic()
 
             # Refresh the perception-based collision world before planning so
             # the plan accounts for the latest camera data.
             self.refresh_perception_world()
+            _t_world = time.monotonic()
 
             self.get_logger().info(f"Planning with {planner.get_planner_name()}")
             # _plan_lock() holds gpu_lock for the entire plan when CUDA graphs
@@ -818,6 +836,14 @@ class UnifiedPlannerNode(Node):
             # timer if no lock is held (see _plan_lock docstring, 2026-09-11).
             with self._plan_lock():
                 result = planner.plan(start_state, goal, config, self.robot_context)
+            _t_plan = time.monotonic()
+            self.get_logger().info(
+                f"[plan-perf] {planner.get_planner_name()}: "
+                f"setup(start_state+config+gpu_lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                f"world refresh {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                f"plan() {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
+            )
 
             return self._fill_result_insight(
                 result_msg, planner, goal, result, start_state)
@@ -1359,6 +1385,7 @@ class UnifiedPlannerNode(Node):
                 self._goal_active = False
 
     def _execute_goal(self, goal_handle, goal, planner, result_msg):
+        _t_total = time.monotonic()
         try:
             ok, reason = self._check_goal_request(planner, goal)
             if not ok:
@@ -1373,20 +1400,33 @@ class UnifiedPlannerNode(Node):
             _, start_state = self._resolve_start_state(goal)
             config = self._get_planner_config(planner)
             self._setup_planner(planner)
+            _t_setup = time.monotonic()
 
             result = None
             if planner.is_open_loop():
                 reuse = (bool(getattr(goal_handle.request, 'allow_cached', True))
                          and self._pending_plan_matches(start_state, goal))
                 if reuse:
-                    self.get_logger().info("Reusing cached (pre-planned) trajectory")
+                    _t_reuse = time.monotonic()
+                    self.get_logger().info(
+                        f"[plan-perf] Reusing cached (pre-planned) trajectory "
+                        f"(setup {(_t_reuse - _t_total) * 1e3:.1f} ms TOTAL)")
                 else:
                     self.refresh_perception_world()
+                    _t_world = time.monotonic()
                     self.get_logger().info(f"Planning with {planner.get_planner_name()}")
                     # _plan_lock() holds gpu_lock for the entire plan when CUDA
                     # graphs are enabled (see _plan_lock docstring, 2026-09-11).
                     with self._plan_lock():
                         result = planner.plan(start_state, goal, config, self.robot_context)
+                    _t_plan = time.monotonic()
+                    self.get_logger().info(
+                        f"[plan-perf] {planner.get_planner_name()} (execute path): "
+                        f"setup(start_state+config+gpu_lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                        f"world refresh {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                        f"plan() {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                        f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
+                    )
                     if not result.success:
                         self._fill_result_insight(
                             result_msg.result, planner, goal, result, start_state,
@@ -1404,8 +1444,17 @@ class UnifiedPlannerNode(Node):
             else:
                 # Reactive: (re)set the goal on the solver before servoing.
                 self.refresh_perception_world()
+                _t_world = time.monotonic()
                 self.get_logger().info(f"Planning with {planner.get_planner_name()}")
                 result = planner.plan(start_state, goal, config, self.robot_context)
+                _t_plan = time.monotonic()
+                self.get_logger().info(
+                    f"[plan-perf] {planner.get_planner_name()} (execute path): "
+                    f"setup(start_state+config+gpu_lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                    f"world refresh {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                    f"plan() {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                    f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
+                )
                 if not result.success:
                     self._fill_result_insight(
                         result_msg.result, planner, goal, result, start_state,
@@ -1971,10 +2020,6 @@ class UnifiedPlannerNode(Node):
             [self._pose_tuple(p) for p in g.poses]
             for g in (getattr(req, 'goalsets', None) or [])
         ]
-        allowed = [
-            list(getattr(g, 'allowed_collisions', None) or [])
-            for g in (getattr(req, 'goalsets', None) or [])
-        ]
         # Joint targets are per-segment (Goalset.target_joint_positions); each
         # entry stays aligned with its goalset ([] for Cartesian segments).
         joints = [
@@ -1989,7 +2034,6 @@ class UnifiedPlannerNode(Node):
         return {
             'start': start,
             'goalsets': goalsets,
-            'allowed_collisions': allowed,
             'target_joints': joints,
             'options': (
                 int(getattr(opts, 'num_seeds', 0)),

@@ -59,6 +59,8 @@ if os.environ.get("CUROBO_DEBUG_CUDA_GRAPH", "").strip().lower() not in (
     _curobo_runtime_public.debug_cuda_graphs = True
 
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+from curobo._src.util.config_io import join_path, resolve_config
+from curobo.content import get_task_configs_path
 
 from .config_wrapper import ConfigWrapper, resolve_use_cuda_graph
 from .collision_distance import _compute_sphere_distance, _query_sphere_collision
@@ -71,7 +73,7 @@ class ConfigWrapperMotion(ConfigWrapper):
         super().__init__(node, robot)
 
         # v2 trajopt / IK / batch tunables
-        self.num_ik_seeds = 32
+        self.num_ik_seeds = self._resolve_num_ik_seeds(node)
         self.num_trajopt_seeds = self._resolve_num_trajopt_seeds(node)
         # ROS param 'use_cuda_graph' (default True), overridable via the
         # CUROBO_USE_CUDA_GRAPH env var. Disabling avoids the MPC->Classic
@@ -128,6 +130,78 @@ class ConfigWrapperMotion(ConfigWrapper):
             )
         return 12
 
+    def _resolve_num_ik_seeds(self, node) -> int:
+        """Per-pose IK seeds, read from the node param.
+
+        Used for pose/goalset planning: each candidate goal pose is resolved
+        into joint configurations with this many parallel IK seeds, and the
+        standalone ``/ik`` / ``/ik_batch`` services use the SAME count (see
+        ``IKServices._resolve_num_seeds``) so both IK paths behave identically.
+        Default 32 (cuRobo's default at ``max_batch_size == 1``). Baked into
+        solver buffers / the CUDA graph at build time, so a runtime change
+        takes effect only via the ``update_motion_gen_config`` rebuild (same
+        caveat as num_trajopt_seeds).
+        """
+        if node.has_parameter("num_ik_seeds"):
+            return max(
+                1,
+                int(
+                    node.get_parameter("num_ik_seeds")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        return 32
+
+    _GRAPH_PLANNER_YAML = "graph_planner/exact_graph_planner.yml"
+
+    def _resolve_graph_planner_config(self, node):
+        """Graph-planner config for the build, with ROS-param search-budget overrides.
+
+        The v2 PRM graph planner has no per-plan "seed count": its search
+        effort is (nodes sampled per iteration) x (path-finding iterations),
+        capped by ``max_nodes``. Those three knobs are exposed as node params
+        (``graph_new_nodes_per_iteration``, ``graph_max_path_finding_iterations``,
+        ``graph_max_nodes``) and merged over the shipped
+        ``exact_graph_planner.yml`` defaults. When none are set this returns
+        the default YAML path — identical behavior to passing nothing.
+        """
+        overrides = {}
+        if node.has_parameter("graph_new_nodes_per_iteration"):
+            overrides["new_nodes_per_iteration"] = max(
+                1,
+                int(
+                    node.get_parameter("graph_new_nodes_per_iteration")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        if node.has_parameter("graph_max_path_finding_iterations"):
+            overrides["max_path_finding_iterations"] = max(
+                1,
+                int(
+                    node.get_parameter("graph_max_path_finding_iterations")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        if node.has_parameter("graph_max_nodes"):
+            overrides["max_nodes"] = max(
+                1,
+                int(
+                    node.get_parameter("graph_max_nodes")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        if not overrides:
+            return self._GRAPH_PLANNER_YAML
+        base = resolve_config(
+            join_path(get_task_configs_path(), self._GRAPH_PLANNER_YAML)
+        )
+        base["graph_planner"].update(overrides)
+        return base
+
     def _resolve_max_batch_size(self, node) -> int:
         """Batched-solve capacity (problems stacked into ONE solver call).
 
@@ -181,8 +255,9 @@ class ConfigWrapperMotion(ConfigWrapper):
             cfg = MotionPlannerCfg.create(
                 robot=self.robot_model_manager.robot_cfg,
                 scene_model=scene,
-                num_ik_seeds=self.num_ik_seeds,
+                num_ik_seeds=self._resolve_num_ik_seeds(node),
                 num_trajopt_seeds=self.num_trajopt_seeds,
+                graph_planner_config=self._resolve_graph_planner_config(node),
                 position_tolerance=self.position_tolerance,
                 orientation_tolerance=self.orientation_tolerance,
                 use_cuda_graph=self.use_cuda_graph,

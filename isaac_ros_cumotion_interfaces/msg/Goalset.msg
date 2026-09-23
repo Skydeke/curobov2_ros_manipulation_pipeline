@@ -4,10 +4,6 @@
 #   len(poses)==N  -> candidate set, the planner picks the best (goalset)
 geometry_msgs/Pose[] poses
 
-# Link names whose collision spheres are disabled during this segment.
-# After the segment completes, spheres are re-enabled (exception-safe).
-string[] allowed_collisions
-
 # Target joint configuration for joint-space planning. When set (non-empty),
 # this segment is planned in joint space (plan_cspace) with these joint
 # values in cuRobo's active-DOF order.

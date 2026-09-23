@@ -48,6 +48,15 @@ class JointSpeedStrategy(JointCommandStrategy):
         # jerky/oscillating motion.
         max_accel_dps = float(self.params.get('max_joint_accel_dps', 45.0))
         self._max_accel_rad_s2 = math.radians(max_accel_dps)
+
+        # Length of the terminal deceleration ramp applied on every outgoing
+        # trajectory (see _taper_terminal_velocity): velocities over the final
+        # 0.6 s are ramped to zero at the goal so the FollowJointTrajectory
+        # controller parks the arm instead of continuing past the path end
+        # (nonzero terminal velocity is otherwise accepted and keeps driving
+        # the joint after the action reports success). Covers the 1.4 rad/s
+        # joint-speed cap at 300 dps^2 (decel time ~0.27 s) with margin.
+        self._terminal_taper_dt = float(self.params.get('terminal_taper_dt', 0.6))
         # Interval the clamp assumes between consecutive points. Defaults to
         # self.dt (interpolation_dt) — the physically correct choice now that
         # curobo_ros is the single dt authority (see resolve_interpolation_dt):
@@ -170,6 +179,43 @@ class JointSpeedStrategy(JointCommandStrategy):
             str(clamp_active), f"{intra:.1f}",
         ])
 
+    def _taper_terminal_velocity(self, vel_clamped):
+        """Decelerate the trajectory's tail to a parked stop at the goal.
+
+        cuRobo's interpolated plan does not guarantee a zero terminal velocity.
+        A nonzero last-point velocity streamed through the FollowJointTrajectory
+        controller — which, per the moveit2#3561 workaround in this repo's
+        ros2_control.yaml, ACCEPTS nonzero end velocity — makes the controller
+        keep driving the affected joints past the end of the path (observed as
+        "a joint keeps moving after execution finished"). Scaling the final
+        ``_terminal_taper_dt`` of velocity rows down to zero (and zeroing the
+        last point's velocity + acceleration) turns the tail into a smooth
+        deceleration that parks the arm exactly at the goal; the positions are
+        untouched, so the path shape is preserved.
+        """
+        if not vel_clamped:
+            return vel_clamped
+        n = len(vel_clamped)
+        if n < 2:
+            vel_clamped[-1] = [0.0] * self.dof
+            return vel_clamped
+        dt = self._dilated_dt()
+        if dt <= 0.0:
+            vel_clamped[-1] = [0.0] * self.dof
+            return vel_clamped
+        k = max(1, min(n - 1, int(round(self._terminal_taper_dt / dt))))
+        # e counts points back from the end: e=0 is the last point (factor 0 ->
+        # zero velocity), e=k-1 is the first tapered point (nearly unchanged).
+        for e in range(k):
+            row = vel_clamped[n - 1 - e]
+            factor = e / k
+            vel_clamped[n - 1 - e] = [v * factor for v in row]
+        vel_clamped[-1] = [0.0] * self.dof
+        acc = self.accel_command
+        if len(acc) == n:
+            acc[-1] = [0.0] * self.dof
+        return vel_clamped
+
     def send_trajectrory(self):
         with self.buffer_lock:
             self.robot_state = RobotState.RUNNING
@@ -180,6 +226,9 @@ class JointSpeedStrategy(JointCommandStrategy):
                 self.trajectory_progression = 1.0
 
             vel_clamped = self._clamp_velocities(self.vel_command)
+            # Terminal hold: never hand the controller a path that ends with a
+            # nonzero joint velocity (see _taper_terminal_velocity).
+            vel_clamped = self._taper_terminal_velocity(vel_clamped)
             if self.vel_command:
                 self._debug_csv_write(vel_clamped)
 
