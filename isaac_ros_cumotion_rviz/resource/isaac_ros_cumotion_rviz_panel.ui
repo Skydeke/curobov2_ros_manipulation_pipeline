@@ -299,11 +299,6 @@
       <string>MPC (Real-time)</string>
      </property>
     </item>
-    <item>
-     <property name="text">
-      <string>Multipoint (Multiple traj)</string>
-     </property>
-    </item>
    </widget>
    <widget class="QLabel" name="labelPlannerNode">
     <property name="geometry">

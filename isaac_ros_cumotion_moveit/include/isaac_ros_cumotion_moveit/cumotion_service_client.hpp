@@ -19,6 +19,7 @@
 #define ISAAC_ROS_CUMOTION_SERVICE_CLIENT_H
 
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -29,9 +30,19 @@
 #include "rclcpp/rclcpp.hpp"
 
 #include "isaac_ros_cumotion_interfaces/srv/add_object.hpp"
+#include "isaac_ros_cumotion_interfaces/srv/attach_object.hpp"
 #include "isaac_ros_cumotion_interfaces/srv/remove_object.hpp"
 #include "isaac_ros_cumotion_interfaces/srv/set_planner.hpp"
 #include "isaac_ros_cumotion_interfaces/srv/trajectory_generation.hpp"
+#include "std_srvs/srv/trigger.hpp"
+
+namespace moveit
+{
+namespace planning_interface
+{
+class PlanningSceneInterface;
+}
+}  // namespace moveit
 
 namespace nvidia
 {
@@ -72,8 +83,19 @@ public:
     isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Request & req,
     isaac_ros_cumotion_interfaces::srv::TrajectoryGeneration::Response & res);
 
-  /// Mirror the planning-scene collision objects into cuRobo (add/update/remove).
+  /// Mirror the planning-scene collision objects (world + attached bodies) into
+  /// cuRobo (add/update/remove), multi-shape and mesh aware.
   bool syncPlanningScene(const planning_scene::PlanningSceneConstPtr & planning_scene);
+
+  /// Reverse direction of syncPlanningScene: pull the objects cuRobo currently
+  /// knows about (anything added via /add_object, not just MoveIt mirrors) and
+  /// mirror them into a MoveIt planning scene as CollisionObjects. Names that
+  /// were never part of a forward sync have no cached geometry and are skipped
+  /// with a one-time warning (Sec 6d of the task-constructor plan). @p
+  /// planning_frame becomes the CollisionObjects' header.frame_id.
+  bool syncObstaclesFromServer(
+    moveit::planning_interface::PlanningSceneInterface & psi,
+    const std::string & planning_frame);
 
 private:
   template<typename Srv>
@@ -81,6 +103,12 @@ private:
     const typename rclcpp::Client<Srv>::SharedPtr & client,
     const typename Srv::Request::SharedPtr & req,
     typename Srv::Response::SharedPtr & res);
+
+  /// Remove one curobo-side object (member name) and drop its cached state.
+  void removeCuroboObject(const std::string & name);
+
+  /// Parse the newline-separated obstacle-name list returned by get_obstacles.
+  static std::vector<std::string> parseServerObjectNames(const std::string & message);
 
   std::shared_ptr<rclcpp::Node> node_;
   std::string ns_;  // service namespace, e.g. "curobo_server"
@@ -91,9 +119,32 @@ private:
     traj_gen_client_;
   rclcpp::Client<isaac_ros_cumotion_interfaces::srv::AddObject>::SharedPtr add_object_client_;
   rclcpp::Client<isaac_ros_cumotion_interfaces::srv::RemoveObject>::SharedPtr remove_object_client_;
+  rclcpp::Client<isaac_ros_cumotion_interfaces::srv::AttachObject>::SharedPtr attach_object_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr detach_object_client_;
+  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr get_obstacles_client_;
 
-  /// Names of objects currently mirrored into cuRobo (for stale-object removal).
-  std::vector<std::string> synced_object_names_;
+  /// Obstacles mirrored into cuRobo, keyed by their MoveIt object id. Values are
+  /// the expanded curobo-side names (`{id}` for single-shape objects, `{id}__{i}`
+  /// per shape for multi-shape ones), so stale-object removal and re-sync stay
+  /// keyed per original object id (Sec 6a).
+  std::map<std::string, std::vector<std::string>> synced_groups_;
+  /// Per curobo-side name, a signature of the last-synced geometry + pose. Used
+  /// to skip unchanged objects on repeated syncs (avoid a remove/re-add churn
+  /// on every plan in a static scene).
+  std::map<std::string, std::string> synced_member_signatures_;
+  /// Names currently attached in cuRobo (diff-driven via attach/detach services,
+  /// Sec 6c).
+  std::vector<std::string> synced_attached_names_;
+
+  /// Per curobo-side name, the AddObject request that last mirrored it. Forward
+  /// sync populates this; the reverse sync (syncObstaclesFromServer) replays it
+  /// into MoveIt as a CollisionObject (Sec 6d). Keyed by the exact name sent to
+  /// add_object (i.e. the expanded member name).
+  std::map<std::string, isaac_ros_cumotion_interfaces::srv::AddObject::Request>
+    cached_geometry_;
+
+  /// Names mirrored into MoveIt by the reverse sync (stale-removal tracking).
+  std::vector<std::string> mirrored_in_moveit_names_;
 
   std::mutex sync_mutex_;
 };

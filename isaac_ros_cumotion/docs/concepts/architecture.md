@@ -75,13 +75,12 @@ classDiagram
     TrajectoryPlanner <|-- SinglePlanner
     TrajectoryPlanner <|-- ReactiveController
     SinglePlanner <|-- ClassicPlanner
-    SinglePlanner <|-- MultiPointPlanner
     SinglePlanner <|-- JointSpacePlanner
     ReactiveController <|-- MPCController
     ReactiveController <|-- RetargetController
 ```
 
-- **Open-loop** (`SinglePlanner` children) share one class-level cuRobo `MotionPlanner`: `ClassicPlanner` (single Cartesian goal), `MultiPointPlanner` (waypoint sequence), `JointSpacePlanner` (joint-space goal).
+- **Open-loop** (`SinglePlanner` children) share one class-level cuRobo `MotionPlanner`: `ClassicPlanner` (single Cartesian goal), `JointSpacePlanner` (joint-space goal).
 - **Closed-loop** (`ReactiveController` children) each wrap a cuRobo reactive solver and inherit the whole servo loop from the base class: `MPCController` (Model Predictive Control) and `RetargetController` (IK-based teleoperation follower).
 
 `PlannerFactory` (`curobo_ros/planners/planner_factory.py`) holds the catalog mapping `SetPlanner` enum IDs to classes; `PlannerManager` caches instances and performs runtime switching. Adding a planner = subclass one of the two bases + one catalog entry. See [Unified Planner](unified-planner.md).

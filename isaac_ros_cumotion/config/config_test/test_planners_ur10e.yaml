@@ -1,7 +1,7 @@
 # Test planner management + unified generate/execute action (Universal Robots UR10e / ur10e)
 #
 # Covers:
-# - planner switching (multipoint / classic / MPC)
+# - planner switching (classic / MPC)
 # - open-loop "preview" cache: generate_trajectory caches a plan, the execute
 #   action reuses it (matching target), and clear_trajectory drops it
 # - reactive (MPC): the execute action servos CONTINUOUSLY (does not self-
@@ -40,31 +40,6 @@ tests:
     type: isaac_ros_cumotion_interfaces/srv/GetPlanners
     data: {}
     expect: {success: True}
-
-  - name: "02 Set planner multipoint"
-    service: "/unified_planner/set_planner"
-    type: isaac_ros_cumotion_interfaces/srv/SetPlanner
-    data: {planner_type: 4}
-    expect: {success: True}
-
-  - name: "03 Generate trajectory multipoint"
-    service: "/unified_planner/generate_trajectory"
-    type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
-    data:
-      start_pose:
-        name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
-        position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.3256, y: 0.4438, z: 0.756}
-              orientation: {x: 0.7996, y: -0.5934, z: -0.0614, w: 0.0689}
-
-        - poses:
-            - position: {x: 0.0625, y: 0.6321, z: 0.7547}
-              orientation: {x: 0.8922, y: -0.4121, z: 0.0262, w: 0.183}
-    expect:
-      success: True
 
   - name: "04 Set robot strategy emulator"
     service: "/unified_planner/set_robot_strategy"

@@ -33,7 +33,7 @@ displays at a running planner node (default `unified_planner`).
 
 ### Current state
 Control panel for trajectory planning. Retrieves parameters at launch; time
-dilation is applied live. Exposes trajectory type (Classic / MPC / Multipoint),
+dilation is applied live. Exposes trajectory type (Classic / MPC),
 planner node selection, the target pose (synced with the
 `TargetDisplay` gizmo), and the plan / send / stop actions.
 
@@ -47,12 +47,11 @@ saved config.
 switches the planner to MPC, sends an `execute_trajectory` goal, and streams
 the target pose to `/<planner>/mpc_goal` at 10 Hz while the gizmo is dragged.
 
-**Multipoint mode:** selecting "Multipoint (Multiple traj)" makes every
-`TargetDisplay` in the display tree a waypoint, in display-tree order (reorder
-displays to change the path). Displays are found automatically — including
-ones nested inside display Groups — and the panel keeps scanning, so a display
-added later is used without reloading. Classic and MPC act on the first
-(primary) display only.
+**Multiple target displays:** the panel scans every `TargetDisplay` in the
+display tree — including ones nested inside display Groups — so the primary
+(first) display is found after an RViz config reload. Classic and MPC act on
+that primary display only; the old Multipoint mode that turned every extra
+display into a waypoint is removed.
 
 ### Future development
 - [ ] Save and load the system's state

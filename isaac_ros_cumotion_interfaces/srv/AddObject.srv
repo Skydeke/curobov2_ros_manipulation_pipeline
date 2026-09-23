@@ -8,8 +8,14 @@ int8 MESH=4
 # Request fields
 int8 type
 string name
-# Only used for mesh objects, file path must be absolute
+# Mesh objects: either a file path (absolute) or inline vertex/triangle data.
+# Inline is preferred — MoveIt CollisionObject meshes are in-memory
+# vertex/triangle arrays (shapes::Mesh), not files on disk; give clients a
+# path that avoids a per-sync temp-file write (Sec 6b of the task-constructor
+# plan). When `vertices`/`triangles` are non-empty they take precedence.
 string mesh_file_path ""
+geometry_msgs/Point[] vertices        # inline mesh: raw vertex buffer
+int32[] triangles                     # inline mesh: flat triangle index buffer
 geometry_msgs/Pose pose
 geometry_msgs/Vector3 dimensions
 std_msgs/ColorRGBA color

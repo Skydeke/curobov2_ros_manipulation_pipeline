@@ -25,6 +25,14 @@
 
 #include "isaac_ros_cumotion_moveit/cumotion_service_client.hpp"
 
+namespace moveit
+{
+namespace planning_interface
+{
+class PlanningSceneInterface;
+}
+}  // namespace moveit
+
 namespace nvidia
 {
 namespace isaac
@@ -49,6 +57,10 @@ public:
   bool planner_busy = false;
 
 private:
+  /// Lazily created PlanningSceneInterface used to mirror cuRobo-side objects
+  /// back into the MoveIt world before a plan (Sec 6d reverse sync).
+  std::shared_ptr<moveit::planning_interface::PlanningSceneInterface> psi_;
+
   std::shared_ptr<rclcpp::Node> node_;
   std::shared_ptr<CumotionServiceClient> service_client_;
 };

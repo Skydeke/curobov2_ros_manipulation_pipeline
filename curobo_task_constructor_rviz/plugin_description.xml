@@ -1,0 +1,11 @@
+<library path="curobo_task_constructor_rviz">
+  <class name="curobo_task_constructor/Task Constructor"
+         type="curobo_task_constructor_rviz::TaskConstructorPanel"
+         base_class_type="rviz_common::Panel">
+    <description>
+      Browse curobo_task_constructor tasks: render the stage tree, color
+      stages by their last attempted solution, view a selected stage's
+      debug markers and re-request task execution.
+    </description>
+  </class>
+</library>

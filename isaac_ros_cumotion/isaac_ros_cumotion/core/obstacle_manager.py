@@ -770,19 +770,50 @@ class ObstacleManager:
                     ))
 
                 case request.MESH:
-                    if not os.path.exists(request.mesh_file_path):
-                        response.success = False
-                        response.message = f'Mesh file not found: {request.mesh_file_path}'
-                        return response
-                    self._append('mesh', Mesh(
-                        name=request.name, pose=pose,
-                        file_path=request.mesh_file_path,
-                        scale=dims, color=color,
-                    ))
-                    node.get_logger().info(
-                        f"Added MESH obstacle '{request.name}' "
-                        f"(handled natively by Mapper TSDF in v2)"
-                    )
+                    # Inline vertex/triangle data takes precedence over a file
+                    # path (Sec 6b of the task-constructor plan): MoveIt
+                    # CollisionObject meshes are in-memory arrays, not files on
+                    # disk, and the planning plugin forwards them inline to
+                    # avoid a per-sync temp-file write. cuRobo's Mesh consumes
+                    # `faces` as a flat triangle index buffer.
+                    if len(request.vertices) > 0 or len(request.triangles) > 0:
+                        if len(request.vertices) == 0 or len(request.triangles) == 0:
+                            response.success = False
+                            response.message = (
+                                'Inline MESH requires both vertices and triangles')
+                            return response
+                        if len(request.triangles) % 3 != 0:
+                            response.success = False
+                            response.message = (
+                                'Inline MESH triangles must be a flat index '
+                                'buffer with a multiple-of-3 length')
+                            return response
+                        self._append('mesh', Mesh(
+                            name=request.name, pose=pose,
+                            vertices=[[v.x, v.y, v.z] for v in request.vertices],
+                            faces=list(request.triangles),
+                            scale=dims, color=color,
+                        ))
+                        node.get_logger().info(
+                            f"Added MESH obstacle '{request.name}' from inline "
+                            f"geometry ({len(request.vertices)} vertices, "
+                            f"{len(request.triangles) // 3} triangles; handled "
+                            f"natively by Mapper TSDF in v2)"
+                        )
+                    else:
+                        if not os.path.exists(request.mesh_file_path):
+                            response.success = False
+                            response.message = f'Mesh file not found: {request.mesh_file_path}'
+                            return response
+                        self._append('mesh', Mesh(
+                            name=request.name, pose=pose,
+                            file_path=request.mesh_file_path,
+                            scale=dims, color=color,
+                        ))
+                        node.get_logger().info(
+                            f"Added MESH obstacle '{request.name}' "
+                            f"(handled natively by Mapper TSDF in v2)"
+                        )
 
                 case _:
                     response.success = False

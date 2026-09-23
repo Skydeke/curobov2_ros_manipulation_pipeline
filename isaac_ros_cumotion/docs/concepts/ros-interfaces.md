@@ -21,7 +21,7 @@ Request:
 
 | Field | Type | Used by |
 |---|---|---|
-| `start_pose` | `sensor_msgs/JointState` | All planners. Empty = current robot state |
+| `start_pose` | `sensor_msgs/JointState` | All planners. Empty = current robot state. Positions are resolved VERBATIM in cspace order (`kinematics.cspace.joint_names`); clients that feed readings from `/joint_states` (publisher order, e.g. the kortex sim emits the finger joint first) must reorder name[]/position[] into cspace order first — the task-constructor adapter does this by name at ingest |
 | `goalsets` | `Goalset[]` | One entry per segment. Cartesian segments hold `Goalset.poses` (candidate set; Classic resolves it inside one solve, Multi-point uses one per waypoint); joint-space segments hold `Goalset.target_joint_positions` |
 
 Response:
@@ -71,7 +71,7 @@ Type: `curobo_msgs/srv/SetPlanner`. Switches the active planner. Request field `
 | `MPC` | 1 | Implemented (closed-loop reactive control) |
 | `BATCH` | 2 | **Not implemented** — the call fails |
 | `CONSTRAINED` | 3 | **Not implemented** — the call fails (use `trajectory_constraints` on `generate_trajectory` instead) |
-| `MULTIPOINT` | 4 | Implemented |
+| `MULTIPOINT` | 4 | **Removed** — the `MultiPointPlanner` no longer exists; switching to it fails |
 | `JOINT_SPACE` | 5 | Implemented |
 | `RETARGET` | 6 | Implemented (IK-based teleoperation follower) |
 

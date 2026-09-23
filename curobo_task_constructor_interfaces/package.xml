@@ -1,0 +1,31 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>curobo_task_constructor_interfaces</name>
+  <version>0.0.1</version>
+  <description>
+    Declarative task description for the curobo_task_constructor executor.
+    Owns the open wire format (StageSpec tree, Task action, introspection
+    messages) and deliberately depends only on std_msgs/geometry_msgs/
+    visualization_msgs — never on isaac_ros_cumotion_interfaces. New stage
+    types extend the schema through the opaque stage_params string without
+    touching any message definition.
+  </description>
+  <maintainer email="dev@example.com">curobo_task_constructor maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>rosidl_default_generators</buildtool_depend>
+
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>visualization_msgs</depend>
+
+  <exec_depend>rosidl_default_runtime</exec_depend>
+
+  <member_of_group>rosidl_interface_packages</member_of_group>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

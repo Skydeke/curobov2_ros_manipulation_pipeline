@@ -42,7 +42,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 
 | Parameter | Default | Effect | Kind |
 |---|---|---|---|
-| `planner_type` | `'classic'` | Planner selected at startup (`classic`, `mpc`, `multi_point`, `joint_space`, `retarget`) — switch at runtime with `set_planner` | Startup |
+| `planner_type` | `'classic'` | Planner selected at startup (`classic`, `mpc`, `joint_space`, `retarget`) — switch at runtime with `set_planner` | Startup |
 | `max_attempts` | `1` | Planning retries per request | Plan-time |
 | `interpolation_dt` | `0.025` | Time step (s) of the interpolated output trajectory | Build-time |
 | `voxel_size` | `0.05` | Voxel size (m) shared by the perception ESDF, the collision cache, and `get_voxel_grid` | Build-time |

@@ -1,0 +1,34 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>curobo_task_constructor</name>
+  <version>0.1.0</version>
+  <description>
+    An open MoveIt Task Constructor equivalent for cuRobo: a stage/container
+    framework (generators / propagators / connectors composed into serial,
+    alternatives, fallbacks and independent containers) with cuRobo's batched
+    GPU solve as the execution substrate. Task graphs are declared as
+    StageSpec trees referencing stage types through an open STAGE_REGISTRY —
+    adding a capability is writing a Stage subclass, never editing an enum or
+    the executor. The action server at /curobo_task_constructor/task fronts
+    the MTC Task::init()/plan()/execute() lifecycle and publishes
+    per-attempt introspection (TaskDescription / SolutionInfo /
+    StageStatistics) for the companion rviz panel.
+  </description>
+  <maintainer email="dev@example.com">curobo_task_constructor maintainers</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>curobo_task_constructor_interfaces</depend>
+  <depend>isaac_ros_cumotion_interfaces</depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

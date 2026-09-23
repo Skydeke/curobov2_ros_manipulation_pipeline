@@ -22,7 +22,8 @@ The GUI matches the upstream example -- draggable goal gizmo plus two buttons
 an in-node MotionPlanner):
 
 - "Move" (green)  -> Classic single-pose plan toward the goal gizmo,
-- "Grasp" (blue)  -> MultiPoint approach->grasp->lift plan toward the gizmo.
+- "Grasp" (blue)  -> Classic approach->grasp->lift, three single-pose plans
+  chained and animated in sequence toward the gizmo.
 
 The returned trajectory is animated in the viewer; the joint-trajectory plot
 image in the GUI panel is NOT computed locally — the node enables the server's
@@ -143,6 +144,7 @@ class MpViserNode(Node):
         self._traj_plot_handle = None
         self._default_goal = np.array([0.4, 0.2, 0.3])
         self._mode = 'Move'
+        self._grasp_queue = []
         self._setup_viser_ui()
 
         self.create_timer(0.05, self._update_viser)
@@ -161,8 +163,8 @@ class MpViserNode(Node):
 
         Mirrors the upstream cuRobo ``motion_planning.py`` GUI exactly, but all
         planning goes through ROS services on ``curobo_server`` (never an in-node
-        MotionPlanner): "Move" = Classic single-pose plan, "Grasp" = MultiPoint
-        approach->grasp->lift plan.
+        MotionPlanner): "Move" = Classic single-pose plan, "Grasp" =
+        approach->grasp->lift as three chained Classic single-pose plans.
         """
         try:
             server = getattr(self._viz, '_server', None)
@@ -214,14 +216,23 @@ class MpViserNode(Node):
         )
 
     def _on_grasp(self):
-        """'Grasp' -> MultiPoint approach->grasp->lift plan toward the gizmo."""
+        """'Grasp' -> Classic sequential approach->grasp->lift toward the gizmo.
+
+        Each waypoint is a separate single-goalset Classic plan; the three are
+        queued and sent one after another (plan + animate each in turn), which
+        replaces the removed MultiPoint planner with identical waypoint
+        semantics.
+        """
         if not self._ready or self._busy:
             return
         pos, quat = self._read_goal_pose()
         self._mode = 'Grasp'
+        self._grasp_queue = list(self._build_grasp_requests(pos, quat))
+        if not self._grasp_queue:
+            return
         self._switch_and_plan(
-            SetPlanner.Request.MULTIPOINT,
-            self._build_grasp_request(pos, quat),
+            SetPlanner.Request.CLASSIC,
+            self._grasp_queue.pop(0),
         )
 
     @staticmethod
@@ -260,27 +271,26 @@ class MpViserNode(Node):
             return req
         return build
 
-    def _build_grasp_request(self, pos, quat, approach_offset=0.1, lift_offset=0.1):
-        """Synthesize an approach->grasp->lift MultiPoint request from the gizmo.
+    def _build_grasp_requests(self, pos, quat, approach_offset=0.1, lift_offset=0.1):
+        """Generate the approach->grasp->lift waypoint request list.
 
         Mirrors upstream ``plan_grasp`` (approach offset back along tool -Z,
-        grasp at the goal, lift along tool +Z) as three sequential waypoints
-        consumed by the server's MultiPointPlanner.
+        grasp at the goal, lift along tool +Z): each waypoint becomes one
+        single-goalset Classic request, planned and animated in sequence.
         """
         z = self._quat_z_axis(quat)
         approach = np.asarray(pos) - approach_offset * z
         lift = np.asarray(pos) + lift_offset * z
 
-        def build():
-            req = TrajectoryGeneration.Request()
-            req.start_pose = self._build_start()
-            req.goalsets = [
-                Goalset(poses=[self._build_pose(approach, quat)]),
-                Goalset(poses=[self._build_pose(pos, quat)]),
-                Goalset(poses=[self._build_pose(lift, quat)]),
-            ]
-            return req
-        return build
+        def make(target):
+            def build():
+                req = TrajectoryGeneration.Request()
+                req.start_pose = self._build_start()
+                req.goalsets = [Goalset(poses=[self._build_pose(target, quat)])]
+                return req
+            return build
+
+        return [make(approach), make(pos), make(lift)]
 
     def _switch_and_plan(self, planner_type, build_req):
         """Switch the server planner, then send the plan once the switch lands."""
@@ -375,15 +385,26 @@ class MpViserNode(Node):
     # ------------------------------------------------------------------
 
     def _on_trajectory_done(self, future: Future):
-        self._busy = False
         resp = future.result()
         if not resp.success:
+            self._busy = False
+            self._grasp_queue = []
             self._set_status('Plan failed')
             return
         trajectory = resp.trajectory
         self.get_logger().debug(f'{self._mode} plan - {len(trajectory)} waypoints, dt={resp.dt}')
         self._set_status(f'{self._mode} OK - {len(trajectory)} waypoints')
         self._animate_trajectory(trajectory)
+        if self._mode == 'Grasp' and self._grasp_queue:
+            # Chain the next waypoint of the approach->grasp->lift sequence.
+            next_build = self._grasp_queue.pop(0)
+            self._busy = True
+            self._set_status('Planning...')
+            req = next_build()
+            fut = self._traj_client.call_async(req)
+            fut.add_done_callback(self._on_trajectory_done)
+            return
+        self._busy = False
 
     def _animate_trajectory(self, waypoints):
         """Move the viser robot through the returned joint waypoints."""

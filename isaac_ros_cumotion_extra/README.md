@@ -55,7 +55,7 @@ viser view adds interactive controls:
 |---|---|
 | `fk_viser_node` | per-joint sliders + a "Sweep" toggle to animate the arm |
 | `ik_viser_node` | a draggable 6-DOF goal gizmo; IK re-solves live as you drag it |
-| `mp_viser_node` | draggable goal gizmo + upstream "Move"/"Grasp" buttons (Classic vs MultiPoint plan) and a joint-trajectory plot |
+| `mp_viser_node` | draggable goal gizmo + upstream "Move"/"Grasp" buttons (Classic; Grasp chains approach→grasp→lift waypoints) and a joint-trajectory plot |
 | `mpc_viser_node` | draggable target gizmo driving a live MPC closed loop via the execution action + live-goal topic |
 
 ```bash

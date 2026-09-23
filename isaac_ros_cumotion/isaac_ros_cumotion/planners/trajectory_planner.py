@@ -85,7 +85,6 @@ class TrajectoryPlanner(ABC):
             goal_request: Goal specification (planner-specific)
                          - For ClassicPlanner: TrajectoryGeneration request (uses goalsets)
                          - For MPCController/Retarget: TrajectoryGeneration request (uses goalsets[0].poses[0])
-                         - For MultiPointPlanner: TrajectoryGeneration request (goalsets[i] per waypoint)
                          Each planner extracts what it needs from the request
             config: Planner-specific configuration parameters
             robot_context: Optional RobotContext for trajectory visualization

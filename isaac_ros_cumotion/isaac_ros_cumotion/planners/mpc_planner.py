@@ -258,7 +258,7 @@ class MPCController(ReactiveController):
                 f"MPC requires exactly one goalset entry with a single pose "
                 f"(got {len(gset)} sets, "
                 f"poses_per_set={[len(g.poses) for g in gset]}) - "
-                f"candidate sets belong to the open-loop planners (classic/multipoint)"
+                f"candidate sets belong to the open-loop planners (classic/joint space)"
             )
             return False
         p = gset[0].poses[0]

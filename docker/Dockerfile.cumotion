@@ -84,6 +84,13 @@ COPY isaac_ros_cumotion_moveit ${ROS_WS}/src/isaac_ros_cumotion_moveit
 COPY isaac_ros_cumotion_rviz ${ROS_WS}/src/isaac_ros_cumotion_rviz
 COPY isaac_ros_cumotion_extra ${ROS_WS}/src/isaac_ros_cumotion_extra
 
+# --- task-constructor packages (declarative task layer over the unified
+# planner; the grasp orchestrator drives every motion through its Task
+# action) ---
+COPY curobo_task_constructor_interfaces ${ROS_WS}/src/curobo_task_constructor_interfaces
+COPY curobo_task_constructor ${ROS_WS}/src/curobo_task_constructor
+COPY curobo_task_constructor_rviz ${ROS_WS}/src/curobo_task_constructor_rviz
+
 # --- cuRobo v2 ---
 COPY curobo_core ${ROS_WS}/src/curobo_core
 
@@ -109,5 +116,6 @@ RUN source /opt/ros/jazzy/setup.bash && \
   --packages-select \
   curobo_core isaac_ros_cumotion_interfaces \
   isaac_ros_cumotion isaac_ros_cumotion_moveit \
-  isaac_ros_cumotion_rviz \
-  isaac_ros_cumotion_extra
+  isaac_ros_cumotion_rviz isaac_ros_cumotion_extra \
+  curobo_task_constructor_interfaces \
+  curobo_task_constructor curobo_task_constructor_rviz

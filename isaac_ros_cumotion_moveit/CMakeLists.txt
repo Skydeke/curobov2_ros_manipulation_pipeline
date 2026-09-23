@@ -13,6 +13,7 @@ find_package(ament_cmake_auto REQUIRED)
 ament_auto_find_build_dependencies()
 
 find_package(moveit_core REQUIRED)
+find_package(moveit_ros_planning_interface REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_components REQUIRED)
@@ -21,6 +22,7 @@ find_package(moveit_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(shape_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 
 find_package(geometric_shapes REQUIRED)
@@ -28,11 +30,13 @@ find_package(geometric_shapes REQUIRED)
 set(THIS_PACKAGE_INCLUDE_DEPENDS
   rclcpp_components
   moveit_core
+  moveit_ros_planning_interface
   isaac_ros_cumotion_interfaces
   moveit_msgs
   sensor_msgs
   geometry_msgs
   shape_msgs
+  std_srvs
   trajectory_msgs
   geometric_shapes
 )

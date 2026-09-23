@@ -104,13 +104,10 @@ namespace isaac_ros_cumotion_rviz
     // async completion instead).
     void generateTrajectoryAsync(std::function<void(bool)> on_done);
 
-    // Build the goalset list from the TargetDisplays currently in RViz. For the
-    // multipoint planner one Goalset (single pose) is emitted PER display, in
-    // display-tree order -- the waypoint order -- matching what MultiPointPlanner
-    // expects (goalsets[i] = i-th waypoint) and what the server's cached-plan
-    // signature compares against. Classic and MPC keep the single-target
-    // behaviour: only the first (primary) display feeds the goalset.
-    // Returns an empty vector when no TargetDisplay is available.
+    // Build the goalset list from the TargetDisplays currently in RViz. A
+    // single Goalset (single pose) is emitted from the PRIMARY (first)
+    // display only, matching what the server's Classic/JointSpace path
+    // consumes. Returns an empty vector when no TargetDisplay is available.
     std::vector<isaac_ros_cumotion_interfaces::msg::Goalset> buildGoalsets();
 
     // (Re)creates every planner-facing client/publisher against the given planner
@@ -146,9 +143,9 @@ namespace isaac_ros_cumotion_rviz
     float time_dilation_factor_;
     // The TargetDisplay owning the draggable 6-DOF target (self-contained;
     // polling timer refreshes it lazily). Not owned by the panel. For multiple
-    // TargetDisplays, `target_display_` is the FIRST one (the one MPC/classic
-    // and the pose spin boxes act on); `target_displays_` carries ALL of them in
-    // display-tree order for multipoint planning.
+    // TargetDisplays, `target_display_` is the FIRST one (the one Classic/MPC
+    // and the pose spin boxes act on); `target_displays_` carries ALL of them
+    // in display-tree order.
     TargetDisplay* target_display_;
     std::vector<TargetDisplay*> target_displays_;
 

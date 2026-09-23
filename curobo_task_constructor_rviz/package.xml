@@ -1,0 +1,38 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>curobo_task_constructor_rviz</name>
+  <version>0.1.0</version>
+  <description>
+    rviz2 panel for curobo_task_constructor tasks: renders the StageSpec
+    tree, colors stages by their last attempted solution, publishes the
+    selected stage's debug markers and re-requests task execution via the
+    Task.action client.
+  </description>
+
+  <license>BSD-3-Clause</license>
+
+  <maintainer email="dev@example.com">curobo_task_constructor</maintainer>
+  <author email="dev@example.com">curobo_task_constructor</author>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- qtbase5-dev is what upstream moveit_task_constructor_visualization
+       declares; the Qt5 runtime comes from the rviz stack (rviz_common). -->
+  <build_depend>qtbase5-dev</build_depend>
+
+  <depend>curobo_task_constructor_interfaces</depend>
+  <depend>pluginlib</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>rviz_common</depend>
+  <depend>visualization_msgs</depend>
+
+  <exec_depend>libqt5-core</exec_depend>
+  <exec_depend>libqt5-gui</exec_depend>
+  <exec_depend>libqt5-opengl</exec_depend>
+  <exec_depend>libqt5-widgets</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

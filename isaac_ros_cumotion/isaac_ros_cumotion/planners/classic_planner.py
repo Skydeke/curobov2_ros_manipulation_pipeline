@@ -71,7 +71,7 @@ class ClassicPlanner(SinglePlanner):
         # whole path). Reset afterwards since the MotionPlanner is shared.
         applied = self._apply_pose_constraints(goal_request)
 
-        # Contact allowance rides on the goalset (same contract as MultiPoint /
+        # Contact allowance rides on the goalset (same contract as
         # JointSpace): disable the listed links' collision spheres for the
         # solve only, then re-enable (exception-safe).
         allowed = list(getattr(goal_request.goalsets[0], 'allowed_collisions', None) or [])

@@ -11,7 +11,6 @@ from .trajectory_planner import TrajectoryPlanner
 from .classic_planner import ClassicPlanner
 from .mpc_planner import MPCController
 from .retarget_controller import RetargetController
-from .multi_point_planner import MultiPointPlanner
 from .joint_space_planner import JointSpacePlanner
 
 class PlannerFactory:
@@ -32,7 +31,6 @@ class PlannerFactory:
     _PLANNER_CATALOG = [
         ('classic',     ClassicPlanner,    0, 'Classic'),
         ('mpc',         MPCController,      1, 'MPC'),
-        ('multi_point', MultiPointPlanner, 4, 'Multi Point'),
         ('joint_space', JointSpacePlanner, 5, 'Joint Space'),
         ('retarget',    RetargetController, 6, 'Motion Retargeting'),
     ]
@@ -90,7 +88,7 @@ class PlannerFactory:
             List of planner type strings
         """
         # Return only primary names (not aliases)
-        return cls._PLANNER_REGISTRY.keys() #['classic', 'mpc', 'multi_point']
+        return cls._PLANNER_REGISTRY.keys()
 
     @classmethod
     def switch_planner(cls, enum_id: int, planner_manager) -> tuple:

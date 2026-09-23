@@ -12,7 +12,7 @@ The migration is **complete**: the package contains no `MotionGen`, `WorldConfig
 - **Dynamics-aware B-spline trajopt**
 - Composition-based architecture, easier to extend
 
-This let the wrapper delete: the `Lab-CORO/curobo` fork (branch `lab-coro`), the nvblox forks, the homegrown `MeshBloxilization` voxelizer, the mesh+cuboid dual storage in `ObstacleManager`, the triple `obb`/`mesh`/`blox` cache (now a single v2 `collision_cache` dict — the `SetCollisionCache` service keeps its three request fields and maps them onto it), and `MultiPointPlanner`'s manual per-waypoint loop.
+This let the wrapper delete: the `Lab-CORO/curobo` fork (branch `lab-coro`), the nvblox forks, the homegrown `MeshBloxilization` voxelizer, the mesh+cuboid dual storage in `ObstacleManager`, the triple `obb`/`mesh`/`blox` cache (now a single v2 `collision_cache` dict — the `SetCollisionCache` service keeps its three request fields and maps them onto it).
 
 ## Prerequisites
 

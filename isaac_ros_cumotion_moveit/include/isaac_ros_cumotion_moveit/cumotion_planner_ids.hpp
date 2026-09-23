@@ -40,6 +40,8 @@ namespace manipulation
  * and are hidden to avoid silently planning toward an empty goal when a joint
  * goal is sent. Closed-loop planners (MPC, retargeting) are excluded too.
  *
+ * (The old MultiPointPlanner is removed; classic is the only Cartesian
+ * pose planner.)
  * `kAutoPlannerId` selects the Joint Space planner (the only available one).
  */
 inline constexpr char kAutoPlannerId[] = "cuMotion";

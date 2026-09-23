@@ -10,7 +10,6 @@ Architecture:
     TrajectoryPlanner (abstract interface)
         ├── SinglePlanner (open-loop, MotionPlanner-based) [THIS CLASS]
         │   ├── ClassicPlanner (single-shot planning)
-        │   ├── MultiPointPlanner (waypoint planning)
         │   └── JointSpacePlanner (joint space planning)
         └── ReactiveController (closed-loop control loop)
             └── MPCController (cuRobo ModelPredictiveControl)
@@ -19,6 +18,7 @@ Architecture:
 from abc import abstractmethod
 from typing import Optional, Any
 import time
+import torch
 
 from sensor_msgs.msg import Image as ImageMsg
 from rclpy.qos import (
@@ -651,13 +651,15 @@ class SinglePlanner(TrajectoryPlanner):
         # PREVIOUS plan() call must not silently guard this one's execute().
         self._command_epoch = None
         # Reset per-segment goalset winners — children (ClassicPlanner /
-        # MultiPointPlanner) set this in _plan_trajectory; plan() reports it as
-        # metadata['selected_goal_index'] so the node can fill the response.
+        # JointSpacePlanner) set this in _plan_trajectory; _finalize_plan_result
+        # reports it as metadata['selected_goal_index'] so the node can fill
+        # the response.
         self._selected_goal_indexes = None
         # Per-request insight metadata (rooted in PlanningOptions): winner seed
         # + per-segment reached flags + candidate tally + the gated considered
-        # rows. Children set these in _plan_trajectory; plan() reports them via
-        # _result_metadata so the node can fill TrajectoryResult / PlanningStats.
+        # rows. Children set these in _plan_trajectory; _finalize_plan_result
+        # reports them via _result_metadata so the node can fill
+        # TrajectoryResult / PlanningStats.
         self._selected_seed_index = None
         self._waypoint_status = None
         self._candidate_tally = None
@@ -668,127 +670,8 @@ class SinglePlanner(TrajectoryPlanner):
         try:
             # Let child class generate the trajectory using MotionGen
             result = self._plan_trajectory(start_state, goal_request, config)
-
-            # Check if planning succeeded
-            # v2: plan_pose() returns Optional[TrajOptSolverResult] — None on failure
-            if result is None:
-                return PlannerResult(
-                    success=False,
-                    message="Planning failed: no solution found (plan_pose returned None)",
-                    metadata=self._result_metadata(result=None, num_wp=None),
-                )
-
-            success_val = result.success
-            if hasattr(success_val, 'item'):
-                success_val = success_val.item()
-            if not success_val:
-                # TrajOptSolverResult has no `.status`; the informative fields
-                # are debug_info (dict) and feasible (constraint satisfaction).
-                status = getattr(result, 'status', None)
-                if not status:
-                    dbg = getattr(result, 'debug_info', None) or {}
-                    status = next(iter(dbg.values()), None) if dbg else None
-                if not status:
-                    feasible = getattr(result, 'feasible', None)
-                    if feasible is not None:
-                        try:
-                            ok = feasible
-                            if hasattr(ok, 'detach'):
-                                ok = ok.detach().cpu()
-                            if hasattr(ok, 'all'):
-                                ok = bool(ok.all())
-                            if not ok:
-                                status = "constraints violated (collision/limits)"
-                        except Exception:
-                            pass
-                return PlannerResult(
-                    success=False,
-                    message=f"Planning failed: {status or 'unknown'}",
-                    metadata=self._result_metadata(result=result)
-                )
-
-            # Get interpolated trajectory
-            self.planned_trajectory = result.get_interpolated_plan()
-
-            # Allow child class to post-process the trajectory
-            # (e.g., add grasp commands, modify velocities, etc.)
-            self.planned_trajectory = self._process_trajectory(
-                self.planned_trajectory,
-                config
-            )
-
-            # v2: position shape can be [B, T, D] — count waypoints on horizon dim.
-            _pos = self.planned_trajectory.position
-            num_wp = _pos.shape[-2] if _pos.ndim >= 2 else len(_pos)
-            self.node.get_logger().info(
-                f"{self.get_planner_name()}: Successfully planned trajectory "
-                f"with {num_wp} waypoints"
-            )
-
-            # Publish the motion-plan debug image (gated by publish_plan_debug_image).
-            self._publish_plan_image()
-
-            # Send trajectory to robot context for visualization
-            if robot_context is not None:
-                traj = self.planned_trajectory
-                # v2: position/velocity/acceleration may have shape [B, T, D];
-                # robot_context expects [T, D] (one row of floats per waypoint).
-                # Flatten all leading dims down to 2 so `.tolist()` yields a
-                # list[list[float]] regardless of batch rank.
-                def _to_2d_list(t):
-                    if t is None:
-                        return None
-                    while t.ndim > 2:
-                        t = t[0]
-                    return t.detach().cpu().tolist()
-
-                self.node.get_logger().debug(
-                    f"Trajectory shapes - pos: {tuple(traj.position.shape)}, "
-                    f"vel: {tuple(traj.velocity.shape) if traj.velocity is not None else None}, "
-                    f"acc: {tuple(traj.acceleration.shape) if traj.acceleration is not None else None}"
-                )
-                pos_list = _to_2d_list(traj.position)
-                vel_list = _to_2d_list(traj.velocity)
-                acc_list = _to_2d_list(traj.acceleration)
-
-                # Ensure velocity/acceleration arrays align with positions even
-                # if the planner omitted them (rare but possible for a stubbed
-                # trajectory).
-                if vel_list is None:
-                    vel_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
-                if acc_list is None:
-                    acc_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
-
-                # Interpolated plans are in FULL joint space: cuRobo augments
-                # locked joints (e.g. a gripper finger_joint) via
-                # get_full_dof_from_solution(), so rows can be wider than
-                # joint_names (Kortex: 8 columns vs 7 names). Project the
-                # streamed command back onto ACTIVE joints by name so it matches
-                # the controller's arm joints — same active-joint projection the
-                # preview/ghost pipeline (robot_context) applies to set_command().
-                joint_names, cols = self._active_joint_projection(traj)
-                if cols is not None:
-                    pos_list = [[r[i] for i in cols] for r in pos_list]
-                    vel_list = [[r[i] for i in cols] for r in vel_list]
-                    acc_list = [[r[i] for i in cols] for r in acc_list]
-                    joint_names = [joint_names[i] for i in cols]
-
-                self._command_epoch = robot_context.set_command(
-                    joint_names,
-                    vel_list,
-                    acc_list,
-                    pos_list,
-                )
-                self.node.get_logger().info(
-                    "Trajectory sent to robot context for visualization"
-                )
-
-            return PlannerResult(
-                success=True,
-                message="Trajectory planned successfully",
-                trajectory=self.planned_trajectory,
-                metadata=self._result_metadata(result=result, num_wp=num_wp),
-            )
+            return self._finalize_plan_result(
+                result, goal_request, config, robot_context)
 
         except Exception as e:
             self.node.get_logger().error(f"Planning exception: {e}")
@@ -798,6 +681,426 @@ class SinglePlanner(TrajectoryPlanner):
                 success=False,
                 message=f"Planning error: {str(e)}",
             )
+
+    def _finalize_plan_result(self, result, goal_request, config, robot_context):
+        """Shape a solved TrajOptSolverResult into a PlannerResult.
+
+        Shared by plan() (one problem) and plan_batch() (one call per problem,
+        fed a row-sliced batch result) so failure shaping, interpolated-
+        trajectory extraction, per-request insight metadata, the plan debug
+        image and the robot-context preview behave identically on both planning
+        surfaces. The caller binds the per-request insight fields (selected
+        goal/seed index, waypoint status, candidate tally, considered rows,
+        waypoint tolerance, log_considered) before calling — children set them
+        in ``_plan_trajectory`` for plan(), the batch loop sets them per
+        problem for plan_batch().
+
+        Args:
+            result: TrajOptSolverResult from ``_plan_trajectory`` (or a
+                row-sliced copy of a batched solve), or None when no solution
+                was found.
+            goal_request: The request this result was solved for (bound to
+                ``self.goal_pose``).
+            config: Per-call planner config (max_attempts etc.).
+            robot_context: Optional RobotContext for trajectory visualization.
+
+        Returns:
+            PlannerResult — failure (with metadata) or success (trajectory
+            with the waypoint count in metadata).
+        """
+        # Reset: only set below if this call actually binds a fresh
+        # set_command() (robot_context is not None). A stale epoch from a
+        # PREVIOUS plan() call must not silently guard this one's execute().
+        self._command_epoch = None
+        self.goal_pose = goal_request
+
+        # Check if planning succeeded
+        # v2: plan_pose() returns Optional[TrajOptSolverResult] — None on failure
+        if result is None:
+            return PlannerResult(
+                success=False,
+                message="Planning failed: no solution found (plan_pose returned None)",
+                metadata=self._result_metadata(result=None, num_wp=None),
+            )
+
+        # Untouched cuRobo pads requests below TrajOptSolverCfg.max_batch_size
+        # up to the solver's full grid, then slices most fields back but leaves
+        # the interpolated trajectory at the padded batch (upstream
+        # `_slice_batch_result` omits those fields). A single-problem result can
+        # therefore carry interpolated fields of len > 1, which
+        # get_interpolated_plan() rejects with "only single result is
+        # supported". Normalize to row 0 so this surface always behaves like a
+        # single-problem solve regardless of max_batch_size. No-op when the
+        # result is already row-sliced (plan_batch) or the solver did not pad
+        # (max_batch_size == 1).
+        _lt = getattr(result, "interpolated_last_tstep", None)
+        if _lt is not None and len(_lt) > 1:
+            result = self._slice_result_row(result, 0)
+
+        success_val = result.success
+        if hasattr(success_val, 'item'):
+            success_val = success_val.item()
+        if not success_val:
+            # TrajOptSolverResult has no `.status`; the informative fields
+            # are debug_info (dict) and feasible (constraint satisfaction).
+            status = getattr(result, 'status', None)
+            if not status:
+                dbg = getattr(result, 'debug_info', None) or {}
+                status = next(iter(dbg.values()), None) if dbg else None
+            if not status:
+                feasible = getattr(result, 'feasible', None)
+                if feasible is not None:
+                    try:
+                        ok = feasible
+                        if hasattr(ok, 'detach'):
+                            ok = ok.detach().cpu()
+                        if hasattr(ok, 'all'):
+                            ok = bool(ok.all())
+                        if not ok:
+                            status = "constraints violated (collision/limits)"
+                    except Exception:
+                        pass
+            return PlannerResult(
+                success=False,
+                message=f"Planning failed: {status or 'unknown'}",
+                metadata=self._result_metadata(result=result)
+            )
+
+        # Get interpolated trajectory
+        self.planned_trajectory = result.get_interpolated_plan()
+
+        # Allow child class to post-process the trajectory
+        # (e.g., add grasp commands, modify velocities, etc.)
+        self.planned_trajectory = self._process_trajectory(
+            self.planned_trajectory,
+            config
+        )
+
+        # v2: position shape can be [B, T, D] — count waypoints on horizon dim.
+        _pos = self.planned_trajectory.position
+        num_wp = _pos.shape[-2] if _pos.ndim >= 2 else len(_pos)
+        self.node.get_logger().info(
+            f"{self.get_planner_name()}: Successfully planned trajectory "
+            f"with {num_wp} waypoints"
+        )
+
+        # Publish the motion-plan debug image (gated by publish_plan_debug_image).
+        self._publish_plan_image()
+
+        # Send trajectory to robot context for visualization
+        if robot_context is not None:
+            traj = self.planned_trajectory
+            # v2: position/velocity/acceleration may have shape [B, T, D];
+            # robot_context expects [T, D] (one row of floats per waypoint).
+            # Flatten all leading dims down to 2 so `.tolist()` yields a
+            # list[list[float]] regardless of batch rank.
+            def _to_2d_list(t):
+                if t is None:
+                    return None
+                while t.ndim > 2:
+                    t = t[0]
+                return t.detach().cpu().tolist()
+
+            self.node.get_logger().debug(
+                f"Trajectory shapes - pos: {tuple(traj.position.shape)}, "
+                f"vel: {tuple(traj.velocity.shape) if traj.velocity is not None else None}, "
+                f"acc: {tuple(traj.acceleration.shape) if traj.acceleration is not None else None}"
+            )
+            pos_list = _to_2d_list(traj.position)
+            vel_list = _to_2d_list(traj.velocity)
+            acc_list = _to_2d_list(traj.acceleration)
+
+            # Ensure velocity/acceleration arrays align with positions even
+            # if the planner omitted them (rare but possible for a stubbed
+            # trajectory).
+            if vel_list is None:
+                vel_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
+            if acc_list is None:
+                acc_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
+
+            # Interpolated plans are in FULL joint space: cuRobo augments
+            # locked joints (e.g. a gripper finger_joint) via
+            # get_full_dof_from_solution(), so rows can be wider than
+            # joint_names (Kortex: 8 columns vs 7 names). Project the
+            # streamed command back onto ACTIVE joints by name so it matches
+            # the controller's arm joints — same active-joint projection the
+            # preview/ghost pipeline (robot_context) applies to set_command().
+            joint_names, cols = self._active_joint_projection(traj)
+            if cols is not None:
+                pos_list = [[r[i] for i in cols] for r in pos_list]
+                vel_list = [[r[i] for i in cols] for r in vel_list]
+                acc_list = [[r[i] for i in cols] for r in acc_list]
+                joint_names = [joint_names[i] for i in cols]
+
+            self._command_epoch = robot_context.set_command(
+                joint_names,
+                vel_list,
+                acc_list,
+                pos_list,
+            )
+            self.node.get_logger().info(
+                "Trajectory sent to robot context for visualization"
+            )
+
+        return PlannerResult(
+            success=True,
+            message="Trajectory planned successfully",
+            trajectory=self.planned_trajectory,
+            metadata=self._result_metadata(result=result, num_wp=num_wp),
+        )
+
+    def plan_batch(
+        self,
+        start_states: list,
+        goal_requests: list,
+        config: dict,
+        robot_context: Optional[Any] = None,
+    ) -> list:
+        """Plan several whole-task problems in ONE batched solve.
+
+        All problems share one ``plan_cspace`` call: the solver's batch
+        dimension carries the problems and the seed dimension carries the
+        per-problem candidate trajectories (``num_trajopt_seeds``), so N
+        problems cost one solve — one CUDA-graph capture, one metric/rank pass
+        — instead of N. Results are sliced back per problem and shaped exactly
+        like a single ``plan()`` call (winner seed, per-segment reached flags,
+        candidate tally, considered rows, plan debug image, robot-context
+        preview).
+
+        Supported: every problem a single joint-space goalset (the move_to
+        segments the task constructor fans out through the
+        ``trajectory_generation_batch`` surface). Anything else — pose
+        goalsets, multi-goalset chains, multi-candidate sets, reactive
+        controllers — falls back to one sequential ``plan()`` per problem.
+
+        Args:
+            start_states: One start JointState per problem.
+            goal_requests: One whole-task request per problem.
+            config: Per-call planner config (max_attempts /
+                enable_graph_attempt).
+            robot_context: Optional RobotContext for trajectory visualization.
+
+        Returns:
+            One PlannerResult per problem, in request order.
+        """
+        if self.motion_planner is None:
+            return [
+                PlannerResult(
+                    success=False,
+                    message=(
+                        "MotionPlanner not initialized. "
+                        "Call SinglePlanner.set_motion_planner() after warmup."
+                    ),
+                )
+                for _ in goal_requests
+            ]
+        if not goal_requests:
+            return []
+        if not self._batch_is_supported(goal_requests):
+            return [
+                self.plan(s, g, config, robot_context)
+                for s, g in zip(start_states, goal_requests)
+            ]
+        try:
+            return self._plan_cspace_batch(
+                start_states, goal_requests, config, robot_context)
+        except Exception as e:
+            self.node.get_logger().error(
+                f"Batched planning error (falling back to sequential "
+                f"plan() per problem): {e}")
+            self.node.get_logger().error(traceback.format_exc())
+            return [
+                self.plan(s, g, config, robot_context)
+                for s, g in zip(start_states, goal_requests)
+            ]
+
+    @staticmethod
+    def _batch_is_supported(goal_requests) -> bool:
+        """True when every problem is a single joint-space goalset.
+
+        The batched path stacks one joint goal + one start per problem into a
+        single ``plan_cspace`` call. Pose goalsets, multi-goalset whole-task
+        chains and multi-candidate sets are planned one at a time (``plan``
+        fallback), since their goalset/IK machinery is single-problem shaped.
+        """
+        for g in goal_requests:
+            goalsets = list(getattr(g, 'goalsets', None) or [])
+            if len(goalsets) != 1:
+                return False
+            if not list(getattr(goalsets[0], 'target_joint_positions', None) or []):
+                return False
+        return True
+
+    def _plan_cspace_batch(self, start_states, goal_requests, config, robot_context):
+        """One ``plan_cspace`` solve for N joint-space problems, then shape.
+
+        Mirrors JointSpacePlanner._plan_trajectory per problem: short joint
+        targets are padded with the start-state tail, contact-link collision
+        allowance is applied for the solve only (the union of every problem's
+        allowed links), and per-problem insight fields are bound from the
+        row-sliced result before ``_finalize_plan_result`` shapes it.
+        """
+        # solve_cspace hard-raises when the batch exceeds
+        # config.max_batch_size (solver buffers are sized at build); fall back
+        # to one sequential plan() per problem instead of tripping the
+        # exception path (identical results, just not batched).
+        max_batch = getattr(
+            getattr(self.motion_planner, 'trajopt_solver', None), 'config', None)
+        max_batch = int(getattr(max_batch, 'max_batch_size', 1)) if max_batch else 1
+        if len(goal_requests) > max_batch:
+            self.node.get_logger().warn(
+                f"Batched planning: {len(goal_requests)} problems exceed solver "
+                f"max_batch_size={max_batch}; falling back to sequential plan()")
+            return [
+                self.plan(s, g, config, robot_context)
+                for s, g in zip(start_states, goal_requests)
+            ]
+
+        robot_dof = self.motion_planner.kinematics.get_dof()
+        max_attempts = config.get('max_attempts', 1)
+        enable_graph_attempt = config.get('enable_graph_attempt', 1)
+
+        goal_rows = []
+        start_rows = []
+        allowed_links = set()
+        for s, g in zip(start_states, goal_requests):
+            goalset = list(getattr(g, 'goalsets', None) or [])[0]
+            target = list(getattr(goalset, 'target_joint_positions', None) or [])
+            if len(target) > robot_dof:
+                raise ValueError(
+                    f"Joint count mismatch: received {len(target)} joints, "
+                    f"but robot has {robot_dof} DOF"
+                )
+            if len(target) < robot_dof:
+                # Short joint target (e.g. arm-only goalset covering only the
+                # manipulator DOF): keep the trailing DOF (gripper) at the
+                # start-state value — the same padding as the single path.
+                start_tail = s.position[0][len(target):].cpu().tolist()
+                target = target + start_tail
+            if any(not (-1e6 < x < 1e6) or x != x for x in target):
+                raise ValueError(f"Invalid joint positions (NaN/Inf): {target}")
+            goal_rows.append(torch.tensor(
+                target, dtype=s.position.dtype, device=s.position.device))
+            start_rows.append(s.position[0])
+            allowed_links.update(
+                list(getattr(goalset, 'allowed_collisions', None) or []))
+
+        goal_state = JointState.from_position(torch.stack(goal_rows))
+        current_state = JointState.from_position(torch.stack(start_rows))
+
+        self.node.get_logger().info(
+            f"Batched joint-space planning: {len(goal_rows)} problem(s) in "
+            f"one solve (max_attempts={max_attempts}, "
+            f"enable_graph_attempt={enable_graph_attempt})")
+
+        # Contact allowance rides on each goalset: disable the union of the
+        # listed links' collision spheres for the solve only (exception-safe).
+        disabled = sorted(allowed_links)
+        if disabled:
+            self.motion_planner.disable_link_collision(disabled)
+            self.node.get_logger().info(
+                f"Disabled collision spheres for contact links: {disabled}")
+        try:
+            result = self.motion_planner.plan_cspace(
+                goal_state,
+                current_state,
+                max_attempts=max_attempts,
+                enable_graph_attempt=enable_graph_attempt,
+            )
+        finally:
+            if disabled:
+                self.motion_planner.enable_link_collision(disabled)
+                self.node.get_logger().info(
+                    f"Re-enabled collision spheres for contact links: {disabled}")
+
+        if result is None:
+            return [
+                PlannerResult(
+                    success=False,
+                    message="Planning failed: no solution found "
+                            "(plan_cspace returned None)",
+                )
+                for _ in goal_requests
+            ]
+
+        results = []
+        for i, (s, g) in enumerate(zip(start_states, goal_requests)):
+            row = self._slice_result_row(result, i)
+            # Per-segment insight metadata — mirrors
+            # JointSpacePlanner._plan_trajectory (one segment, joint-space
+            # solve: goalset candidate is 0/N/A).
+            seg_ok = False
+            succ = row.success
+            seg_ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+            self.start_state = s
+            self._waypoint_tolerance = self._request_waypoint_tolerance(g)
+            self._log_considered = self._request_log_considered(g)
+            seed_id = self._select_seed_index(row)
+            self._selected_goal_indexes = [self._select_goal_index(row)]
+            self._selected_seed_index = [seed_id]
+            self._waypoint_status = [self._segment_reached(
+                row, seed_id, self._waypoint_tolerance, seg_ok)]
+            self._candidate_tally = self._tally_candidates(row)
+            self._considered_rows = self._segment_considered_rows(
+                row, 0, self._selected_goal_indexes[0], self._log_considered)
+            try:
+                results.append(self._finalize_plan_result(
+                    row, g, config, robot_context))
+            except Exception as e:
+                self.node.get_logger().error(
+                    f"Batched problem {i} shaping error: {e}")
+                self.node.get_logger().error(traceback.format_exc())
+                results.append(PlannerResult(
+                    success=False, message=f"Planning error: {str(e)}"))
+        return results
+
+    @staticmethod
+    def _slice_result_row(result, i):
+        """Slice a batched TrajOptSolverResult down to problem ``i``.
+
+        Returns a NEW result whose tensor fields carry batch size 1 (the
+        ``[i:i+1]`` slice), matching the single-problem solve path exactly so
+        downstream helpers (seed selection, candidate tally,
+        ``get_interpolated_plan``) behave per problem without modification.
+        ``clone()`` deep-copies every tensor, so the other problems' rows are
+        left untouched for the rest of the loop.
+        """
+        row = result.clone()
+        for attr in (
+            "success", "solution", "position_error", "rotation_error",
+            "cspace_error", "goalset_index", "optimized_seeds",
+            "seed_rank", "seed_cost", "total_cost_reshaped", "feasible",
+        ):
+            val = getattr(row, attr, None)
+            if val is not None:
+                setattr(row, attr, val[i:i + 1])
+        if row.js_solution is not None:
+            row.js_solution = SinglePlanner._slice_joint_state(row.js_solution, i)
+        if row.interpolated_trajectory is not None:
+            row.interpolated_trajectory = SinglePlanner._slice_joint_state(
+                row.interpolated_trajectory, i)
+        lt = getattr(row, "interpolated_last_tstep", None)
+        if lt is not None:
+            row.interpolated_last_tstep = lt[i:i + 1]
+        row.batch_size = 1
+        return row
+
+    @staticmethod
+    def _slice_joint_state(js, i):
+        """Slice the leading (batch) axis of a cloned JointState to row ``i``.
+
+        Works on a clone so the parent result's tensors are never rebound.
+        ``dt`` is a scalar and ``joint_names`` are strings — kept as-is.
+        """
+        js = js.clone()
+        for attr in ("position", "velocity", "acceleration", "jerk", "knot"):
+            val = getattr(js, attr, None)
+            if val is not None and getattr(val, "ndim", 0) >= 1:
+                setattr(js, attr, val[i:i + 1])
+        kd = getattr(js, "knot_dt", None)
+        if kd is not None and getattr(kd, "ndim", 0) >= 1:
+            js.knot_dt = kd[i:i + 1]
+        return js
 
     @abstractmethod
     def _plan_trajectory(
@@ -811,7 +1114,6 @@ class SinglePlanner(TrajectoryPlanner):
 
         Child planners extract different data from goal_request:
         - ClassicPlanner: goalsets[0]  → single GoalToolPose (goal-set resolve when N>1)
-        - MultiPointPlanner: goalsets[i] → per-waypoint GoalToolPose
         - JointSpacePlanner: goal_request.target_joints → joint goal
 
         Args:

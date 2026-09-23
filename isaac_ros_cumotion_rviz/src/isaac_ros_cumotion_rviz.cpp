@@ -120,7 +120,7 @@ namespace isaac_ros_cumotion_rviz
 
     // Timer to find the TargetDisplay(s) (added to RViz as displays, not owned
     // by this panel). Keeps running so displays added/removed/reordered later
-    // are picked up (multipoint mode uses as many as are present).
+    // are picked up (the primary display feeds the goal).
     QTimer* findDisplayTimer = new QTimer(this);
     connect(findDisplayTimer, &QTimer::timeout, this, &RvizArgsPanel::refreshTargetDisplays);
     findDisplayTimer->start(500); // Check every 500ms
@@ -342,10 +342,8 @@ namespace isaac_ros_cumotion_rviz
       // MPC is active), which overrides the empty goalset. The open-loop path
       // has no such second source -- the cache was its only route, and it was
       // unreachable.
-      // Classic/MPC: a single goalset from the primary display. Multipoint:
-      // one goalset per TargetDisplay, in display order -- matching what the
-      // "generate" step sent is what lets the server reuse the cached plan
-      // (_pending_plan_matches). buildGoalsets() warns when no display exists.
+      // Classic/MPC: a single goalset from the primary display.
+      // buildGoalsets() warns when no display exists.
       goal_request.goal.goalsets = buildGoalsets();
 
       auto send_goal_options = rclcpp_action::Client<isaac_ros_cumotion_interfaces::action::SendTrajectory>::SendGoalOptions();
@@ -436,8 +434,7 @@ namespace isaac_ros_cumotion_rviz
         return;
       }
 
-      // Classic/MPC: a single goalset from the primary display. Multipoint:
-      // one goalset per TargetDisplay, in display order. buildGoalsets() warns
+      // A single goalset from the primary display. buildGoalsets() warns
       // below when no display is available.
       const auto goalsets = buildGoalsets();
       if (goalsets.empty()) {
@@ -726,8 +723,8 @@ namespace isaac_ros_cumotion_rviz
       // shipped rviz configs (<robot>_curobo.rviz) place TargetDisplay inside a
       // "Curobo Planning" group, so a scan of only root-level displays misses it
       // whenever RViz reloads the config. Runs continuously so displays added,
-      // removed or reordered later are picked up (multipoint mode plans through
-      // as many as are present, in display-tree order).
+      // removed or reordered later are picked up (the primary display feeds
+      // the goal, others are available for display-reordering diagnostics).
       std::vector<TargetDisplay*> found;
       auto root_display = context->getRootDisplayGroup();
       if (root_display) {
@@ -741,12 +738,11 @@ namespace isaac_ros_cumotion_rviz
           RCLCPP_WARN(node_->get_logger(),
             "No TargetDisplay found - add one via Displays -> Add");
         } else if (target_display_ != found.front()) {
-          // The PRIMARY target stays the FIRST display in the tree. Classic and
-          // MPC act only on this one; multipoint plans through all of them.
+          // The PRIMARY target stays the FIRST display in the tree. Classic
+          // and MPC act only on this one.
           target_display_ = found.front();
           RCLCPP_INFO(node_->get_logger(),
-            "Primary TargetDisplay set (%zu total; multipoint mode plans "
-            "through all, in display order)", found.size());
+            "Primary TargetDisplay set (total: %zu)", found.size());
         }
       }
     }
@@ -777,25 +773,6 @@ namespace isaac_ros_cumotion_rviz
     std::vector<isaac_ros_cumotion_interfaces::msg::Goalset> RvizArgsPanel::buildGoalsets()
     {
       std::vector<isaac_ros_cumotion_interfaces::msg::Goalset> goalsets;
-
-      // Multipoint planner: one Goalset (single pose) PER TargetDisplay, in
-      // display-tree order -- goalsets[i] is the i-th waypoint, exactly what
-      // MultiPointPlanner expects and what the server's cached-plan signature
-      // compares against. Classic and MPC keep the existing single-target
-      // behaviour: only the primary (first) display feeds the goalset.
-      if (current_planner_type_ == 4 /* SetPlanner::MULTIPOINT */ &&
-          !target_displays_.empty())
-      {
-        for (const auto * display_ptr : target_displays_) {
-          isaac_ros_cumotion_interfaces::msg::Goalset gset;
-          gset.poses.push_back(display_ptr->getPose());
-          goalsets.push_back(gset);
-        }
-        RCLCPP_INFO(node_->get_logger(),
-          "Multipoint: %zu waypoint(s) from TargetDisplay(s) in display order",
-          goalsets.size());
-        return goalsets;
-      }
 
       if (target_display_) {
         isaac_ros_cumotion_interfaces::msg::Goalset gset;
@@ -968,14 +945,11 @@ namespace isaac_ros_cumotion_rviz
       RCLCPP_INFO(node_->get_logger(), "Planner type changed to index: %d", index);
 
       // Combo index -> SetPlanner enum. The combo is ordered Classic, MPC,
-      // Multipoint, but SetPlanner.srv enums are sparser (CLASSIC=0, MPC=1,
-      // MULTIPOINT=4, ...): the index must NOT be forwarded raw, or "Multipoint"
-      // (index 2) would go out as 2 and the node would reject it ("Unknown
-      // planner enum id: 2"). 4 is the real multipoint id.
+      // so the forwarding is identity (CLASSIC=0, MPC=1); keep the explicit
+      // table in case the combo order changes.
       static constexpr uint8_t kComboIndexToPlannerType[] = {
         0u,  // Classic (MotionGen)
         1u,  // MPC (Real-time)
-        4u,  // Multipoint (Multiple traj) -> SetPlanner::MULTIPOINT
       };
       if (index < 0 || static_cast<size_t>(index) >=
           sizeof(kComboIndexToPlannerType) / sizeof(kComboIndexToPlannerType[0])) {
@@ -992,9 +966,6 @@ namespace isaac_ros_cumotion_rviz
           break;
         case 1:
           planner_name = "MPC";
-          break;
-        case 4:
-          planner_name = "MULTIPOINT";
           break;
         default:
           planner_name = "UNKNOWN";

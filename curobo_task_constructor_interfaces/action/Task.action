@@ -1,0 +1,18 @@
+# Request a declarative task solve from the curobo_task_constructor executor.
+# The task is a flat StageSpec[] list — one node per graph element, wired by
+# id/parent_id (parent_id == id marks the root), emitted in pre-order; see
+# msg/StageSpec.msg.
+string task_name
+StageSpec[] stages
+bool execute              # also execute the winning solution (plan+drive)
+
+---
+bool success
+string error
+string failed_stage_name
+
+---
+string feedback               # human-readable progress/failure text
+string current_stage_name     # stage being computed / that just failed
+uint32 attempts               # total stage attempts so far
+uint32 solutions              # complete solutions found so far

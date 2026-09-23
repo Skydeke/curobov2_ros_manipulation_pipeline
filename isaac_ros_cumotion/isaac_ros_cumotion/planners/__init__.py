@@ -5,7 +5,6 @@ Two families share the same Strategy/Factory switch (SetPlanner / GetPlanners):
 
 Open-loop planners (plan a full trajectory, then execute) — base ``SinglePlanner``:
 - ClassicPlanner: single-shot pose planning
-- MultiPointPlanner: goalset / multi-waypoint planning
 - JointSpacePlanner: joint-space planning
 
 Reactive controllers (closed-loop control loop) — base ``ReactiveController``:
@@ -22,7 +21,6 @@ from .reactive_controller import ReactiveController
 from .classic_planner import ClassicPlanner
 from .mpc_planner import MPCController, MPCPlanner
 from .retarget_controller import RetargetController
-from .multi_point_planner import MultiPointPlanner
 from .joint_space_planner import JointSpacePlanner
 from .planner_factory import PlannerFactory, PlannerManager
 
@@ -36,7 +34,6 @@ __all__ = [
     'MPCController',
     'MPCPlanner',
     'RetargetController',
-    'MultiPointPlanner',
     'JointSpacePlanner',
     'PlannerFactory',
     'PlannerManager',

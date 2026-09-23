@@ -72,7 +72,7 @@ class ConfigWrapperMotion(ConfigWrapper):
 
         # v2 trajopt / IK / batch tunables
         self.num_ik_seeds = 32
-        self.num_trajopt_seeds = 12
+        self.num_trajopt_seeds = self._resolve_num_trajopt_seeds(node)
         # ROS param 'use_cuda_graph' (default True), overridable via the
         # CUROBO_USE_CUDA_GRAPH env var. Disabling avoids the MPC->Classic
         # captured-graph replay segfault at the cost of per-plan latency.
@@ -80,7 +80,7 @@ class ConfigWrapperMotion(ConfigWrapper):
         self.self_collision_check = True
         self.position_tolerance = 0.005
         self.orientation_tolerance = 0.05
-        self.max_batch_size = 1
+        self.max_batch_size = self._resolve_max_batch_size(node)
         self.multi_env = False
         self.max_goalset = self._resolve_max_goalset(node)
 
@@ -106,6 +106,48 @@ class ConfigWrapperMotion(ConfigWrapper):
                 node.get_parameter("max_goalset").get_parameter_value().integer_value
             )
         return 16
+
+    def _resolve_num_trajopt_seeds(self, node) -> int:
+        """Trajopt candidate trajectories per problem, read from the node param.
+
+        Each seed is a full trajectory-optimization solve, so per-plan latency
+        scales ~linearly with this count (12 seeds ≈ 12 solves per plan; 1 seed
+        is the fast lane for single deterministic segments). Default 12 (the
+        pre-batch, full-ranking behavior). Baked into solver buffers / the CUDA
+        graph at build time, so a runtime change takes effect only via the
+        ``update_motion_gen_config`` rebuild (same caveat as max_goalset).
+        """
+        if node.has_parameter("num_trajopt_seeds"):
+            return max(
+                1,
+                int(
+                    node.get_parameter("num_trajopt_seeds")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        return 12
+
+    def _resolve_max_batch_size(self, node) -> int:
+        """Batched-solve capacity (problems stacked into ONE solver call).
+
+        The trajectory_generation_batch surface (Alternatives/plan_batch fan-out)
+        plans N problems in a single plan_cspace solve, with the problems on the
+        batch dimension of the solver. The solver buffers are sized from this at
+        build time (like max_goalset), so it must cover the largest fan-out the
+        deployment actually sends — the node's launch parameter sets it, default 1
+        (no batch, matches the pre-batch behavior exactly).
+        """
+        if node.has_parameter("max_batch_size"):
+            return max(
+                1,
+                int(
+                    node.get_parameter("max_batch_size")
+                    .get_parameter_value()
+                    .integer_value
+                ),
+            )
+        return 1
 
     def set_motion_gen_config(self, node, _, response):
         """
@@ -147,7 +189,7 @@ class ConfigWrapperMotion(ConfigWrapper):
                 self_collision_check=self.self_collision_check,
                 collision_cache=self.collision_cache,
                 optimizer_collision_activation_distance=collision_activation_distance,
-                max_batch_size=self.max_batch_size,
+                max_batch_size=self._resolve_max_batch_size(node),
                 multi_env=self.multi_env,
                 max_goalset=self._resolve_max_goalset(node),
             )

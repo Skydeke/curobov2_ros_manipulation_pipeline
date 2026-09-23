@@ -27,6 +27,7 @@
 
 #include "moveit/planning_interface/planning_interface.hpp"
 #include "moveit/planning_scene/planning_scene.hpp"
+#include "moveit/planning_scene_interface/planning_scene_interface.h"
 #include "moveit/robot_state/conversions.hpp"
 #include "builtin_interfaces/msg/duration.hpp"
 #include "rclcpp/rclcpp.hpp"
@@ -82,9 +83,23 @@ void CumotionInterface::solve(
   RCLCPP_INFO(node_->get_logger(), "Planning trajectory");
 
   // Mirror MoveIt planning-scene obstacles into cuRobo's collision scene so the
-  // plan accounts for them. Best-effort: a sync failure is logged, not fatal.
-  if (!planner_busy) {
+  // plan accounts for them (multi-shape / mesh / attached-body aware, Sec 6).
+  // Best-effort: a sync failure is logged, not fatal.
+  if (!planner_busy && planning_scene) {
     service_client_->syncPlanningScene(planning_scene);
+
+    // Reverse sync (Sec 6d): mirror cuRobo-side objects (perception ESDF
+    // obstacles, direct /add_object calls) back into the MoveIt world as
+    // CollisionObjects, on-demand before every plan. Same best-effort rule.
+    // Lazily create the PlanningSceneInterface on first use so a plugin that
+    // never reaches the MoveIt planning scene stays cheap.
+    if (!psi_) {
+      // MoveIt2's PlanningSceneInterface has no node-taking constructor anymore;
+      // default (global planning-scene services) matches this move_group, which
+      // runs un-namespaced (moveit_configs_utils default).
+      psi_ = std::make_shared<moveit::planning_interface::PlanningSceneInterface>();
+    }
+    service_client_->syncObstaclesFromServer(*psi_, planning_scene->getPlanningFrame());
   }
 
   // Resolve the group's joint ordering from the robot model.

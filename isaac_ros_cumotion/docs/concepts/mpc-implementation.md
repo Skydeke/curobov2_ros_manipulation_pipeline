@@ -19,7 +19,6 @@ We mirror that with two planner families that share **one switch** (`SetPlanner`
 TrajectoryPlanner (abstract Strategy)
 ├── SinglePlanner            # open-loop: plan a full trajectory, then execute
 │   ├── ClassicPlanner
-│   ├── MultiPointPlanner
 │   └── JointSpacePlanner
 └── ReactiveController       # closed-loop: a control loop, no precomputed traj
     ├── MPCController         # cuRobo ModelPredictiveControl

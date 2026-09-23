@@ -266,6 +266,21 @@ class UnifiedPlannerNode(Node):
         # it at runtime requires a rebuild via update_motion_gen_config (same
         # caveat as max_batch_size). Read by ConfigWrapperMotion.
         self.declare_parameter('max_goalset', 16)
+        # Batched-solve capacity: problems stacked into ONE plan_cspace call on
+        # the trajectory_generation_batch surface (batch dim = problems × seed
+        # dim = candidate trajectories). Cap sizes solver buffers at build time
+        # and is baked into the CUDA graph (same caveat as max_goalset). Read by
+        # ConfigWrapperMotion; the launch sets it to the task's max fan-out.
+        self.declare_parameter('max_batch_size', 1)
+        # Trajopt candidate trajectories per problem (the seed axis: each
+        # problem is solved from this many warmstarts and the best kept). Each
+        # seed is a FULL trajectory-optimization solve, so per-plan latency
+        # scales ~linearly with it — 1 seed is the fast lane (single
+        # deterministic segments need no ranking). Sized into solver buffers /
+        # baked into the CUDA graph at build time, so a runtime change needs
+        # the update_motion_gen_config rebuild (same caveat as max_goalset).
+        # Read by ConfigWrapperMotion; the launch sets the deployment default.
+        self.declare_parameter('num_trajopt_seeds', 12)
         # Diagnostic toggle (see update_all_solvers_world): set false to withhold
         # the perception ESDF from the solvers. Leave true for normal operation —
         # false disables camera-based collision avoidance.
@@ -537,8 +552,8 @@ class UnifiedPlannerNode(Node):
             self._warmup_mpc()
         elif planner_type in ('retarget', 'motion_retargeting', 'teleop'):
             self._warmup_reactive('retarget')
-        elif planner_type in ('classic', 'multi_point', 'joint_space',
-                              'motion_gen', 'multipoint'):
+        elif planner_type in ('classic', 'joint_space',
+                              'motion_gen'):
             self._warmup_classic()
         else:
             self._warmup_classic()
@@ -549,7 +564,7 @@ class UnifiedPlannerNode(Node):
         self.get_logger().info(f"{planner_type} planner ready")
 
     def _warmup_classic(self):
-        """Warm up MotionPlanner for Classic/MultiPoint/JointSpace planners."""
+        """Warm up MotionPlanner for Classic/JointSpace planners."""
         if self.motion_planner is None:
             self.get_logger().info("  -> Initializing MotionPlanner...")
             self.config_wrapper_motion.set_motion_gen_config(self, None, None)
@@ -819,12 +834,71 @@ class UnifiedPlannerNode(Node):
             result_msg.stats = self._build_planning_stats(goal, {}, problems=1)
             return result_msg
 
+    def _plan_trajectory_goal_batch(self, planner, goals) -> list:
+        """Plan an array of goals in ONE planner.plan_batch call.
+
+        Mirrors _plan_trajectory_goal's ordering (validate → resolve starts →
+        config → setup planner → refresh world → plan under _plan_lock) but
+        runs the planner-independent steps ONCE for the whole batch: one
+        perception-world refresh, one lock acquisition, one solver call (the
+        planner stacks the problems into the solver's batch dimension, so N
+        problems share one CUDA-graph capture instead of N).
+
+        Falls back to one sequential _plan_trajectory_goal per goal when any
+        request fails validation or the batched solve raises — the per-problem
+        response contract (success OR failure for every request) always holds.
+
+        Returns:
+            One TrajectoryResult per goal, in request order, serialized through
+            the same _fill_result_insight as the single-goal service.
+        """
+        if any(not self._check_goal_request(planner, g)[0] for g in goals):
+            return [self._plan_trajectory_goal(planner, g) for g in goals]
+        try:
+            start_states = [self._resolve_start_state(g)[1] for g in goals]
+            config = self._get_planner_config(planner)
+            self._setup_planner(planner)
+
+            # ONE perception refresh for the whole batch (the per-goal path
+            # re-runs it per problem). The staleness window is unchanged: no
+            # new depth frames integrate mid-batch under _plan_lock.
+            self.refresh_perception_world()
+
+            self.get_logger().info(
+                f"Batched planning: {len(goals)} problem(s) with "
+                f"{planner.get_planner_name()}")
+            # See _plan_lock: holds gpu_lock for the WHOLE batched solve, since
+            # cuRobo may re-capture CUDA graphs mid-plan (even more likely when
+            # one call covers N problems).
+            with self._plan_lock():
+                planned = planner.plan_batch(
+                    start_states, goals, config, self.robot_context)
+            if len(planned) != len(goals):
+                raise RuntimeError(
+                    f"plan_batch returned {len(planned)} results for "
+                    f"{len(goals)} problems")
+            return [
+                self._fill_result_insight(
+                    TrajectoryResult(), planner, g, r, s)
+                for g, r, s in zip(goals, planned, start_states)
+            ]
+        except Exception as e:
+            self.get_logger().error(f"Batch planning error (falling back to "
+                                    f"sequential per-goal planning): {e}")
+            self.get_logger().error(traceback.format_exc())
+            return [self._plan_trajectory_goal(planner, g) for g in goals]
+
     def trajectory_generation_batch_callback(self, request, response):
         """Batch trajectory generation: plan every problem, rollup total_stats.
 
-        Always produces one ``responses[i]`` (TrajectoryResult) per problem —
-        success or failure — and a cross-problem ``total_stats`` rollup
-        (always populated once dispatched, even when every problem fails).
+        Problems are solved in ONE curobo call when the active planner exposes
+        ``plan_batch`` (batch dimension = problems, seed dimension = candidate
+        trajectories — N problems cost one GPU solve and one world refresh);
+        otherwise the callback falls back to one sequential plan per problem.
+        Either way it always produces one ``responses[i]`` (TrajectoryResult)
+        per problem — success or failure — and a cross-problem ``total_stats``
+        rollup (always populated once dispatched, even when every problem
+        fails).
         """
         try:
             planner = self.planner_manager.get_current_planner()
@@ -835,10 +909,19 @@ class UnifiedPlannerNode(Node):
                 response.total_stats = self._empty_stats()
                 return response
 
-            response.responses = [
-                self._plan_trajectory_goal(planner, g)
-                for g in (getattr(request, 'requests', None) or [])
-            ]
+            goals = list(getattr(request, 'requests', None) or [])
+            if not goals:
+                response.responses = []
+                response.success = True
+                response.error_msg = ""
+                response.total_stats = self._empty_stats()
+                return response
+            if getattr(planner, 'plan_batch', None) is not None:
+                response.responses = self._plan_trajectory_goal_batch(planner, goals)
+            else:
+                response.responses = [
+                    self._plan_trajectory_goal(planner, g) for g in goals
+                ]
             response.success = all(r.success for r in response.responses)
             response.error_msg = ""
             response.total_stats = self._rollup_stats(response.responses)

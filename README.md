@@ -94,3 +94,16 @@ This project builds on the work of:
   framework the package integrates with.
 - **[curobo_ros](https://github.com/Lab-CORO/curobo_ros)** — the ROS wrapping of
   cuRobo that much of this repository's ROS-side integration is derived from.
+- **[MoveIt Task Constructor](https://github.com/moveit/moveit_task_constructor)
+  (PickNik Robotics)** — the stage/container architecture used by this repo's
+  task constructor (`curobo_task_constructor/`): generators/propagators/
+  connectors, serial/alternatives/fallbacks/independent containers,
+  interface-adjacency validation, and the plan/rank/execute lifecycle all
+  reimplement that design for the cuRobo planning stack (workspace
+  `documentation/curobo_task_constructor_plan.md`).
+- **[moveit_task_constructor_visualization](https://github.com/moveit/moveit_task_constructor_visualization)** —
+  specifically the pluginlib-registered `rviz_common::Panel` structure of
+  `curobo_task_constructor_rviz` (Sec. 7 of that plan) mirrors the panel/
+  plugin-registration shape of this visualization package. The panel only uses
+  `curobo_task_constructor_interfaces` topics and does not reuse MoveIt's
+  introspection messages or code.

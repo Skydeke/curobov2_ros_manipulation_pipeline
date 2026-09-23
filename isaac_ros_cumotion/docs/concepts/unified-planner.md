@@ -8,11 +8,10 @@ The **unified planner** is the central node of `curobo_ros` (node name `unified_
 |---|---|---|---|
 | `classic` | 0 | Open-loop | Single Cartesian goal → collision-free trajectory (default) |
 | `mpc` | 1 | Closed-loop | Model Predictive Control: continuous re-optimization while executing |
-| `multi_point` | 4 | Open-loop | Sequence of Cartesian waypoints, planned segment by segment |
 | `joint_space` | 5 | Open-loop | Goal expressed directly in joint space |
 | `retarget` | 6 | Closed-loop | IK-based pose-stream follower for teleoperation |
 
-Enum IDs 2 (`BATCH`) and 3 (`CONSTRAINED`) exist in `SetPlanner.srv` but are **not implemented** — switching to them fails. Orientation/position constraints are available on the classic planner through the `Goalset.trajectory_constraints` field instead.
+Enum IDs 2 (`BATCH`) and 3 (`CONSTRAINED`) exist in `SetPlanner.srv` but are **not implemented** — switching to them fails. Enum ID 4 (`MULTIPOINT`) is likewise **removed** (the `MultiPointPlanner` no longer exists; multi-waypoint goal sets are not supported by any planner). Orientation/position constraints are available on the classic planner through the `Goalset.trajectory_constraints` field instead.
 
 The catalog lives in one place, `PlannerFactory._PLANNER_CATALOG` (`curobo_ros/planners/planner_factory.py`); `GetPlanners` reflects it at runtime, so the service is always authoritative:
 
@@ -24,7 +23,7 @@ ros2 service call /unified_planner/get_planners curobo_msgs/srv/GetPlanners
 
 Every planner declares an `ExecutionMode` that changes the behavior of the `execute_trajectory` action:
 
-- **`OPEN_LOOP`** (`classic`, `multi_point`, `joint_space`): plan once, stream the interpolated trajectory to the robot, succeed when it ends. Feedback carries `step_progression` (0→1).
+- **`OPEN_LOOP`** (`classic`, `joint_space`): plan once, stream the interpolated trajectory to the robot, succeed when it ends. Feedback carries `step_progression` (0→1).
 - **`CLOSED_LOOP`** (`mpc`, `retarget`): the action starts a servo loop that re-solves continuously, tracks `position_error`, and **keeps running after reaching the goal** (feedback `on_target: true`, state `ON_TARGET`). Retarget the goal live by publishing to `/unified_planner/mpc_goal`; stop by cancelling the goal. See [MPC Implementation](mpc-implementation.md).
 
 ## Two base classes
@@ -72,7 +71,6 @@ curobo_ros/planners/
 ├── trajectory_planner.py    # TrajectoryPlanner ABC, ExecutionMode, PlannerResult
 ├── single_planner.py        # open-loop base (shared MotionPlanner)
 ├── classic_planner.py
-├── multi_point_planner.py
 ├── joint_space_planner.py
 ├── reactive_controller.py   # closed-loop base (servo loop)
 ├── mpc_planner.py           # MPCController
