@@ -246,7 +246,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'goalsets': [{'poses': [{'position': {'x': 0.1, 'y': 0.0, 'z': 0.1}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
+        set_message_fields(request, {'request': {'goalsets': [{'poses': [{'position': {'x': 0.1, 'y': 0.0, 'z': 0.1}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]}})
 
         # Call service
         future = client.call_async(request)
@@ -263,7 +263,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
 
         self.assertEqual(
-            response.success,
+            response.response.success,
             False,
             f"Field 'success' doesn't match expected value"
         )

@@ -84,10 +84,14 @@ tests:
     # plan (~0.2s measured) whose expected outcome is failure. Stretching the
     # budget of a test that expects False only delays detecting a real hang.
     timeout: 30.0
+    # The srv nests the whole-task goal (TrajectoryGoal) under `request`,
+    # and `success` rides on the inner TrajectoryResult under `response`.
     data:
-      goalsets:
-        - poses:
-            - position: {x: 0.1, y: 0.0, z: 0.1}
-              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      request:
+        goalsets:
+          - poses:
+              - position: {x: 0.1, y: 0.0, z: 0.1}
+                orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
     expect:
-      success: False
+      response:
+        success: False

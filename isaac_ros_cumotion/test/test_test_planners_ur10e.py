@@ -224,7 +224,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]})
+        set_message_fields(request, {'request': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]}})
 
         # Call service
         future = client.call_async(request)
@@ -241,7 +241,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
 
         self.assertEqual(
-            response.success,
+            response.response.success,
             True,
             f"Field 'success' doesn't match expected value"
         )
@@ -265,7 +265,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create and send the goal
         goal = SendTrajectory.Goal()
-        set_message_fields(goal, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]})
+        set_message_fields(goal, {'goal': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]}})
 
         send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)
@@ -386,7 +386,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create and send the goal
         goal = SendTrajectory.Goal()
-        set_message_fields(goal, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]})
+        set_message_fields(goal, {'goal': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]}})
 
         send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)
@@ -474,7 +474,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}], 'trajectory_constraints': [0, 0, 1, 0, 0, 0]}]})
+        set_message_fields(request, {'request': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}], 'trajectory_constraints': [0, 0, 1, 0, 0, 0]}]}})
 
         # Call service
         future = client.call_async(request)
@@ -491,7 +491,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
 
         self.assertEqual(
-            response.success,
+            response.response.success,
             True,
             f"Field 'success' doesn't match expected value"
         )
@@ -556,7 +556,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create and send the goal
         goal = SendTrajectory.Goal()
-        set_message_fields(goal, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]})
+        set_message_fields(goal, {'goal': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]}})
 
         send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)

@@ -150,7 +150,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'target_joint_positions': [1.2, -1.6, 1.4, -1.0, -1.6, 0.5]}]})
+        set_message_fields(request, {'request': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'target_joint_positions': [1.2, -1.6, 1.4, -1.0, -1.6, 0.5]}]}})
 
         # Call service
         future = client.call_async(request)
@@ -167,7 +167,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
 
         self.assertEqual(
-            response.success,
+            response.response.success,
             True,
             f"Field 'success' doesn't match expected value"
         )
@@ -220,7 +220,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]})
+        set_message_fields(request, {'request': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.3256, 'y': 0.4438, 'z': 0.756}, 'orientation': {'x': 0.7996, 'y': -0.5934, 'z': -0.0614, 'w': 0.0689}}]}]}})
 
         # Call service
         future = client.call_async(request)
@@ -237,7 +237,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
 
         self.assertEqual(
-            response.success,
+            response.response.success,
             True,
             f"Field 'success' doesn't match expected value"
         )
@@ -255,7 +255,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         # Create request
         request = TrajectoryGeneration.Request()
-        set_message_fields(request, {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 10.0, 'y': 10.0, 'z': 10.0}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]})
+        set_message_fields(request, {'request': {'start_pose': {'name': ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint'], 'position': [0.0, -2.2, 1.9, -1.383, -1.57, 0.0], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 10.0, 'y': 10.0, 'z': 10.0}, 'orientation': {'x': 0.0, 'y': 0.0, 'z': 0.0, 'w': 1.0}}]}]}})
 
         # Call service
         future = client.call_async(request)
@@ -272,7 +272,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
 
         self.assertEqual(
-            response.success,
+            response.response.success,
             False,
             f"Field 'success' doesn't match expected value"
         )

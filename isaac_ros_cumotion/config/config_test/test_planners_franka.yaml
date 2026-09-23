@@ -61,16 +61,19 @@ tests:
     service: "/unified_planner/generate_trajectory"
     type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
     # Computes + caches the trajectory for an explicit start/goal pair.
+    # The srv nests the whole-task goal (TrajectoryGoal) under `request`.
     data:
-      start_pose:
-        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
-        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
-              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
-    expect: {success: True}
+      request:
+        start_pose:
+          name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+          position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+                orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+    # `success` rides on the inner TrajectoryResult under `response`.
+    expect: {response: {success: True}}
 
   - name: "07 Execute classic cached"
     action: "/unified_planner/execute_trajectory"
@@ -79,15 +82,18 @@ tests:
     # recompute) and the open-loop action terminates on its own. This run also
     # drives the emulator onto the planner's active joints, so the reactive
     # cases below read back a consistent DOF.
+    # The action goal nests the whole-task goal (TrajectoryGoal) under `goal`;
+    # the generator asserts on `result` (the embedded TrajectoryResult).
     data:
-      start_pose:
-        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
-        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
-              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+      goal:
+        start_pose:
+          name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+          position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+                orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
     timeout: 90.0
     expect: {success: True}
 
@@ -113,15 +119,17 @@ tests:
     # run_ik=False (pure pose tracking) the arm must servo toward it. The
     # action servos CONTINUOUSLY: we let it run, then cancel; the generator
     # asserts feedback was streamed (the servo loop ran).
+    # The action goal nests the whole-task goal (TrajectoryGoal) under `goal`.
     data:
-      start_pose:
-        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
-        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
-              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+      goal:
+        start_pose:
+          name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+          position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+                orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
     cancel_after: 6.0
     timeout: 90.0
     expect: {success: False}   # canceled (reactive never self-completes)
@@ -137,17 +145,20 @@ tests:
     type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
     # Lock rotation about Z along the path (ToolPoseCriteria) — exercises the
     # constraint code path; must still plan successfully and reset afterwards.
+    # The srv nests the whole-task goal (TrajectoryGoal) under `request`.
     data:
-      start_pose:
-        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
-        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
-              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
-          trajectory_constraints: [0, 0, 1, 0, 0, 0]
-    expect: {success: True}
+      request:
+        start_pose:
+          name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+          position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+                orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+            trajectory_constraints: [0, 0, 1, 0, 0, 0]
+    # `success` rides on the inner TrajectoryResult under `response`.
+    expect: {response: {success: True}}
 
   # ---- Reactive (Motion Retargeting / teleop): continuous, ends only on cancel ----
 
@@ -163,15 +174,17 @@ tests:
     type: isaac_ros_cumotion_interfaces/action/SendTrajectory
     # Same reachable FK pose B. Reactive servoing is continuous: run, then
     # cancel.
+    # The action goal nests the whole-task goal (TrajectoryGoal) under `goal`.
     data:
-      start_pose:
-        name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
-        position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.0255, y: 0.1521, z: 0.8555}
-              orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
+      goal:
+        start_pose:
+          name: ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7']
+          position: [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 0.0255, y: 0.1521, z: 0.8555}
+                orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
     cancel_after: 6.0
     timeout: 90.0
     expect: {success: False}   # canceled (reactive never self-completes)

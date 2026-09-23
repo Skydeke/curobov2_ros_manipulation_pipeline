@@ -36,15 +36,19 @@ tests:
   - name: "02 Generate trajectory joint space"
     service: "/unified_planner/generate_trajectory"
     type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # The srv nests the whole-task goal (TrajectoryGoal) under `request`.
     data:
-      start_pose:
-        name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
-        position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - target_joint_positions: [1.2, -1.6, 1.4, -1.0, -1.6, 0.5]
+      request:
+        start_pose:
+          name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+          position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - target_joint_positions: [1.2, -1.6, 1.4, -1.0, -1.6, 0.5]
+    # `success` rides on the inner TrajectoryResult under `response`.
     expect:
-      success: True
+      response:
+        success: True
 
   - name: "03 Set planner classic"
     service: "/unified_planner/set_planner"
@@ -57,29 +61,37 @@ tests:
   - name: "04 Generate trajectory cartesian"
     service: "/unified_planner/generate_trajectory"
     type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # The srv nests the whole-task goal (TrajectoryGoal) under `request`.
     data:
-      start_pose:
-        name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
-        position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 0.3256, y: 0.4438, z: 0.756}
-              orientation: {x: 0.7996, y: -0.5934, z: -0.0614, w: 0.0689}
+      request:
+        start_pose:
+          name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+          position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 0.3256, y: 0.4438, z: 0.756}
+                orientation: {x: 0.7996, y: -0.5934, z: -0.0614, w: 0.0689}
+    # `success` rides on the inner TrajectoryResult under `response`.
     expect:
-      success: True
+      response:
+        success: True
 
   - name: "05 Generate trajectory invalid target"
     service: "/unified_planner/generate_trajectory"
     type: isaac_ros_cumotion_interfaces/srv/TrajectoryGeneration
+    # The srv nests the whole-task goal (TrajectoryGoal) under `request`.
     data:
-      start_pose:
-        name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
-        position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
-        velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-      goalsets:
-        - poses:
-            - position: {x: 10.0, y: 10.0, z: 10.0}
-              orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+      request:
+        start_pose:
+          name: ['shoulder_pan_joint', 'shoulder_lift_joint', 'elbow_joint', 'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint']
+          position: [0.0, -2.2, 1.9, -1.383, -1.57, 0.0]
+          velocity: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        goalsets:
+          - poses:
+              - position: {x: 10.0, y: 10.0, z: 10.0}
+                orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}
+    # `success` rides on the inner TrajectoryResult under `response`.
     expect:
-      success: False
+      response:
+        success: False

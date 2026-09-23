@@ -1,7 +1,7 @@
 services:
   curobo_server:
     container_name: curobo_benchmark_server
-    image: ${CUROBO_IMAGE:-isaac_ros_cumotion:benchmark}
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -34,7 +34,7 @@ services:
 
   curobo_benchmark:
     container_name: curobo_benchmark
-    image: ${CUROBO_IMAGE:-isaac_ros_cumotion:benchmark}
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     depends_on:
       curobo_server:
         condition: service_started
@@ -67,7 +67,7 @@ services:
 
   curobo_test:
     container_name: curobo_test
-    image: ${CUROBO_IMAGE:-isaac_ros_cumotion:benchmark}
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
     depends_on:
       curobo_server:
         condition: service_started
