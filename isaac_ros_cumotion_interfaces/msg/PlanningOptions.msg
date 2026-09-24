@@ -2,7 +2,10 @@
 #
 # Per-request planning options. Embedded by TrajectoryGoal.msg (single core
 # schema, three surfaces). Left at defaults for classic (single goal) planning;
-# the node rejects non-default options on classic planners.
+# the node rejects non-default planning KNOBS (num_seeds / waypoint_tolerance /
+# exact_joints) on classic planners. `log_considered_trajectories` is a pure
+# reporting flag (gates the considered-rows detail block, never the search) and
+# is accepted on every planner.
 #
 # num_seeds: parallel solver restarts per (problem, goal). 0 -> node/planner
 #            default. The ONLY search knob (max_attempts removed).

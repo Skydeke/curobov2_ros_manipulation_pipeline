@@ -1,0 +1,89 @@
+# Pure-Python test compose: benchmark-harness tests + task-constructor core tests.
+#
+#   curobo_test                  runs the benchmark package's pure-Python tests
+#                                (compare/report logic against synthetic rows)
+#                                on the mounted source tree
+#   curobo_task_constructor_test runs the task-constructor core tests, which
+#                                drive the ROS-free framework through its
+#                                MockCuroboServer double (no ROS, no GPU)
+#
+# Neither service needs the planner server (compose_benchmark.yaml), so they
+# live here, separate from the parity compose. Both run pytest directly on the
+# mounted src tree, so a container rebuild is NOT required to pick up new
+# sources (the image itself must have pytest, which Dockerfile.cumotion gets
+# via curobo[benchmark]).
+#
+# Run:  docker compose -f docker/compose_tests.yaml up
+#       docker compose -f docker/compose_tests.yaml logs -f curobo_test
+#       docker compose -f docker/compose_tests.yaml logs -f curobo_task_constructor_test
+services:
+  curobo_test:
+    container_name: curobo_test
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: $DISPLAY
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -o pipefail &&
+        source /opt/ros/jazzy/setup.bash &&
+        export PYTHONPATH=/root/ros2_ws/src/isaac_ros_cumotion_extra:$${PYTHONPATH} &&
+        echo "Running benchmark package tests..." &&
+        python3 -m pytest \
+          /root/ros2_ws/src/isaac_ros_cumotion_extra/isaac_ros_cumotion_extra/benchmark/tests/ \
+          -v --tb=short -x -p no:cacheprovider \
+          -p no:launch_testing -p no:launch_ros \
+          -W ignore::pytest.PytestUnknownMarkWarning --no-header 2>&1 |
+          tee /tmp/test_results.log;
+        echo "--- Test exit code: $? ---" &&
+        tail -f /dev/null
+
+  curobo_task_constructor_test:
+    container_name: curobo_task_constructor_test
+    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    runtime: nvidia
+    network_mode: host
+    ipc: host
+    privileged: true
+    stdin_open: true
+    tty: true
+    environment:
+      DISPLAY: $DISPLAY
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
+      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+    volumes:
+      - /tmp/.X11-unix:/tmp/.X11-unix
+      - /dev/shm:/dev/shm
+      - ..:/root/ros2_ws/src
+    command:
+      - bash
+      - -c
+      - |
+        set -o pipefail &&
+        source /opt/ros/jazzy/setup.bash &&
+        export PYTHONPATH=/root/ros2_ws/src/curobo_task_constructor:$${PYTHONPATH} &&
+        echo "Running curobo_task_constructor tests..." &&
+        cd /root/ros2_ws/src/curobo_task_constructor &&
+        python3 -m pytest \
+          tests/ \
+          -v --tb=short -x -p no:cacheprovider \
+          -p no:launch_testing -p no:launch_ros \
+          -W ignore::pytest.PytestUnknownMarkWarning --no-header 2>&1 |
+          tee /tmp/curobo_task_constructor_test_results.log;
+        echo "--- Test exit code: $? ---" &&
+        tail -f /dev/null

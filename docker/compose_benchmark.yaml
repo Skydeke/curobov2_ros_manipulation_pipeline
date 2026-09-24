@@ -1,3 +1,47 @@
+# Planner parity benchmark: curobo_core native vs the ROS-wrapped planner.
+#
+#   curobo_server    launches the unified planner (gen_traj.launch.py,
+#                    node `unified_planner`, robot:=franka) in the
+#                    *reference-benchmark envelope*: the same solver recipe as
+#                    curobo core's benchmark (panda_hand tool frame via
+#                    config/franka.curobo.reference.yml, particle+LBFGS
+#                    optimizers — the default solver recipe — max_attempts:=1,
+#                    num_trajopt_seeds:=4,
+#                    collision_activation_distance:=0.0025)
+#                    so the ROS leg can produce metrics comparable to the
+#                    native leg; the ROS leg exercises it through
+#                    /unified_planner/generate_trajectory
+#
+#   Timing diagnostics (see the README "timing attribution" section):
+#     CUROBO_USE_CUDA_GRAPH=false   relaunch the server with eager solvers
+#     CUROBO_MAX_ATTEMPTS=N         plan_pose retries per request (default 1:
+#                                   native solves in ~1-3 attempts and the
+#                                   server's extra retries were ~1.35 s/request
+#                                   of unseeded churn — raise to see the
+#                                   cost-scaling curve)
+#     CUROBO_NUM_TRAJOPT_SEEDS=N    trajopt seed budget (default 4 = native recipe;
+#                                   12 = the node's deployment default)
+#   e.g.:
+#     CUROBO_MAX_ATTEMPTS=10 docker compose -f docker/compose_benchmark.yaml up
+#   curobo_benchmark runs  curobo_benchmark all --dataset demo  which
+#                    replays the robometrics problems through curobo directly
+#                    (core leg — the upstream reference-benchmark config) and
+#                    through /unified_planner/generate_trajectory (ROS leg),
+#                    then prints the parity report and writes it to
+#                    /tmp/benchmark_report.json (+ /tmp/benchmark_report.core.json
+#                    and /tmp/benchmark_report.ros.json sidecars)
+#
+# Pure-Python test suites live in docker/compose_tests.yaml (curobo_test +
+# curobo_task_constructor_test), not here.
+#
+# The benchmark module is executed with `python3 -m` + an explicit PYTHONPATH
+# to the mounted src package, so a container rebuild is NOT required to pick
+# up new isaac_ros_cumotion_extra sources (only the docker image itself must
+# have curobo[benchmark] + robometrics, which Dockerfile.cumotion installs).
+#
+# Run:  docker compose -f docker/compose_benchmark.yaml up
+#       docker compose -f docker/compose_benchmark.yaml exec curobo_benchmark \
+#         cat /tmp/benchmark_report.json
 services:
   curobo_server:
     container_name: curobo_benchmark_server
@@ -26,11 +70,14 @@ services:
       - |
         source /opt/ros/jazzy/setup.bash &&
         source /root/ros2_ws/install/setup.bash &&
-        ros2 run isaac_ros_cumotion curobo_server_node \
-          --ros-args \
-          -p robot:=/root/ros2_ws/src/isaac_ros_cumotion_robot_description/xrdf/franka.xrdf \
-          -p urdf_path:=/opt/ros/jazzy/share/moveit_resources_panda_description/urdf/panda.urdf \
-          -p num_graph_seeds:=32 -p num_trajopt_seeds:=4 -p max_attempts:=100
+        ros2 launch isaac_ros_cumotion gen_traj.launch.py \
+          robot:=franka gui:=false \
+          voxel_size:=0.05 mapper_extent_xyz:="[2.0, 2.0, 2.0]" \
+          robot_config_file:=/root/ros2_ws/src/isaac_ros_cumotion/config/franka.curobo.reference.yml \
+          urdf_path:=/root/ros2_ws/src/isaac_ros_cumotion/config/urdf/franka/franka_panda.urdf \
+          max_attempts:=${CUROBO_MAX_ATTEMPTS:-1} collision_activation_distance:=0.0025 \
+          num_trajopt_seeds:=${CUROBO_NUM_TRAJOPT_SEEDS:-4} \
+          use_cuda_graph:=${CUROBO_USE_CUDA_GRAPH:-true}
 
   curobo_benchmark:
     container_name: curobo_benchmark
@@ -59,47 +106,19 @@ services:
       - |
         source /opt/ros/jazzy/setup.bash &&
         source /root/ros2_ws/install/setup.bash &&
-        echo "Waiting for cumotion/plan_motion..." &&
-        while ! ros2 action list 2>/dev/null | grep -q cumotion/plan_motion; do sleep 1; done &&
-        echo "Server ready, running benchmark..." &&
-        ros2 run isaac_ros_cumotion_benchmark curobo_benchmark all --dataset demo --capability all --output /tmp/benchmark_report.json &&
-        tail -f /dev/null
-
-  curobo_test:
-    container_name: curobo_test
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
-    depends_on:
-      curobo_server:
-        condition: service_started
-    runtime: nvidia
-    network_mode: host
-    ipc: host
-    privileged: true
-    stdin_open: true
-    tty: true
-    environment:
-      DISPLAY: $DISPLAY
-      NVIDIA_VISIBLE_DEVICES: all
-      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
-      ROS_DOMAIN_ID: $ROS_DOMAIN_ID
-    volumes:
-      - /tmp/.X11-unix:/tmp/.X11-unix
-      - /dev/shm:/dev/shm
-      - ..:/root/ros2_ws/src
-    command:
-      - bash
-      - -c
-      - |
-        set -o pipefail &&
-        source /opt/ros/jazzy/setup.bash &&
-        source /root/ros2_ws/install/setup.bash &&
-        echo "Waiting for cumotion/plan_motion..." &&
-        while ! ros2 action list 2>/dev/null | grep -q cumotion/plan_motion; do sleep 1; done &&
-        echo "Server ready, running tests..." &&
-        python3 -m pytest /root/ros2_ws/src/isaac_ros_cumotion_benchmark/test/ \
-          -v --tb=short -x -p no:cacheprovider \
-          -p no:launch_testing -p no:launch_ros \
-          -W ignore::pytest.PytestUnknownMarkWarning --no-header 2>&1 |
-          tee /tmp/test_results.log;
-        echo "--- Test exit code: $? ---" &&
+        export PYTHONPATH=/root/ros2_ws/src/isaac_ros_cumotion_extra:$${PYTHONPATH} &&
+        echo "Waiting for /unified_planner/generate_trajectory..." &&
+        for attempt in 1 2 3 4 5 6 7 8 9 10; do
+          if ros2 service list --no-daemon 2>/dev/null | grep -q unified_planner/generate_trajectory; then
+            echo "Planner service detected.";
+            break;
+          fi;
+          sleep 3;
+        done;
+        echo "Server ready, running parity benchmark (core + ROS legs)..." &&
+        python3 -m isaac_ros_cumotion_extra.benchmark.run all \
+          --dataset demo --show-all -o /tmp/benchmark_report.json;
+        bench_exit=$?;
+        echo "Benchmark exit code: $$bench_exit (any PARITY-DELTA verdict is expected as exit 1)" &&
+        echo "Report: /tmp/benchmark_report.json (+ core/ros sidecars in /tmp)" &&
         tail -f /dev/null

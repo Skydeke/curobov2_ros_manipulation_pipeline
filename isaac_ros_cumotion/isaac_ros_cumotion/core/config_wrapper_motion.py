@@ -79,6 +79,10 @@ class ConfigWrapperMotion(ConfigWrapper):
         # CUROBO_USE_CUDA_GRAPH env var. Disabling avoids the MPC->Classic
         # captured-graph replay segfault at the cost of per-plan latency.
         self.use_cuda_graph = resolve_use_cuda_graph(node)
+        # Solver recipe mirrors curobo core's benchmark: particle + LBFGS for
+        # both IK and trajopt (applied unconditionally in set_motion_gen_config
+        # below) — the same optimizer set the native benchmark leg runs, by
+        # default in every startup.
         self.self_collision_check = True
         self.position_tolerance = 0.005
         self.orientation_tolerance = 0.05
@@ -252,22 +256,55 @@ class ConfigWrapperMotion(ConfigWrapper):
                 .double_value
             )
 
-            cfg = MotionPlannerCfg.create(
-                robot=self.robot_model_manager.robot_cfg,
-                scene_model=scene,
-                num_ik_seeds=self._resolve_num_ik_seeds(node),
-                num_trajopt_seeds=self.num_trajopt_seeds,
-                graph_planner_config=self._resolve_graph_planner_config(node),
-                position_tolerance=self.position_tolerance,
-                orientation_tolerance=self.orientation_tolerance,
-                use_cuda_graph=self.use_cuda_graph,
-                self_collision_check=self.self_collision_check,
-                collision_cache=self.collision_cache,
-                optimizer_collision_activation_distance=collision_activation_distance,
-                max_batch_size=self._resolve_max_batch_size(node),
-                multi_env=self.multi_env,
-                max_goalset=self._resolve_max_goalset(node),
+            cfg_kwargs: dict = {
+                "robot": self.robot_model_manager.robot_cfg,
+                "scene_model": scene,
+                "num_ik_seeds": self._resolve_num_ik_seeds(node),
+                "num_trajopt_seeds": self.num_trajopt_seeds,
+                "graph_planner_config": self._resolve_graph_planner_config(node),
+                "position_tolerance": self.position_tolerance,
+                "orientation_tolerance": self.orientation_tolerance,
+                "use_cuda_graph": self.use_cuda_graph,
+                "self_collision_check": self.self_collision_check,
+                "collision_cache": self.collision_cache,
+                "optimizer_collision_activation_distance": collision_activation_distance,
+                "max_batch_size": self._resolve_max_batch_size(node),
+                "multi_env": self.multi_env,
+                "max_goalset": self._resolve_max_goalset(node),
+            }
+            # Same solver recipe as curobo core's benchmark
+            # (motion_plan_benchmark.py load_curobo): particle + LBFGS for both
+            # IK and trajopt. Unconditional — this is the default in every
+            # startup, no flag or env var.
+            cfg_kwargs.update(
+                {
+                    "ik_optimizer_configs": [
+                        "ik/particle_ik.yml",
+                        "ik/lbfgs_ik.yml",
+                    ],
+                    "ik_transition_model": "ik/transition_ik.yml",
+                    "metrics_rollout": "metrics_base.yml",
+                    "trajopt_optimizer_configs": [
+                        "trajopt/particle_trajopt.yml",
+                        "trajopt/lbfgs_bspline_trajopt.yml",
+                    ],
+                    "trajopt_transition_model": "trajopt/transition_bspline_trajopt.yml",
+                    "store_debug": False,
+                }
             )
+            node.get_logger().info(
+                "MotionPlanner solver recipe: particle+LBFGS ik/trajopt"
+            )
+
+            node.get_logger().info(
+                "MotionPlanner solver envelope: "
+                f"use_cuda_graph={cfg_kwargs['use_cuda_graph']}, "
+                f"num_ik_seeds={cfg_kwargs['num_ik_seeds']}, "
+                f"num_trajopt_seeds={cfg_kwargs['num_trajopt_seeds']}, "
+                f"collision_activation_distance={collision_activation_distance}"
+            )
+
+            cfg = MotionPlannerCfg.create(**cfg_kwargs)
 
             node.motion_planner = MotionPlanner(cfg)
             # Legacy alias — some downstream code still references `node.motion_gen`.

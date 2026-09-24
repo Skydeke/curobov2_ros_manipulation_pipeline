@@ -11,7 +11,10 @@ from curobo.config_io import load_yaml
 from curobo._src.robot.loader.util import load_robot_yaml
 from curobo._src.types.content_path import ContentPath
 
-from isaac_ros_cumotion.robot.robot_description import load_robot_description
+from isaac_ros_cumotion.robot.robot_description import (
+    load_robot_description,
+    resolve_curobo_config,
+)
 
 
 class ConfigManager:
@@ -198,6 +201,14 @@ class ConfigManager:
         is_xrdf = config_file.get('format') == 'xrdf'
         if is_xrdf:
             robot_config_file = self._translate_xrdf(robot_config_file)
+        else:
+            # Resolve the yml's package:// / yml-relative urdf_path and
+            # asset_root_path like the descriptor flow does (see
+            # resolve_curobo_config — an explicit override bypasses
+            # load_robot_description, and cuRobo's own relative resolution
+            # would point at curobo's bundled assets dir instead). A no-op for
+            # configs that carry absolute paths.
+            robot_config_file = resolve_curobo_config(robot_config_file)
 
         self.robot_config_file = robot_config_file
 

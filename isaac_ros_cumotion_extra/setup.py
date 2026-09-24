@@ -54,6 +54,7 @@ setup(
             'feature_viser_node = isaac_ros_cumotion_extra.feature_viser_node:main',
             'robot_model_viser_node = isaac_ros_cumotion_extra.robot_model_viser_node:main',
             'retarget_viser_node = isaac_ros_cumotion_extra.retarget_viser_node:main',
+            'curobo_benchmark = isaac_ros_cumotion_extra.benchmark.run:main',
         ],
     },
 )

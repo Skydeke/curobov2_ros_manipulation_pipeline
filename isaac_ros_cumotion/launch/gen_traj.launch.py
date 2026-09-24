@@ -249,6 +249,18 @@ def launch_setup(context, *args, **kwargs):
                 # Planning retries per request (MotionPlanner.plan_pose).
                 'max_attempts': ParameterValue(
                     LaunchConfiguration('max_attempts'), value_type=int),
+                # Trajopt candidate trajectories per problem (the seed axis: each
+                # seed is a full trajectory-optimization solve, so per-plan latency
+                # scales ~linearly with it; baked into solver buffers at build
+                # time). Node default 12; the parity benchmark's reference
+                # envelope lowers this to the native recipe's 4 (ik=32/trajopt=4).
+                'num_trajopt_seeds': ParameterValue(
+                    LaunchConfiguration('num_trajopt_seeds'), value_type=int),
+                # CUDA-graph capture for solver rollouts (default true; the node
+                # also declares it, but forwarding keeps `:=false` usable — see
+                # the parity benchmark's timing-attribution diagnostics).
+                'use_cuda_graph': ParameterValue(
+                    LaunchConfiguration('use_cuda_graph'), value_type=bool),
                 # Feedback publish period (s) during open-loop execution.
                 'time_dilation_factor': ParameterValue(
                     LaunchConfiguration('time_dilation_factor'), value_type=float),
@@ -431,6 +443,12 @@ def generate_launch_description():
             description='Planning retries per request (MotionPlanner.plan_pose)'
         ),
         DeclareLaunchArgument(
+            'num_trajopt_seeds', default_value='12',
+            description='Trajopt candidate trajectories per problem (seed axis); '
+                        'the parity benchmark reference envelope sets this to 4 '
+                        'to match the native recipe'
+        ),
+        DeclareLaunchArgument(
             'time_dilation_factor', default_value='1.0',
             description='Trajectory re-timing: multiplies the stamped per-point dt '
                         'as 1/factor. 1.0 = nominal; <1.0 slows the motion, >1.0 speeds it up. '
@@ -454,6 +472,12 @@ def generate_launch_description():
             'publish_plan_debug_image', default_value='false',
             description='Publish the per-plan joint-trajectory debug plot as an RGB image '
                         'on /<node>/motion_plan_debug (RViz/viser demo display; off by default)'
+        ),
+        DeclareLaunchArgument(
+            'use_cuda_graph', default_value='true',
+            description='Enable CUDA-graph capture for the solver rollouts. Diagnostic: '
+                        'set :=false to isolate mid-plan graph re-capture cost (the parity '
+                        'benchmark README \'timing attribution\' section)'
         ),
 
         # OpaqueFunction defers the body until LaunchConfigurations can be resolved

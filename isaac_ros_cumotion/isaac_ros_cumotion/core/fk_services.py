@@ -135,7 +135,7 @@ class FKServices:
             self._node.get_logger().error("FK: no joint states provided")
             return response
 
-        qs = [list(js.position) for js in request.joint_states]
+        qs = [self._positions_for_model(js) for js in request.joint_states]
         with self._gpu_guard():
             ok, poses = self._compute_poses(qs)
             if not ok:
@@ -166,7 +166,7 @@ class FKServices:
             response.error_msg = String(data="FK batch: no joint states provided")
             return response
 
-        qs = [list(js.position) for js in request.joint_states]
+        qs = [self._positions_for_model(js) for js in request.joint_states]
 
         with self._gpu_guard():
             ok, poses = self._compute_poses(qs)
@@ -258,6 +258,28 @@ class FKServices:
         fk_model.compute_kinematics(js)
 
         self._node.get_logger().info("FK model ready")
+
+    def _positions_for_model(self, js):
+        """Map one JointState's positions onto the FK model's joint order.
+
+        The model is built from the robot config's cspace kinematics (7 DOF
+        for franka, fingers excluded), but callers routinely send full robot
+        states — e.g. the parity benchmark FK's the planner's returned
+        trajectory waypoints, which carry all 9 cspace joints (7 + 2 locked
+        fingers). Select by joint name in model order when the incoming state
+        carries aligned names (any missing name falls back to a positional
+        truncation), else take the first ``dof`` positions. This keeps the
+        service contract "joint states → poses" intact for any caller.
+        """
+        positions = list(js.position)
+        names = list(getattr(js, "name", None) or [])
+        if len(names) == len(positions):
+            by_name = {n: p for n, p in zip(names, positions)}
+            try:
+                return [by_name[n] for n in self._fk_model.joint_names]
+            except KeyError:
+                pass
+        return positions[: self._fk_model.get_dof()]
 
     def _compute_poses(self, qs):
         """

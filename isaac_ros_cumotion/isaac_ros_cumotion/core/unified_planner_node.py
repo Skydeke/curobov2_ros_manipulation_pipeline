@@ -142,6 +142,71 @@ def install_colored_curobo_logger(level: int = logging.WARNING, logger_name: str
     logger.propagate = False
 
 
+class _ThrottleMeshCacheReuseWarnings(logging.Filter):
+    """Rate-limit curobo's benign "Mesh already in cache" WARNING.
+
+    curobo keeps ONE mesh store per process (a global cache). Every time an
+    obstacle with a mesh prim is registered again — e.g. the planner's own
+    scene prims on startup, or a ``remove_all_objects`` + re-``add_object``
+    cycle from a client (the parity benchmark does this per problem) — the
+    cache hits and curobo logs the same informational WARNING each time
+    ("Mesh already in cache, reusing existing instance: <name>"). The message
+    is expected behavior, not a problem; throttle it so each DISTINCT message
+    (i.e. each mesh name) escapes at most once per ``interval`` seconds while
+    the churn continues. Repeats of the same line are the spam and get slowed;
+    a line that differs even slightly (a new mesh name) still logs
+    immediately. ``interval <= 0`` restores full silence.
+
+    A single filter instance is shared by every record, so the throttle state
+    is guarded by a lock (the node runs a multi-threaded executor). State is
+    message-keyed and pruned once it outgrows a small bound, so memory stays
+    flat across a session.
+    """
+
+    _MESH_CACHE_REUSE = "Mesh already in cache"
+
+    def __init__(self, interval: float = 5.0):
+        super().__init__()
+        self.interval = float(interval)
+        # message text -> last emission time (monotonic); one window per
+        # distinct message, so a slightly different line is never throttled
+        # by an earlier one's window.
+        self._last_emitted = {}
+        self._lock = threading.Lock()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if self._MESH_CACHE_REUSE not in message:
+            return True
+        if self.interval <= 0:
+            return False
+        with self._lock:
+            now = time.monotonic()
+            last = self._last_emitted.get(message)
+            if last is None or now - last >= self.interval:
+                self._last_emitted[message] = now
+                if len(self._last_emitted) > 64:
+                    # drop keys that have been quiet for 2+ windows; actively
+                    # churning keys (last < 2*interval ago) are kept.
+                    quiet_before = now - 2 * self.interval
+                    self._last_emitted = {
+                        k: v
+                        for k, v in self._last_emitted.items()
+                        if v >= quiet_before
+                    }
+                return True
+            return False
+
+
+def throttle_curobo_mesh_cache_warnings(
+    logger_name: str = "curobo", interval: float = 5.0
+) -> None:
+    """Install :class:`_ThrottleMeshCacheReuseWarnings` on the ``curobo`` logger."""
+    logging.getLogger(logger_name).addFilter(
+        _ThrottleMeshCacheReuseWarnings(interval=interval)
+    )
+
+
 class UnifiedPlannerNode(Node):
     """Unified trajectory planning node with dynamic strategy switching (v2)."""
 
@@ -213,10 +278,24 @@ class UnifiedPlannerNode(Node):
         install_colored_curobo_logger(curobo_level)
         if hasattr(logging, 'lastResort') and logging.lastResort is not None:
             logging.lastResort.setLevel(curobo_level)
+        # Throttle curobo's benign "Mesh already in cache" WARNING (repeated
+        # obstacle registration hits its global mesh cache; see the filter):
+        # at most one line per interval seconds while the churn continues;
+        # 0/negative restores full silence. Read once at startup (installed
+        # before the solver build, so the first registrations count).
+        self.declare_parameter('curobo_mesh_cache_log_interval', 5.0)
+        throttle_curobo_mesh_cache_warnings(
+            interval=self.get_parameter('curobo_mesh_cache_log_interval').value
+        )
 
         self.robot_context = RobotContext(self)
 
         self.declare_parameter('planner_type', 'classic')
+        # Planning retries per request (MotionPlanner.plan_pose). Plumbed
+        # through the launch arg and read by every SinglePlanner subclass at
+        # plan time (classic / joint-space / multi-waypoint). Default 1 = the
+        # single-attempt behavior.
+        self.declare_parameter('max_attempts', 1)
         # torch.cuda.synchronize() bridges the executor's Python threads to the
         # GPU but blocks the calling thread every frame/kernel — off by default
         # so the depth callback and viz timers keep running while the GPU works
@@ -1676,7 +1755,10 @@ class UnifiedPlannerNode(Node):
         exact_joints / log_considered_trajectories):
 
         - Classic planners and every non-open-loop (reactive) controller carry
-          ZERO options: any non-default value is rejected verbatim.
+          ZERO planning knobs: non-default num_seeds / waypoint_tolerance /
+          exact_joints are rejected verbatim. ``log_considered_trajectories``
+          is a *reporting* flag (it only gates the considered-rows detail
+          block, never the search), so it is accepted on every planner.
         - Per-segment open-loop planners (multi-point / joint-space) accept only
           num_seeds == 0 (no multi-seed axis in the per-segment machinery),
           waypoint_tolerance >= 0, and exact_joints drawn from the robot's
@@ -1690,14 +1772,29 @@ class UnifiedPlannerNode(Node):
             return None
         planner_name = planner.get_planner_name()
         if type(planner).__name__ == 'ClassicPlanner' or not planner.is_open_loop():
-            return (
-                f"{planner_name}: planning options must stay at defaults "
-                f"(classic/reactive planners carry zero options); got num_seeds="
-                f"{opts.num_seeds}, waypoint_tolerance={opts.waypoint_tolerance}, "
-                f"exact_joints={list(getattr(opts, 'exact_joints', None) or [])}, "
-                f"log_considered_trajectories="
-                f"{opts.log_considered_trajectories}"
-            )
+            # Only the search KNOBS are rejected. The diagnostics flag
+            # log_considered_trajectories changes no planning behaviour (it
+            # merely requests the considered-rows detail block — solve time,
+            # costs, FK error — after the solve), so classic/reactive requests
+            # may set it. The parity benchmark uses it to read the winner's
+            # solver-reported solve time off the response.
+            offending = []
+            num_seeds = int(getattr(opts, 'num_seeds', 0))
+            if num_seeds != 0:
+                offending.append(f"num_seeds={num_seeds}")
+            wp_tol = float(getattr(opts, 'waypoint_tolerance', 0.0))
+            if wp_tol != 0.0:
+                offending.append(f"waypoint_tolerance={wp_tol}")
+            exact = list(getattr(opts, 'exact_joints', None) or [])
+            if exact:
+                offending.append(f"exact_joints={exact}")
+            if offending:
+                return (
+                    f"{planner_name}: planning knobs must stay at defaults "
+                    f"(classic/reactive planners carry zero options); got "
+                    f"{', '.join(offending)}"
+                )
+            return None
         if int(getattr(opts, 'num_seeds', 0)) != 0:
             return (
                 f"{planner_name}: num_seeds must be 0 (default) — the "
@@ -1937,10 +2034,15 @@ class UnifiedPlannerNode(Node):
         if isinstance(planner, SinglePlanner):
             # plan_pose only honors max_attempts in v2 (timeout / time_dilation
             # are not solver args anymore — speed lives in the robot YAML
-            # cspace). max_attempts was removed from the node; the planners
-            # fall back to their own default (config.get('max_attempts', 1))
-            # when the key is absent.
-            return {}
+            # cspace). The launch forwards `max_attempts` ("Planning retries per
+            # request"); the node declares it (default 1, so existing launches
+            # are unchanged) and we read it here so requesting N attempts
+            # actually reaches plan_pose.
+            return {
+                'max_attempts': self.get_parameter('max_attempts')
+                .get_parameter_value()
+                .integer_value,
+            }
         if isinstance(planner, ReactiveController):
             return {
                 'convergence_threshold': self.get_parameter('convergence_threshold').value,
