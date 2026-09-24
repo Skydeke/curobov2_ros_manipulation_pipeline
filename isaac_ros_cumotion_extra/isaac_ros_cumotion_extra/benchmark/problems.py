@@ -22,7 +22,11 @@ Each problem dict carries:
 from typing import Any, Dict, List, Optional, Tuple
 
 # Datasets usable via `load_problems` (keys of robometrics' raw loaders).
-DATASET_NAMES = ("demo", "motion_benchmaker", "mpinets")
+# "full" is the combined motion_benchmaker + mpinets dataset that the
+# reference page's tables aggregate (2600 problems), replayed the way the
+# upstream script does — as two separate file_paths, each with its own
+# mpinets classification.
+DATASET_NAMES = ("demo", "motion_benchmaker", "mpinets", "full")
 
 _LOADERS: Dict[str, Any] = {}
 
@@ -51,12 +55,65 @@ def _get_loaders() -> Dict[str, Any]:
     return _LOADERS
 
 
+def _combined_loader() -> Dict[str, List[Dict[str, Any]]]:
+    """Merge motion_benchmaker + mpinets into one ``{scene: [problems]}`` dict.
+
+    Upstream iterates ``file_paths = [motion_benchmaker_raw, mpinets_raw]``
+    (the two halves of the page's 2600-problem tables) in one run, so the
+    combined dataset is just the union, keyed by scene. Scene keys between the
+    two robometrics datasets are disjoint — a collision would mean the merge
+    silently hid problems, so it fails fast instead. The merged dict (and the
+    mpinets provenance) is cached: the box's 2600-problem pass otherwise
+    re-loads both datasets from robometrics on every access.
+    """
+    global _FULL_CACHE, _MPINETS_SCENE_KEYS_CACHE
+    if _FULL_CACHE is not None:
+        return _FULL_CACHE
+    loaders = _get_loaders()
+    loaded: Dict[str, List[Dict[str, Any]]] = {}
+    mpinets_seen: List[str] = []
+    for name in ("motion_benchmaker", "mpinets"):
+        for scene_key, scene_problems in loaders[name]().items():
+            if scene_key in loaded:
+                raise ValueError(
+                    f"Scene {scene_key!r} appears in both motion_benchmaker and "
+                    "mpinets; cannot merge the 'full' dataset."
+                )
+            loaded[scene_key] = scene_problems
+            if name == "mpinets":
+                mpinets_seen.append(scene_key)
+    _FULL_CACHE = loaded
+    if _MPINETS_SCENE_KEYS_CACHE is None:
+        _MPINETS_SCENE_KEYS_CACHE = frozenset(mpinets_seen)
+    return loaded
+
+
+_FULL_CACHE: Optional[Dict[str, List[Dict[str, Any]]]] = None
+_MPINETS_SCENE_KEYS_CACHE: Optional[frozenset] = None
+
+
+def mpinets_scene_keys() -> frozenset:
+    """Scene keys belonging to the mpinets dataset (for the combined "full"
+    dataset, where upstream's per-file ``mpinets_data`` flag must classify
+    each scene individually — motion_benchmaker problems must not gain the
+    mpinets finger-lock robot config). Cached; loading the full dataset
+    populates it as a side effect."""
+    global _MPINETS_SCENE_KEYS_CACHE
+    if _MPINETS_SCENE_KEYS_CACHE is None:
+        _MPINETS_SCENE_KEYS_CACHE = frozenset(
+            _get_loaders()["mpinets"]().keys()
+        )
+    return _MPINETS_SCENE_KEYS_CACHE
+
+
 def load_problems(dataset: str = "demo") -> Dict[str, List[Dict[str, Any]]]:
     """Load ``{scene_key: [problem, ...]}`` for a benchmark dataset."""
     if dataset not in DATASET_NAMES:
         raise ValueError(
             f"Unknown dataset {dataset!r}. Choose from: {list(DATASET_NAMES)}"
         )
+    if dataset == "full":
+        return _combined_loader()
     return _get_loaders()[dataset]()
 
 

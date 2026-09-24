@@ -10,6 +10,10 @@
 #     the panda_hand tool frame; the product default [grasping_frame] sits
 #     ~finger-length further out and makes the same goals un-reachable)
 #
+#   - collision_sphere_buffer: 0.0 for all links (the benchmark's load_curobo
+#     forces this to 0.0; the product default 0.004 would inflate every world/
+#     obstacle collision sphere by 4 mm the native leg does not have)
+#
 # `attached_object` (grasp-only) is re-parented onto panda_hand so the config
 # stays self-consistent once grasping_frame is not a tool frame anymore; the
 # benchmark sends no attached payloads.
@@ -155,9 +159,7 @@ robot_cfg:
           radius: 0.011
         - center: [0.0, -0.01, 0.015]
           radius: 0.011
-    collision_sphere_buffer: {panda_link0: 0.004, panda_link1: 0.004, panda_link2: 0.004,
-      panda_link3: 0.004, panda_link4: 0.004, panda_link5: 0.004, panda_link6: 0.004,
-      panda_link7: 0.004, panda_hand: 0.004, panda_leftfinger: 0.004, panda_rightfinger: 0.004}
+    collision_sphere_buffer: 0.0
     collision_link_names:
       - panda_link0
       - panda_link1

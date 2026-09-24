@@ -44,11 +44,65 @@ class RobotModelManager:
         # loading and configuring the robot model multiple times per process
         # (one set of "Converting continuous joint" warnings per construction).
         self.kin_cfg = KinematicsCfg.from_robot_yaml_file(robot_config_file)
-        self.robot_cfg = RobotCfg(kinematics=self.kin_cfg)
+        # Torque-limited planning: `load_dynamics` (a build-time node param —
+        # see docs/concepts/parameters.md) wraps the kinematics config with a
+        # pinocchio dynamics config, exactly what curobo's RobotCfg.create
+        # does for the upstream benchmark. The robot_cfg is a plain attribute
+        # (NOT launch-immutable): set_torque_mode() re-wraps it with/without
+        # dynamics on demand, and ConfigWrapperMotion.set_motion_gen_config()
+        # syncs it from the node's current `load_dynamics` param before every
+        # solver build — so the runtime trigger path (ros2 param set … +
+        # /unified_planner/update_motion_gen_config) can switch a running
+        # server between the reference page's two tables without a relaunch.
+        # The kinematics side is never rebuilt: `kin_cfg` is THE SAME object
+        # across switches, so every solver built from robot_cfg.kinematics
+        # (MotionPlanner, IK, FK) keeps a valid GPU model.
+        self._load_dynamics_active = None
+        load_dynamics = False
+        if node is not None and node.has_parameter("load_dynamics"):
+            load_dynamics = bool(
+                node.get_parameter("load_dynamics")
+                .get_parameter_value()
+                .bool_value
+            )
+        self.set_torque_mode(load_dynamics)
         self.kin_model = Kinematics(self.robot_cfg.kinematics)
 
         self._ops_dtype = torch.float32
         self._device = torch.device('cuda')
+
+    def set_torque_mode(self, load_dynamics: bool) -> bool:
+        """Re-wrap ``robot_cfg`` with/without torque-limited dynamics.
+
+        Returns True when the mode actually changed (a switch) and False when
+        it already matched — idempotent, so every solver rebuild can call it
+        from the node's current ``load_dynamics`` param at no cost when the
+        launch mode is unchanged. Only the ``dynamics`` field varies: the
+        shared ``kin_cfg`` is reused as-is, so existing GPU Kinematics models
+        remain valid and only a MotionPlanner rebuild (via
+        ``update_motion_gen_config``) is needed to pick the new mode up.
+        """
+        load_dynamics = bool(load_dynamics)
+        if load_dynamics == self._load_dynamics_active:
+            return False
+        dynamics = None
+        if load_dynamics:
+            from curobo._src.types.device_cfg import DeviceCfg
+
+            dynamics = RobotCfg._create_dynamics_config(
+                kinematics_config=self.kin_cfg.kinematics_config,
+                device_cfg=DeviceCfg(),
+            )
+        self.robot_cfg = RobotCfg(kinematics=self.kin_cfg, dynamics=dynamics)
+        self._load_dynamics_active = load_dynamics
+        if self.node is not None:
+            self.node.get_logger().info(
+                f"RobotCfg torque mode "
+                f"{'enabled' if load_dynamics else 'disabled'} "
+                f"(load_dynamics={str(load_dynamics).lower()}) — rebuild the "
+                "MotionPlanner to pick it up"
+            )
+        return True
 
     def get_kinematics_state(self, joint_positions):
         # v2: kin_model.get_state removed — compute_kinematics takes a JointState.

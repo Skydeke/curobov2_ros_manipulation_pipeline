@@ -485,7 +485,11 @@ class SinglePlanner(TrajectoryPlanner):
         """
         if not log_flag:
             return []
-        success = SinglePlanner._flat_values(getattr(result, 'success', None))
+        success = SinglePlanner._flat_values(getattr(result, 'success', None)) or []
+        # ``plan_pose`` may return None (or a result without ``.success``) on
+        # hard failures — the n_seeds guard below tolerates that, so the loop's
+        # ``len(success)`` must too. Empty success => a single all-failed row
+        # (we cannot confirm any seed solved), matching the sibling helpers.
         costs = SinglePlanner._flat_values(getattr(result, 'seed_cost', None))
         perr = SinglePlanner._flat_values(getattr(result, 'position_error', None))
         gidx = getattr(result, 'goalset_index', None)
@@ -513,7 +517,10 @@ class SinglePlanner(TrajectoryPlanner):
                 except (TypeError, ValueError):
                     cand = 0
             elif not ok:
-                cand = int(fallback_candidate)
+                # Failed/absent solve: the fallback candidate is -1 ("no
+                # candidate won"); the wire's goalset_candidate is unsigned,
+                # so clamp to 0.
+                cand = max(0, int(fallback_candidate))
             rows.append({
                 'problem': 0,
                 'segment': segment_i,

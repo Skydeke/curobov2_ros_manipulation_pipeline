@@ -4,13 +4,18 @@
 
 import math
 
+import pytest
+
 from isaac_ros_cumotion_extra.benchmark.compare import (
     _grid_table,
     _stat_str,
     compare,
     curobo_style_rows,
     position_error_mm,
+    print_reference_comparison,
     print_report,
+    print_webpage_summary,
+    reference_stats,
     save_report,
     trajectory_jerk,
     trajectory_metrics,
@@ -404,6 +409,26 @@ class TestCuroboStyleRows:
         ]
         assert by_label['Jerk'].startswith('mean: 12.500')
 
+    def test_energy_torque_rows_only_when_data_present(self):
+        """Energy (J) / Torque (N·m) rows (reference page layout, after Jerk)
+        are emitted only when any successful entry carries the fields — the ROS
+        leg without a dynamics model leaves them None and must not gain rows."""
+        results = [_successful('a', energy_j=89.27, torque_nm=71.03)]
+        rows = curobo_style_rows(results)
+        assert [r[0] for r in rows] == [
+            'Success %', 'Plan Time (s)', 'Path Length (rad.)', 'Motion Time(s)',
+            'Energy (J)', 'Torque (N·m)',
+        ]
+        by_label = dict(rows)
+        assert by_label['Energy (J)'].startswith('mean: 89.270')
+        assert by_label['Torque (N·m)'].startswith('mean: 71.030')
+
+    def test_no_energy_torque_rows_without_fields(self):
+        results = [_successful('a', path_length=1.0, motion_time_s=1.0)]
+        by_label = dict(curobo_style_rows(results))
+        assert 'Energy (J)' not in by_label
+        assert 'Torque (N·m)' not in by_label
+
 
 class TestWinnerSolveTime:
     """Solver-reported solve time of the winning considered row (ROS leg).
@@ -579,3 +604,183 @@ class TestGridTable:
         out = _grid_table([['Plan Time (s)', 'mean: 0.038']], ['Metric', 'Value'])
         assert '+---------------+-------------+' in out
         assert '| Plan Time (s) | mean: 0.038 |' in out
+
+
+class TestReferenceStats:
+    """Aggregation for the `reference` subcommand's page-comparison grids."""
+
+    def test_success_pct_over_all_problems(self):
+        results = [
+            _successful('a', solve_time_s=0.07, position_error_mm=0.5, jerk=3.2,
+                        path_length_curobo=1.5, motion_time_curobo=2.0,
+                        energy_j=89.27, torque_nm=71.03),
+            _successful('b', solve_time_s=0.11, position_error_mm=0.7, jerk=4.0,
+                        path_length_curobo=2.5, motion_time_curobo=3.0,
+                        energy_j=99.27, torque_nm=81.03),
+            _result('c', success=False),
+        ]
+        stats = reference_stats(results)
+        assert stats['Success %'][0] == pytest.approx(66.66666666666666)
+        assert stats['Plan Time (s)'][0] == pytest.approx(0.1)  # time_s default
+        assert stats['Solve Time (s)'][0] == pytest.approx(0.09)
+        assert stats['Position Error (mm)'][0] == pytest.approx(0.6)
+        assert stats['Jerk'][0] == pytest.approx(3.6)
+        # path/motion prefer the curobo control-point fields
+        assert stats['Path Length (rad.)'][0] == pytest.approx(2.0)
+        assert stats['Motion Time(s)'][0] == pytest.approx(2.5)
+        assert stats['Energy (J)'] == (pytest.approx(94.27), pytest.approx(94.27))
+        assert stats['Torque (N·m)'] == (pytest.approx(76.03), pytest.approx(76.03))
+
+    def test_errors_are_success_rate_only(self):
+        """Zero successful solves -> Success % only (no statistic rows)."""
+        stats = reference_stats([_result('a', success=False)])
+        assert stats['Success %'] == (0.0, None)
+        assert len(stats) == 1
+
+    def test_filters_inf_timings_like_stat_str(self):
+        results = [_successful('a', time_s=float('inf'), position_error_mm=0.5)]
+        stats = reference_stats(results)
+        assert 'Plan Time (s)' not in stats  # all timings inf -> no row
+        assert stats['Position Error (mm)'][0] == pytest.approx(0.5)
+
+    def test_falls_back_to_dense_path_motion_without_curobo_fields(self):
+        results = [_successful('a', path_length=1.0, motion_time_s=1.0)]
+        stats = reference_stats(results)
+        assert stats['Path Length (rad.)'][0] == pytest.approx(1.0)
+        assert stats['Motion Time(s)'][0] == pytest.approx(1.0)
+        assert 'Position Error (mm)' not in stats
+        assert 'Energy (J)' not in stats
+
+
+class TestPrintReferenceComparison:
+    def test_prints_both_tables_and_published_grid(self, capsys):
+        def one(p_base, e, t):
+            return [_successful(
+                'a', solve_time_s=0.07, position_error_mm=0.5, jerk=3.2,
+                path_length_curobo=1.5, motion_time_curobo=2.0,
+                energy_j=e, torque_nm=t,
+            ), _successful('b', solve_time_s=0.11, position_error_mm=0.7,
+                           jerk=4.0, path_length_curobo=2.5,
+                           motion_time_curobo=3.0, energy_j=e + p_base,
+                           torque_nm=t + p_base)]
+
+        print_reference_comparison(
+            one(10.0, 89.27, 71.03), one(-8.0, 81.41, 62.27), mass=3.0)
+
+        out = capsys.readouterr().out
+        # both curobo-style tables are printed again
+        assert '== without torque limits (native) ==' in out
+        assert '== with torque limits (3 kg) (native) ==' in out
+        # then the published-vs-ours comparison grids for both tables
+        assert '== published page (RTX 6000 Ada) vs this box — without torque limits ==' in out
+        assert '== published page (RTX 6000 Ada) vs this box — with torque limits (3 kg) ==' in out
+        for marker in ('Docs mean', 'Ours mean', 'Docs median', 'Ours median'):
+            assert marker in out
+        # published values appear verbatim in the comparison grid
+        assert '0.038' in out and '0.041' in out
+        assert '89.270' in out and '78.959' in out
+        assert '62.270' in out and '65.345' in out
+        # regression guard: the delta note is computed from the real
+        # (mean, median) tuples, never from their first characters. With this
+        # fixture the worst mean delta is Jerk: |227.365 - 3.6| = 223.765.
+        assert 'worst mean delta vs the page: 223.765' in out
+        assert 'max |mean delta|' not in out
+
+    def test_empty_results_still_print_published_grid(self, capsys):
+        print_reference_comparison([], [])
+        out = capsys.readouterr().out
+        assert '== without torque limits (native) ==' in out
+        # all ours cells are dashes but the grid still lists the page values
+        assert '| Success %' in out
+        assert '99.73' in out
+        assert 'max |mean delta|' not in out  # no data, no delta note
+
+    def test_mass_shown_in_torque_table_title(self, capsys):
+        print_reference_comparison([_successful('a')], [_successful('b')], mass=2.0)
+        out = capsys.readouterr().out
+        assert 'with torque limits (2 kg) (native)' in out
+
+
+class TestPrintWebpageSummary:
+    """The compose-end summary: every suite, page order, native + ROS legs."""
+
+    def _motion(self, **extra):
+        base = dict(
+            problem_name='a', scene_key='s', capability='planning', success=True,
+            time_s=0.04, solve_time_s=0.031, path_length=1.5, motion_time_s=2.0,
+            path_length_curobo=3.126, motion_time_curobo=1.25,
+            position_error_mm=0.041, orientation_error_deg=0.1, jerk=227.365,
+            energy_j=89.27, torque_nm=71.028,
+        )
+        base.update(extra)
+        return base
+
+    def _ik(self, **extra):
+        base = dict(
+            problem_name='g0', scene_key='s', capability='ik', variant='cfree',
+            success=True, time_ms=1.2, position_error_mm=0.3,
+            orientation_error_deg=0.05, n_waypoints=0,
+        )
+        base.update(extra)
+        return base
+
+    def _cost(self, **extra):
+        base = dict(
+            problem_name='c0', scene_key='s', capability='cost', valid=True,
+            time_ms=2.0, n_configs=64,
+        )
+        base.update(extra)
+        return base
+
+    def test_suites_print_in_webpage_order_with_both_legs(self, capsys):
+        motion, ik, cost = [self._motion()], [self._ik()], [self._cost()]
+        print_webpage_summary(
+            motion_plain_native=motion, motion_plain_ros=motion,
+            motion_torque_native=motion, motion_torque_ros=motion,
+            ik_native=ik, ik_ros=ik, cost_native=cost, cost_ros=cost,
+        )
+        out = capsys.readouterr().out
+        i1 = out.index('[1/3] MOTION GENERATION')
+        i2 = out.index('[2/3] INVERSE KINEMATICS')
+        i3 = out.index('[3/3] KINEMATICS & COLLISION')
+        i4 = out.index('[APPENDIX]')
+        assert i1 < i2 < i3 < i4
+        # both legs of every suite are present, with distinguishable titles
+        assert '== without torque limits — native curobo ==' in out
+        assert '== without torque limits — ROS (server) ==' in out
+        assert '== with torque limits (3 kg) — native curobo ==' in out
+        assert '== with torque limits (3 kg) — ROS (server) ==' in out
+        assert '== inverse kinematics — native curobo ==' in out
+        assert '== inverse kinematics — ROS (/ik_batch) ==' in out
+        assert '== kinematics & collision — native curobo ==' in out
+        assert '== kinematics & collision — ROS (/fk_batch) ==' in out
+        assert '== published page (RTX 6000 Ada) vs this box — without torque limits ==' in out
+        assert 'Receipt notes:' in out
+        # the receipt states both legs share the page's 100-attempt budget
+        # (the runner pins the server's plan-time max_attempts to --max-attempts)
+        assert '100 for BOTH legs' in out
+        assert 'max_attempts to --max-attempts' in out
+
+    def test_missing_ros_legs_are_flagged_not_crashed(self, capsys):
+        print_webpage_summary(
+            motion_plain_native=[self._motion()],
+            motion_torque_native=[self._motion()],
+            ik_native=[self._ik()],
+            cost_native=[self._cost()],
+        )
+        out = capsys.readouterr().out
+        assert 'without torque limits — ROS (server): (not run' in out
+        assert 'with torque limits (3 kg) — ROS (server): (not run' in out
+        assert 'inverse kinematics — ROS (/ik_batch): (not run' in out
+        assert 'kinematics & collision — ROS (/fk_batch): (not run' in out
+        # the native motion tables exist, so the appendix grids (and their
+        # delta note) still print
+        assert '== published page (RTX 6000 Ada) vs this box' in out
+        assert 'worst mean delta' in out
+
+    def test_motion_section_only_when_native_motion_missing(self, capsys):
+        """The appendix needs the two native motion tables to compare."""
+        print_webpage_summary(ik_native=[self._ik()])
+        out = capsys.readouterr().out
+        assert '[APPENDIX]' not in out
+        assert '[2/3] INVERSE KINEMATICS' in out

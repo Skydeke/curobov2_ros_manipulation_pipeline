@@ -92,9 +92,11 @@ per-problem loop the reference table is generated with — curobo's bundled
 particle + LBFGS ik/trajopt optimizers,
 `optimizer_collision_activation_distance=0.0025`, `{obb: n_cubes}` collision
 cache, `num_ik_seeds=32`, `num_trajopt_seeds=4`, fixed seeds, CUDA-graph warmup,
-one planner per scene and the real solve capped at `max_attempts=1` by default
-(the upstream reference uses 100; `--max-attempts N` raises the native leg's
-budget). Per-problem
+one planner per scene and the real solve at `max_attempts=100` by default —
+the page's real-solve budget, for the WHOLE benchmark (every subcommand
+defaults both legs to 100; the ROS runner pins the server's plan-time
+`max_attempts` to the run's `--max-attempts`, so native and ROS always share
+one retry envelope; lower it for a fast smoke pass). Per-problem
 worlds are OBB conversions of the problem obstacles (`--mesh` switches to
 meshes). Its `Metric`/`Value` table should therefore match the reference page.
 
@@ -155,13 +157,20 @@ envelope at `max_attempts:=100`, `plan()` was uniform ~2.0 ± 0.1 s per problem;
 capping it at `max_attempts:=1` dropped `plan()` to **~0.70 s with 5/5
 first-attempt success**. So the retry loop contributed ~1.35 s/request
 (≈14 ms of unseeded churn per extra attempt) while native exits the loop in
-one or two calm attempts. The reference envelope therefore **defaults
-`max_attempts:=1`** — a plain `docker compose -f docker/compose_benchmark.yaml
-up` reports the calm numbers with no env var; `CUROBO_MAX_ATTEMPTS=10` shows
-the cost-scaling curve. (The process-level explanations for the churn —
-unseeded server RNG and the denser voxel/ESDF world — remain candidates for
-*why* the server's later attempts keep being explored, but they no longer cost
-the benchmark anything.)
+one or two calm attempts. The page's success rate still requires the budget —
+native is ~99.7 % at 100 attempts but only ~90 % at 1, and the ROS legs sat at
+the old one-attempt server cap for the same reason — so the **whole benchmark**
+now defaults `max_attempts=100` for **both** legs (`core`/`ros`/`all` included,
+not just the webpage reproduction), and the ROS runner pins the server's
+plan-time `max_attempts` to the run's own `--max-attempts` before each motion
+leg (one `set_parameters`, no rebuild). Both legs therefore retry like the
+page: solve-time numbers stay calm for the ~99 % of problems that solve on the
+first attempt and accumulate the same retry cost as native on the rare
+failures. `CUROBO_MAX_ATTEMPTS=10` shows the cost-scaling curve at a shorter
+wall time. (The process-level explanations for
+the churn — unseeded server RNG and the denser voxel/ESDF world — remain
+candidates for *why* the server's later attempts keep being explored, but they
+no longer cost the reproduction anything.)
 
 **Root cause of the 12x single-attempt gap (resolved).** One capped server
 attempt used to cost ~0.67 s of `solve_time` vs native's ~0.055 s for its
@@ -253,11 +262,13 @@ retry/seed caps:
   tool frame as the reference franka.yml (the robometrics goal poses are
   defined for `panda_hand`; the product default `grasping_frame` sits a
   finger-length further out and makes those goals unreachable);
-- `max_attempts:=1` and `collision_activation_distance:=0.0025`, with
-  `num_trajopt_seeds:=4` — the reference recipe's retry budget and seed count
-  (the native core leg now also defaults to `max_attempts=1`, so both legs run
-  the identical single-attempt envelope;
-  `CUROBO_MAX_ATTEMPTS` / `--max-attempts` raise it for the cost-scaling curve)
+- `max_attempts` (plan-time — the compose launches the server at
+  `${CUROBO_MAX_ATTEMPTS:-100}`, the page's budget) and
+  `collision_activation_distance:=0.0025`, with `num_trajopt_seeds:=4` — the
+  reference recipe's retry budget and seed count. Every benchmark subcommand
+  defaults both legs to 100: the ROS runner pins the server's plan-time
+  `max_attempts` to the run's own `--max-attempts` before each motion leg
+  (stock `set_parameters`, no rebuild — one knob, identical envelopes).
   (back when the server defaulted to an LBFGS-only single-attempt solver, this
   envelope was what made the ROS leg pass the hard problems; the solver recipe
   itself is now common by default). `max_attempts` is plumbed from the node
@@ -326,6 +337,92 @@ ros2 run isaac_ros_cumotion_extra curobo_benchmark all \
   --dataset motion_benchmaker --scene table_pick_panda
 ```
 
+### Reproducing the reference page's tables (with / without torque limits)
+
+The page's "Latest Motion Generation Results" **both tables** come from the
+same run over the combined dataset — `--dataset full`
+(motion_benchmaker + mpinets, the page's 2600 problems), fixed seeds
+(`np`/`random`/`torch` = 2) and per-problem `reset_seed`, exactly like the
+upstream script's `file_paths` loop; the only difference between the two
+tables is `--use-dynamics --mass 3.0` (the full 3 kg payload). "full" keeps
+upstream's **per-dataset** `mpinets_data` classification (benchmaker scenes
+never gain the mpinets finger locks), and `--scene` filtering works on it
+like any other dataset.
+
+- `Energy (J)` / `Torque (N·m)` rows are computed for **every** successful
+  plan in *both* tables via the upstream Pinocchio recipe
+  (`load_robot_model_for_dynamics("franka", attached_object_mass=mass)` +
+  `compute_trajectory_energy` on the B-spline solution) — the reference page
+  reports both columns in both tables. `--use-dynamics` only toggles the
+  solver's torque-limited mode (`robot_cfg["load_dynamics"]` + the mass
+  payload on the planner); the energy columns are not gated on it.
+- The torque-limits section flows through the ROS server leg too: the
+  *webpage* run switches the running server's torque mode itself — stock
+  `set_parameters` (`load_dynamics`, `robot_payload_mass`) + the
+  `update_motion_gen_config` trigger rebuilds the MotionPlanner from them
+  (see `docs/concepts/parameters.md`; the launch-time flags below are only
+  the initial state). Standalone legs can still do it explicitly:
+  `curobo_benchmark ros --use-dynamics --mass 3.0 ...` after launch-time
+  `load_dynamics:=true robot_payload_mass:=3.0`. Per the accepted "server
+  plans; client computes" split the server needs **no response-schema
+  change**; `ros_runner.py` reconstructs Energy/Torque client-side from the
+  returned trajectory. The wire carries positions + velocity + dt but **no
+  acceleration**, so the ROS-leg numbers are an approximation (`qdd`
+  finite-differenced from velocity) and may not match the native Pinocchio
+  values.
+- Honest receipt notes: the whole benchmark defaults `max_attempts=100` for
+  BOTH legs — every subcommand (`webpage`, `reference`, `all`, `core`, `ros`)
+  and the compose-launched server share the page's 100-attempt budget, and the
+  runner pins the server's plan-time `max_attempts` to the run's
+  `--max-attempts` before each motion ROS leg, so a plain
+  `docker compose -f docker/compose_benchmark.yaml up` reproduces the page's
+  99.73 % success on native AND ROS alike (~90 % is what either leg scores at
+  `--max-attempts 1`, the old harness default). And
+  the box's GPU differs from the page's RTX 6000 Ada, so the timing columns
+  stay informational; the quality metrics are deterministic given the same
+  config + seeds + dataset.
+- Server robot-config parity: the ROS motion-gen solver runs the same franka
+  kinematics, solver recipe (particle+LBFGS, same transitions), seeds (32/4),
+  `collision_activation_distance:=0.0025`, and the `load_dynamics` /
+  `robot_payload_mass` envelope knobs as the page, on
+  `config/franka.curobo.reference.yml` (`tool_frames: [panda_hand]`,
+  `collision_sphere_buffer: 0.0` — the benchmark forces 0.0, not the 0.004
+  product default). Two **accepted** deltas vs upstream `load_curobo` remain:
+  (1) the page widens the solver's joint limits by ±0.2 rad; the server
+  plans with the raw URDF limits (the shared `robot_cfg` also feeds the
+  IK/FK services, whose native legs use raw limits — widening motion-gen
+  only would require a solver-local cfg copy); (2) dresser (mpinets)
+  scenes lock the finger joints at 0.025 in the page vs the yml's 0.04 on
+  the server (affects finger-sphere geometry only; the `panda_hand`
+  tool-frame result is unaffected).
+
+The webpage order, both legs — `webpage` runs the page's suites in the page's
+order (motion generation → IK → kinematics & collision), each once with the
+native curobo leg and once via the ROS server, then prints ALL results again
+grouped exactly like the page (the docker compose default; `reference` is the
+motion-generation-only variant of the same envelope). With `--run-ros`,
+nothing is ever skipped — neither a native nor a ROS leg. The two motion ROS
+rows differ only in the server's torque mode, and the runner ensures it per
+leg via the runtime switch (`set_parameters` + `update_motion_gen_config`:
+the without-torque leg asks for plain, the with-torque leg asks for
+torque-limits at `--mass`), so **one server life fills both motion ROS rows**
+— the launch-time `load_dynamics` / `robot_payload_mass` are just the initial
+state the runner overrides:
+
+```bash
+ros2 run isaac_ros_cumotion_extra curobo_benchmark webpage \
+  --dataset full -o /tmp/benchmark_webpage.json
+# native-only (no server needed): omit --run-ros
+#   -> runs, in order: motion gen without torque -> with torque (3 kg) ->
+#      IK -> kinematics & collision, each native + ROS (when the server is
+#      up), then prints everything again in that order, plus the
+#      published-page comparison grids; JSONs:
+#      /tmp/benchmark_webpage.{motion-plain-core,motion-plain-ros,
+#      motion-torque-core,motion-torque-ros,ik-core,ik-ros,cost-core,
+#      cost-ros}.json
+#   CUROBO_DATASET=demo / --max-attempts 1  -> fast smoke pass
+```
+
 ```bash
 # Rebuild only if you want the `ros2 run` entry point (not required to run):
 #   colcon build --symlink-install --packages-select isaac_ros_cumotion_extra
@@ -349,13 +446,105 @@ export PYTHONPATH=/root/ros2_ws/src/isaac_ros_cumotion_extra:$PYTHONPATH
 python3 -m isaac_ros_cumotion_extra.benchmark.run all --dataset demo
 ```
 
-One-shot compose (server + benchmark + compare, no rebuild needed):
+One-shot compose (server + webpage-ordered reproduction, no rebuild needed):
 
 ```bash
+# Runs the page's suites in order (motion generation -> IK -> kinematics &
+# collision), each native + ROS, then prints ALL results again (webpage order,
+# both legs). Motion figures use the full 2600-problem dataset at the upstream
+# 100-attempt budget; JSONs: /tmp/benchmark_webpage.*.json. The runner
+# switches the server's torque mode at runtime, so BOTH motion ROS rows
+# (without / with torque limits) are filled by this single plain launch —
+# nothing is skipped.
 docker compose -f docker/compose_benchmark.yaml up
+# Add CUROBO_RUN_PARITY=1 to also run the compare-verdict suite (all/ik/cost).
 docker compose -f docker/compose_benchmark.yaml exec curobo_benchmark \
-  cat /tmp/benchmark_report.json
+  cat /tmp/benchmark_webpage.motion-plain-core.json
 ```
+
+## IK and kinematics & collision parity legs
+
+Besides motion planning, the [cuRobo benchmarks
+page](https://nvlabs.github.io/curobo/latest/reference/benchmarks.html) also
+lists an **inverse-kinematics** family (upstream
+`benchmark/ik_benchmark.py`) and a **kinematics & collision** family
+(upstream `benchmark/cost_gradient_benchmark.py`). The compose's parity suite
+(`CUROBO_RUN_PARITY=1`; `all` motion planning, then `ik`, then `cost`) runs
+all three, and the CLI exposes each leg:
+
+```bash
+# native IK leg                -> report.json + report.ik-core.json
+curobo_benchmark ik-core -o /tmp/ik_report.json
+# ROS IK leg (server up)       -> report.json + report.ik-ros.json
+curobo_benchmark ik-ros  -o /tmp/ik_report.json
+# both + compare (verdict = exit code)
+curobo_benchmark ik -o /tmp/ik_report.json
+
+# native FK + collision leg    -> report.json + report.cost-core.json
+curobo_benchmark cost-core -o /tmp/cost_report.json
+# ROS FK/collision leg         -> report.json + report.cost-ros.json
+curobo_benchmark cost-ros  -o /tmp/cost_report.json
+curobo_benchmark cost -o /tmp/cost_report.json
+
+# compare existing JSONs (planning | ik | cost; default planning)
+curobo_benchmark compare core.json ros.json --capability ik
+```
+
+Both new families solve/evaluate **shared, deterministically reseeded
+inputs** (`benchmark/synthetic.py`): the ROS leg can't read the upstream
+benchmark's internal RNG, so the harness regenerates identical goal poses
+(IK) and joint configurations (cost) for both legs from `--seed` (default 2),
+mirroring the upstream benchmarks' own sample-config input style.
+
+**IK parity (`ik`)** solves collision-free IK goals through the server's
+`/ik_batch` (per-goal `joint_states_valid` = the solver's best-seed `success`)
+and natively with the server's exact `InverseKinematicsCfg.create` recipe
+(`--robot-config` defaults to the envelope's
+`config/franka.curobo.reference.yml`; 32 seeds, position tolerance 0.005 m,
+orientation tolerance 0.05 rad, `{cuboid: 1}` cache — the table world). The
+ROS response carries no solver residual, so **both** legs score the same
+FK-verified `position_error_mm` / `orientation_error_deg` of the returned
+first-seed solution versus the goal. Parity is success agreement plus those
+two errors within `--position-tolerance-mm` (default 0.5) and
+`--orientation-tolerance-deg` (default 0.5); per-goal `time_ms` is
+informational. The native leg also emits the upstream-style `plain`
+(kinematics-only, no scene) variant as a reference row — the server has no
+collision-free-off IK mode, so `plain` is **never** compared (the parity
+verdict only counts `cfree` goals).
+
+**Kinematics & collision parity (`cost`)** evaluates the shared config batches
+through the server's `/fk_batch` (per-config `poses_valid` = joint-limits +
+self + scene collision via `RobotCollisionChecker.validate`) and natively with
+the same model + `RobotCollisionCheckerCfg.load_from_config(
+collision_activation_distance=0.001)` on the cost world (table + tall
+cuboid). Parity is `valid` agreement (exact) plus FK tool-pose agreement
+within `--position-tolerance-mm` / `--orientation-tolerance-deg` (defaults
+1e-3 — the expected deltas are float32 reproducibility, ~0).
+
+Both ROS legs size the server's collision cache to their synthetic world
+(cuboid=1 for IK, cuboid=2 for cost, mesh/voxel off) before the timed runs,
+so the server's collision kernels match the native side. The setup order is
+`remove_all_objects` → `SetCollisionCache` → `add_object` → `warmup_ik` /
+`warmup_fk`: cuRobo requires the registered scene to never hold more cuboids
+than the active cache capacity — a cache change rebuilds every solver from
+the then-current scene (raising if it exceeds the new cap), and an add raises
+if it would exceed the current cap. Clearing first empties the scene (so
+sizing down over planning-suite leftovers, up to 8 cuboids, is safe) and
+sizing *before* the adds guarantees the parity world can never overflow the
+previous leg's shrunk cache (the IK leg shrinks it to 1, so a `clear → add →
+size` order would crash the node on the cost world's second cuboid). The
+sized solver then captures the registered world at construction
+(`--no-size-cache` keeps the padded defaults for A/B).
+
+Every cuRobo construction in these legs — native and the server's `FkBatch`
+collision validator — runs on an explicitly indexed CUDA device (`cuda:0`),
+canonicalized from a bare `"cuda"` by `synthetic.canonical_device`. The
+upstream reference scripts do the same (`DeviceCfg` defaults to
+`torch.device("cuda", 0)`; `cost_gradient_benchmark.py` passes `"cuda:0"`):
+Warp's `wp.device_from_torch` requires a device index, so an index-less
+`torch.device("cuda")` raises `TypeError` whenever curobo builds collision
+`MeshData`. This also fixes the server validator, which previously swallowed
+that crash and silently reported every `poses_valid` as True.
 
 Pure-Python tests have their own compose (`curobo_test` — the benchmark
 package's tests — plus `curobo_task_constructor_test`, the

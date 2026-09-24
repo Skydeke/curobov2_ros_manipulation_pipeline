@@ -18,9 +18,9 @@ loop, so the native-leg numbers reproduce the reference page:
   worlds to meshes), ``num_ik_seeds`` = 32, ``num_trajopt_seeds`` = 4
 - one planner per scene: ``warmup(enable_graph=True)``, then 3 warmup solves at
   ``max_attempts=1`` on the first problem, then the real solve at the same
-  ``max_attempts`` (default 1 = the ROS server's ``max_attempts:=1`` cap, so
-  both legs run the same single-attempt envelope; the upstream reference uses
-  100 — raise ``--max-attempts`` to reproduce it); fixed seeds exactly like the
+  ``max_attempts`` (default 100 — the page's real-solve budget, for the whole
+  benchmark, so both legs share the same retry envelope; lower
+  ``--max-attempts`` for a fast smoke pass); fixed seeds exactly like the
   upstream script
 - per-problem world: ``SceneCfg.create(obstacles).get_obb_world()`` (mesh when
   ``--mesh``)
@@ -29,7 +29,12 @@ Each result entry carries the shared parity schema (see ``compare``) plus the
 upstream ``CuroboMetrics`` numbers needed to reproduce the reference table:
 ``path_length_curobo`` (B-spline control-point polyline), ``motion_time_curobo``
 (``dt * (H - 2*interpolation_steps)`` for B-spline control spaces),
-``position_error_mm``, ``orientation_error_deg`` and ``jerk``.
+``position_error_mm``, ``orientation_error_deg``, ``jerk`` and — computed for
+every successful plan via the upstream Pinocchio helper — ``energy_j`` (J,
+``sum(|tau * qd|) * dt``) and ``torque_nm`` (max |tau|), both at the
+``--mass`` payload. ``--use-dynamics`` toggles the solver's torque-limited
+mode (``robot_cfg["load_dynamics"]``); the energy/torque columns are reported
+in both modes, exactly like the reference page.
 """
 
 # Standard Library
@@ -42,7 +47,7 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from .compare import trajectory_metrics
-from .problems import filter_scenes, load_problems
+from .problems import filter_scenes, load_problems, mpinets_scene_keys
 
 _REL_WITHIN_PACKAGE = os.path.join("curobo", "benchmark", "motion_plan_benchmark.py")
 _REL_AT_ROOT = os.path.join("benchmark", "motion_plan_benchmark.py")
@@ -118,21 +123,26 @@ def _reference_benchmark_module():
     )
 
 
-def _reference_args(mesh: bool, use_cuda_graph: bool):
+def _reference_args(mesh: bool, use_cuda_graph: bool, use_dynamics: bool = False, mass: float = 3.0):
     """Namespace matching the reference benchmark's CLI defaults.
 
     ``load_curobo`` (upstream) only reads ``use_dynamics``, ``mesh``,
     ``disable_cuda_graph`` and ``mass`` — keep those aligned with the
     reference script's defaults (no dynamics, obb worlds by default, CUDA
-    graphs on, 3.0 kg payload).
+    graphs on, 3.0 kg payload). ``use_dynamics`` flows into upstream
+    ``robot_cfg["load_dynamics"]`` (torque-limited trajopt) and
+    ``motion_planner.update_links_inertial``; ``mass`` feeds both that solver
+    payload and the Pinocchio energy model (``load_robot_model_for_dynamics``
+    is wired unconditionally in ``run_core`` — the page reports Energy/Torque
+    in both the with- and without-torque-limit tables).
     """
     import argparse
 
     return argparse.Namespace(
-        use_dynamics=False,
+        use_dynamics=use_dynamics,
         mesh=mesh,
         disable_cuda_graph=not use_cuda_graph,
-        mass=3.0,
+        mass=mass,
     )
 
 
@@ -144,6 +154,9 @@ def _run_scene(
     warmup_iters: int,
     mesh: bool,
     reset_seed_per_problem: bool = True,
+    robot_model_data=None,
+    compute_energy=None,
+    verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """Replay one scene's problems exactly like ``benchmark_mb`` does.
 
@@ -152,11 +165,16 @@ def _run_scene(
     ``clear_cache`` + ``update_world`` + ``reset_seed``, CUDA-graph-capture
     warmup of ``warmup_iters`` solves at ``max_attempts=1`` on the first
     problem (upstream uses 3), then the real ``plan_pose`` solve at
-    ``max_attempts`` (default 1).
+    ``max_attempts`` (100 by default across the whole benchmark).
 
     ``reset_seed_per_problem=False`` skips the per-problem ``reset_seed()``
     calls (diagnostic: reproduces the ROS server's drifting RNG state — see
     ``run_core``), isolating whether repeated-attempt cost tracks seed resets.
+
+    ``robot_model_data`` (Pinocchio model/data/torque-limits from the upstream
+    ``load_robot_model_for_dynamics``) plus ``compute_energy`` enable the
+    Energy (J) / Torque (N·m) columns on every successful solve, exactly like
+    the reference script.
     """
     from curobo._src.geom.types import SceneCfg
     from curobo._src.state.state_joint import JointState
@@ -212,14 +230,23 @@ def _run_scene(
         )
         wall_time = time.perf_counter() - t_start
 
-        entry = _entry_from_result(problem_name, scene_key, mg, result, wall_time)
-        entries.append(entry)
-        print(
-            f"[core] {problem_name}: "
-            f"{'SUCCESS' if entry['success'] else 'FAILED'} "
-            f"(t={entry['time_s']:.3f}s)",
-            flush=True,
+        entry = _entry_from_result(
+            problem_name,
+            scene_key,
+            mg,
+            result,
+            wall_time,
+            robot_model_data=robot_model_data,
+            compute_energy=compute_energy,
         )
+        entries.append(entry)
+        if verbose:
+            print(
+                f"[core] {problem_name}: "
+                f"{'SUCCESS' if entry['success'] else 'FAILED'} "
+                f"(t={entry['time_s']:.3f}s)",
+                flush=True,
+            )
     return entries
 
 
@@ -229,6 +256,8 @@ def _entry_from_result(
     mg,
     result,
     wall_time: float,
+    robot_model_data=None,
+    compute_energy=None,
 ) -> Dict[str, Any]:
     """Build the shared result-dict schema from a ``plan_pose`` result.
 
@@ -239,6 +268,14 @@ def _entry_from_result(
     ``motion_time_curobo`` (``dt * (H - offset)`` with
     ``offset = 2 * interpolation_steps`` for B-spline control spaces),
     ``position_error_mm``, ``orientation_error_deg`` and ``jerk``.
+
+    When ``robot_model_data`` (Pinocchio model/data/torque-limits from the
+    upstream ``load_robot_model_for_dynamics``) and ``compute_energy`` are
+    supplied, every successful solve also carries ``energy_j`` (J) and
+    ``torque_nm`` (N·m) computed with the upstream
+    ``compute_trajectory_energy`` on the B-spline ``js_solution`` — exactly
+    what the reference page reports, in both the with- and without-torque-limit
+    tables.
     """
     entry = {
         "problem_name": problem_name,
@@ -250,6 +287,8 @@ def _entry_from_result(
         "path_length": None,
         "motion_time_s": None,
         "solve_time_s": None,
+        "energy_j": None,
+        "torque_nm": None,
     }
     if result is None or result.success is None or not result.success.any().item():
         return entry
@@ -307,6 +346,17 @@ def _entry_from_result(
         entry["jerk"] = float(torch.max(torch.abs(q_traj.jerk)).item())
     except (AttributeError, TypeError):
         pass
+
+    # Energy / torque on the B-spline js_solution (same q_traj upstream feeds
+    # to compute_trajectory_energy), guarded like the reference script so a
+    # Pinocchio failure degrades to no rows rather than a hard failure.
+    if robot_model_data is not None and compute_energy is not None:
+        try:
+            dynamics_result = compute_energy(q_traj, robot_model_data)
+            entry["energy_j"] = float(dynamics_result["energy"])
+            entry["torque_nm"] = float(dynamics_result["max_torque"])
+        except Exception as exc:  # noqa: BLE001 - mirrors upstream's guard
+            print(f"[core] Warning: Failed to compute energy: {exc}", flush=True)
     return entry
 
 
@@ -319,8 +369,11 @@ def run_core(
     num_trajopt_seeds: int = 4,
     use_cuda_graph: bool = True,
     mesh: bool = False,
+    use_dynamics: bool = False,
+    mass: float = 3.0,
     seed_globals: bool = True,
     reset_seed_per_problem: bool = True,
+    verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """Run the native leg: the upstream curobo reference motion-planning benchmark.
 
@@ -330,14 +383,23 @@ def run_core(
     ``_reference_benchmark_module``) and replays the same per-scene/per-problem
     loop: one planner per scene
     (``warmup(enable_graph=True)`` + 3 warmup solves at ``max_attempts=1`` on
-    the first problem, real solve at the same ``max_attempts`` — default 1,
-    matching the ROS server's cap so both legs run the identical
-    single-attempt envelope; the upstream reference uses 100, raise
-    ``--max-attempts`` to reproduce it), OBB (or ``--mesh``)
+    the first problem, real solve at the same ``max_attempts`` — default 100,
+    the page's real-solve budget for the whole benchmark, so native and ROS
+    legs share the identical retry envelope), OBB (or ``--mesh``)
     per-problem worlds, and the upstream script's fixed seeds.
 
     ``scene`` restricts the run to one scene key within the dataset (``None`` =
     all scenes). Requires the docker image (torch / curobo / robometrics).
+
+    Torque-limits / payload (reference page's two tables):
+
+    - ``use_dynamics=True`` sets ``robot_cfg["load_dynamics"]`` and applies the
+      ``mass`` payload via ``motion_planner.update_links_inertial`` — the
+      solver's torque-limited mode (the page's "with torque limits" table).
+    - Energy (J) / Torque (N·m) rows are computed for *every* successful plan
+      in both modes via the upstream Pinocchio helper, at the same ``mass``
+      (the page reports both columns in both tables). ``mass`` defaults to
+      3.0 kg (full payload) like the reference script.
 
     Diagnostic knobs for attributing the ROS-vs-native wall gap (both default
     to the upstream reference behaviour):
@@ -362,11 +424,18 @@ def run_core(
     reference = _reference_benchmark_module()
     check_problems = reference.check_problems
     load_curobo = reference.load_curobo
+    load_robot_model_for_dynamics = getattr(
+        reference, "load_robot_model_for_dynamics", None
+    )
+    compute_energy = getattr(reference, "compute_trajectory_energy", None)
 
     full_problems = load_problems(dataset)
-    # mpinets detection mirrors the upstream script, on the full dataset
-    # (so --scene filtering does not change the planner's robot config).
-    mpinets_data = "dresser_task_oriented" in list(full_problems.keys())
+    # mpinets detection mirrors the upstream script, which sets the flag per
+    # file_path (benchmaker problems have no finger locks, mpinets problems
+    # do). For a single dataset the flag is global; for the combined "full"
+    # dataset it must classify each scene by which robometrics dataset it came
+    # from (and --scene filtering must keep the planner config stable).
+    mpinets_scenes = mpinets_scene_keys() if dataset == "full" else None
     problems = filter_scenes(full_problems, scene)
     if not problems:
         raise ValueError("No problems to run after scene filtering.")
@@ -381,7 +450,8 @@ def run_core(
     print(
         f"[core] solver: curobo reference benchmark (franka.yml, "
         f"particle+LBFGS, ik={num_ik_seeds}/trajopt={num_trajopt_seeds} seeds, "
-        f"max_attempts={max_attempts}, cuda_graph={use_cuda_graph})",
+        f"max_attempts={max_attempts}, cuda_graph={use_cuda_graph}, "
+        f"use_dynamics={use_dynamics}, mass={mass})",
         flush=True,
     )
     print(
@@ -390,8 +460,12 @@ def run_core(
     )
 
     all_results: List[Dict[str, Any]] = []
-    args = _reference_args(mesh, use_cuda_graph)
+    args = _reference_args(mesh, use_cuda_graph, use_dynamics, mass)
     for scene_key, scene_problems in problems.items():
+        if mpinets_scenes is not None:
+            mpinets_data = scene_key in mpinets_scenes
+        else:
+            mpinets_data = "dresser_task_oriented" in list(full_problems.keys())
         n_cubes = check_problems(scene_problems)
         mg, _robot_cfg = load_curobo(
             n_cubes,
@@ -402,6 +476,23 @@ def run_core(
             args=args,
         )
         mg.warmup(enable_graph=True)
+        # Pinocchio dynamics model for the Energy/Torque columns, loaded per
+        # scene exactly like the upstream benchmark's `if mg_init is None`
+        # branch (unconditional — the page reports energy/torque in both the
+        # with- and without-torque-limit tables).
+        robot_model_data = None
+        if load_robot_model_for_dynamics is not None:
+            try:
+                robot_model_data = load_robot_model_for_dynamics(
+                    robot_name="franka",
+                    attached_object_mass=mass,
+                )
+            except Exception as exc:  # noqa: BLE001 - degrade to no energy rows
+                print(
+                    f"[core] Warning: dynamics model unavailable "
+                    f"({exc}) — Energy/Torque rows omitted",
+                    flush=True,
+                )
         try:
             all_results.extend(
                 _run_scene(
@@ -412,6 +503,9 @@ def run_core(
                     warmup_iters=warmup_iters,
                     mesh=mesh,
                     reset_seed_per_problem=reset_seed_per_problem,
+                    robot_model_data=robot_model_data,
+                    compute_energy=compute_energy,
+                    verbose=verbose,
                 )
             )
         finally:

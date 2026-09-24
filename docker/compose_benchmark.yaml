@@ -5,26 +5,75 @@
 #                    *reference-benchmark envelope*: the same solver recipe as
 #                    curobo core's benchmark (panda_hand tool frame via
 #                    config/franka.curobo.reference.yml, particle+LBFGS
-#                    optimizers — the default solver recipe — max_attempts:=1,
+#                    optimizers — the default solver recipe — max_attempts:=100
+#                    (the page's budget; the runner re-pins it per leg),
 #                    num_trajopt_seeds:=4,
 #                    collision_activation_distance:=0.0025)
 #                    so the ROS leg can produce metrics comparable to the
 #                    native leg; the ROS leg exercises it through
 #                    /unified_planner/generate_trajectory
 #
+#   The compose reproduces the cuRobo benchmarks page's suites in the page's
+#   order (https://nvlabs.github.io/curobo/latest/reference/benchmarks.html),
+#   each once with the native curobo leg and once via the ROS server, then
+#   prints ALL results again (webpage order, both legs):
+#     1. motion generation: without torque limits  -> native + ROS table
+#     2. motion generation: with torque limits (full 3 kg payload)
+#                         -> native + ROS table
+#     3. inverse kinematics                        -> native + ROS (/ik_batch)
+#     4. kinematics & collision                    -> native + ROS (/fk_batch)
+#     appendix: published-page means/medians vs this box (motion generation)
+#   The `webpage` run uses the full 2600-problem dataset at the upstream
+#   100-attempt budget; JSONs land in /tmp/benchmark_webpage.*.json.
+#   Both motion ROS rows are always filled: the runner switches the server's
+#   torque mode at runtime (set_parameters + update_motion_gen_config), so
+#   the CUROBO_LOAD_DYNAMICS / CUROBO_PAYLOAD_MASS envs below are only the
+#   server's INITIAL mode and never cause a leg to be skipped. The runner
+#   also pins the server's plan-time max_attempts to the run's own
+#   --max-attempts before each motion ROS leg, so native and ROS share one
+#   retry budget.
+#   Set CUROBO_RUN_PARITY=1 to additionally run the compare-verdict suite
+#   (`all` motion planning demo dataset, `ik`, `cost`); each leg's exit code
+#   is captured separately (`ik`/`cost` return 1 on any PARITY-DELTA verdict,
+#   like `all`).
+#
 #   Timing diagnostics (see the README "timing attribution" section):
 #     CUROBO_USE_CUDA_GRAPH=false   relaunch the server with eager solvers
-#     CUROBO_MAX_ATTEMPTS=N         plan_pose retries per request (default 1:
-#                                   native solves in ~1-3 attempts and the
-#                                   server's extra retries were ~1.35 s/request
-#                                   of unseeded churn — raise to see the
-#                                   cost-scaling curve)
+#     CUROBO_MAX_ATTEMPTS=N         plan_pose retries per request — ONE knob
+#                                   for both legs, whole benchmark (default
+#                                   100 = the page's budget): the server is
+#                                   launched with it AND the ROS runner pins
+#                                   the server's plan-time max_attempts to
+#                                   the run's own --max-attempts before each
+#                                   motion leg — every subcommand defaults to
+#                                   the same 100
+#     CUROBO_DATASET=demo           `webpage` dataset size (default full =
+#                                   the page's 2600 problems; demo for a
+#                                   fast smoke pass)
 #     CUROBO_NUM_TRAJOPT_SEEDS=N    trajopt seed budget (default 4 = native recipe;
 #                                   12 = the node's deployment default)
 #     CUROBO_COLLISION_MODE=mesh    solver-collision geometry for spheres/cylinders/
 #                                   capsules: cuboid (default — fast OBB, identical
 #                                   to native get_obb_world) or mesh (exact trimesh,
 #                                   legacy; ~12x slower collision kernels)
+#
+#   Torque limits section (the page's "with torque limits" table — full 3 kg
+#   payload): the server gets the torque-limited recipe purely from its launch
+#   config (load_dynamics:=true builds the pinocchio inverse-dynamics model;
+#   robot_payload_mass:=3.0 patches the attached_object inertia like the
+#   reference script's update_links_inertial — no response-schema change) and
+#   the benchmark leg forwards --use-dynamics/--mass to both the core and ROS
+#   runners (the Energy (J) / Torque (N·m) columns are reconstructed on every
+#   successful plan in BOTH tables at the run's mass):
+#     CUROBO_LOAD_DYNAMICS=true CUROBO_PAYLOAD_MASS=3.0 \
+#       CUROBO_DYN_FLAGS="--use-dynamics --mass 3.0" \
+#       docker compose -f docker/compose_benchmark.yaml up
+#   The without-torque-limits table is the same command with the defaults
+#   (leave the three vars unset). The page's 99.73 % success is already the
+#   default: CUROBO_MAX_ATTEMPTS defaults to 100 for BOTH legs (the runner
+#   pins the server's max_attempts to the run's --max-attempts; upstream
+#   hardcodes the same 100). CUROBO_MAX_ATTEMPTS=1 reproduces the old
+#   single-attempt harness (each leg's 1-attempt success rate).
 #
 #   The ROS leg additionally sizes the server's collision cache to the
 #   dataset's actual per-type obstacle counts (obb = the same max-scene count
@@ -90,10 +139,18 @@ services:
           voxel_size:=0.05 mapper_extent_xyz:="[2.0, 2.0, 2.0]" \
           robot_config_file:=/root/ros2_ws/src/isaac_ros_cumotion/config/franka.curobo.reference.yml \
           urdf_path:=/root/ros2_ws/src/isaac_ros_cumotion/config/urdf/franka/franka_panda.urdf \
-          max_attempts:=${CUROBO_MAX_ATTEMPTS:-1} collision_activation_distance:=0.0025 \
+          max_attempts:=${CUROBO_MAX_ATTEMPTS:-100} collision_activation_distance:=0.0025 \
           num_trajopt_seeds:=${CUROBO_NUM_TRAJOPT_SEEDS:-4} \
           obstacle_collision_mode:=${CUROBO_COLLISION_MODE:-cuboid} \
-          use_cuda_graph:=${CUROBO_USE_CUDA_GRAPH:-true}
+          use_cuda_graph:=${CUROBO_USE_CUDA_GRAPH:-true} \
+          load_dynamics:=${CUROBO_LOAD_DYNAMICS:-false} \
+          robot_payload_mass:=${CUROBO_PAYLOAD_MASS:-0.0}
+        # Note: those two knobs are only the server's INITIAL torque mode —
+        # the benchmark's webpage run flips them at runtime via
+        # set_parameters + update_motion_gen_config. max_attempts is
+        # plan-time: the runner re-pins it per leg (default 100 for every
+        # subcommand — webpage, parity, standalone ros) via set_parameters
+        # with no rebuild.
 
   curobo_benchmark:
     container_name: curobo_benchmark
@@ -131,10 +188,25 @@ services:
           fi;
           sleep 3;
         done;
-        echo "Server ready, running parity benchmark (core + ROS legs)..." &&
-        python3 -m isaac_ros_cumotion_extra.benchmark.run all \
-          --dataset demo --show-all -o /tmp/benchmark_report.json;
-        bench_exit=$?;
-        echo "Benchmark exit code: $$bench_exit (any PARITY-DELTA verdict is expected as exit 1)" &&
-        echo "Report: /tmp/benchmark_report.json (+ core/ros sidecars in /tmp)" &&
+        echo "Server ready, running the cuRobo benchmarks page's suites in order (motion generation -> IK -> kinematics & collision), once native / once ROS..." &&
+        echo "The runner switches the server's torque mode itself (set_parameters + update_motion_gen_config), so one server life fills BOTH motion ROS rows - nothing is skipped." &&
+        python3 -m isaac_ros_cumotion_extra.benchmark.run webpage --run-ros \
+          --dataset ${CUROBO_DATASET:-full} --max-attempts ${CUROBO_MAX_ATTEMPTS:-100} \
+          -o /tmp/benchmark_webpage.json;
+        webpage_exit=$?;
+        if [ "${CUROBO_RUN_PARITY:-0}" = "1" ]; then
+          echo "CUROBO_RUN_PARITY=1: additionally running the compare-verdict suite (all/ik/cost)..." &&
+          python3 -m isaac_ros_cumotion_extra.benchmark.run all \
+            --dataset ${CUROBO_PARITY_DATASET:-demo} --show-all -o /tmp/benchmark_report.json \
+            ${CUROBO_DYN_FLAGS:-};
+          planning_exit=$?;
+          python3 -m isaac_ros_cumotion_extra.benchmark.run ik \
+            --show-all -o /tmp/benchmark_ik_report.json;
+          ik_exit=$?;
+          python3 -m isaac_ros_cumotion_extra.benchmark.run cost \
+            --show-all -o /tmp/benchmark_cost_report.json;
+          cost_exit=$?;
+          echo "Parity exit codes: planning=$$planning_exit ik=$$ik_exit cost=$$cost_exit (any PARITY-DELTA verdict is expected as exit 1)";
+        fi;
+        echo "Webpage exit code: $$webpage_exit" &&
         tail -f /dev/null

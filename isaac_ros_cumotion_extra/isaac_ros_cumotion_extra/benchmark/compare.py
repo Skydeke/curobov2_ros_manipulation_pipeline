@@ -27,13 +27,14 @@ reference envelope:
      conversion sent every sphere/cylinder/capsule obstacle through the
      mesh-SDF path, ~12x slower per solver iteration than native's OBB
      `get_obb_world()` geometries (fixed: default `cuboid`);
-  2. `max_attempts` (both legs now run capped at 1 by default — native solves
-     in ~1-3 attempts, so the server's extra retries were pure churn;
-     `CUROBO_MAX_ATTEMPTS` for the server / `--max-attempts` for the native
-     leg raise the budget for the cost-scaling curve) and `num_trajopt_seeds`
-     (12 vs the native recipe's 4; the envelope pins 4 via
-     `CUROBO_NUM_TRAJOPT_SEEDS`) — the retry loop contributed
-     ~1.35 s/request;
+  2. `max_attempts` (every benchmark subcommand now defaults both legs to 100 —
+     the page's real-solve budget — and the ROS runner pins the server's
+     plan-time `max_attempts` to the run's own `--max-attempts`, so native
+     and ROS always share the same retry envelope; at 1 attempt both legs sit
+     at their ~90 % 1-attempt success rate, which is what the old harness
+     measured) and `num_trajopt_seeds` (12 vs the native recipe's 4; the
+     envelope pins 4 via `CUROBO_NUM_TRAJOPT_SEEDS`) — the retry loop
+     contributed ~1.35 s/request;
   3. the collision cache: curobo's Warp kernels launch one thread per (sphere,
      padded obstacle slot) per obstacle type, and the server's (former)
      deployment default `{cuboid: 100, mesh: 100, voxel: ...}` padded grids
@@ -129,6 +130,27 @@ def position_error_mm(
         )
         * 1000.0
     )
+
+
+def orientation_error_deg(
+    achieved_quat_wxyz: Sequence[float], goal_quat_wxyz: Sequence[float]
+) -> float:
+    """Angular distance (deg) between two quaternions (wxyz order).
+
+    ``2 * atan2(||q_misalign||_vec, |w|)`` — the shortest-arc rotation between
+    ``achieved`` and ``goal``, in degrees. Used by both IK legs to score the FK
+    of the solved config against the goal pose (the ROS server reports no
+    solver residual, so this replaces it on both sides with identical math).
+    """
+    w1, x1, y1, z1 = (float(v) for v in achieved_quat_wxyz)
+    w2, x2, y2, z2 = (float(v) for v in goal_quat_wxyz)
+    # Relative rotation: q_goal^-1 ⊗ q_achieved (use conjugate of the goal).
+    w = w2 * w1 + x2 * x1 + y2 * y1 + z2 * z1
+    x = w2 * x1 - x2 * w1 - y2 * z1 + z2 * y1
+    y = w2 * y1 + x2 * z1 - y2 * w1 - z2 * x1
+    z = w2 * z1 - x2 * y1 + y2 * x1 - z2 * w1
+    vec_norm = math.sqrt(x * x + y * y + z * z)
+    return math.degrees(2.0 * math.atan2(vec_norm, abs(w)))
 
 
 def trajectory_jerk(waypoints: Sequence[Sequence[float]], dt: float) -> Optional[float]:
@@ -386,10 +408,12 @@ def compare(
         # Solver-reported solve times are curobo's accumulated plan_pose
         # retry-loop optimizer time on BOTH legs (see the module docstring):
         # the ROS leg sizes the server's collision cache to the dataset
-        # (native-equivalent kernel grids) and the envelope caps
-        # max_attempts:=1, so both legs' solve_time reflects the same single
-        # calm-attempt, same-geometry optimizer cost and should track each
-        # other (and the ROS wall - solve ≈ plan() ≈ wall on the server).
+        # (native-equivalent kernel grids) and the benchmark envelope pins the
+        # server's max_attempts to the run's own budget (100 by default), so
+        # both legs' solve_time reflects the same calm-attempt,
+        # same-geometry optimizer cost on the ~99 % of problems that solve at
+        # attempt 1 and should track each other (and the ROS wall -
+        # solve ≈ plan() ≈ wall on the server).
         "avg_solve_time_core": _mean(
             [core_by_name[n].get("solve_time_s") for n in common]
         ),
@@ -422,10 +446,11 @@ def compare(
     }
 
 
-def _success_rate(results, names):
+def _success_rate(results, names, key: str = "success"):
+    """Fraction of named rows with a truthy field (``success`` by default)."""
     if not names:
         return None
-    ok = sum(1 for n in names if bool(results[n]["success"]))
+    ok = sum(1 for n in names if bool(results[n][key]))
     return ok / len(names)
 
 
@@ -460,8 +485,320 @@ def _solve_tracks_wall_pct(ros_wall_avg, ros_solve_avg):
 
 
 # ---------------------------------------------------------------------------
+# IK / kinematics-collision parity (the `ik` and `cost` benchmark capabilities)
+# ---------------------------------------------------------------------------
+
+
+def _rows_for(results: List[Dict[str, Any]], capability: str) -> List[Dict[str, Any]]:
+    """Filter result entries to one capability (and, for ``ik``, the ``cfree``
+    parity variant — the ``plain`` row family is native-only reference data)."""
+    rows = [r for r in results if r.get("capability") == capability]
+    if capability == "ik":
+        rows = [r for r in rows if r.get("variant") == "cfree"]
+    return rows
+
+
+def compare_ik(
+    core_results: List[Dict[str, Any]],
+    ros_results: List[Dict[str, Any]],
+    position_tolerance_mm: float = 0.5,
+    orientation_tolerance_deg: float = 0.5,
+) -> Dict[str, Any]:
+    """Compare IK parity (native vs ROS, both legs' ``cfree`` rows).
+
+    Rows are matched by ``problem_name`` (``ik_cfree_bNN_gNNN``, identical on
+    both legs from the shared goal generator). A goal matches when:
+
+    - success agrees, AND (when both succeed)
+    - FK-verified ``position_error_mm`` delta <= ``position_tolerance_mm``,
+      AND
+    - FK-verified ``orientation_error_deg`` delta <=
+      ``orientation_tolerance_deg``.
+
+    Both-sides failure is an agreement. Timing (``time_ms``, a per-batch wall)
+    never counts as a mismatch — it is gathered in ``summary`` informational
+    fields. The native leg's ``plain`` variant rows are excluded by design
+    (the ROS server has no collision-free-off IK mode; they are reference
+    rows within the native results only).
+    """
+    core_by_name = {r["problem_name"]: r for r in _rows_for(core_results, "ik")}
+    ros_by_name = {r["problem_name"]: r for r in _rows_for(ros_results, "ik")}
+
+    common = sorted(set(core_by_name) & set(ros_by_name))
+    core_only = sorted(set(core_by_name) - set(ros_by_name))
+    ros_only = sorted(set(ros_by_name) - set(core_by_name))
+
+    matches = 0
+    success_mismatches = 0
+    mismatches: List[Dict[str, Any]] = []
+    pos_deltas: List[float] = []
+    ori_deltas: List[float] = []
+    deltas: List[Dict[str, Any]] = []
+
+    for name in common:
+        c, r = core_by_name[name], ros_by_name[name]
+        ok = True
+
+        if bool(c["success"]) != bool(r["success"]):
+            ok = False
+            success_mismatches += 1
+            mismatches.append(
+                {
+                    "problem_name": name,
+                    "diff_type": "success_mismatch",
+                    "core": bool(c["success"]),
+                    "ros": bool(r["success"]),
+                }
+            )
+            continue
+
+        if not c["success"]:
+            matches += 1
+            continue
+
+        pos_delta = _abs_delta(c.get("position_error_mm"), r.get("position_error_mm"))
+        ori_delta = _abs_delta(
+            c.get("orientation_error_deg"), r.get("orientation_error_deg")
+        )
+        if pos_delta is not None and pos_delta > position_tolerance_mm:
+            ok = False
+            mismatches.append(
+                {
+                    "problem_name": name,
+                    "diff_type": "position_error",
+                    "core": c.get("position_error_mm"),
+                    "ros": r.get("position_error_mm"),
+                    "delta_mm": pos_delta,
+                }
+            )
+        if ori_delta is not None and ori_delta > orientation_tolerance_deg:
+            ok = False
+            mismatches.append(
+                {
+                    "problem_name": name,
+                    "diff_type": "orientation_error",
+                    "core": c.get("orientation_error_deg"),
+                    "ros": r.get("orientation_error_deg"),
+                    "delta_deg": ori_delta,
+                }
+            )
+
+        if pos_delta is not None:
+            pos_deltas.append(pos_delta)
+        if ori_delta is not None:
+            ori_deltas.append(ori_delta)
+        deltas.append(
+            {
+                "problem_name": name,
+                "pos_delta_mm": pos_delta,
+                "ori_delta_deg": ori_delta,
+                "time_core_ms": c.get("time_ms"),
+                "time_ros_ms": r.get("time_ms"),
+            }
+        )
+        if ok:
+            matches += 1
+
+    total = len(common)
+    n_mismatches = total - matches
+
+    summary = {
+        "success_rate_core": _success_rate(core_by_name, common),
+        "success_rate_ros": _success_rate(ros_by_name, common),
+        "avg_pos_delta_mm": _mean(pos_deltas),
+        "max_pos_delta_mm": _max(pos_deltas),
+        "avg_ori_delta_deg": _mean(ori_deltas),
+        "max_ori_delta_deg": _max(ori_deltas),
+        "avg_time_core_ms": _mean(
+            [core_by_name[n].get("time_ms") for n in common]
+        ),
+        "avg_time_ros_ms": _mean([ros_by_name[n].get("time_ms") for n in common]),
+    }
+
+    return {
+        "capability": "ik",
+        "total": total,
+        "matches": matches,
+        "mismatches": n_mismatches,
+        "success_mismatches": success_mismatches,
+        "core_only": core_only,
+        "ros_only": ros_only,
+        "details": {"mismatches": mismatches, "deltas": deltas},
+        "summary": summary,
+        "verdict": (
+            "PARITY-OK"
+            if n_mismatches == 0 and not core_only and not ros_only
+            else "PARITY-DELTA"
+        ),
+    }
+
+
+def compare_cost(
+    core_results: List[Dict[str, Any]],
+    ros_results: List[Dict[str, Any]],
+    position_tolerance_mm: float = 1e-3,
+    orientation_tolerance_deg: float = 1e-3,
+) -> Dict[str, Any]:
+    """Compare kinematics & collision parity (native FK/validate vs ``/fk_batch``).
+
+    Rows are matched by ``problem_name`` (``cost_bNN_gNNN``). Per config:
+
+    - ``valid`` agreement is exact (both sides run the same
+      ``RobotCollisionChecker.validate`` on the same world, so a flipped bit is
+      a real parity fault), and
+    - the FK tool poses agree within ``position_tolerance_mm`` /
+      ``orientation_tolerance_deg`` (float32 reproducibility guards — the
+      expected deltas are ~0).
+
+    Both mismatches are recorded independently for the same config. Timing is
+    informational (``summary`` only).
+    """
+    core_by_name = {r["problem_name"]: r for r in _rows_for(core_results, "cost")}
+    ros_by_name = {r["problem_name"]: r for r in _rows_for(ros_results, "cost")}
+
+    common = sorted(set(core_by_name) & set(ros_by_name))
+    core_only = sorted(set(core_by_name) - set(ros_by_name))
+    ros_only = sorted(set(ros_by_name) - set(core_by_name))
+
+    matches = 0
+    validity_mismatches = 0
+    mismatches: List[Dict[str, Any]] = []
+    pos_deltas: List[float] = []
+    ori_deltas: List[float] = []
+    deltas: List[Dict[str, Any]] = []
+
+    for name in common:
+        c, r = core_by_name[name], ros_by_name[name]
+        ok = True
+
+        if bool(c["valid"]) != bool(r["valid"]):
+            ok = False
+            validity_mismatches += 1
+            mismatches.append(
+                {
+                    "problem_name": name,
+                    "diff_type": "validity",
+                    "core": bool(c["valid"]),
+                    "ros": bool(r["valid"]),
+                }
+            )
+
+        pos_delta = _abs_delta(c.get("position_xyz"), r.get("position_xyz"), _vec_mm)
+        ori_delta = _abs_delta(
+            c.get("quaternion_wxyz"), r.get("quaternion_wxyz"), orientation_error_deg
+        )
+        if pos_delta is not None and pos_delta > position_tolerance_mm:
+            ok = False
+            mismatches.append(
+                {
+                    "problem_name": name,
+                    "diff_type": "pose",
+                    "core": c.get("position_xyz"),
+                    "ros": r.get("position_xyz"),
+                    "delta_mm": pos_delta,
+                }
+            )
+        if ori_delta is not None and ori_delta > orientation_tolerance_deg:
+            ok = False
+            mismatches.append(
+                {
+                    "problem_name": name,
+                    "diff_type": "pose_orientation",
+                    "core": c.get("quaternion_wxyz"),
+                    "ros": r.get("quaternion_wxyz"),
+                    "delta_deg": ori_delta,
+                }
+            )
+
+        if pos_delta is not None:
+            pos_deltas.append(pos_delta)
+        if ori_delta is not None:
+            ori_deltas.append(ori_delta)
+        deltas.append(
+            {
+                "problem_name": name,
+                "pos_delta_mm": pos_delta,
+                "ori_delta_deg": ori_delta,
+                "time_core_ms": c.get("time_ms"),
+                "time_ros_ms": r.get("time_ms"),
+            }
+        )
+        if ok:
+            matches += 1
+
+    total = len(common)
+    n_mismatches = total - matches
+
+    summary = {
+        "valid_rate_core": _success_rate(core_by_name, common, key="valid"),
+        "valid_rate_ros": _success_rate(ros_by_name, common, key="valid"),
+        "validity_mismatches": validity_mismatches,
+        "avg_pos_delta_mm": _mean(pos_deltas),
+        "max_pos_delta_mm": _max(pos_deltas),
+        "avg_ori_delta_deg": _mean(ori_deltas),
+        "max_ori_delta_deg": _max(ori_deltas),
+        "avg_time_core_ms": _mean(
+            [core_by_name[n].get("time_ms") for n in common]
+        ),
+        "avg_time_ros_ms": _mean([ros_by_name[n].get("time_ms") for n in common]),
+    }
+
+    return {
+        "capability": "cost",
+        "total": total,
+        "matches": matches,
+        "mismatches": n_mismatches,
+        "success_mismatches": validity_mismatches,
+        "core_only": core_only,
+        "ros_only": ros_only,
+        "details": {"mismatches": mismatches, "deltas": deltas},
+        "summary": summary,
+        "verdict": (
+            "PARITY-OK"
+            if n_mismatches == 0 and not core_only and not ros_only
+            else "PARITY-DELTA"
+        ),
+    }
+
+
+def _abs_delta(core_value, ros_value, metric=None) -> Optional[float]:
+    """Absolute delta between two comparable values (None-safe)."""
+    if core_value is None or ros_value is None:
+        return None
+    if metric is not None:
+        return float(metric(core_value, ros_value))
+    return abs(float(core_value) - float(ros_value))
+
+
+def _vec_mm(core_vec: Sequence[float], ros_vec: Sequence[float]) -> float:
+    """Euclidean distance (mm) between two 3-vectors (posed positions)."""
+    return math.sqrt(
+        sum(
+            (float(a) - float(b)) ** 2
+            for a, b in zip(core_vec, ros_vec)
+        )
+    ) * 1000.0
+
+
+# ---------------------------------------------------------------------------
 # curobo-style reporting (mirrors curobo benchmark/motion_plan_benchmark.py)
 # ---------------------------------------------------------------------------
+
+
+def _percentile(values: Sequence[float], p: float) -> float:
+    """Numpy-style linear percentile interpolation over sorted numeric values.
+
+    Mirrors curobo's ``Statistic`` percentile aggregation so the new IK / cost
+    tables aggregate identically to the planning table. ``values`` must be
+    non-empty (callers filter first).
+    """
+    ordered = sorted(float(v) for v in values)
+    n = len(ordered)
+    rank = (n - 1) * p / 100.0
+    lo = int(math.floor(rank))
+    hi = min(lo + 1, n - 1)
+    frac = rank - lo
+    return ordered[lo] + (ordered[hi] - ordered[lo]) * frac
 
 
 def _stat_str(values: Sequence[Optional[float]], ndigits: int = 3) -> str:
@@ -476,21 +813,12 @@ def _stat_str(values: Sequence[Optional[float]], ndigits: int = 3) -> str:
     n = len(values)
     mean = sum(values) / n
     std = math.sqrt(sum((v - mean) ** 2 for v in values) / n)
-    ordered = sorted(values)
-
-    def _pctile(p: float) -> float:
-        rank = (n - 1) * p / 100.0
-        lo = int(math.floor(rank))
-        hi = min(lo + 1, n - 1)
-        frac = rank - lo
-        return ordered[lo] + (ordered[hi] - ordered[lo]) * frac
-
-    median = _pctile(50.0)
+    median = _percentile(values, 50.0)
     return (
         f"mean: {mean:2.{ndigits}f} \u00b1 {std:2.{ndigits}f}"
         f"  median: {median:2.{ndigits}f}"
-        f"  75%: {_pctile(75.0):2.{ndigits}f}"
-        f"  98%: {_pctile(98.0):2.{ndigits}f}"
+        f"  75%: {_percentile(values, 75.0):2.{ndigits}f}"
+        f"  98%: {_percentile(values, 98.0):2.{ndigits}f}"
     )
 
 
@@ -520,15 +848,16 @@ def curobo_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     """Build the ``Metric``/``Value`` body rows for one leg (curobo layout).
 
     Row order follows the reference benchmark table (Success %, Plan Time,
-    Solve Time, Position Error, Path Length, Motion Time, Jerk). Success %
-    covers all problems; the statistic rows cover successful problems only
-    (curobo filters ``inf``/failed timings the same way).
+    Solve Time, Position Error, Path Length, Motion Time, Jerk, Energy (J),
+    Torque (N·m)). Success % covers all problems; the statistic rows cover
+    successful problems only (curobo filters ``inf``/failed timings the same
+    way).
 
     Path Length / Motion Time prefer the upstream control-point values
     (``path_length_curobo`` / ``motion_time_curobo``) when present so the
     native leg reproduces the reference page; the ROS leg falls back to its
-    dense-interpolated values. Solve Time / Position Error / Jerk rows are
-    emitted only when their data exists.
+    dense-interpolated values. Solve Time / Position Error / Jerk / Energy /
+    Torque rows are emitted only when their data exists.
     """
     ok = [r for r in results if bool(r.get("success"))]
     success_pct = 100.0 * len(ok) / len(results) if results else 0.0
@@ -553,6 +882,64 @@ def curobo_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     jerk = [r.get("jerk") for r in ok]
     if any(v is not None for v in jerk):
         rows.append(["Jerk", _stat_str(jerk)])
+    energy = [r.get("energy_j") for r in ok]
+    if any(v is not None for v in energy):
+        rows.append(["Energy (J)", _stat_str(energy)])
+    torque = [r.get("torque_nm") for r in ok]
+    if any(v is not None for v in torque):
+        rows.append(["Torque (N·m)", _stat_str(torque)])
+    return rows
+
+
+def ik_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
+    """Build the ``Metric``/``Value`` rows for one IK leg (curobo-layout).
+
+    Follows the reference ``ik_benchmark`` table: Success % over all goals;
+    IK Time over successful goals (``time_ms`` is the per-batch solve wall the
+    goals belong to — the upstream table also aggregates per-inference times);
+    then the FK-verified pose errors, which are the parity fields both legs
+    report identically. Statistics rows cover successful goals only.
+    """
+    cfree = _rows_for(results, "ik")
+    ok = [r for r in cfree if bool(r.get("success"))]
+    success_pct = 100.0 * len(ok) / len(cfree) if cfree else 0.0
+    rows: List[List[str]] = [
+        ["Success %", f"{success_pct:2.2f}"],
+        ["IK Time (ms)", _stat_str([r.get("time_ms") for r in ok])],
+    ]
+    pos_err = [r.get("position_error_mm") for r in ok]
+    if any(v is not None for v in pos_err):
+        rows.append(["Position Error (mm)", _stat_str(pos_err)])
+    ori_err = [r.get("orientation_error_deg") for r in ok]
+    if any(v is not None for v in ori_err):
+        rows.append(["Orientation Error (deg)", _stat_str(ori_err)])
+    return rows
+
+
+def cost_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
+    """Build the ``Metric``/``Value`` rows for one kinematics & collision leg.
+
+    Valid % over all configs (the parity field); per-batch FK+validate wall
+    and the per-sample marginal (``time_ms`` is per batch of ``n_configs``).
+    """
+    cost = _rows_for(results, "cost")
+    valid = [r for r in cost if bool(r.get("valid"))]
+    valid_pct = 100.0 * len(valid) / len(cost) if cost else 0.0
+    rows: List[List[str]] = [
+        ["Valid %", f"{valid_pct:2.2f}"],
+        ["FK Time (ms)", _stat_str([r.get("time_ms") for r in cost])],
+        [
+            "FK Time / Sample (ms)",
+            _stat_str(
+                [
+                    r.get("time_ms", 0.0) / r.get("n_configs", 1)
+                    if r.get("n_configs")
+                    else None
+                    for r in cost
+                ]
+            ),
+        ],
+    ]
     return rows
 
 
@@ -560,6 +947,260 @@ def print_curobo_table(title: str, results: List[Dict[str, Any]]) -> None:
     """Print one leg's results as a curobo benchmark-style grid table."""
     print(f"== {title} ==")
     print(_grid_table(curobo_style_rows(results), ["Metric", "Value"]))
+
+
+# ---------------------------------------------------------------------------
+# Reference-page reproduction (the `reference` subcommand)
+# ---------------------------------------------------------------------------
+
+# Metrics as published on the cuRobo benchmarks page, "Latest Motion
+# Generation Results"
+# (https://nvlabs.github.io/curobo/latest/reference/benchmarks.html, RTX 6000
+# Ada, 2600 problems, mean / median). Informational printout only — never
+# used for a verdict; timing columns on a different GPU are not comparable.
+PUBLISHED_REFERENCE_PAGE: Dict[str, Dict[str, tuple]] = {
+    "without_torque": {
+        "Success %": ("99.73", None),
+        "Plan Time (s)": ("0.038", None),
+        "Solve Time (s)": ("0.031", None),
+        "Position Error (mm)": ("0.041", None),
+        "Path Length (rad.)": ("3.126", None),
+        "Motion Time(s)": ("1.250", None),
+        "Jerk": ("227.365", None),
+        "Energy (J)": ("89.270", "78.959"),
+        "Torque (N·m)": ("71.028", "67.328"),
+    },
+    "with_torque": {
+        "Success %": ("99.73", None),
+        "Plan Time (s)": ("0.052", None),
+        "Solve Time (s)": ("0.042", None),
+        "Position Error (mm)": ("0.042", None),
+        "Path Length (rad.)": ("3.234", None),
+        "Motion Time(s)": ("1.336", None),
+        "Jerk": ("217.786", None),
+        "Energy (J)": ("81.409", "72.707"),
+        "Torque (N·m)": ("62.270", "65.345"),
+    },
+}
+
+# (result key, table label) for the statistic rows, in page order.
+_REFERENCE_METRIC_KEYS = (
+    ("time_s", "Plan Time (s)"),
+    ("solve_time_s", "Solve Time (s)"),
+    ("position_error_mm", "Position Error (mm)"),
+    ("jerk", "Jerk"),
+    ("energy_j", "Energy (J)"),
+    ("torque_nm", "Torque (N·m)"),
+)
+
+
+def _metric_vals(results, key, fallback=None):
+    """Successful-solve values for one result key (fallback key if empty).
+
+    Filters ``inf`` like ``_stat_str`` (failed/unrun timings are ``inf`` in
+    the native results).
+    """
+    vals = []
+    for r in results:
+        if not bool(r.get("success")):
+            continue
+        v = r.get(key)
+        if v is None and fallback is not None:
+            v = r.get(fallback)
+        if v is not None and float(v) < math.inf:
+            vals.append(float(v))
+    return vals
+
+
+def reference_stats(results: List[Dict[str, Any]]) -> Dict[str, tuple]:
+    """Aggregate one reference table into {metric label: (mean, median)}.
+
+    Statistic rows cover successful solves only (curobo filters failed
+    timings the same way); ``Success %`` is over all problems. Path Length
+    and Motion Time prefer the upstream control-point fields when present,
+    else the dense-interpolated values. A label is omitted (``None`` mean) when
+    it has no data — matching ``curobo_style_rows`` row emission.
+    """
+    ok = [r for r in results if bool(r.get("success"))]
+    out: Dict[str, tuple] = {
+        "Success %": (100.0 * len(ok) / len(results) if results else 0.0, None)
+    }
+    for key, label in _REFERENCE_METRIC_KEYS:
+        vals = _metric_vals(results, key)
+        if vals:
+            out[label] = (_mean(vals), _percentile(vals, 50.0))
+    path = _metric_vals(results, "path_length_curobo", "path_length")
+    if path:
+        out["Path Length (rad.)"] = (_mean(path), _percentile(path, 50.0))
+    motion = _metric_vals(results, "motion_time_curobo", "motion_time_s")
+    if motion:
+        out["Motion Time(s)"] = (_mean(motion), _percentile(motion, 50.0))
+    return out
+
+
+def _fmt_stat(v) -> str:
+    return "-" if v is None else f"{v:.3f}"
+
+
+def print_published_comparison(
+    plain: List[Dict[str, Any]],
+    torque: List[Dict[str, Any]],
+    mass: float = 3.0,
+) -> None:
+    """Print the side-by-side mean/median grids: published page vs this box.
+
+    One grid per motion-generation table (without / with torque limits at
+    ``mass`` kg). Pure printout — see ``reference_stats`` for the aggregation.
+    """
+    for key, (results, label) in (
+        ("without_torque", (plain, "without torque limits")),
+        ("with_torque", (torque, f"with torque limits ({mass:g} kg)")),
+    ):
+        stats = reference_stats(results)
+        published = PUBLISHED_REFERENCE_PAGE[key]
+        grid: List[List[str]] = []
+        for metric, (p_mean, p_median) in published.items():
+            ours = stats.get(metric)
+            ours_mean = ours[0] if ours else None
+            ours_median = ours[1] if ours else None
+            grid.append(
+                [
+                    metric,
+                    p_mean if p_mean is not None else "-",
+                    _fmt_stat(ours_mean),
+                    p_median if p_median is not None else "-",
+                    _fmt_stat(ours_median),
+                ]
+            )
+        abs_deltas = [
+            abs(float(p) - float(s[0]))
+            for metric, (p, _m) in published.items()
+            if (s := stats.get(metric)) and s[0] is not None and p is not None
+        ]
+        note = ""
+        # Only claim a comparison when the run actually produced data
+        # (an empty / all-failed run still shows the grid, just without the
+        # delta note — its `.0` Success % vs the page is not a signal).
+        if abs_deltas and any(m != "Success %" for m in stats):
+            note = (
+                f"\n  worst mean delta vs the page: {max(abs_deltas):.3f} "
+                f"(page units — each metric keeps its own unit)"
+            )
+        print(
+            f"\n== published page (RTX 6000 Ada) vs this box — {label} =="
+            f"{note}"
+        )
+        print(
+            _grid_table(
+                grid,
+                ["Metric", "Docs mean", "Ours mean", "Docs median", "Ours median"],
+            )
+        )
+        print(
+            "  note: timing columns are informational on a different GPU; the "
+            "quality metrics (success, position error, path/motion, jerk, "
+            "energy, torque) are deterministic given the same config, seeds "
+            "and dataset."
+        )
+
+
+def print_reference_comparison(
+    plain: List[Dict[str, Any]],
+    torque: List[Dict[str, Any]],
+    mass: float = 3.0,
+) -> None:
+    """Print the reference-page reproduction: both curobo-style tables, then a
+    side-by-side mean/median grid against the values published on the page.
+
+    ``plain`` / ``torque`` are the native result lists for the two passes
+    (solver without / with torque limits at ``mass`` kg). Printed after the
+    runs so the box numbers can be compared against the page without digging
+    through the logs.
+    """
+    print_curobo_table("without torque limits (native)", plain)
+    print_curobo_table(f"with torque limits ({mass:g} kg) (native)", torque)
+    print_published_comparison(plain, torque, mass=mass)
+
+
+def _print_leg(label: str, results: Optional[List[Dict[str, Any]]],
+               table_printer) -> None:
+    """Print one leg's table, or a short placeholder when the leg didn't run."""
+    if results is None:
+        print(f"  {label}: (not run — see the run log for why)")
+        return
+    table_printer(label, results)
+
+
+def print_webpage_summary(
+    *,
+    mass: float = 3.0,
+    motion_plain_native: Optional[List[Dict[str, Any]]] = None,
+    motion_plain_ros: Optional[List[Dict[str, Any]]] = None,
+    motion_torque_native: Optional[List[Dict[str, Any]]] = None,
+    motion_torque_ros: Optional[List[Dict[str, Any]]] = None,
+    ik_native: Optional[List[Dict[str, Any]]] = None,
+    ik_ros: Optional[List[Dict[str, Any]]] = None,
+    cost_native: Optional[List[Dict[str, Any]]] = None,
+    cost_ros: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Print ALL results again, grouped like the cuRobo benchmarks page.
+
+    The page's suite order is motion generation (without torque limits, then
+    with torque limits at the full ``mass`` kg payload) → inverse kinematics →
+    kinematics & collision. Each suite is shown once for the native curobo leg
+    and once for the ROS leg (``None`` = that leg was not run in this
+    invocation). The printed output is the "end of ``compose up``" summary a
+    box run is compared against.
+    """
+    print("=" * 72)
+    print("cuRobo benchmarks page reproduction — all results again, in the")
+    print("page's suite order (motion generation -> IK -> kinematics & collision)")
+    print("=" * 72)
+
+    print("\n[1/3] MOTION GENERATION  (the page's \"Latest Motion Generation")
+    print("      Results\" — two tables, same dataset, same seeds)")
+    print(f"  -- without torque limits --  (mass {mass:g} kg payload model)")
+    _print_leg("without torque limits — native curobo", motion_plain_native,
+               print_curobo_table)
+    _print_leg("without torque limits — ROS (server)", motion_plain_ros,
+               print_curobo_table)
+    print(f"  -- with torque limits (full {mass:g} kg payload) --")
+    _print_leg(f"with torque limits ({mass:g} kg) — native curobo",
+               motion_torque_native, print_curobo_table)
+    _print_leg(f"with torque limits ({mass:g} kg) — ROS (server)",
+               motion_torque_ros, print_curobo_table)
+
+    print("\n[2/3] INVERSE KINEMATICS  (the page's \"Inverse Kinematics\")")
+    _print_leg("inverse kinematics — native curobo", ik_native, print_ik_table)
+    _print_leg("inverse kinematics — ROS (/ik_batch)", ik_ros, print_ik_table)
+
+    print("\n[3/3] KINEMATICS & COLLISION  (the page's \"Kinematics & Collision\")")
+    _print_leg("kinematics & collision — native curobo", cost_native,
+               print_cost_table)
+    _print_leg("kinematics & collision — ROS (/fk_batch)", cost_ros,
+               print_cost_table)
+
+    if motion_plain_native is not None and motion_torque_native is not None:
+        print(
+            "\n[APPENDIX] PUBLISHED PAGE vs THIS BOX — motion-generation means/"
+            "medians"
+        )
+        print_published_comparison(motion_plain_native, motion_torque_native,
+                                   mass=mass)
+
+    print("\n" + "=" * 72)
+    print("Receipt notes:")
+    print("  - timing columns are informational: this box's GPU differs from the")
+    print("    page's RTX 6000 Ada.")
+    print("  - the quality metrics are deterministic given the same config, seeds")
+    print("    and dataset.")
+    print("  - the page's 99.73% success assumes the 100-attempt budget; this")
+    print("    run defaults to 100 for BOTH legs (the runner pins the server's")
+    print("    plan-time max_attempts to --max-attempts before each motion ROS")
+    print("    leg). At 1 attempt only a ~1-attempt success-rate is expected.")
+    print("  - ROS-leg Energy (J) / Torque (N·m) are the client-side velocity")
+    print("    finite-difference approximation (the wire carries no acceleration).")
+    print("=" * 72)
 
 
 # ---------------------------------------------------------------------------
@@ -629,9 +1270,10 @@ def print_report(
         print(
             "note: both legs solved 0 problems on this run "
             f"(scenes: {scene_txt}).",
-            "Both legs run the same particle+LBFGS solver recipe capped at",
-            "max_attempts=1 by default (the parity envelope;",
-            "CUROBO_MAX_ATTEMPTS / --max-attempts raise the budget). A 0/0",
+            "Both legs run the same particle+LBFGS solver recipe at the same",
+            "retry budget (the whole benchmark defaults both to max_attempts=100",
+            "— the runner pins the server's plan-time max_attempts to the",
+            "run's own --max-attempts). A 0/0",
             "outcome means that solver envelope could",
             "not crack these scenes on this box. Path/motion cells are empty "
             "and the parity",
@@ -671,9 +1313,11 @@ def print_report(
         tracks = s.get("solve_tracks_wall_pct")
         note = (
             "solver-reported (curobo's accumulated plan_pose retry-loop "
-            "optimizer time on both legs). The reference envelope caps the "
-            "server at max_attempts:=1 (CUROBO_MAX_ATTEMPTS to raise) and the "
-            "ROS leg sizes the server's collision cache to the dataset's "
+            "optimizer time on both legs). The benchmark envelope runs both "
+            "legs at the same budget — the runner pins the server's plan-time "
+            "max_attempts to the run's --max-attempts (CUROBO_MAX_ATTEMPTS "
+            "sets one knob for both, default 100) — and the ROS leg sizes the "
+            "server's collision cache to the dataset's "
             "actual obstacle counts with the voxel layer off before the timed "
             "run, so one server attempt runs native-equivalent solver kernels "
             "(see the README timing-attribution section); ros solve tracks "
@@ -740,6 +1384,154 @@ def print_report(
     print("\n" + "=" * 78)
     print(f"VERDICT: {verdict}")
     print("=" * 78)
+
+
+def _print_pose_parity_report(
+    title: str,
+    report: Dict[str, Any],
+    show_all: bool = False,
+    core_results: Optional[List[Dict[str, Any]]] = None,
+    ros_results: Optional[List[Dict[str, Any]]] = None,
+    nag_ok: bool = True,
+) -> None:
+    """Shared body of the IK and cost parity reports (mirrors print_report)."""
+    s = report["summary"]
+
+    print("=" * 78)
+    print(title)
+    print("=" * 78)
+    if core_results is not None and report["capability"] == "ik":
+        print_ik_table("native (curobo_core)", core_results)
+    elif core_results is not None:
+        print_cost_table("native (curobo_core)", core_results)
+    if ros_results is not None and report["capability"] == "ik":
+        print_ik_table("ros (unified_planner)", ros_results)
+    elif ros_results is not None:
+        print_cost_table("ros (unified_planner)", ros_results)
+
+    n_problems = report["total"]
+    per_leg_label = (
+        "success rate (core/ros)"
+        if report["capability"] == "ik"
+        else "valid rate (core/ros)"
+    )
+    rate_core = s.get("success_rate_core", s.get("valid_rate_core"))
+    rate_ros = s.get("success_rate_ros", s.get("valid_rate_ros"))
+    print(
+        f"goals/configs: {n_problems} common, "
+        f"{len(report['core_only'])} core-only, "
+        f"{len(report['ros_only'])} ros-only"
+    )
+    print(f"{per_leg_label}: {_fmt(rate_core)} / {_fmt(rate_ros)}")
+    print(
+        f"parity: {report['matches']}/{n_problems} match, "
+        f"{report['mismatches']} mismatch "
+        f"({report['success_mismatches']} success/validity mismatches)"
+    )
+    if n_problems == 0 and nag_ok:
+        print(
+            "note: no common rows to compare — check both legs ran the same "
+            "goal/config seed and batch sizes (synthetic goals are "
+            "deterministic on --seed).",
+            sep="\n",
+        )
+    print(
+        f"position delta (mm): avg {_fmt(s.get('avg_pos_delta_mm'))} "
+        f"max {_fmt(s.get('max_pos_delta_mm'))}"
+    )
+    print(
+        f"orientation delta (deg): avg {_fmt(s.get('avg_ori_delta_deg'))} "
+        f"max {_fmt(s.get('max_ori_delta_deg'))}"
+    )
+    print(
+        f"time (info): core avg {_fmt(s.get('avg_time_core_ms'))}ms, "
+        f"ros avg {_fmt(s.get('avg_time_ros_ms'))}ms"
+    )
+
+    mismatches = report["details"]["mismatches"]
+    deltas = report["details"]["deltas"]
+
+    if report["core_only"]:
+        print(f"core-only problems: {', '.join(report['core_only'])}")
+    if report["ros_only"]:
+        print(f"ros-only problems: {', '.join(report['ros_only'])}")
+
+    if mismatches:
+        print("\n--- mismatches ---")
+        for m in mismatches:
+            print(
+                f"  {m['problem_name']}: {m['diff_type']} "
+                f"(core={m.get('core')}, ros={m.get('ros')})"
+            )
+
+    mismatch_names = {m["problem_name"] for m in mismatches}
+    rows = deltas
+    if not show_all:
+        rows = [d for d in deltas if d["problem_name"] in mismatch_names]
+    if rows:
+        print("\n--- per-goal deltas ---")
+        print(
+            f"  {'goal':38s} {'posD':>9s} {'oriD':>9s} "
+            f"{'timeC':>9s} {'timeR':>9s}"
+        )
+        print("  (posD/oriD: absolute mm / deg deltas; timeC/timeR: ms)")
+        for d in rows:
+            print(
+                f"  {d['problem_name']:38s} "
+                f"{_fmt(d.get('pos_delta_mm')):>9s} "
+                f"{_fmt(d.get('ori_delta_deg')):>9s} "
+                f"{_fmt(d.get('time_core_ms')):>9s} "
+                f"{_fmt(d.get('time_ros_ms')):>9s}"
+            )
+
+    verdict = report["verdict"]
+    print("\n" + "=" * 78)
+    print(f"VERDICT: {verdict}")
+    print("=" * 78)
+
+
+def print_report_ik(
+    report: Dict[str, Any],
+    show_all: bool = False,
+    core_results: Optional[List[Dict[str, Any]]] = None,
+    ros_results: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Print the IK parity report (native ``ik-core`` + ROS ``ik-ros``)."""
+    _print_pose_parity_report(
+        "IK parity report: native curobo core vs ROS /ik_batch",
+        report,
+        show_all=show_all,
+        core_results=core_results,
+        ros_results=ros_results,
+    )
+
+
+def print_report_cost(
+    report: Dict[str, Any],
+    show_all: bool = False,
+    core_results: Optional[List[Dict[str, Any]]] = None,
+    ros_results: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Print the kinematics & collision parity report (``cost-core`` + ``cost-ros``)."""
+    _print_pose_parity_report(
+        "Kinematics & collision parity report: native curobo core vs ROS /fk_batch",
+        report,
+        show_all=show_all,
+        core_results=core_results,
+        ros_results=ros_results,
+    )
+
+
+def print_ik_table(title: str, results: List[Dict[str, Any]]) -> None:
+    """Print one IK leg's results as a curobo benchmark-style grid table."""
+    print(f"== {title} ==")
+    print(_grid_table(ik_style_rows(results), ["Metric", "Value"]))
+
+
+def print_cost_table(title: str, results: List[Dict[str, Any]]) -> None:
+    """Print one FK/collision leg's results as a curobo benchmark-style grid table."""
+    print(f"== {title} ==")
+    print(_grid_table(cost_style_rows(results), ["Metric", "Value"]))
 
 
 def save_report(report: Dict[str, Any], path: str) -> None:

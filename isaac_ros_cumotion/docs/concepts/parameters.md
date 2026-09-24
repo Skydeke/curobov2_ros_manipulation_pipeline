@@ -29,10 +29,12 @@ These are the launch arguments that actually configure the system:
 | `gui` | `true` | Start RViz |
 | `voxel_size` | `0.05` | Perception/collision voxel size (m) |
 | `mapper_extent_xyz` | `[2.56, 2.56, 2.56]` | Perception volume extent (m), centred on the robot base |
-| `max_attempts` | `1` | Planning retries per request |
+| `max_attempts` | `1` | Planning retries per request (the compose benchmark launch passes `${CUROBO_MAX_ATTEMPTS:-100}` — the page's budget) |
 | `time_dilation_factor` | `1.0` | Trajectory re-timing: 1.0 = nominal interpolation_dt pacing; <1.0 slows the motion, >1.0 speeds it up. Also gates execute() feedback re-reads |
 | `collision_activation_distance` | `0.025` | Distance (m) at which the collision cost activates |
 | `publish_plan_debug_image` | `false` | Publish the per-plan joint-trajectory plot as an RGB image on `/<node>/motion_plan_debug` (RViz/viser display). Enabled (`:=true`) in the franka/ur10e compose demos |
+| `load_dynamics` | `false` | Build the inverse-dynamics model (torque-limited planning — the reference "with torque limits" table); build-time, switchable at runtime via `set_parameters` + `update_motion_gen_config` |
+| `robot_payload_mass` | `0.0` | Attached-object payload mass (kg) patched onto the MotionPlanner; only applies with `load_dynamics:=true` |
 
 The last five are forwarded straight to the node, so their defaults above are also the node's defaults — see the tables below for what each one does.
 
@@ -43,7 +45,9 @@ There is no world floor added automatically at startup: if you want a ground pla
 | Parameter | Default | Effect | Kind |
 |---|---|---|---|
 | `planner_type` | `'classic'` | Planner selected at startup (`classic`, `mpc`, `joint_space`, `retarget`) — switch at runtime with `set_planner` | Startup |
-| `max_attempts` | `1` | Planning retries per request | Plan-time |
+| `max_attempts` | `1` | Planning retries per request (plan-time — no rebuild: the benchmark runner pins it to the run's own `--max-attempts` before each motion ROS leg, so native and ROS share one envelope — 100 for the whole benchmark, the page's budget) | Plan-time |
+| `load_dynamics` | `false` | Build the robot's inverse-dynamics model (torque-limited planning — the reference benchmarks page's "with torque limits" variant). Build-time: `RobotModelManager.set_torque_mode` re-wraps the robot_cfg from the current param on every solver rebuild, so a running server flips modes via `set_parameters` + `update_motion_gen_config` | Build-time |
+| `robot_payload_mass` | `0.0` | Attached-object payload mass (kg) patched onto the MotionPlanner (`update_links_inertial`, like the reference script). Only applies with `load_dynamics:=true` | Build-time |
 | `interpolation_dt` | `0.025` | Time step (s) of the interpolated output trajectory | Build-time |
 | `voxel_size` | `0.05` | Voxel size (m) shared by the perception ESDF, the collision cache, and `get_voxel_grid` | Build-time |
 | `collision_activation_distance` | `0.025` | Distance (m) at which collision cost activates | Build-time |

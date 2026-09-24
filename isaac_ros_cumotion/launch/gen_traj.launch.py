@@ -256,6 +256,17 @@ def launch_setup(context, *args, **kwargs):
                 # envelope lowers this to the native recipe's 4 (ik=32/trajopt=4).
                 'num_trajopt_seeds': ParameterValue(
                     LaunchConfiguration('num_trajopt_seeds'), value_type=int),
+                # Torque-limited planning (reference 'with torque limits'
+                # table): load_dynamics builds the inverse-dynamics model into
+                # the robot_cfg (must be set at startup — RobotModelManager
+                # builds the cfg once) and robot_payload_mass patches the
+                # attached_object inertia onto the MotionPlanner (the
+                # reference script's update_links_inertial). Payload only
+                # applies with load_dynamics:=true.
+                'load_dynamics': ParameterValue(
+                    LaunchConfiguration('load_dynamics'), value_type=bool),
+                'robot_payload_mass': ParameterValue(
+                    LaunchConfiguration('robot_payload_mass'), value_type=float),
                 # CUDA-graph capture for solver rollouts (default true; the node
                 # also declares it, but forwarding keeps `:=false` usable — see
                 # the parity benchmark's timing-attribution diagnostics).
@@ -464,6 +475,19 @@ def generate_launch_description():
             description='Trajopt candidate trajectories per problem (seed axis); '
                         'the parity benchmark reference envelope sets this to 4 '
                         'to match the native recipe'
+        ),
+        DeclareLaunchArgument(
+            'load_dynamics', default_value='false',
+            description='Build the inverse-dynamics model into the robot_cfg '
+                        '(torque-limited planning — the reference page\'s '
+                        '"with torque limits" table). Startup-only: the robot_cfg '
+                        'is built once in RobotModelManager.'
+        ),
+        DeclareLaunchArgument(
+            'robot_payload_mass', default_value='0.0',
+            description='Attached-object payload mass in kg patched onto the '
+                        'MotionPlanner (reference default 3.0 = full payload). '
+                        'Only applies with load_dynamics:=true.'
         ),
         DeclareLaunchArgument(
             'time_dilation_factor', default_value='1.0',

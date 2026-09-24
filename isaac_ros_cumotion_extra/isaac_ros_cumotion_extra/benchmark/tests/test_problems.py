@@ -14,7 +14,9 @@ from isaac_ros_cumotion_extra.benchmark.problems import (
 
 class TestDatasetRegistry:
     def test_known_datasets(self):
-        assert set(DATASET_NAMES) == {'demo', 'motion_benchmaker', 'mpinets'}
+        assert set(DATASET_NAMES) == {
+            'demo', 'motion_benchmaker', 'mpinets', 'full',
+        }
 
     def test_unknown_dataset_raises(self):
         with pytest.raises(ValueError):
@@ -98,6 +100,90 @@ class TestCollisionCacheSizes:
         assert collision_cache_sizes(problems) == (2, 3)
 
 
+class TestFullMergeRegistry:
+    """The 'full' merge (motion_benchmaker + mpinets) — pure Python, no
+    robometrics needed.
+
+    Regression: ``_combined_loader`` assigned ``_MPINETS_SCENE_KEYS_CACHE``
+    without a ``global`` declaration, so the module-level read raised
+    ``UnboundLocalError`` on the FIRST call. That path was only covered by the
+    robometrics-gated tests (skipped locally, they ran first on the box) —
+    this class pins it in the pure-Python suite.
+    """
+
+    @pytest.fixture
+    def _fake(self, monkeypatch):
+        from isaac_ros_cumotion_extra.benchmark import problems as problems_mod
+
+        datasets = {
+            'motion_benchmaker': {
+                'bench_a': [
+                    {
+                        'start': [],
+                        'goal_pose': {
+                            'position_xyz': [0.0, 0.0, 0.5],
+                            'quaternion_wxyz': [1.0, 0.0, 0.0, 0.0],
+                        },
+                    }
+                ],
+            },
+            'mpinets': {
+                'mp_a': [
+                    {
+                        'start': [],
+                        'goal_pose': {
+                            'position_xyz': [0.2, 0.2, 0.5],
+                            'quaternion_wxyz': [1.0, 0.0, 0.0, 0.0],
+                        },
+                    }
+                ],
+            },
+        }
+        counts = {'n_calls': 0}
+
+        def fake_loaders():
+            counts['n_calls'] += 1
+            return {
+                'motion_benchmaker': lambda: datasets['motion_benchmaker'],
+                'mpinets': lambda: datasets['mpinets'],
+            }
+
+        monkeypatch.setattr(problems_mod, '_FULL_CACHE', None)
+        monkeypatch.setattr(problems_mod, '_MPINETS_SCENE_KEYS_CACHE', None)
+        monkeypatch.setattr(problems_mod, '_get_loaders', fake_loaders)
+        return problems_mod, datasets, counts
+
+    def test_first_call_populates_both_caches(self, _fake):
+        # exactly the path that crashed with UnboundLocalError on the box
+        mod, _, _ = _fake
+        full = load_problems('full')
+        assert set(full) == {'bench_a', 'mp_a'}
+        # the merge's side-effect cache is populated (was the local-scope read)
+        assert mod.mpinets_scene_keys() == frozenset({'mp_a'})
+
+    def test_second_call_served_from_cache(self, _fake):
+        mod, _, counts = _fake
+        first = load_problems('full')
+        second = load_problems('full')
+        assert second is first
+        assert counts['n_calls'] == 1  # one loader pass serves both calls
+
+    def test_shared_scene_key_fails_fast(self, _fake):
+        mod, datasets, _ = _fake
+        datasets['mpinets'] = {'bench_a': []}
+        with pytest.raises(ValueError, match='appears in both'):
+            load_problems('full')
+
+    def test_preloaded_mpinets_cache_reused_by_merge(self, _fake):
+        mod, _, _ = _fake
+        # mpinets_scene_keys() loads and caches independently first...
+        assert mod.mpinets_scene_keys() == frozenset({'mp_a'})
+        # ...and the merge then reuses it (no reload, no classification drift)
+        full = load_problems('full')
+        assert set(full) == {'bench_a', 'mp_a'}
+        assert mod.mpinets_scene_keys() == frozenset({'mp_a'})
+
+
 class TestProblemShape:
     """Structure of each problem dict (skipped when robometrics is absent)."""
 
@@ -110,6 +196,26 @@ class TestProblemShape:
         problems = load_problems('demo')
         assert isinstance(problems, dict)
         assert len(problems) > 0
+
+    def test_loads_full_combines_benchmaker_and_mpinets(self):
+        """'full' = motion_benchmaker + mpinets (the reference page's 2600
+        problems); scene keys are disjoint and per-scene mpinets provenance
+        stays recoverable so the combined run classifies each problem exactly
+        like the reference script's per-file_path loop."""
+        from isaac_ros_cumotion_extra.benchmark.problems import (
+            mpinets_scene_keys,
+        )
+
+        full = load_problems('full')
+        mpinets_scenes = mpinets_scene_keys()
+        bench_only = load_problems('motion_benchmaker')
+        # every mpinets scene survives the merge, and no benchmaker scene
+        # collides with an mpinets scene (a collision would hide problems).
+        assert mpinets_scenes <= set(full)
+        assert bench_only.keys().isdisjoint(mpinets_scenes)
+        # a known mpinets scene must classify as mpinets in the combined run.
+        assert 'dresser_task_oriented' in mpinets_scenes
+        assert any(s in mpinets_scenes for s in full)
 
     def test_problem_fields(self):
         problems = load_problems('demo')

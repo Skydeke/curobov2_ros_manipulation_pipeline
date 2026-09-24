@@ -25,6 +25,22 @@ Talks to the ``unified_planner`` node started by ``gen_traj.launch.py``:
   ``PlanningStats.considered`` row (the request sets
   ``log_considered_trajectories`` — a reporting-only flag, accepted on the
   classic planner — so the server fills the gated detail block)
+
+Energy (J) / Torque (N·m) follow the accepted "server plans; client
+computes" split: the server runs torque-limited planning from its loaded
+robot config (no response schema change — ``use_dynamics`` only labels the
+run / client-side reconstruction), and this client reconstructs the two
+columns from the returned trajectory with the upstream Pinocchio helper's
+arithmetic. The server's torque mode is a build-time property of its robot
+cfg, so ``run_ros(..., server_dynamics=…)`` switches the running server
+between the reference page's two tables at runtime through the standard
+``set_parameters`` service + the ``update_motion_gen_config`` trigger (see
+``RosBenchmarkRunner.set_server_torque_mode``) — one server life services
+BOTH motion ROS rows, nothing is ever skipped. Because the wire carries
+positions + velocity + dt but *no acceleration*, ``qdd`` is
+finite-differenced from the returned velocity: the numbers are an
+approximation of the native leg's (exact ``js_solution``) values — see the
+README "timing attribution" section for the accepted divergence.
 """
 
 # Standard Library
@@ -34,6 +50,8 @@ from typing import Any, Dict, List, Optional
 import rclpy
 from geometry_msgs.msg import Point as RosPoint
 from geometry_msgs.msg import Pose as RosPose
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import JointState as RosJointState
 
@@ -67,6 +85,12 @@ GENERATE_TRAJECTORY_SRV = f"{SERVER_NODE}/generate_trajectory"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
 SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
+# Runtime torque-mode switch plumbing (both stock ROS2 services — no new
+# wire schema): the server's dynamics mode is baked into its robot_cfg at
+# solver build time, so flipping it = set_parameters + update_motion_gen_config.
+GET_PARAMETERS_SRV = f"{SERVER_NODE}/get_parameters"
+SET_PARAMETERS_SRV = f"{SERVER_NODE}/set_parameters"
+UPDATE_MOTION_GEN_CONFIG_SRV = f"{SERVER_NODE}/update_motion_gen_config"
 
 
 class RosBenchmarkRunner(Node):
@@ -81,12 +105,24 @@ class RosBenchmarkRunner(Node):
         self._cache_client = self.create_client(
             SetCollisionCache, SET_COLLISION_CACHE_SRV
         )
+        self._get_params_client = self.create_client(
+            GetParameters, GET_PARAMETERS_SRV
+        )
+        self._params_client = self.create_client(
+            SetParameters, SET_PARAMETERS_SRV
+        )
+        self._rebuild_client = self.create_client(
+            Trigger, UPDATE_MOTION_GEN_CONFIG_SRV
+        )
 
         for label, client in (
             ("generate_trajectory", self._traj_client),
             ("add_object", self._add_client),
             ("remove_all_objects", self._clear_client),
             ("set_collision_cache", self._cache_client),
+            ("get_parameters", self._get_params_client),
+            ("set_parameters", self._params_client),
+            ("update_motion_gen_config", self._rebuild_client),
         ):
             if not client.wait_for_service(timeout_sec=service_timeout):
                 self.get_logger().error(f"{label} service not available")
@@ -105,6 +141,135 @@ class RosBenchmarkRunner(Node):
                 f"{client.srv_name}: service call failed (timeout={timeout}s)"
             )
         return future.result()
+
+    def set_server_torque_mode(
+        self,
+        load_dynamics: bool,
+        payload_mass: float,
+        rebuild_timeout: float = 300.0,
+    ) -> None:
+        """Switch the running server's torque-limited planning mode at runtime.
+
+        The server's dynamics mode is baked into its ``robot_cfg`` at solver
+        build time, so this sets the ``load_dynamics`` / ``robot_payload_mass``
+        node parameters through the stock ``set_parameters`` service and then
+        triggers ``update_motion_gen_config`` (``std_srvs/Trigger`` — the same
+        build-time-parameter path as ``max_goalset`` / ``num_trajopt_seeds``,
+        see docs/concepts/parameters.md) to rebuild the MotionPlanner from
+        them. No new wire schema: both services are standard ROS2 interfaces.
+
+        Idempotent: the server's current parameter values are queried first,
+        and the expensive rebuild is only triggered when the mode actually
+        changes — the without-torque leg against an already-plain server costs
+        nothing, and the with-torque leg pays one rebuild (~20-60 s:
+        allocation + CUDA-graph re-capture; ``rebuild_timeout`` defaults
+        high). This is what lets a single server life fill BOTH motion ROS
+        rows of the reference page reproduction.
+        """
+        # Query the server's current values; skip the expensive rebuild when
+        # they already match this leg's requested mode.
+        get_req = GetParameters.Request()
+        get_req.names = ["load_dynamics", "robot_payload_mass"]
+        current = self._call(
+            self._get_params_client, get_req, timeout=rebuild_timeout
+        )
+        if len(current.values) == 2:
+            dyn = current.values[0].bool_value
+            mass = current.values[1].double_value
+            if bool(dyn) == bool(load_dynamics) and abs(
+                mass - float(payload_mass)
+            ) < 1e-9:
+                self.get_logger().info(
+                    f"Server already in the requested torque mode "
+                    f"(load_dynamics={str(load_dynamics).lower()}, "
+                    f"robot_payload_mass={payload_mass}) — no rebuild needed"
+                )
+                return
+
+        self.get_logger().info(
+            f"Switching server torque mode: load_dynamics="
+            f"{str(load_dynamics).lower()}, robot_payload_mass={payload_mass} "
+            f"— triggering update_motion_gen_config rebuild (~20-60 s)"
+        )
+        set_req = SetParameters.Request()
+        set_req.parameters = [
+            Parameter(
+                name="load_dynamics",
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_BOOL,
+                    bool_value=bool(load_dynamics),
+                ),
+            ),
+            Parameter(
+                name="robot_payload_mass",
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_DOUBLE,
+                    double_value=float(payload_mass),
+                ),
+            ),
+        ]
+        set_resp = self._call(
+            self._params_client, set_req, timeout=rebuild_timeout
+        )
+        failed = [res.reason for res in set_resp.results if not res.successful]
+        if failed:
+            raise RuntimeError(
+                f"set_parameters failed switching torque mode: {failed}"
+            )
+        self._call(
+            self._rebuild_client, Trigger.Request(), timeout=rebuild_timeout
+        )
+        self.get_logger().info("update_motion_gen_config rebuild complete")
+
+    def set_server_max_attempts(
+        self, attempts: int, timeout: float = 30.0
+    ) -> None:
+        """Pin the server's plan_pose retry budget to match this run's.
+
+        ``max_attempts`` is a **plan-time** parameter: the node reads it fresh
+        per request (``_get_planner_config`` -> ``plan_pose``), so a plain
+        ``set_parameters`` takes effect immediately — no solver rebuild, unlike
+        the torque mode. The runner pins it to the run's own ``--max-attempts``
+        so native and ROS legs always share one retry envelope: the whole
+        benchmark defaults to the page's 100-attempt budget (its 99.73 %
+        success). Idempotent — the current value is queried first and
+        nothing is sent when the server already matches.
+        """
+        get_req = GetParameters.Request()
+        get_req.names = ["max_attempts"]
+        current = self._call(
+            self._get_params_client, get_req, timeout=timeout
+        )
+        if len(current.values) == 1 and (
+            current.values[0].integer_value == int(attempts)
+        ):
+            self.get_logger().info(
+                f"Server max_attempts already {attempts} — no change needed"
+            )
+            return
+
+        self.get_logger().info(
+            f"Pinning server max_attempts to {attempts} "
+            f"(plan-time parameter — no rebuild needed)"
+        )
+        set_req = SetParameters.Request()
+        set_req.parameters = [
+            Parameter(
+                name="max_attempts",
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_INTEGER,
+                    integer_value=int(attempts),
+                ),
+            ),
+        ]
+        set_resp = self._call(
+            self._params_client, set_req, timeout=timeout
+        )
+        failed = [res.reason for res in set_resp.results if not res.successful]
+        if failed:
+            raise RuntimeError(
+                f"set_parameters failed pinning max_attempts: {failed}"
+            )
 
     # ------------------------------------------------------------------
     # collision cache
@@ -228,9 +393,49 @@ class RosBenchmarkRunner(Node):
             options=PlanningOptions(log_considered_trajectories=True),
         )
 
+    @staticmethod
+    def _client_energy_torque(
+        waypoints, waypoint_velocities, dt, robot_model_data,
+    ):
+        """Reconstruct Energy (J) / max Torque (N·m) client-side.
+
+        Mirrors the upstream ``compute_trajectory_energy`` arithmetic on the
+        returned interpolated trajectory: ``torque[t] = pin.rnea(model, data,
+        q[t], qd[t], qdd[t])``, ``energy = sum(|torque * qd|) * dt``,
+        ``max_torque = max(|torque|)``. The wire carries no acceleration, so
+        ``qdd`` is finite-differenced from the returned per-waypoint velocity
+        (or from ``q`` when velocity is absent) — the accepted approximation
+        (exact for the native leg's ``js_solution``).
+        """
+        import numpy as np
+        import pinocchio as pin
+
+        model, data, _torque_limits = robot_model_data
+        q = np.asarray(waypoints, dtype=float)
+        if q.ndim > 2:
+            q = q.reshape(-1, q.shape[-1])
+        num_dof = model.nq
+        if waypoint_velocities is not None:
+            qd = np.asarray(waypoint_velocities, dtype=float)
+            if qd.ndim > 2:
+                qd = qd.reshape(q.shape[0], -1)
+        else:
+            qd = np.gradient(q, dt, axis=0)
+        qdd = np.gradient(qd, dt, axis=0)
+        horizon = q.shape[0]
+        torques = np.zeros((horizon, num_dof))
+        for t in range(horizon):
+            torques[t, :] = pin.rnea(
+                model, data, q[t, :num_dof], qd[t, :num_dof], qdd[t, :num_dof]
+            )[:num_dof]
+        power = torques[:, :num_dof] * qd[:, :num_dof]
+        energy = float(np.sum(np.abs(power)) * dt)
+        max_torque = float(np.max(np.abs(torques[:, :num_dof])))
+        return energy, max_torque
+
     def plan_one(
         self, problem: Dict[str, Any], problem_name: str, scene_key: str,
-        timeout: float = 120.0,
+        timeout: float = 120.0, robot_model_data=None,
     ) -> Dict[str, Any]:
         goal = self._build_goal(problem)
         request = TrajectoryGeneration.Request()
@@ -253,6 +458,8 @@ class RosBenchmarkRunner(Node):
             "solve_time_s": None,
             "jerk": None,
             "position_error_mm": None,
+            "energy_j": None,
+            "torque_nm": None,
         }
 
         if not result.success:
@@ -267,6 +474,23 @@ class RosBenchmarkRunner(Node):
         entry["solve_time_s"] = self._winner_solve_time(result)
         entry["jerk"] = trajectory_jerk(waypoints, float(result.dt))
         entry["position_error_mm"] = self._winner_position_error_mm(result)
+        if robot_model_data is not None:
+            try:
+                velocities = None
+                first_wp = result.trajectory[0] if result.trajectory else None
+                if first_wp is not None and list(
+                    getattr(first_wp, "velocity", []) or []
+                ):
+                    velocities = [list(w.velocity) for w in result.trajectory]
+                energy_j, torque_nm = self._client_energy_torque(
+                    waypoints, velocities, float(result.dt), robot_model_data,
+                )
+                entry["energy_j"] = energy_j
+                entry["torque_nm"] = torque_nm
+            except Exception as exc:  # noqa: BLE001 - degrade, not fail
+                self.get_logger().warn(
+                    f"Failed to reconstruct energy/torque: {exc}"
+                )
         return entry
 
     @staticmethod
@@ -318,6 +542,12 @@ def run_ros(
     call_timeout: float = 120.0,
     warmup_probe: bool = True,
     size_collision_cache: bool = True,
+    use_dynamics: bool = False,
+    mass: float = 3.0,
+    server_dynamics: Optional[bool] = None,
+    server_payload_mass: float = 0.0,
+    server_max_attempts: Optional[int] = None,
+    verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """Run the ROS-wrapped leg over a robometrics dataset.
 
@@ -333,6 +563,32 @@ def run_ros(
     would otherwise inflate every solver iteration's Warp collision kernel
     grid ~7x (see ``size_collision_cache`` and the README). Pass False to
     reproduce the padded behaviour for A/B diagnosis.
+
+    ``use_dynamics`` / ``mass`` label this run as the torque-limited variant at
+    the given payload mass (the page's "with torque limits" table; the server
+    runs torque-limited planning from its own loaded robot config — nothing
+    changes on the wire). Energy (J) / Torque (N·m) are reconstructed
+    client-side from every successful returned trajectory at ``mass`` via the
+    upstream Pinocchio model (see ``_client_energy_torque``); when the model
+    can't be loaded (e.g. pinocchio absent) the columns stay ``None`` and the
+    compare rows are omitted.
+
+    ``server_dynamics`` / ``server_payload_mass`` (default ``None`` / ``0.0``)
+    drive the runtime torque-mode switch: when ``server_dynamics`` is given,
+    the leg FIRST ensures the running server's solver is in that mode —
+    plain, or torque-limited at ``server_payload_mass`` — via
+    ``RosBenchmarkRunner.set_server_torque_mode`` (stock ``set_parameters`` +
+    ``update_motion_gen_config`` trigger, no relaunch). The webpage
+    reproduction passes ``False/0.0`` for the without-torque ROS leg and
+    ``True/mass`` for the with-torque leg, so one server life fills both rows
+    and nothing is skipped.
+
+    ``server_max_attempts`` (default ``None`` = leave the server's param
+    alone) pins the server's plan-time ``max_attempts`` to this value via
+    ``set_server_max_attempts`` (one ``set_parameters``, no rebuild) so the
+    ROS leg retries exactly like its native counterpart. Every benchmark
+    subcommand passes its own ``--max-attempts`` — default 100, the page's
+    budget, for the whole benchmark.
     """
     rclpy.init()
     node: Optional[RosBenchmarkRunner] = None
@@ -344,6 +600,24 @@ def run_ros(
         node.get_logger().info(
             f"ROS leg dataset={dataset} scenes: {', '.join(sorted(problems))}"
         )
+
+        if server_dynamics is not None:
+            # Ensure the server's solver is in the mode this leg needs (see
+            # set_server_torque_mode): the without-torque leg asks for plain,
+            # the with-torque leg asks for torque limits + the payload mass.
+            # Idempotent — no rebuild when the server already matches.
+            node.set_server_torque_mode(
+                bool(server_dynamics), float(server_payload_mass or 0.0)
+            )
+
+        if server_max_attempts is not None:
+            # Pin the server's plan_pose retry budget to this run's (see
+            # set_server_max_attempts): every subcommand defaults both legs to
+            # the page's 100-attempt budget. Plan-time parameter — one
+            # set_parameters, no rebuild, idempotent.
+            node.set_server_max_attempts(int(server_max_attempts))
+
+        robot_model_data = _load_client_dynamics_model(node, mass)
 
         if size_collision_cache:
             node.size_collision_cache(problems, timeout=call_timeout)
@@ -370,18 +644,25 @@ def run_ros(
             node.clear_world(timeout=call_timeout)
             node.add_world(first_problem["obstacles"], timeout=call_timeout)
             try:
-                node.plan_one(first_problem, f"{scene_key}_{i}", scene_key, timeout=call_timeout)
+                node.plan_one(
+                    first_problem, f"{scene_key}_{i}", scene_key,
+                    timeout=call_timeout, robot_model_data=robot_model_data,
+                )
             except RuntimeError as exc:
                 node.get_logger().warn(f"Warmup probe failed (continuing): {exc}")
 
         results: List[Dict[str, Any]] = []
         for scene_key, i, problem in ready_problems:
             problem_name = f"{scene_key}_{i}"
-            node.get_logger().info(f"Solving {problem_name} ...")
+            if verbose:
+                node.get_logger().info(f"Solving {problem_name} ...")
             node.clear_world(timeout=call_timeout)
             node.add_world(problem["obstacles"], timeout=call_timeout)
             results.append(
-                node.plan_one(problem, problem_name, scene_key, timeout=call_timeout)
+                node.plan_one(
+                    problem, problem_name, scene_key,
+                    timeout=call_timeout, robot_model_data=robot_model_data,
+                )
             )
 
         node.get_logger().info(
@@ -394,3 +675,36 @@ def run_ros(
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()
+
+
+def _load_client_dynamics_model(node, mass: float):
+    """Load the upstream Pinocchio dynamics model for the client-side
+    Energy/Torque reconstruction (``load_robot_model_for_dynamics`` with the
+    run's ``mass``). Returns ``None`` — columns left ``None`` — when the
+    model can't be loaded (pinocchio/curobo not available, upstream helper
+    absent, or load failure), so a hiccup degrades to no rows instead of
+    failing the run.
+    """
+    try:
+        from .core_runner import _reference_benchmark_module
+
+        reference = _reference_benchmark_module()
+        loader = getattr(reference, "load_robot_model_for_dynamics", None)
+        if loader is None:
+            node.get_logger().warn(
+                "load_robot_model_for_dynamics not found in the reference "
+                "benchmark — Energy/Torque rows omitted"
+            )
+            return None
+        model_data = loader(robot_name="franka", attached_object_mass=mass)
+        node.get_logger().info(
+            f"Client dynamics model loaded (franka, attached "
+            f"object mass={mass} kg) — Energy/Torque will be reconstructed "
+            f"from returned trajectories"
+        )
+        return model_data
+    except Exception as exc:  # noqa: BLE001 - degrade, not fail
+        node.get_logger().warn(
+            f"Dynamics model unavailable ({exc}) — Energy/Torque rows omitted"
+        )
+        return None

@@ -245,6 +245,19 @@ class ConfigWrapperMotion(ConfigWrapper):
         gpu_lock = getattr(node, "gpu_lock", None)
         lock_ctx = gpu_lock if gpu_lock is not None else nullcontext()
         with lock_ctx:
+            # Runtime torque-mode switch (build-time param, same trigger path
+            # as max_goalset / num_trajopt_seeds — docs/concepts/parameters.md):
+            # the running server's MotionPlanner follows the CURRENT
+            # `load_dynamics` param, so `ros2 param set … load_dynamics …` +
+            # update_motion_gen_config flips the reference page's two tables
+            # without a relaunch. set_torque_mode is idempotent — a no-op when
+            # the mode is unchanged (the common cache-change rebuild path).
+            if node.has_parameter("load_dynamics"):
+                self.robot_model_manager.set_torque_mode(
+                    node.get_parameter("load_dynamics")
+                    .get_parameter_value()
+                    .bool_value
+                )
             # No perception voxel layer at construction — collision_cache allocates
             # the voxel storage and update_world fills it by copy. Passing the live
             # layer aliases the solver's buffer onto our ESDF tensor, which the first
@@ -310,6 +323,8 @@ class ConfigWrapperMotion(ConfigWrapper):
             # Legacy alias — some downstream code still references `node.motion_gen`.
             node.motion_gen = node.motion_planner
 
+            self._apply_payload_mass(node)
+
             # Output sampling step of the interpolated plan. It's a trajopt config
             # field (not a MotionPlannerCfg.create arg), so set it post-build, before
             # warmup so the interpolation buffer picks it up. Guarded: the standalone
@@ -361,6 +376,53 @@ class ConfigWrapperMotion(ConfigWrapper):
             response.success = True
             response.message = "Motion planner config set"
         return response
+
+    def _apply_payload_mass(self, node) -> None:
+        """Patch the launched payload mass onto the MotionPlanner's dynamics.
+
+        Mirrors the reference benchmark's ``use_dynamics`` path
+        (``motion_planner.update_links_inertial({"attached_object":
+        {"mass": args.mass}})``) so the ROS-wrapped planner solves with the
+        same attached-object inertia as the native leg — the difference
+        between the reference page's two tables. Requires the robot_cfg to
+        have been built with ``load_dynamics:=true`` (the dynamics transition
+        model is absent otherwise and a mass patch is undefined); with
+        ``robot_payload_mass:=0.0`` (the default) this is a no-op and the
+        solver is byte-for-byte the pre-change behavior. Re-run on every
+        rebuild (this is inside ``set_motion_gen_config``).
+        """
+        payload_mass = 0.0
+        if node.has_parameter("robot_payload_mass"):
+            payload_mass = (
+                node.get_parameter("robot_payload_mass")
+                .get_parameter_value()
+                .double_value
+            )
+        if payload_mass <= 0.0:
+            return
+        planner = getattr(node, "motion_planner", None)
+        if planner is None:
+            return
+        if not getattr(planner, "update_links_inertial", None):
+            node.get_logger().warn(
+                "robot_payload_mass>0 but the planner has no "
+                "update_links_inertial (curobo version) — payload ignored"
+            )
+            return
+        try:
+            planner.update_links_inertial(
+                {"attached_object": {"mass": payload_mass}}
+            )
+            node.get_logger().info(
+                f"Payload mass {payload_mass} kg patched onto attached_object "
+                "(torque-limited planning)"
+            )
+        except Exception as exc:  # noqa: BLE001 - degraded planning over crash
+            node.get_logger().warn(
+                f"robot_payload_mass>0 but update_links_inertial failed: {exc} "
+                f"— payload ignored (launch with load_dynamics:=true for "
+                f"torque-limited planning)"
+            )
 
     def update_world_config(self, node):
         """Push the current Scene into all active solvers."""

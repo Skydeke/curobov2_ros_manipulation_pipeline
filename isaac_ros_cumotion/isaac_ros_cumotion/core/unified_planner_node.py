@@ -296,6 +296,16 @@ class UnifiedPlannerNode(Node):
         # plan time (classic / joint-space / multi-waypoint). Default 1 = the
         # single-attempt behavior.
         self.declare_parameter('max_attempts', 1)
+        # Torque-limited planning (the reference benchmarks page's "with
+        # torque limits" table): `load_dynamics` builds the robot's pinocchio
+        # inverse-dynamics model (RobotModelManager must see it at startup —
+        # the robot_cfg is built once), and `robot_payload_mass` patches the
+        # attached_object payload inertia onto the MotionPlanner like the
+        # reference script's update_links_inertial({"attached_object":
+        # {"mass": args.mass}}). Payload only applies with load_dynamics (a
+        # mass patch without inverse dynamics is undefined in curobo).
+        self.declare_parameter('load_dynamics', False)
+        self.declare_parameter('robot_payload_mass', 0.0)
         # torch.cuda.synchronize() bridges the executor's Python threads to the
         # GPU but blocks the calling thread every frame/kernel — off by default
         # so the depth callback and viz timers keep running while the GPU works
@@ -1227,10 +1237,13 @@ class UnifiedPlannerNode(Node):
         if isinstance(row, ConsideredTrajectory):
             return row
         c = ConsideredTrajectory()
-        c.problem = int(row.get('problem', 0))
-        c.segment = int(row.get('segment', 0))
-        c.goalset_candidate = int(row.get('goalset_candidate', 0))
-        c.seed = int(row.get('seed', 0))
+        # Message index fields are unsigned: saturate any negative index
+        # (e.g. -1 from a failed/absent solve) to 0 so a failure response
+        # still serializes instead of raising OverflowError.
+        c.problem = max(0, int(row.get('problem', 0)))
+        c.segment = max(0, int(row.get('segment', 0)))
+        c.goalset_candidate = max(0, int(row.get('goalset_candidate', 0)))
+        c.seed = max(0, int(row.get('seed', 0)))
         c.success = bool(row.get('success', False))
         c.cost = float(row.get('cost', 0.0))
         c.waypoint_cost = float(row.get('waypoint_cost', 0.0))

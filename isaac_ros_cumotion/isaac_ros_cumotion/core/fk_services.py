@@ -72,6 +72,17 @@ class FKServices:
             self._device = getattr(config_wrapper, "_device", torch.device("cuda"))
             self._dtype = getattr(config_wrapper, "_ops_dtype", torch.float32)
 
+        # Canonicalize an index-less "cuda" to "cuda:0": Warp's
+        # wp.device_from_torch indexes its CUDA device list with
+        # torch.device(...).index, so the bare device carried by the node's
+        # tensor_args (or the fallback above) raises TypeError deep inside
+        # SceneData/MeshData construction — historically silently disabling
+        # this class's collision validator (poses_valid all True). Upstream
+        # reference scripts always use an indexed device (DeviceCfg defaults
+        # to torch.device("cuda", 0)).
+        if self._device.type == "cuda" and self._device.index is None:
+            self._device = torch.device("cuda", 0)
+
         name = node.get_name()
         node.create_service(WarmupFK, f"{name}/warmup_fk", self._warmup_fk_callback)
         node.create_service(Fk, f"{name}/fk", self._fk_callback)
