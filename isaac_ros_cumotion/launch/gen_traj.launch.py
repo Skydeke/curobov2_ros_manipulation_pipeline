@@ -261,6 +261,23 @@ def launch_setup(context, *args, **kwargs):
                 # the parity benchmark's timing-attribution diagnostics).
                 'use_cuda_graph': ParameterValue(
                     LaunchConfiguration('use_cuda_graph'), value_type=bool),
+                # How sphere/cylinder/capsule obstacles are converted for the
+                # solver-bound scenes: 'cuboid' (fast OBB approximation,
+                # default, matches native get_obb_world geometry) or 'mesh'
+                # (exact trimesh, legacy — ~12x slower collision kernels).
+                'obstacle_collision_mode': LaunchConfiguration(
+                    'obstacle_collision_mode'),
+                # Solver collision-cache capacities: curobo's Warp kernels
+                # launch one thread per (sphere, padded obstacle slot) per
+                # type, so a padded cache slows every solver iteration (the
+                # old 100/100 default was ~7x native's exact {obb: n_cubes}).
+                # Defaults cover typical worlds; exceeding the capacity raises
+                # loudly on add_object, so raise these only when a deployment
+                # legitimately needs more slots.
+                'collision_cache_cuboid': ParameterValue(
+                    LaunchConfiguration('collision_cache_cuboid'), value_type=int),
+                'collision_cache_mesh': ParameterValue(
+                    LaunchConfiguration('collision_cache_mesh'), value_type=int),
                 # Feedback publish period (s) during open-loop execution.
                 'time_dilation_factor': ParameterValue(
                     LaunchConfiguration('time_dilation_factor'), value_type=float),
@@ -478,6 +495,26 @@ def generate_launch_description():
             description='Enable CUDA-graph capture for the solver rollouts. Diagnostic: '
                         'set :=false to isolate mid-plan graph re-capture cost (the parity '
                         'benchmark README \'timing attribution\' section)'
+        ),
+        DeclareLaunchArgument(
+            'obstacle_collision_mode', default_value='cuboid',
+            description='Conversion of sphere/cylinder/capsule obstacles for solver-bound '
+                        'scenes: cuboid (fast OBB approximation, default) or mesh (exact '
+                        'trimesh geometry, legacy behaviour — ~12x slower per-attempt '
+                        'collision kernels)'
+        ),
+        DeclareLaunchArgument(
+            'collision_cache_cuboid', default_value='32',
+            description='Solver collision-cache capacity (cuboid slots). curobo\'s Warp '
+                        'kernels launch one thread per (sphere, obstacle slot), so padding '
+                        'slows every solver iteration; exceeding the capacity raises loudly '
+                        'on add_object. Raise only when a deployment needs more cuboids.'
+        ),
+        DeclareLaunchArgument(
+            'collision_cache_mesh', default_value='4',
+            description='Solver collision-cache capacity (mesh slots). Same trade-off as '
+                        'collision_cache_cuboid; 4 covers typical user meshes. Set 0 to '
+                        'disable the mesh collision kernel entirely (no meshes in the world).'
         ),
 
         # OpaqueFunction defers the body until LaunchConfigurations can be resolved

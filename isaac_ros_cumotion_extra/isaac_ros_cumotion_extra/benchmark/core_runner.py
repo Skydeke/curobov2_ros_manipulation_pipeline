@@ -17,8 +17,11 @@ loop, so the native-leg numbers reproduce the reference page:
   ``collision_cache`` = {obb: n_cubes} (``--mesh`` switches the per-problem
   worlds to meshes), ``num_ik_seeds`` = 32, ``num_trajopt_seeds`` = 4
 - one planner per scene: ``warmup(enable_graph=True)``, then 3 warmup solves at
-  ``max_attempts=1`` on the first problem, then the real solve at
-  ``max_attempts=100``; fixed seeds exactly like the upstream script
+  ``max_attempts=1`` on the first problem, then the real solve at the same
+  ``max_attempts`` (default 1 = the ROS server's ``max_attempts:=1`` cap, so
+  both legs run the same single-attempt envelope; the upstream reference uses
+  100 — raise ``--max-attempts`` to reproduce it); fixed seeds exactly like the
+  upstream script
 - per-problem world: ``SceneCfg.create(obstacles).get_obb_world()`` (mesh when
   ``--mesh``)
 
@@ -148,7 +151,8 @@ def _run_scene(
     problems, convert the problem obstacles to an OBB (or mesh) world,
     ``clear_cache`` + ``update_world`` + ``reset_seed``, CUDA-graph-capture
     warmup of ``warmup_iters`` solves at ``max_attempts=1`` on the first
-    problem (upstream uses 3), then the real ``plan_pose`` solve.
+    problem (upstream uses 3), then the real ``plan_pose`` solve at
+    ``max_attempts`` (default 1).
 
     ``reset_seed_per_problem=False`` skips the per-problem ``reset_seed()``
     calls (diagnostic: reproduces the ROS server's drifting RNG state — see
@@ -310,7 +314,7 @@ def run_core(
     dataset: str = "demo",
     scene: Optional[str] = None,
     warmup_iters: int = 3,
-    max_attempts: int = 100,
+    max_attempts: int = 1,
     num_ik_seeds: int = 32,
     num_trajopt_seeds: int = 4,
     use_cuda_graph: bool = True,
@@ -326,7 +330,10 @@ def run_core(
     ``_reference_benchmark_module``) and replays the same per-scene/per-problem
     loop: one planner per scene
     (``warmup(enable_graph=True)`` + 3 warmup solves at ``max_attempts=1`` on
-    the first problem, real solve at ``max_attempts=100``), OBB (or ``--mesh``)
+    the first problem, real solve at the same ``max_attempts`` — default 1,
+    matching the ROS server's cap so both legs run the identical
+    single-attempt envelope; the upstream reference uses 100, raise
+    ``--max-attempts`` to reproduce it), OBB (or ``--mesh``)
     per-problem worlds, and the upstream script's fixed seeds.
 
     ``scene`` restricts the run to one scene key within the dataset (``None`` =
@@ -341,10 +348,11 @@ def run_core(
       solve — the per-problem seed re-derivation the ROS server never performs.
 
     With both off the native leg mimics the server's drifting-RNG mutation of
-    the reference recipe: if that reproduces the ROS ~2 s wall, the gap is the
-    retry loop under unseeded seeds; if it stays ~0.06 s, the gap lives in the
-    server's world-churn/collision-model path instead (see the README
-    "timing attribution" section).
+    the reference recipe. This was built to attribute the ROS ~2 s wall to the
+    retry loop when that was still unexplained; the wall has since been
+    attributed to the world churn + the now-aligned recipe divergences (see
+    the README "timing attribution" section), so these knobs are kept for A/B
+    of the RNG hypothesis rather than the default explanation.
     """
     import random
 

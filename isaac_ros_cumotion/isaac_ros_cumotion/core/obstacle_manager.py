@@ -74,17 +74,44 @@ class ObstacleManager:
         # the Mapper (MapperCfg) and the solver voxel collision cache.
         self._load_perception_params()
 
+        # Conversion applied to sphere/cylinder/capsule obstacles in every
+        # solver-bound scene (see _collision_supported): 'cuboid' (default —
+        # fast OBB approximation, the same geometry native CuRobo's
+        # get_obb_world() uses) or 'mesh' (exact trimesh geometry via the
+        # mesh-SDF path, the legacy pre-2026-09 behaviour — measured ~12x the
+        # per-attempt solve time). Read at startup like the perception params.
+        self._obstacle_collision_mode = self._declare_param(
+            'obstacle_collision_mode', 'cuboid')
+        if self._obstacle_collision_mode not in ('cuboid', 'mesh'):
+            node.get_logger().warn(
+                f"obstacle_collision_mode={self._obstacle_collision_mode!r} is "
+                "not 'cuboid' or 'mesh'; falling back to 'cuboid'")
+            self._obstacle_collision_mode = 'cuboid'
+
         # v2 collision cache: dict with keys cuboid (int), mesh (int), voxel
         # (None or dict {"layers": int, "dims": [x,y,z], "voxel_size": float}).
         # v1 passed the triple obb/mesh/blox; the service still accepts it and
         # maps obb→cuboid, mesh→mesh, blox→voxel.layers.
         #
+        # Capacity is a real per-attempt solver cost: curobo's Warp collision
+        # kernels launch one thread per (robot sphere, padded obstacle slot) per
+        # type (wp_collision_kernel.py: dim = b*h*n*max_n), and a slot is
+        # allocated even when the bucket is empty — the old 100/100 default
+        # inflated every solver iteration's grids ~7x vs native's exact
+        # {obb: n_cubes}. Defaults (cuboid=32, mesh=4) cover typical worlds
+        # with headroom; exceeding the capacity raises loudly (add_object fails
+        # "cache is full"), so deployments that legitimately need more slots
+        # raise them via the collision_cache_cuboid / collision_cache_mesh
+        # launch params instead of padding every plan.
+        #
         # The voxel sub-dict pre-allocates voxel collision storage in the
         # solvers (VoxelData.create_cache) and MUST match the Mapper's ESDF
         # grid: dims = extent in meters, voxel_size = ESDF voxel size.
+        self._collision_cache_cuboid = self._declare_param('collision_cache_cuboid', 32)
+        self._collision_cache_mesh = self._declare_param('collision_cache_mesh', 4)
         self.collision_cache = {
-            "cuboid": 100,
-            "mesh": 100,
+            "cuboid": self._collision_cache_cuboid,
+            "mesh": self._collision_cache_mesh,
             "voxel": {
                 "layers": 1,
                 "dims": list(self._mapper_extent_xyz),
@@ -1213,11 +1240,33 @@ class ObstacleManager:
         load_from_scene_cfg only ever reads the `cuboid`, `mesh` and `voxel`
         buckets. Sphere/cylinder/capsule obstacles are therefore SILENTLY
         dropped from solver collision checking and from the voxel grid
-        rasterization. CuRobo provides `SceneCfg.create_collision_support_world`,
-        which keeps cuboids as cuboids/voxels as voxels and approximates
-        sphere/cylinder/capsule as trimesh meshes (accurate, via the mesh SDF
-        path). Apply it to every solver-bound Scene so all primitive types
-        actually collide and appear in the voxel map.
+        rasterization. Apply this conversion to every solver-bound / rasterized
+        Scene so all primitive types actually collide and appear in the voxel
+        map.
+
+        Two modes, selected by the `obstacle_collision_mode` param (read at
+        startup):
+
+        * ``cuboid`` (default): sphere/cylinder/capsule become OBB cuboids via
+          ``get_cuboid()`` — the exact same approximation native CuRobo makes
+          in ``SceneCfg.create_obb_world()`` (which the core benchmark uses),
+          so the ROS leg collides against identical geometry for free. The
+          solvers run the fast primitive-cuboid kernels: a radius-r cylinder
+          maps to a 2r x 2r x h OBB, i.e. slightly conservative. These boxes
+          also rasterize into the voxel map, so the original reason for the
+          mesh conversion ("primitives would otherwise be dropped from the
+          voxel grid") holds without touching the mesh path. Measured
+          2026-09: the mesh alternative costs ~12x the per-attempt solver
+          time with this scene.
+        * ``mesh`` (legacy): ``SceneCfg.create_collision_support_world``
+          keeps cuboids as cuboids/voxels as voxels and approximates
+          sphere/cylinder/capsule as trimesh meshes (exact geometry via the
+          mesh SDF path). Opt-in for deployments that need exact round
+          geometry and accept the slower collision kernels.
+
+        In both modes existing cuboids, user-supplied meshes (deliberate exact
+        geometry — unlike create_obb_world() we do NOT box those) and the
+        voxel layer pass through unchanged.
 
         Attached-object exclusion is NOT applied here: solver scenes keep the
         grasped obstacle registered (it is disabled by name afterwards via
@@ -1233,7 +1282,18 @@ class ObstacleManager:
                 mesh=scene.mesh or [],
                 voxel=scene.voxel,
             )
-        return SceneCfg.create_collision_support_world(scene)
+        if self._obstacle_collision_mode == 'mesh':
+            return SceneCfg.create_collision_support_world(scene)
+
+        cuboids = list(scene.cuboid) if scene.cuboid is not None else []
+        for attr in ('sphere', 'capsule', 'cylinder'):
+            for obstacle in getattr(scene, attr) or []:
+                cuboids.append(obstacle.get_cuboid())
+        return SceneCfg(
+            cuboid=cuboids,
+            mesh=scene.mesh or [],
+            voxel=scene.voxel,
+        )
 
     def _without_excluded(self, bucket):
         """Bucket list minus the currently-excluded (attached) obstacle names.

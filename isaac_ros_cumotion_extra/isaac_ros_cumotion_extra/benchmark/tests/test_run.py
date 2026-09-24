@@ -17,7 +17,7 @@ class TestSubcommands:
         assert args.dataset == 'demo'
         assert args.num_ik_seeds == 32
         assert args.num_trajopt_seeds == 4
-        assert args.max_attempts == 100
+        assert args.max_attempts == 1
         assert args.mesh is False
         assert not args.no_cuda_graph
         assert not args.no_reset_seed
@@ -68,7 +68,7 @@ class TestSubcommands:
         assert args.show_all is False
         assert args.num_ik_seeds == 32
         assert args.num_trajopt_seeds == 4
-        assert args.max_attempts == 100
+        assert args.max_attempts == 1
         assert args.mesh is False
 
     def test_overrides(self):

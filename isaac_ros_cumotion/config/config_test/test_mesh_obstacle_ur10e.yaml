@@ -95,3 +95,18 @@ tests:
     expect:
       response:
         success: False
+
+  - name: "05 remove all objects (hermetic server)"
+    service: "/unified_planner/remove_all_objects"
+    type: std_srvs/srv/Trigger
+    # The ur10e suites all run against ONE persistent planner server
+    # (docker/ur10e_tests.yaml: tests container loops `test_test_*_ur10e.py`
+    # against the shared `server`). test_test_object_ur10e.py runs NEXT
+    # alphabetically and expects to start from an empty world ("(1 cuboids,
+    # 0 meshes)", "All 1 obstacles removed") — leaving the duck registered
+    # would leak it into that suite's counts. Suites are hermetic: remove
+    # everything we added before exiting. (The object suite's own test 08 does
+    # the same at its end.)
+    data: {}
+    expect: {success: True,
+            message: "All 1 obstacles removed"}

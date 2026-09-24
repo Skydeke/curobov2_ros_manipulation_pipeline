@@ -19,7 +19,7 @@ Each problem dict carries:
 """
 
 # Standard Library
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Datasets usable via `load_problems` (keys of robometrics' raw loaders).
 DATASET_NAMES = ("demo", "motion_benchmaker", "mpinets")
@@ -78,3 +78,57 @@ def filter_scenes(
             f"Available scenes: {', '.join(sorted(problems))}"
         )
     return {scene: problems[scene]}
+
+
+_CONVERTED_BUCKETS = ("sphere", "capsule", "cylinder")
+
+
+def collision_cache_sizes(
+    problems: Dict[str, List[Dict[str, Any]]],
+) -> Tuple[int, int]:
+    """Solver collision-cache sizes (cuboid slots, mesh slots) a dataset needs.
+
+    curobo's Warp collision kernels launch one thread per (robot sphere, padded
+    obstacle slot) per obstacle *type*, so an over-padded cache — the server's
+    former deployment default ``{cuboid: 100, mesh: 100, voxel: ...}`` (the
+    launch defaults are now 32/4 via ``collision_cache_cuboid`` /
+    ``collision_cache_mesh``) — makes every solver iteration run
+    a much larger kernel grid than the native leg's ``{obb: n_cubes}`` cache —
+    the residual ~7x single-attempt solve gap after the
+    ``obstacle_collision_mode:=cuboid`` fix (see the extra README "timing
+    attribution" section). The ROS benchmark leg sizes the server's cache to
+    these values (and disables the empty no-camera voxel layer) before the
+    timed run so both legs collide through native-equivalent kernel grids.
+
+    The semantics mirror the native leg's ``check_problems``
+    (``curobo/benchmark/motion_plan_benchmark.py``): per problem it builds
+    ``SceneCfg.create(obstacles).get_obb_world()`` and reads the resulting OBB
+    cache count, so cuboids *plus* converted sphere/cylinder/capsule all
+    occupy the cuboid bucket. The server can run either
+    ``obstacle_collision_mode``, routing those prims to the cuboid bucket
+    (cuboid, default) or the mesh bucket (mesh), so the cuboid budget is
+    ``cuboid + converted`` and the mesh budget is ``mesh + converted`` — exact
+    for the default mode and safe in mesh mode.
+
+    Returns:
+        ``(cuboid_slots, mesh_slots)`` — the maximum per-scene count the
+        solver must hold per type across the dataset (cuboid_slots >= 1).
+    """
+    cuboid_slots = 0
+    mesh_slots = 0
+    for scene_problems in problems.values():
+        scene_cuboid = scene_mesh = scene_converted = 0
+        for problem in scene_problems:
+            obstacles = problem.get("obstacles") or {}
+            scene_cuboid = max(scene_cuboid, len(obstacles.get("cuboid") or {}))
+            scene_mesh = max(scene_mesh, len(obstacles.get("mesh") or {}))
+            scene_converted = max(
+                scene_converted,
+                sum(
+                    len(obstacles.get(bucket) or {})
+                    for bucket in _CONVERTED_BUCKETS
+                ),
+            )
+        cuboid_slots = max(cuboid_slots, scene_cuboid + scene_converted)
+        mesh_slots = max(mesh_slots, scene_mesh + scene_converted)
+    return max(cuboid_slots, 1), mesh_slots

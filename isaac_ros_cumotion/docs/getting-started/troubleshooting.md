@@ -356,10 +356,13 @@ type** (e.g. re-add `a` as a sphere after it was a cylinder), collision checking
 continues to use the *old* geometry.
 
 **Cause**
-Non-cuboid primitives (sphere/cylinder/capsule) are converted to meshes before
-they are pushed to the CuRobo GPU solvers. CuRobo's internal mesh cache
-(`MeshData.wp_cache`) keys cached geometry by mesh *name*. When the same name is
-re-loaded with a different mesh, the cache logs
+Non-cuboid primitives (sphere/cylinder/capsule) are converted to a
+solver-supported type before they are pushed to the CuRobo GPU solvers. With
+`obstacle_collision_mode:=cuboid` (the default since 2026-09) they become OBB
+cuboids, which are re-added in place by name — this bug does **not** apply.
+With `obstacle_collision_mode:=mesh` they become trimeshes, and CuRobo's
+internal mesh cache (`MeshData.wp_cache`) keys cached geometry by mesh *name*.
+When the same name is re-loaded with a different mesh, the cache logs
 `Mesh already in cache, reusing existing instance: <name>` and reuses the stale
 geometry unless the cache is explicitly invalidated (`clear_warp_cache=True`).
 This invalidation cannot be performed from `isaac_ros_cumotion` because the
@@ -368,15 +371,17 @@ relevant code lives in the `curobo_core` submodule, which must not be modified.
 **Scope**
 - Moving, resizing, or editing an obstacle **does not** trigger this — geometry
   (vertices/faces) is unchanged, so cache reuse is correct and expected.
-- Only a runtime *type* change under the same name hits it.
+- Only a runtime *type* change under the same name hits it, and only in
+  `obstacle_collision_mode:=mesh`.
 
 **Workaround**
-Give the obstacle a **new name** when you change its type at runtime (e.g.
-remove obstacle `a` and add `a_sphere`). Each distinct name gets its own cache
-entry, so the fresh geometry loads correctly.
+Default to `obstacle_collision_mode:=cuboid` (also ~12x faster per-attempt
+collision). In `mesh` mode, give the obstacle a **new name** when you change
+its type at runtime (e.g. remove obstacle `a` and add `a_sphere`). Each
+distinct name gets its own cache entry, so the fresh geometry loads correctly.
 
 **Status**
-Open. Documented as a known limitation rather than fixed, per the constraint
-that `curobo_core` must not be altered. A proper fix would make
+Open (mesh mode only). Documented as a known limitation rather than fixed, per
+the constraint that `curobo_core` must not be altered. A proper fix would make
 `_load_mesh_into_cache` geometry-aware or invalidate the warp cache on scene
 updates from within `curobo_core`.

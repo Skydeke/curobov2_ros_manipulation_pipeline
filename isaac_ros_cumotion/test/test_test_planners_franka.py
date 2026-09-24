@@ -282,7 +282,7 @@ class GeneratedTestSuite(unittest.TestCase):
         if result_future.result() is None:
             self.fail("Action '/unified_planner/execute_trajectory' did not return a result in time")
 
-        result = result_future.result().result
+        result = result_future.result().result.result
 
 
         self.assertEqual(
@@ -411,7 +411,7 @@ class GeneratedTestSuite(unittest.TestCase):
         if result_future.result() is None:
             self.fail("Action '/unified_planner/execute_trajectory' did not return a result in time")
 
-        result = result_future.result().result
+        result = result_future.result().result.result
 
 
         self.assertGreater(
@@ -581,7 +581,7 @@ class GeneratedTestSuite(unittest.TestCase):
         if result_future.result() is None:
             self.fail("Action '/unified_planner/execute_trajectory' did not return a result in time")
 
-        result = result_future.result().result
+        result = result_future.result().result.result
 
 
         self.assertGreater(

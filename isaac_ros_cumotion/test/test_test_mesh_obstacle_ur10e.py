@@ -268,6 +268,47 @@ class GeneratedTestSuite(unittest.TestCase):
             f"Field 'success' doesn't match expected value"
         )
 
+    def test_05_remove_all_objects(self):
+        """05 remove all objects (hermetic server)"""
+
+        # Create service client
+        client = self.node.create_client(Trigger, '/unified_planner/remove_all_objects')
+
+        # Wait for service to be available
+        timeout = 10.0
+        if not client.wait_for_service(timeout_sec=timeout):
+            self.fail(f"Service '/unified_planner/remove_all_objects' not available after {timeout}s")
+
+        # Create request
+        request = Trigger.Request()
+        set_message_fields(request, {})
+
+        # Call service
+        future = client.call_async(request)
+        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
+
+        # Check if call completed
+        if not future.done():
+            self.fail("Service call to '/unified_planner/remove_all_objects' timed out")
+
+        # Get response
+        response = future.result()
+        if response is None:
+            self.fail("Service call to '/unified_planner/remove_all_objects' failed")
+
+
+        self.assertEqual(
+            response.success,
+            True,
+            f"Field 'success' doesn't match expected value"
+        )
+
+        self.assertEqual(
+            response.message,
+            'All 1 obstacles removed',
+            f"Field 'message' doesn't match expected value"
+        )
+
 @launch_testing.post_shutdown_test()
 class PostShutdownTests(unittest.TestCase):
     """Post-shutdown tests to validate clean exit"""

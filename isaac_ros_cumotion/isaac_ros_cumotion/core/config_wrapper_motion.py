@@ -366,7 +366,9 @@ class ConfigWrapperMotion(ConfigWrapper):
         """Push the current Scene into all active solvers."""
         # Sphere/cylinder/capsule obstacles must be converted to a solver-
         # supported collision type (cuboid/mesh) or they are silently dropped
-        # from collision checking. See collision_world_scene().
+        # from collision checking. obstacle_collision_mode picks the conversion:
+        # 'cuboid' (fast OBB approximation, default) or 'mesh' (exact trimesh,
+        # legacy). See collision_world_scene().
         scene = self.obstacle_manager.collision_world_scene()
         if getattr(node, "motion_planner", None) is not None:
             node.motion_planner.update_world(scene)

@@ -21,6 +21,21 @@
 #                                   cost-scaling curve)
 #     CUROBO_NUM_TRAJOPT_SEEDS=N    trajopt seed budget (default 4 = native recipe;
 #                                   12 = the node's deployment default)
+#     CUROBO_COLLISION_MODE=mesh    solver-collision geometry for spheres/cylinders/
+#                                   capsules: cuboid (default — fast OBB, identical
+#                                   to native get_obb_world) or mesh (exact trimesh,
+#                                   legacy; ~12x slower collision kernels)
+#
+#   The ROS leg additionally sizes the server's collision cache to the
+#   dataset's actual per-type obstacle counts (obb = the same max-scene count
+#   as native's check_problems, mesh = 0 for the demo data, blox = 0 to drop
+#   the empty no-camera voxel layer) via /unified_planner/set_collision_cache
+#   before its timed run — even the server's 32/4 defaults
+#   (collision_cache_cuboid/collision_cache_mesh launch params) pad every
+#   solver iteration's Warp collision kernel grid past native's exact
+#   {obb: n_cubes} (the old 100/100 default was ~7x). One synchronous
+#   solver rebuild (~25-37s) is paid once at startup. A/B with
+#   `curobo_benchmark ros --no-size-cache` (or `all --no-size-cache`).
 #   e.g.:
 #     CUROBO_MAX_ATTEMPTS=10 docker compose -f docker/compose_benchmark.yaml up
 #   curobo_benchmark runs  curobo_benchmark all --dataset demo  which
@@ -77,6 +92,7 @@ services:
           urdf_path:=/root/ros2_ws/src/isaac_ros_cumotion/config/urdf/franka/franka_panda.urdf \
           max_attempts:=${CUROBO_MAX_ATTEMPTS:-1} collision_activation_distance:=0.0025 \
           num_trajopt_seeds:=${CUROBO_NUM_TRAJOPT_SEEDS:-4} \
+          obstacle_collision_mode:=${CUROBO_COLLISION_MODE:-cuboid} \
           use_cuda_graph:=${CUROBO_USE_CUDA_GRAPH:-true}
 
   curobo_benchmark:

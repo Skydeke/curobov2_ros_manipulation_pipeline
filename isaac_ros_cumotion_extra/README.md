@@ -92,7 +92,9 @@ per-problem loop the reference table is generated with — curobo's bundled
 particle + LBFGS ik/trajopt optimizers,
 `optimizer_collision_activation_distance=0.0025`, `{obb: n_cubes}` collision
 cache, `num_ik_seeds=32`, `num_trajopt_seeds=4`, fixed seeds, CUDA-graph warmup,
-one planner per scene and the real solve at `max_attempts=100`. Per-problem
+one planner per scene and the real solve capped at `max_attempts=1` by default
+(the upstream reference uses 100; `--max-attempts N` raises the native leg's
+budget). Per-problem
 worlds are OBB conversions of the problem obstacles (`--mesh` switches to
 meshes). Its `Metric`/`Value` table should therefore match the reference page.
 
@@ -112,37 +114,41 @@ timing numbers come from the same fields on both legs:
   the `plan_pose` retry loop** (`MotionPlanner._plan_pose_single`).
 
 They are NOT "apples-to-apples solver speed": on the box the ROS leg's
-solve_time tracks its wall (~2 s/problem) instead of native's ~0.06 s, because
-the per-request work that makes the wall slow — the object-set churn
+solve_time used to track its wall (~2 s/problem) instead of native's ~0.06 s,
+because the per-request work that made the wall slow — the object-set churn
 (`remove_all_objects` + `add_object` reloading the solver collision model) plus
-the server's drifting, unseeded RNG — is charged *inside* curobo's own timers.
-So the ~2 s is solver-loop cost in the server environment, **not**
+the server's drifting, unseeded RNG — was charged *inside* curobo's own timers.
+So the pre-fix ~2 s was solver-loop cost in the server environment, **not**
 serialization/RTT around the call (the `solve_tracks_wall_pct` summary field,
-near 100% on the box, makes this visible per run).
+near 100% on the box, makes this visible per run). With the geometry, retry,
+seed and collision-cache divergences closed (below), the ROS leg's solve_time
+now reports the same calm single-attempt optimizer cost as native.
 
-The report therefore prints the solver-reported **Solve Time** row, an explicit
-`solve time (info)` line with that attribution, and `solveC`/`solveR` columns
-in the per-problem delta table — so nobody reads the ros solve number as "the
-same ~0.06 s the native leg achieves".
+The report therefore prints the solver-reported **Solve Time** row and an
+explicit `solve time (info)` line with that attribution — solve time is
+informational, never a parity signal — plus `solveC`/`solveR` columns in the
+per-problem delta table.
 
-**Diagnosing the gap.** Server `[plan-perf]` logs on the box pin the wall to
+**Diagnosing the gap.** The measurements in this retrofit are pre-fix
+history; the fixes they motivated are described below and now apply at the
+envelope defaults. Server `[plan-perf]` logs on the box pinned the wall to
 the solver: `setup ~1 ms`, `world refresh 0.0 ms`, and `plan()` (the whole
 `plan_pose` call) at nearly the ros wall, with `solve ≈ plan()` (≈96-98% of
 the wall). curobo's `result.solve_time` accumulates the optimizer-iteration
 time across *every attempt of the `plan_pose` retry loop*
-(`_plan_pose_single`), so the per-request cost sits inside curobo's
+(`_plan_pose_single`), so the per-request cost sat inside curobo's
 retry/optimizer loop — not serialization/RTT.
 
 CUDA-graph re-capture is **not** the driver: relaunching the server with
 `CUROBO_USE_CUDA_GRAPH=false` (eager solvers; the toggle is forwarded to the
 node and honoured — the startup `MotionPlanner solver envelope:` log reports
-the resolved flags on every run) leaves `plan()` at ~2.0 s, indistinguishable
-from the graphs-on run. Eager warmup is only ~1.4x slower than graph warmup
-(15 s vs 11 s) when nothing overlaps it — the earlier "4.4x" reading was the
-concurrent core leg contaminating the warmup wall, not a solver-mode effect.
-(The `gpu_lock busy (CUDA graph capture in progress)` warning in the logs is
-static text fired on any failed non-blocking lock acquire — it does *not*
-prove a capture was in progress.)
+the resolved flags on every run) left `plan()` at ~2.0 s (pre-fix),
+indistinguishable from the graphs-on run. Eager warmup is only ~1.4x slower
+than graph warmup (15 s vs 11 s) when nothing overlaps it — the earlier
+"4.4x" reading was the concurrent core leg contaminating the warmup wall, not
+a solver-mode effect. (The `gpu_lock busy (CUDA graph capture in progress)`
+warning in the logs is static text fired on any failed non-blocking lock
+acquire — it does *not* prove a capture was in progress.)
 
 The retry budget WAS part of it, and the box measurement resolved it: with the
 envelope at `max_attempts:=100`, `plan()` was uniform ~2.0 ± 0.1 s per problem;
@@ -157,15 +163,58 @@ unseeded server RNG and the denser voxel/ESDF world — remain candidates for
 *why* the server's later attempts keep being explored, but they no longer cost
 the benchmark anything.)
 
-That leaves a **12x single-attempt gap**: one capped server attempt costs
-~0.67 s of `solve_time` vs native's ~0.055 s for its entire plan. That is the
-open question, and it is a per-attempt divergence, not retries. The prime
-suspects are the server's collision world (the native leg solves against the
-OBB cache; the server rasterizes obstacles to a voxel/ESDF grid the solvers
-collide against) and per-attempt graph-search/finetune cost (the node declares
-graph-budget params that add a PRM search before trajopt). On the native side,
-`curobo_benchmark core --no-cuda-graph` gives the reference's eager per-attempt
-cost for comparison.
+**Root cause of the 12x single-attempt gap (resolved).** One capped server
+attempt used to cost ~0.67 s of `solve_time` vs native's ~0.055 s for its
+entire plan. The cause is the server's obstacle representation, not retries,
+CUDA-graph replay, RTT or the seed budget: `ObstacleManager._collision_supported`
+converted every sphere/cylinder/capsule obstacle into a **trimesh** (the
+conversion was originally introduced so the primitives would show up in the
+voxel-map rasterization, which only reads cuboid/mesh/voxel buckets), so the
+solvers collided the whole scene through the mesh-SDF path. The native leg's
+`get_obb_world()` keeps the very same obstacles as **OBB cuboid primitives**
+and collides them with the fast primitive-cuboid kernels — the per-iteration
+kernel cost differs by roughly the measured 12x. (Warmup-primed CUDA-graph
+replay, `max_attempts:=1` and the seed/tolerance recipe were already ruled
+out; `gpu_lock busy (CUDA graph capture in progress)` fires once at the
+warmup probe and never again while solves stay ~0.68 s.)
+
+The fix: `obstacle_collision_mode:=cuboid` (new default) converts
+sphere/cylinder/capsule to OBB cuboids via `get_cuboid()` — the exact same
+approximation native's `create_obb_world()` uses — for every solver-bound /
+rasterized scene. The voxel map still shows the obstacles (as boxes), so the
+original motivation for the mesh conversion holds without the mesh cost.
+`obstacle_collision_mode:=mesh` restores the
+legacy exact-trimesh geometry (`CUROBO_COLLISION_MODE=mesh` in compose) and
+brings the ~12x per-attempt cost back, for deployments that need it.
+
+**Second root cause: the solver's collision cache padding (resolved).** With
+the mesh path gone, one capped server attempt still cost ~0.40 s vs native's
+~0.055 s for its whole plan (~7x). The remaining difference was not geometry
+— the analytic-obstacle worlds now matched native's exactly — but the
+*capacity* the server pre-allocates per obstacle type. curobo's Warp
+collision kernels launch **one thread per (robot sphere, padded obstacle
+slot) per obstacle type** (`wp_collision_kernel.py`: `dim = b*h*n*max_n`),
+and the server's former deployment default
+`collision_cache = {cuboid: 100, mesh: 100, voxel: ...}` padded every solver
+iteration's kernel grids to 100 cuboid slots + 100 mesh slots (even with
+zero meshes registered) + 1 voxel layer — **201 threads per sphere per
+collision query** — while native's `{obb: n_cubes}` cache runs a single
+16-slot cuboid grid. That ~12.6x thread-grid inflation (empty slots
+early-return cheaply, landing at the measured ~7x) is why the server's one
+attempt stayed slow even though it collided identical geometry. The server
+now ships **32/4 defaults** (`collision_cache_cuboid` /
+`collision_cache_mesh` launch params; exceeding the capacity raises loudly,
+so deployments that need more slots raise the params instead of padding
+every plan), and the ROS
+benchmark leg additionally **sizes the server's collision cache to the
+dataset's actual per-type obstacle counts** — the same computation as native's
+`check_problems` (max over scenes of `get_obb_world().get_cache_dict()["obb"]`,
+i.e. cuboids + converted sphere/cylinder/capsule) — and disables the empty
+no-camera voxel layer (`blox=0`) via `SetCollisionCache` before the timed
+run. One synchronous solver rebuild (~25-37 s) is paid once at startup; after
+it the server runs native-equivalent kernel grids (`{obb: 16}` for the demo
+dataset, mesh off, voxel off). `curobo_benchmark ros --no-size-cache` keeps
+the padded deployment default for A/B.
 
 Two recipe divergences (now aligned) compound the per-attempt cost: the server
 node's `num_trajopt_seeds` default is **12**, triple the native reference's 4
@@ -206,11 +255,28 @@ retry/seed caps:
   finger-length further out and makes those goals unreachable);
 - `max_attempts:=1` and `collision_activation_distance:=0.0025`, with
   `num_trajopt_seeds:=4` — the reference recipe's retry budget and seed count
+  (the native core leg now also defaults to `max_attempts=1`, so both legs run
+  the identical single-attempt envelope;
+  `CUROBO_MAX_ATTEMPTS` / `--max-attempts` raise it for the cost-scaling curve)
   (back when the server defaulted to an LBFGS-only single-attempt solver, this
   envelope was what made the ROS leg pass the hard problems; the solver recipe
   itself is now common by default). `max_attempts` is plumbed from the node
   parameter (declared, default 1) into `_get_planner_config` → `plan_pose`, so
   the launch argument actually takes effect.
+- `obstacle_collision_mode:=cuboid` (default) — sphere/cylinder/capsule
+  obstacles are converted to the same OBB cuboids native's `get_obb_world()`
+  produces, instead of the legacy trimesh conversion that made the mesh-SDF
+  path ~12x slower per solver attempt (see "timing attribution" above).
+  `:=mesh` restores the exact-trimesh behaviour.
+- The ROS leg sizes the server's collision cache to the dataset before the
+  timed run (one synchronous rebuild at startup): the Warp collision kernels
+  launch one thread per (sphere, padded obstacle slot) per type, and even the
+  server's lean 32/4 defaults (`collision_cache_cuboid` /
+  `collision_cache_mesh`) pad grids larger than native's exact `{obb: n_cubes}`
+  (plus the empty no-camera voxel layer). `SetCollisionCache` sets
+  `obb=cuboids+converted` (the same count as native's `check_problems`),
+  `mesh=0` for the demo dataset, `blox=0` (no cameras — no voxel layer).
+  `curobo_benchmark ros --no-size-cache` keeps the padded default for A/B.
 
 `docker/compose_benchmark.yaml` launches the server with exactly this
 envelope, so `curobo_benchmark all` produces comparable metrics from both legs
@@ -238,11 +304,15 @@ row is read from the same
 winner's `PlanningStats.considered` row, so the same
 `result.solve_time` the native leg records rides out of the server.
 
-Expect successful ROS runs to land in the same ballpark as the native table
-rather than bit-identical: the server's world is its voxel/trajectory pipeline
-collision cache (rasterized at `voxel_size:=0.05`) while the native leg uses
-the reference's `{obb: n_cubes}` cache, and the server process does not seed
-its RNG the way the native leg's `seed(2)` does. Residual path/motion deltas
+With `obstacle_collision_mode:=cuboid` (default) the analytic-obstacle
+geometry matches native's `{obb: n_cubes}` cache exactly — both legs convert
+sphere/cylinder/capsule obstacles to the same OBB cuboids via `get_cuboid()`
+— and the ROS leg additionally sizes the server's collision cache to the
+dataset's actual per-type counts with the (empty, no-camera) voxel layer
+disabled, so the solver kernel grids match native's too. The remaining
+difference between the two legs is RNG: the server process does not seed its
+RNG the way the native leg's `seed(2)` does, so its seed candidate selection
+can pick a different (equally valid) trajectory. Residual path/motion deltas
 are reported by the parity verdict, not hidden.
 
 Scene keys are printed at the start of each leg's run. Restrict a run with

@@ -17,23 +17,36 @@ reported with attribution rather than as a parity signal.
   native-vs-ROS delta is real solver-observed behaviour, not measurement skew.
 
 On the server (box logs `[plan-perf]`:
-`setup ~1 ms`, `world refresh ~0 ms`, so the whole wall is inside `plan()`), the
-ROS leg's solve_time tracks its wall (~2 s per problem) rather than native's
-~0.06 s — and it does so identically with CUDA graphs on and off (the
-`use_cuda_graph` launch toggle is honoured and self-reported in the startup
-`MotionPlanner solver envelope:` log; `plan()` stays ~2 s either way). So the
-per-request cost sits inside curobo's
-`plan_pose` retry/optimizer loop, NOT in graph capture, serialization, or RTT.
-Native (same recipe, seeded, fixed-shape worlds) exits the retry loop in a few
-calm attempts and runs ~0.06 s. Two recipe divergences compounded the server
-side and are now aligned in the reference envelope: `max_attempts` (capped at
-1 — native solves in ~1-3 attempts, so the server's extra retries were pure
-churn; `CUROBO_MAX_ATTEMPTS` raises it for the cost-scaling curve) and
-`num_trajopt_seeds` (12 vs the native recipe's 4; the envelope pins 4 via
-`CUROBO_NUM_TRAJOPT_SEEDS`). See the README "timing attribution" section: the
-cap means a plain `docker compose ... up` already reports the calm first-attempt
-cost (~0.7 s vs native ~0.055 s — the remaining per-attempt gap is the open
-question, not the retry loop).
+`setup ~1 ms`, `world refresh ~0 ms`, so the wall sits inside `plan()`), the
+ROS leg's solve_time used to track its wall (~2 s per problem) rather than
+native's ~0.06 s, identically with CUDA graphs on and off. The per-request
+cost was inside curobo's `plan_pose` retry/optimizer loop, driven by three
+server-side divergences from the native recipe, all now closed in the
+reference envelope:
+  1. `obstacle_collision_mode:=mesh` (old default) — the legacy trimesh
+     conversion sent every sphere/cylinder/capsule obstacle through the
+     mesh-SDF path, ~12x slower per solver iteration than native's OBB
+     `get_obb_world()` geometries (fixed: default `cuboid`);
+  2. `max_attempts` (both legs now run capped at 1 by default — native solves
+     in ~1-3 attempts, so the server's extra retries were pure churn;
+     `CUROBO_MAX_ATTEMPTS` for the server / `--max-attempts` for the native
+     leg raise the budget for the cost-scaling curve) and `num_trajopt_seeds`
+     (12 vs the native recipe's 4; the envelope pins 4 via
+     `CUROBO_NUM_TRAJOPT_SEEDS`) — the retry loop contributed
+     ~1.35 s/request;
+  3. the collision cache: curobo's Warp kernels launch one thread per (sphere,
+     padded obstacle slot) per obstacle type, and the server's (former)
+     deployment default `{cuboid: 100, mesh: 100, voxel: ...}` padded grids
+     that native's `{obb: n_cubes}` (16-cuboid demo) never had — ~7x of the
+     remaining single-attempt cost. The server now ships 32/4 defaults
+     (`collision_cache_cuboid` / `collision_cache_mesh` launch params), and
+     the ROS leg sizes the cache to the dataset's actual per-type counts and
+     disables the (empty, no-camera) voxel layer via `SetCollisionCache`
+     before the timed run (`--no-size-cache` keeps the padded behaviour for
+     A/B).
+Both legs now solve the same problems with the same OBB geometry, seed
+budget, retry cap and kernel grids; see the README "timing attribution"
+section.
 
 Result entries (both legs) look like::
 
@@ -372,9 +385,11 @@ def compare(
         ),
         # Solver-reported solve times are curobo's accumulated plan_pose
         # retry-loop optimizer time on BOTH legs (see the module docstring):
-        # on the server the per-request reload/retry work is charged inside
-        # them, so they track the ROS wall; natively they reflect a single
-        # calm attempt.
+        # the ROS leg sizes the server's collision cache to the dataset
+        # (native-equivalent kernel grids) and the envelope caps
+        # max_attempts:=1, so both legs' solve_time reflects the same single
+        # calm-attempt, same-geometry optimizer cost and should track each
+        # other (and the ROS wall - solve ≈ plan() ≈ wall on the server).
         "avg_solve_time_core": _mean(
             [core_by_name[n].get("solve_time_s") for n in common]
         ),
@@ -614,9 +629,10 @@ def print_report(
         print(
             "note: both legs solved 0 problems on this run "
             f"(scenes: {scene_txt}).",
-            "Both legs run the same particle+LBFGS solver recipe (the server's",
-            "default since the parity envelope; native unlimited retries, ROS",
-            "max_attempts=1). A 0/0 outcome means that solver envelope could",
+            "Both legs run the same particle+LBFGS solver recipe capped at",
+            "max_attempts=1 by default (the parity envelope;",
+            "CUROBO_MAX_ATTEMPTS / --max-attempts raise the budget). A 0/0",
+            "outcome means that solver envelope could",
             "not crack these scenes on this box. Path/motion cells are empty "
             "and the parity",
             "deltas are vacuous on an all-failed run.",
@@ -656,10 +672,13 @@ def print_report(
         note = (
             "solver-reported (curobo's accumulated plan_pose retry-loop "
             "optimizer time on both legs). The reference envelope caps the "
-            "server at max_attempts:=1 (CUROBO_MAX_ATTEMPTS to raise), yet one "
-            "server attempt still costs ~0.7 s vs native's ~0.055 s (see the "
-            "README timing-attribution section), so ros solve tracks the ros "
-            "wall; native's is a single calm attempt"
+            "server at max_attempts:=1 (CUROBO_MAX_ATTEMPTS to raise) and the "
+            "ROS leg sizes the server's collision cache to the dataset's "
+            "actual obstacle counts with the voxel layer off before the timed "
+            "run, so one server attempt runs native-equivalent solver kernels "
+            "(see the README timing-attribution section); ros solve tracks "
+            "the ros wall (server solve ≈ plan()) and reads the same field as "
+            "native's calm-attempt solve time"
         )
         if tracks is not None:
             note += (

@@ -38,7 +38,11 @@ from rclpy.node import Node
 from sensor_msgs.msg import JointState as RosJointState
 
 from isaac_ros_cumotion_interfaces.msg import Goalset, PlanningOptions, TrajectoryGoal
-from isaac_ros_cumotion_interfaces.srv import AddObject, TrajectoryGeneration
+from isaac_ros_cumotion_interfaces.srv import (
+    AddObject,
+    SetCollisionCache,
+    TrajectoryGeneration,
+)
 from std_srvs.srv import Trigger
 
 from .compare import (
@@ -48,7 +52,7 @@ from .compare import (
     winner_solve_time,
 )
 from .obstacle_convert import obstacles_dict_to_add_requests
-from .problems import filter_scenes, load_problems
+from .problems import collision_cache_sizes, filter_scenes, load_problems
 
 # Franka active (cspace) joints, in cuRobo order — matches the robot YAML's
 # cspace.joint_names (fingers are locked by the robot config, not sent).
@@ -62,6 +66,7 @@ SERVER_NODE = "unified_planner"
 GENERATE_TRAJECTORY_SRV = f"{SERVER_NODE}/generate_trajectory"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
+SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 
 
 class RosBenchmarkRunner(Node):
@@ -73,11 +78,15 @@ class RosBenchmarkRunner(Node):
         )
         self._add_client = self.create_client(AddObject, ADD_OBJECT_SRV)
         self._clear_client = self.create_client(Trigger, REMOVE_ALL_OBJECTS_SRV)
+        self._cache_client = self.create_client(
+            SetCollisionCache, SET_COLLISION_CACHE_SRV
+        )
 
         for label, client in (
             ("generate_trajectory", self._traj_client),
             ("add_object", self._add_client),
             ("remove_all_objects", self._clear_client),
+            ("set_collision_cache", self._cache_client),
         ):
             if not client.wait_for_service(timeout_sec=service_timeout):
                 self.get_logger().error(f"{label} service not available")
@@ -96,6 +105,52 @@ class RosBenchmarkRunner(Node):
                 f"{client.srv_name}: service call failed (timeout={timeout}s)"
             )
         return future.result()
+
+    # ------------------------------------------------------------------
+    # collision cache
+    # ------------------------------------------------------------------
+
+    def size_collision_cache(self, problems, timeout: float = 120.0) -> None:
+        """Size the server's collision cache to the dataset (native parity).
+
+        curobo's Warp collision kernels launch one thread per (robot sphere,
+        padded obstacle slot) per obstacle *type*, so an over-padded cache —
+        the server's former deployment default
+        ``{cuboid: 100, mesh: 100, voxel: ...}`` (the launch defaults are now
+        32/4 via ``collision_cache_cuboid`` / ``collision_cache_mesh``) —
+        makes every solver iteration run a far larger kernel grid than the
+        native leg's ``{obb: n_cubes}`` cache — the residual ~7x
+        single-attempt solve gap after the
+        ``obstacle_collision_mode:=cuboid`` fix. Sizing the cache to
+        the dataset's actual per-type counts (the same computation as the
+        native leg's ``check_problems``) and disabling the empty no-camera
+        voxel layer makes both legs collide through native-equivalent kernel
+        grids.
+
+        One synchronous solver rebuild (~25-37 s, inside the service call) is
+        paid here, once, before the warmup probe — after it the sized kernels
+        are live for the whole timed run. ``--no-size-cache`` on the CLI skips
+        this to reproduce the padded (slow) behaviour.
+        """
+        cuboid_slots, mesh_slots = collision_cache_sizes(problems)
+        request = SetCollisionCache.Request()
+        request.obb = cuboid_slots
+        request.mesh = mesh_slots
+        request.blox = 0  # no cameras in the benchmark: disable the voxel layer
+        self.get_logger().info(
+            f"Sizing solver collision cache to dataset needs "
+            f"(obb={request.obb}, mesh={request.mesh}, blox={request.blox}) — "
+            f"one synchronous solver rebuild, then native-sized kernel grids"
+        )
+        response = self._call(self._cache_client, request, timeout)
+        if not response.success:
+            raise RuntimeError(
+                f"set_collision_cache failed: {getattr(response, 'message', '')}"
+            )
+        self.get_logger().info(
+            f"Collision cache set: obb={response.obb_cache}, "
+            f"mesh={response.mesh_cache}, blox={response.blox_cache}"
+        )
 
     # ------------------------------------------------------------------
     # world management
@@ -262,6 +317,7 @@ def run_ros(
     service_timeout: float = 30.0,
     call_timeout: float = 120.0,
     warmup_probe: bool = True,
+    size_collision_cache: bool = True,
 ) -> List[Dict[str, Any]]:
     """Run the ROS-wrapped leg over a robometrics dataset.
 
@@ -269,6 +325,14 @@ def run_ros(
     (``None`` = all scenes). One warmup probe (first valid problem, result
     discarded) is sent before the timed run so CUDA-graph warmup / first-solve
     JIT on the server does not skew (or stall) the measurements.
+
+    ``size_collision_cache`` (default True) first resizes the server's
+    collision cache to the dataset's actual per-type obstacle counts and
+    disables the (empty, no-camera) voxel layer — the native leg runs with a
+    ``{obb: n_cubes}`` cache, and the server's oversized deployment default
+    would otherwise inflate every solver iteration's Warp collision kernel
+    grid ~7x (see ``size_collision_cache`` and the README). Pass False to
+    reproduce the padded behaviour for A/B diagnosis.
     """
     rclpy.init()
     node: Optional[RosBenchmarkRunner] = None
@@ -280,6 +344,14 @@ def run_ros(
         node.get_logger().info(
             f"ROS leg dataset={dataset} scenes: {', '.join(sorted(problems))}"
         )
+
+        if size_collision_cache:
+            node.size_collision_cache(problems, timeout=call_timeout)
+        else:
+            node.get_logger().warn(
+                "size_collision_cache=False: leaving the server's default "
+                "collision cache in place (padded kernel grids — diagnostic)"
+            )
 
         ready_problems = [
             (scene_key, i, p)

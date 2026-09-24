@@ -98,6 +98,7 @@ def cmd_ros(args) -> int:
         scene=args.scene,
         service_timeout=args.service_timeout,
         call_timeout=args.call_timeout,
+        size_collision_cache=not args.no_size_cache,
     )
     if args.output:
         _dump(results, args.output)
@@ -155,6 +156,7 @@ def cmd_all(args) -> int:
         scene=args.scene,
         service_timeout=args.service_timeout,
         call_timeout=args.call_timeout,
+        size_collision_cache=not args.no_size_cache,
     )
     ros_path = _sidecar(args.output, "ros")
     if ros_path:
@@ -209,6 +211,13 @@ def build_parser() -> argparse.ArgumentParser:
                        help="seconds to wait for the planner services")
     p_ros.add_argument("--call-timeout", type=float, default=120.0,
                        help="seconds per generate_trajectory call")
+    p_ros.add_argument("--no-size-cache", action="store_true",
+                       help="DIAGNOSTIC: leave the server's default collision "
+                            "cache (cuboid=32, mesh=4 + voxel) in place instead "
+                            "of sizing it to the dataset (the residual "
+                            "padding inflates per-attempt solve vs native's "
+                            "exact {obb: n_cubes} — A/B with the default "
+                            "sized cache)")
     p_ros.add_argument("--output", "-o", default=None)
     p_ros.set_defaults(func=cmd_ros)
 
@@ -227,6 +236,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--warmup-iters", type=int, default=3)
     p_all.add_argument("--service-timeout", type=float, default=30.0)
     p_all.add_argument("--call-timeout", type=float, default=120.0)
+    p_all.add_argument("--no-size-cache", action="store_true",
+                       help="DIAGNOSTIC: leave the server's default collision "
+                            "cache in place (see `ros --no-size-cache`)")
     _add_compare_opts(p_all)
     p_all.add_argument("--output", "-o", default=None)
     p_all.set_defaults(func=cmd_all)
@@ -254,8 +266,12 @@ def _add_solver_opts(parser) -> None:
                         help="IK seeds (curobo reference benchmark default: 32)")
     parser.add_argument("--num-trajopt-seeds", type=int, default=4,
                         help="trajopt seeds (reference default: 4)")
-    parser.add_argument("--max-attempts", type=int, default=100,
-                        help="plan_pose retry budget (reference default: 100)")
+    parser.add_argument("--max-attempts", type=int, default=1,
+                        help="plan_pose retry budget per problem (default 1 = the "
+                             "server's max_attempts:=1 cap, so both legs run the "
+                             "same single-attempt envelope; raise to reproduce the "
+                             "upstream reference's 100 and the retry-loop cost "
+                             "curve)")
     parser.add_argument("--mesh", action="store_true",
                         help="convert obstacles to meshes instead of OBBs "
                              "(reference --mesh; default: OBB worlds)")

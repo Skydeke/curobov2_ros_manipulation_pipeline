@@ -6,6 +6,7 @@ import pytest
 
 from isaac_ros_cumotion_extra.benchmark.problems import (
     DATASET_NAMES,
+    collision_cache_sizes,
     filter_scenes,
     load_problems,
 )
@@ -33,6 +34,68 @@ class TestFilterScenes:
         problems = {'a': [1], 'b': [2]}
         with pytest.raises(ValueError, match="Available scenes: a, b"):
             filter_scenes(problems, 'nope')
+
+
+class TestCollisionCacheSizes:
+    """Solver collision-cache sizing (pure function, no robometrics needed)."""
+
+    def _problem(self, obstacles):
+        return [{"start": [], "goal_pose": {}, "obstacles": obstacles}]
+
+    def test_empty_dataset(self):
+        assert collision_cache_sizes({}) == (1, 0)
+        assert collision_cache_sizes({"a": []}) == (1, 0)
+
+    def test_cuboids_only(self):
+        problems = {
+            "s1": self._problem({"cuboid": {"c1": {}, "c2": {}}}),
+            "s2": self._problem({"cuboid": {"c1": {}}}),
+        }
+        assert collision_cache_sizes(problems) == (2, 0)
+
+    def test_converted_prims_count_as_cuboids(self):
+        # cuboid mode (default) routes sphere/cylinder/capsule to the cuboid
+        # bucket via get_cuboid(); mesh mode routes them to the mesh bucket,
+        # so the sizing must include them in BOTH buckets.
+        problems = {
+            "s1": self._problem(
+                {
+                    "cuboid": {"c1": {}},
+                    "sphere": {"s1": {}},
+                    "capsule": {"cap1": {}},
+                    "cylinder": {"cyl1": {}},
+                }
+            )
+        }
+        assert collision_cache_sizes(problems) == (4, 3)
+
+    def test_max_across_scenes_and_problems(self):
+        problems = {
+            "s1": self._problem({"cuboid": {"c1": {}, "c2": {}}})
+            + self._problem({"cuboid": {"c1": {}}}),
+            "s2": self._problem({"cuboid": {"c1": {}, "c2": {}, "c3": {}}}),
+        }
+        assert collision_cache_sizes(problems) == (3, 0)
+
+    def test_meshes_stay_in_mesh_bucket(self):
+        problems = {
+            "s1": self._problem(
+                {"cuboid": {"c1": {}}, "mesh": {"m1": {}, "m2": {}}}
+            )
+        }
+        assert collision_cache_sizes(problems) == (1, 2)
+
+    def test_meshes_and_converted(self):
+        problems = {
+            "s1": self._problem(
+                {
+                    "mesh": {"m1": {}},
+                    "cylinder": {"cyl1": {}},
+                    "capsule": {"cap1": {}},
+                }
+            )
+        }
+        assert collision_cache_sizes(problems) == (2, 3)
 
 
 class TestProblemShape:
