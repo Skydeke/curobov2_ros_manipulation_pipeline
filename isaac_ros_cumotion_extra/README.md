@@ -1,6 +1,17 @@
 # isaac_ros_cumotion_extra
 
-Extra tools for isaac_ros_cumotion: ESDF/Viser visualizer and cuRobo config generator.
+Extra tools for isaac_ros_cumotion: the **cuRobo benchmarks reproduction**
+(`curobo_benchmark` — replays the reference-page benchmarks natively and
+through the ROS-wrapped planner; the main content of this README), ESDF/Viser
+visualization nodes, and the cuRobo robot-config generator.
+
+## Contents
+
+- [CLI: `build_curobo_config`](#cli-build_curobo_config) — cuRobo robot-config generator from a URDF
+- [Viser nodes](#viser-nodes) — interactive FK/IK/MP/MPC visualization nodes
+- [cuRobo benchmarks reproduction: `curobo_benchmark`](#curobo-benchmarks-reproduction-curobo_benchmark) — the reference-page benchmark, native + ROS legs (primary)
+  - [One-shot reproduction (`docker compose`)](#one-shot-reproduction-docker-compose) — the full page in one command
+- [IK and kinematics & collision parity legs](#ik-and-kinematics--collision-parity-legs) — the page's other two benchmark families
 
 ## CLI: `build_curobo_config`
 
@@ -68,7 +79,7 @@ ros2 launch isaac_ros_cumotion_extra getting_started_viser.launch.py \
 
 Leave `nodes` empty to start all eight demo nodes (each on its own viser port).
 
-## Planner parity benchmark: `curobo_benchmark`
+## cuRobo benchmarks reproduction: `curobo_benchmark`
 
 Re-created replacement for the deleted `isaac_ros_cumotion_benchmark` package.
 It runs **curobo_core's native planning benchmark** (the same solver/machinery
@@ -80,6 +91,26 @@ verified to preserve planning outcomes.
 
 Problems come from the same robometrics datasets the upstream
 `motion_plan_benchmark` uses (`demo`, `motion_benchmaker`, `mpinets`).
+
+### One-shot reproduction (`docker compose`)
+
+The primary reproduction is one command: the compose brings up the server with
+the reference solver envelope and runs the page's suites in order (motion
+generation → IK → kinematics & collision), each **native + ROS**, then prints
+ALL results again in the page's order — no leg is ever skipped.
+
+```bash
+docker compose -f docker/compose_benchmark.yaml up
+# CUROBO_RUN_PARITY=1 additionally runs the compare-verdict suite (all/ik/cost).
+```
+
+Motion figures use the full ~2600-problem `full` dataset at the page's
+100-attempt budget (`CUROBO_MAX_ATTEMPTS` — one knob for both legs; the runner
+re-pins the server's plan-time `max_attempts` before each motion leg and
+switches the server's torque mode at runtime, so one plain launch fills both
+motion ROS rows). `CUROBO_DATASET=demo` / `--max-attempts 1` is a fast smoke
+pass. Result JSONs: `/tmp/benchmark_webpage.*.json`. The full CLI and the
+deep-dive (solver envelope, timing attribution, honest receipt) follow below.
 
 The **native leg reproduces the reference benchmark**: it reuses the upstream
 machinery read-only (`check_problems` / `load_curobo` from
@@ -446,18 +477,10 @@ export PYTHONPATH=/root/ros2_ws/src/isaac_ros_cumotion_extra:$PYTHONPATH
 python3 -m isaac_ros_cumotion_extra.benchmark.run all --dataset demo
 ```
 
-One-shot compose (server + webpage-ordered reproduction, no rebuild needed):
+Inspect a result JSON inside the compose network (the benchmark service writes
+them to the shared `/tmp`):
 
 ```bash
-# Runs the page's suites in order (motion generation -> IK -> kinematics &
-# collision), each native + ROS, then prints ALL results again (webpage order,
-# both legs). Motion figures use the full 2600-problem dataset at the upstream
-# 100-attempt budget; JSONs: /tmp/benchmark_webpage.*.json. The runner
-# switches the server's torque mode at runtime, so BOTH motion ROS rows
-# (without / with torque limits) are filled by this single plain launch —
-# nothing is skipped.
-docker compose -f docker/compose_benchmark.yaml up
-# Add CUROBO_RUN_PARITY=1 to also run the compare-verdict suite (all/ik/cost).
 docker compose -f docker/compose_benchmark.yaml exec curobo_benchmark \
   cat /tmp/benchmark_webpage.motion-plain-core.json
 ```
@@ -563,7 +586,7 @@ Module layout (`isaac_ros_cumotion_extra/benchmark/`):
 | `ros_runner.py` | ROS leg: `generate_trajectory` + `add_object`/`remove_all_objects` |
 | `obstacle_convert.py` | cuRobo obstacle dicts -> AddObject payloads (pure Python) |
 | `compare.py` | parity report (success/path/motion/waypoints; time informational) |
-| `run.py` | `curobo_benchmark` CLI (`core`/`ros`/`compare`/`all`) |
+| `run.py` | `curobo_benchmark` CLI (`core`/`ros`/`webpage`/`reference`/`all`/`compare`, `ik`/`ik-core`/`ik-ros`, `cost`/`cost-core`/`cost-ros`) |
 
 Pure-Python tests live in `benchmark/tests/` and run without curobo/torch/ROS
 (robometrics-gated tests skip when robometrics is absent).

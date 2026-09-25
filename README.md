@@ -24,7 +24,7 @@ depth-to-ESDF mapping, robot segmentation, and trajectory optimization.
 | `curobo_core` | cuRobo v2 library (vendored) |
 | `isaac_ros_cumotion_interfaces` | ROS actions/services/messages |
 | `isaac_ros_cumotion` | The unified node `curobo_trajectory_planner` and supporting services |
-| `isaac_ros_cumotion_extra` | Viser/visualization nodes and tools (e.g. `build_curobo_config`) |
+| `isaac_ros_cumotion_extra` | Viser/visualization nodes, the `build_curobo_config` robot-config generator, and the cuRobo benchmarks reproduction (`curobo_benchmark`) |
 | `isaac_ros_cumotion_moveit` | MoveIt 2 planning plugin |
 | `isaac_ros_cumotion_rviz` | RViz plugin and visualizations |
 
@@ -79,10 +79,43 @@ Pull the freshest pipeline image first (`pull`), then start the session (`up`).
 Requires the NVIDIA container runtime, X11 forwarding via `xhost +local:root`,
 and a working `ROS_DOMAIN_ID`/`DISPLAY`.
 
+## Benchmarks
+
+The fork reproduces the [cuRobo benchmarks
+page](https://nvlabs.github.io/curobo/latest/reference/benchmarks.html) —
+motion generation (with and without torque limits), inverse kinematics, and
+kinematics & collision — running every problem **twice**: through curobo_core
+natively and through the ROS-wrapped planner (`/unified_planner/...`), then
+printing all metrics and a parity verdict. Neither leg is ever skipped.
+
+```bash
+# One command: server + full reproduction (details in
+# isaac_ros_cumotion_extra/README.md, "cuRobo benchmarks reproduction").
+docker compose -f docker/compose_benchmark.yaml up
+# CUROBO_RUN_PARITY=1 additionally runs the compare-verdict suite (all/ik/cost).
+```
+
+- Runs the page's ~2600-problem `full` dataset (motion_benchmaker + mpinets)
+  at the page's 100-attempt budget by default — `CUROBO_MAX_ATTEMPTS` is one
+  knob for both legs (the runner pins the server's plan-time `max_attempts`
+  to the run's budget before each motion leg).
+- Prints all results in the page's order under a final `ALL RESULTS` banner;
+  JSONs land in `/tmp/benchmark_webpage.*.json`.
+- Envelope knobs: `CUROBO_MAX_ATTEMPTS`, `CUROBO_LOAD_DYNAMICS` /
+  `CUROBO_PAYLOAD_MASS` (torque limits), `CUROBO_DATASET`,
+  `CUROBO_NUM_TRAJOPT_SEEDS`, `CUROBO_USE_CUDA_GRAPH`,
+  `CUROBO_COLLISION_MODE`.
+- Pure-Python benchmark tests: `docker compose -f docker/compose_tests.yaml up`.
+
 ## Documentation
 
-- `isaac_ros_cumotion/docs/` — user guide (concepts, getting started, tutorials)
-  and `MIGRATION_V2.md` for the v1 → v2 transition.
+- `isaac_ros_cumotion/docs/` — user guide (concepts, getting started,
+  tutorials) and `MIGRATION_V2.md` for the v1 → v2 transition; the tunable
+  node parameters (including the plan-time `max_attempts` the benchmark
+  re-pins) are in `docs/concepts/parameters.md`.
+- `isaac_ros_cumotion_extra/README.md` — the cuRobo benchmarks reproduction in
+  depth: one-shot compose run, the full `curobo_benchmark` CLI, solver
+  envelope, timing attribution, and the honest receipt.
 
 ## Acknowledgements
 
@@ -95,7 +128,7 @@ This project builds on the work of:
 - **[curobo_ros](https://github.com/Lab-CORO/curobo_ros)** — the ROS wrapping of
   cuRobo that much of this repository's ROS-side integration is derived from.
 - **[MoveIt Task Constructor](https://github.com/moveit/moveit_task_constructor)
-  (PickNik Robotics)** — the stage/container architecture used by this repo's
+  ** — the stage/container architecture used by this repo's
   task constructor (`curobo_task_constructor/`): generators/propagators/
   connectors, serial/alternatives/fallbacks/independent containers,
   interface-adjacency validation, and the plan/rank/execute lifecycle all
