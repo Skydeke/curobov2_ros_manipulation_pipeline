@@ -66,24 +66,36 @@ class IKServices:
         node.create_service(IkBatch, f"{name}/ik_batch", self._ik_batch_callback)
 
         node.get_logger().info(
-            "IKServices registered (not yet initialized - call warmup_ik)"
+            "IKServices registered (solver allocated by the startup warmup, or "
+            "on demand via /warmup_ik when warmup_ik:=false)"
         )
 
     # ------------------------------------------------------------------
     # Warmup
     # ------------------------------------------------------------------
 
+    def warmup(self, batch_size: int, num_seeds: int | None = None) -> str:
+        """Build (or rebuild) the IK solver for the given batch size/seeds.
+
+        Returns the message the ``/warmup_ik`` service reports. Shared with the
+        node's startup default warmup (``unified_planner_node``) so both paths
+        take the same ``gpu_lock`` discipline around the CUDA work. Re-invoking
+        with a different batch size re-initializes the solver and resets the
+        batch the client asked for.
+        """
+        batch_size = max(1, int(batch_size))
+        # Solver construction + warmup run CUDA kernels (solve for a batch
+        # of random configs) — must not race a CUDA graph capture.
+        with self._gpu_guard():
+            self._init(batch_size, num_seeds=num_seeds)
+        return f"IK solver ready (batch_size={batch_size})"
+
     def _warmup_ik_callback(
         self, request: WarmupIK.Request, response: WarmupIK.Response
     ):
-        batch_size = max(1, request.batch_size)
         try:
-            # Solver construction + warmup run CUDA kernels (solve for a batch
-            # of random configs) — must not race a CUDA graph capture.
-            with self._gpu_guard():
-                self._init(batch_size)
+            response.message = self.warmup(request.batch_size)
             response.success = True
-            response.message = f"IK solver ready (batch_size={batch_size})"
         except Exception as e:
             self._node.get_logger().error(f"IK warmup failed: {e}")
             response.success = False
@@ -163,13 +175,32 @@ class IKServices:
     # World update (called by the node when obstacles change)
     # ------------------------------------------------------------------
 
-    def update_world(self):
-        """Propagate obstacle changes to the IK solver. No-op if not initialized."""
+    def update_world(self, scene=None):
+        """Propagate obstacle changes to the IK solver. No-op if not initialized.
+
+        ``scene`` is the node's already-resolved solver scene from
+        ``update_all_solvers_world`` (normalized to cuboid/mesh/voxel, and
+        possibly degraded to primitives-only). It must be passed, because that
+        method is where the two ESDF-withholding decisions live —
+
+          * ``push_esdf_to_solvers:=false`` (diagnostic: solvers see analytic
+            primitives only), and
+          * ``collision_cache['voxel'] is None`` (``SetCollisionCache blox=0``,
+            where a voxel-carrying scene would raise "Voxel cache not
+            initialized" inside the solver's update_world).
+
+        Deriving the scene from the obstacle manager here instead would ignore
+        both decisions: /ik would keep seeing camera obstacles in diagnostic
+        mode, and would raise on every world update under blox=0. The solver is
+        built WITH ``collision_cache`` (see ``_init``), so unlike
+        ``FKServices`` it can accept the voxel layer.
+        """
         if self._ik_solver is None:
             return
-        # Normalize primitives to solver-supported collision types
-        # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
-        scene = self._config.obstacle_manager.collision_world_scene()
+        if scene is None:
+            # Normalize primitives to solver-supported collision types
+            # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
+            scene = self._config.obstacle_manager.collision_world_scene()
         self._ik_solver.update_world(scene)
 
     def rebuild(self):

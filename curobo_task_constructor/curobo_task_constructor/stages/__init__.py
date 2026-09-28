@@ -7,6 +7,7 @@ never change.
 """
 
 from curobo_task_constructor.stages import (  # noqa: F401  (side-effect: registry)
+    cartesian_path,
     compute_ik,
     connect,
     current_state,

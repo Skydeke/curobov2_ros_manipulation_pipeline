@@ -22,6 +22,7 @@ depth-to-ESDF mapping, robot segmentation, and trajectory optimization.
 | Package | Purpose |
 |---|---|
 | `curobo_core` | cuRobo v2 library (vendored) |
+| `curobo_task_constructor` | Task-constructor stages and containers over the cuRobo server — see its [README](curobo_task_constructor/README.md) |
 | `isaac_ros_cumotion_interfaces` | ROS actions/services/messages |
 | `isaac_ros_cumotion` | The unified node `curobo_trajectory_planner` and supporting services |
 | `isaac_ros_cumotion_extra` | Viser/visualization nodes, the `build_curobo_config` robot-config generator, and the cuRobo benchmarks reproduction (`curobo_benchmark`) |

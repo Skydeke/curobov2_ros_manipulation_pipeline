@@ -14,7 +14,7 @@ from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.robot import GoalsetSpec
 from curobo_task_constructor.core.stage import ConnectingStage, Solution
 from curobo_task_constructor.core.state import InterfaceState
-from curobo_task_constructor.stages._util import full_request
+from curobo_task_constructor.stages._util import cost_of, full_request
 
 
 @register_stage("connect")
@@ -52,6 +52,4 @@ class Connect(ConnectingStage):
         self._emit(sol)
 
     def _cost_of(self, result) -> float:
-        if result.cost != float("inf"):
-            return float(result.cost)
-        return float(len(result.trajectory)) if result.trajectory else 0.0
+        return cost_of(result, self.params)

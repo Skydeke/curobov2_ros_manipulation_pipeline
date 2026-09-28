@@ -556,7 +556,8 @@ class TrajectoryStage(PropagatingStage):
             end = self.make_end_state(start, result, raw=result)
             if end is not None:
                 self.send_forward(start, end, trajectory=result.trajectory,
-                                  cost=self._cost_of(result), comment="",
+                                  cost=self._cost_of(result),
+                                  comment=self._comment(req, result),
                                   response=result.raw, plan_request=req)
 
     def commit_result(self, start: InterfaceState, req: PlanRequest,
@@ -568,24 +569,29 @@ class TrajectoryStage(PropagatingStage):
         end = self.make_end_state(start, result, raw=result)
         if end is not None:
             self.send_forward(start, end, trajectory=result.trajectory,
-                              cost=self._cost_of(result), comment="",
+                              cost=self._cost_of(result),
+                              comment=self._comment(req, result),
                               response=result.raw, plan_request=req)
+
+    def _comment(self, req: PlanRequest, result: PlanResult) -> str:
+        """Solution comment. Hook for stages that resolve several candidates
+        and want the winner recorded — without it a multi-candidate goalset is
+        indistinguishable from a single-pose one in the task statistics."""
+        return ""
 
     def compute(self) -> None:
         if self.prepare():
             self.solve_pending()
 
     def _cost_of(self, result: PlanResult) -> float:
-        """Ranking cost of a solve: explicit cost if populated, else the
-        (seeded) considered rows or a waypoint-count proxy."""
-        if result.cost != float("inf"):
-            return float(result.cost)
-        stats = getattr(result, "stats", None)
-        if stats is not None:
-            rows = getattr(stats, "considered", None)
-            if rows:
-                costs = [getattr(r, "cost", float("inf")) for r in rows]
-                costs = [c for c in costs if c != float("inf")]
-                if costs:
-                    return float(min(costs))
-        return float(len(result.trajectory)) if result.trajectory else 0.0
+        """Ranking cost of a solve.
+
+        Delegates to ``stages._util.cost_of`` so every motion stage ranks on
+        the same term (MTC ``cost::PathLength`` on the returned waypoints by
+        default) and a stage can select a different term through its ``cost``
+        param. Imported lazily: ``stages`` depends on ``core``, so a top-level
+        import here would be circular.
+        """
+        from curobo_task_constructor.stages._util import cost_of
+
+        return cost_of(result, self.params)

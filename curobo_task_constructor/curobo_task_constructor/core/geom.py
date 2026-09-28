@@ -22,6 +22,10 @@ class Pose3:
 
     @classmethod
     def from_any(cls, pose: Any) -> "Pose3":
+        # Idempotent: already a Pose3 -> copy. The duck-typed branch (a
+        # geometry_msgs/Pose in deployment, a _PoseStub in tests) is the rest.
+        if isinstance(pose, cls):
+            return pose.copy()
         p = pose.position
         q = pose.orientation
         return cls([float(p.x), float(p.y), float(p.z)],
@@ -66,6 +70,26 @@ def quat_multiply(a: list, b: list) -> list:
         aw * bz + ax * by - ay * bx + az * bw,
         aw * bw - ax * bx - ay * by - az * bz,
     ]
+
+
+def quat_conjugate(q: list) -> list:
+    """Conjugate (inverse, for a unit quaternion) of q=[x,y,z,w]."""
+    return [-q[0], -q[1], -q[2], q[3]]
+
+
+def quat_rotation_angle(a: list, b: list) -> float:
+    """Geodesic angle (rad) of the shortest rotation taking orientation a to b.
+
+    Used by the Cartesian axis-hold computation: an orientation axis may only
+    be HELD along a path when the start and goal orientations already agree,
+    and "agree" is a single angle rather than a per-component comparison.
+    """
+    rel = quat_multiply(quat_conjugate(a), b)
+    if rel[3] < 0.0:
+        rel = [-v for v in rel]  # q and -q are the same rotation; take w >= 0
+    vnorm = math.sqrt(rel[0] ** 2 + rel[1] ** 2 + rel[2] ** 2)
+    # w >= 0 after the flip, so the half-angle is in [0, pi/2] and sin is safe.
+    return 2.0 * math.asin(min(1.0, vnorm))
 
 
 def pose_translate(pose: Pose3, delta: list) -> Pose3:

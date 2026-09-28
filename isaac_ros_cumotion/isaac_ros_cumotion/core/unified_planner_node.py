@@ -385,6 +385,29 @@ class UnifiedPlannerNode(Node):
         # into solver buffers / the CUDA graph at build time (same caveat as
         # num_trajopt_seeds). Read by ConfigWrapperMotion and IKServices.
         self.declare_parameter('num_ik_seeds', 32)
+        # --- default kinematics warmup (IK solver + FK model) ---
+        # IKServices/FKServices register their services in their constructors and
+        # build nothing, so /ik, /ik_batch, /fk and /fk_batch all answer
+        # "not initialized" (and return an empty success=false) until somebody
+        # calls /warmup_ik or /warmup_fk. That pushed the warm-up obligation
+        # onto every client, and a client that forgot simply got silently
+        # useless kinematics — the task constructor's cartesian_path stage was
+        # the one that tripped over it, failing every straight-line segment with
+        # "fk failed: ''" while the trajectory stages planned fine.
+        #
+        # Both default ON so a plain `ros2 launch` gives a server whose
+        # kinematics services answer. IK is the expensive build; set
+        # `warmup_ik:=false` to skip it and keep the on-demand path (a client
+        # that needs IK must then call /warmup_ik itself, and a client that
+        # needs a batch size other than warmup_ik_batch_size must still call
+        # /warmup_ik — the later call re-initializes the solver).
+        self.declare_parameter('warmup_ik', True)
+        self.declare_parameter('warmup_ik_batch_size', 1)
+        # FK is cheap (one Kinematics + a warmup batch of random configs).
+        self.declare_parameter('warmup_fk', True)
+        # Batch size for the FK warmup batch. Only compiles the kernels for that
+        # batch shape — _compute_poses accepts any batch at call time.
+        self.declare_parameter('warmup_fk_batch_size', 1)
         # PRM graph-planner search budget for the first plan attempt
         # (enable_graph_attempt): nodes sampled per iteration x path-finding
         # iterations, capped by max_nodes. There is NO per-plan "seed count" in
@@ -576,6 +599,10 @@ class UnifiedPlannerNode(Node):
 
         initial_planner = self.get_parameter('planner_type').get_parameter_value().string_value
         self._warmup_initial_planner(initial_planner)
+        # The planner has its own internal IK, but /ik, /ik_batch, /fk and
+        # /fk_batch allocate their own models and are dead until warmed. Warm
+        # them by default so a client never has to know to ask.
+        self._warmup_kinematics_services()
         self.planner_manager.set_current_planner(initial_planner)
         # Startup warms exactly one solver, so it is already the sole graph
         # owner — record it so the first plan reuses that warmup graph instead
@@ -657,6 +684,56 @@ class UnifiedPlannerNode(Node):
     # ------------------------------------------------------------------
     # Warmup
     # ------------------------------------------------------------------
+
+    def _warmup_kinematics_services(self):
+        """Build the standalone IK solver and FK model during startup.
+
+        Both are lazy by design (IKServices/FKServices only allocate on an
+        explicit warm-up call) so a node that never uses those services does not
+        pay for them. The default flips that: the planner itself has its own IK,
+        but /ik, /ik_batch, /fk and /fk_batch are separately allocated, and any
+        client that reaches for them without warming first gets a silent failure
+        rather than an error. Warming here makes the services usable from the
+        moment the node is up, and leaves the /warmup_* services for the one
+        thing they are still needed for: changing the batch size later.
+
+        Each build is independent and failure-isolated: if the IK solver cannot
+        be built the node still comes up (and still logs that /ik is
+        unavailable), because a failed kinematics warm-up must not take the
+        planner down with it.
+        """
+        if self.get_parameter('warmup_ik').get_parameter_value().bool_value:
+            batch = max(1, int(self.get_parameter(
+                'warmup_ik_batch_size').get_parameter_value().integer_value))
+            self.get_logger().info(
+                f"Warming up standalone IK solver (batch_size={batch})...")
+            try:
+                self.ik_services.warmup(batch)
+                self.get_logger().info("  -> IK solver ready")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(
+                    f"Startup IK warmup failed: {e}. /ik and /ik_batch will "
+                    "report 'not initialized' until /warmup_ik succeeds.")
+        else:
+            self.get_logger().info(
+                "Skipping IK warmup (warmup_ik:=false); call "
+                f"{self.get_name()}/warmup_ik before /ik")
+
+        if self.get_parameter('warmup_fk').get_parameter_value().bool_value:
+            batch = max(1, int(self.get_parameter(
+                'warmup_fk_batch_size').get_parameter_value().integer_value))
+            self.get_logger().info(f"Warming up FK model (batch_size={batch})...")
+            try:
+                self.fk_services.warmup(batch)
+                self.get_logger().info("  -> FK model ready")
+            except Exception as e:  # noqa: BLE001
+                self.get_logger().error(
+                    f"Startup FK warmup failed: {e}. /fk and /fk_batch will "
+                    "report 'not initialized' until /warmup_fk succeeds.")
+        else:
+            self.get_logger().info(
+                "Skipping FK warmup (warmup_fk:=false); call "
+                f"{self.get_name()}/warmup_fk before /fk")
 
     def _warmup_initial_planner(self, planner_type: str):
         self.get_logger().info(f"Warming up {planner_type} planner...")
@@ -773,7 +850,12 @@ class UnifiedPlannerNode(Node):
             if self.retargeter is not None:
                 self.planner_manager.get_planner('retarget').update_world(scene)
 
-            self.ik_services.update_world()
+            # Both services take the scene we just resolved — they must not
+            # re-derive it from the obstacle manager, or the two degradation
+            # paths above silently do not apply to them. fk_services ignores
+            # the voxel layer by construction (its checker has no voxel cache,
+            # see FKServices.update_world).
+            self.ik_services.update_world(scene)
             self.fk_services.update_world()
 
             # Every update_world above clears + re-adds all obstacles with enable=1,

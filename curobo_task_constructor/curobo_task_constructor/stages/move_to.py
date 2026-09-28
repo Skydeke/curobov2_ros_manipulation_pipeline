@@ -10,10 +10,10 @@ backward (read an already-known end, plan the motion to it, emit the start).
 from __future__ import annotations
 
 from curobo_task_constructor.core.registry import register_stage
-from curobo_task_constructor.core.robot import GoalsetSpec
 from curobo_task_constructor.core.stage import PropagatingEitherWay
 from curobo_task_constructor.core.state import InterfaceState
 from curobo_task_constructor.stages._util import (
+    cost_of,
     full_request,
     goalset_for_scene,
     pose_from_params,
@@ -39,9 +39,23 @@ class MoveTo(PropagatingEitherWay):
             cfg = self.robot.get_named_joint_config(goal["name"])
             return self._merge_named(cfg, names, start.joint_state)
         joints = goal.get("joints")
+        if isinstance(joints, dict):
+            # Sparse name -> position, merged onto the start state: the
+            # "close the fingers without moving the arm" goal. Same semantics
+            # as a partial named config, but it does not require the robot
+            # descriptor to carry an entry per gripper value.
+            return self._merge_sparse(joints, names, start.joint_state)
         if joints is not None:
             return [float(j) for j in joints]
         return None
+
+    @staticmethod
+    def _merge_sparse(values: dict, names, start_joint_state) -> list:
+        base = dict(zip(getattr(start_joint_state, "name", []),
+                        getattr(start_joint_state, "position", [])))
+        base.update({k: float(v) for k, v in values.items()})
+        order = list(names or base.keys())
+        return [base[n] for n in order if n in base]
 
     def _merge_named(self, cfg, names, start_joint_state) -> list:
         """Named config merged onto the *start* state's joints.
@@ -64,26 +78,41 @@ class MoveTo(PropagatingEitherWay):
             return pose_from_params(goal["pose"], self.robot)
         return None
 
-    def _allowed_collisions(self, scene):
-        return scene.all_allowed_links() if scene is not None else []
+    def _goal_poses(self):
+        """Every candidate pose goal, in the order the caller listed them.
+
+        ``goal.poses`` is a LIST of pose dicts. All candidates go into ONE
+        goalset, and the server resolves the set inside a single
+        ``plan_pose()`` call (ClassicPlanner: a segment with N>1 poses becomes a
+        cuRobo goalset solve) and reports the winner via
+        ``selected_goal_index``. This is the framework's cheapest fan-out: one
+        service round-trip, one GPU batch, N IK+trajopt seeds attempted in
+        parallel, best one stitched into the solution — the direct equivalent of
+        the reference pipeline's ``ComputeIK``+``Connect`` multi-seed solve, and
+        the reason ``max_goalset`` must be > 1 on the server.
+
+        ``goal.pose`` is sugar for a one-element list.
+        """
+        goal = self.params.get("goal") or {}
+        if "poses" in goal:
+            return [pose_from_params(p, self.robot) for p in (goal["poses"] or [])]
+        single = self._goal_pose()
+        return [single] if single is not None else []
 
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
     def compute_forward(self, state: InterfaceState) -> None:
         joint_goal = self._goal_positions(state)
-        pose_goal = self._goal_pose() if joint_goal is None else None
-        if joint_goal is None and pose_goal is None:
+        pose_goals = [] if joint_goal is not None else self._goal_poses()
+        if joint_goal is None and not pose_goals:
             self._fail(state, None,
-                       "move_to goal must be one of name/joints/pose")
+                       "move_to goal must be one of name/joints/pose/poses")
             return
-        if pose_goal is not None:
-            goalset = GoalsetSpec(poses=[pose_goal],
-                                  allowed_collisions=self._allowed_collisions(state.scene))
+        if pose_goals:
+            goalset = goalset_for_scene(state.scene, poses=pose_goals)
         else:
-            goalset = GoalsetSpec(
-                target_joint_positions=joint_goal,
-                allowed_collisions=self._allowed_collisions(state.scene))
+            goalset = goalset_for_scene(state.scene, joint_positions=joint_goal)
         req = full_request(self.robot, state.joint_state, [goalset], self.params)
         try:
             result = self.robot.plan(req)
@@ -98,7 +127,7 @@ class MoveTo(PropagatingEitherWay):
             return
         end = state.clone(joint_state=result.last_state)
         self.send_forward(state, end, trajectory=result.trajectory,
-                          cost=self._cost_of(result), comment=self._comment(),
+                          cost=self._cost_of(result), comment=self._comment(result),
                           response=result.raw, plan_request=req)
 
     # ------------------------------------------------------------------
@@ -112,9 +141,10 @@ class MoveTo(PropagatingEitherWay):
         """
         req = full_request(
             self.robot, None,
-            [GoalsetSpec(target_joint_positions=list(
-                getattr(state.joint_state, "position", []) or []),
-                allowed_collisions=self._allowed_collisions(state.scene))],
+            [goalset_for_scene(
+                state.scene,
+                joint_positions=list(getattr(state.joint_state, "position", [])
+                                     or []))],
             self.params)
         try:
             result = self.robot.plan(req)
@@ -126,13 +156,19 @@ class MoveTo(PropagatingEitherWay):
             return
         start = state.clone(joint_state=result.trajectory[0])
         self.send_backward(start, state, trajectory=result.trajectory,
-                           cost=self._cost_of(result), comment=self._comment(),
+                           cost=self._cost_of(result), comment=self._comment(result),
                            response=result.raw, plan_request=req)
 
-    def _comment(self) -> str:
-        return f"move_to {self.params.get('goal', {})}"
+    def _comment(self, result=None) -> str:
+        goal = self.params.get("goal", {})
+        picked = ""
+        if result is not None and getattr(result, "selected_goal_index", None):
+            # Which candidate the server's goalset solve actually picked. This
+            # is the whole point of the fan-out, so surface it: without it a
+            # multi-candidate goalset is indistinguishable from a single one in
+            # the solution statistics.
+            picked = f" -> candidate {list(result.selected_goal_index)}"
+        return f"move_to {goal}{picked}"
 
     def _cost_of(self, result) -> float:
-        if result.cost != float("inf"):
-            return float(result.cost)
-        return float(len(result.trajectory)) if result.trajectory else 0.0
+        return cost_of(result, self.params)

@@ -89,24 +89,34 @@ class FKServices:
         node.create_service(FkBatch, f"{name}/fk_batch", self._fk_batch_callback)
 
         node.get_logger().info(
-            "FKServices registered (not yet initialized - call warmup_fk)"
+            "FKServices registered (model allocated by the startup warmup, or "
+            "on demand via /warmup_fk when warmup_fk:=false)"
         )
 
     # ------------------------------------------------------------------
     # Warmup
     # ------------------------------------------------------------------
 
+    def warmup(self, batch_size: int) -> str:
+        """Build the FK model + collision validator and run a warmup batch.
+
+        Returns the message the ``/warmup_fk`` service reports. Shared with the
+        node's startup default warmup (``unified_planner_node``) so both paths
+        take the same ``gpu_lock`` discipline around the CUDA work.
+        """
+        batch_size = max(1, int(batch_size))
+        # Model construction + warmup batch run CUDA kernels — must not race a
+        # CUDA graph capture (see _gpu_guard).
+        with self._gpu_guard():
+            self._init(batch_size)
+        return f"FK model ready (batch_size={batch_size})"
+
     def _warmup_fk_callback(
         self, request: WarmupFK.Request, response: WarmupFK.Response
     ):
-        batch_size = max(1, request.batch_size)
         try:
-            # Model construction + warmup batch run CUDA kernels — must not
-            # race a CUDA graph capture (see _gpu_guard).
-            with self._gpu_guard():
-                self._init(batch_size)
+            response.message = self.warmup(request.batch_size)
             response.success = True
-            response.message = f"FK model ready (batch_size={batch_size})"
         except Exception as e:
             self._node.get_logger().error(f"FK warmup failed: {e}")
             response.success = False
@@ -204,13 +214,44 @@ class FKServices:
 
     def update_world(self):
         """Propagate obstacle changes to the FK collision validator. No-op if
-        the validator was never initialized."""
+        the validator was never initialized.
+
+        Pushes the PRIMITIVES-ONLY scene, i.e. the same scene the checker was
+        constructed with in ``_init`` — NOT ``collision_world_scene()``.
+        ``RobotCollisionChecker`` (``curobo.RobotSceneCollision``) is the one
+        collision model with no way to pre-allocate a voxel cache:
+        ``RobotSceneCollisionCfg.load_from_config`` accepts ``n_meshes`` /
+        ``n_cuboids`` but no ``collision_cache``, so its ``VoxelData`` is
+        always ``None``. Handing it a scene that carries the perception ESDF
+        layer therefore always fails — ``DataScene.add_obstacle`` raises
+        "Voxel cache not initialized" for a ``VoxelGrid``. Because the node
+        calls this from ``refresh_perception_world()`` inside
+        ``_plan_trajectory_goal``, that raise used to abort the whole plan (it
+        surfaced as a stage error on any task that refreshed perception).
+
+        Consequence: the validator checks joint bounds, self-collision and
+        analytic scene primitives only. Camera/ESDF collision remains the
+        planners' job — they own a real cache, sized from
+        ``collision_cache['voxel']``.
+        """
         if self._collision_checker is None:
             return
         # Normalize primitives to solver-supported collision types
         # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
-        scene = self._obstacle_manager.collision_world_scene()
-        self._collision_checker.update_world(scene)
+        # (primitives_only_scene also applies the attached-object exclusion,
+        # the same one the constructor saw.)
+        scene = self._obstacle_manager.primitives_only_scene()
+        try:
+            self._collision_checker.update_world(scene)
+        except Exception as e:  # noqa: BLE001
+            # The validator is advisory — it only fills poses_valid, and
+            # _validate already reports all-True without it. Drop it rather
+            # than let a failed refresh abort the plan that triggered it.
+            self._node.get_logger().error(
+                f"FK collision validator world update failed ({e}); disabling "
+                "it — FkBatch poses_valid now reports all True"
+            )
+            self._collision_checker = None
 
     def rebuild(self):
         """Recreate the FK model after a robot-config change. No-op if the
@@ -244,12 +285,21 @@ class FKServices:
         # ESDF voxel layer is not double-counted. Synced later via update_world().
         scene = self._obstacle_manager.primitives_only_scene()
         robot_cfg_dict = self._config.config_manager.get_robot_config_dict()
+        # Size the validator's obstacle cache from the shared collision_cache so
+        # it holds exactly what the planners' does. load_from_config has no
+        # voxel-cache knob at all (see update_world), and its n_cuboids/n_meshes
+        # defaults (50/50) are unrelated to collision_cache_cuboid/mesh (32/4) —
+        # left at the defaults, a world the planners accept can overflow the
+        # validator instead, raising "Cuboid cache is full" out of update_world.
+        cache = self._obstacle_manager.collision_cache
         try:
             checker_cfg = RobotCollisionCheckerCfg.load_from_config(
                 robot_config=robot_cfg_dict,
                 scene_model=scene,
                 device_cfg=DeviceCfg(device=self._device, dtype=self._dtype),
                 collision_activation_distance=0.001,
+                n_cuboids=max(1, int(cache.get("cuboid") or 0)),
+                n_meshes=max(1, int(cache.get("mesh") or 0)),
             )
             self._collision_checker = RobotCollisionChecker(checker_cfg)
         except Exception as e:

@@ -87,9 +87,18 @@ class MockCuroboServer(RobotInterface):
                  named: Optional[dict] = None,
                  world: Optional[dict] = None,
                  n_steps: int = 5,
-                 fail_ik: bool = False):
+                 fail_ik: bool = False,
+                 bow: float = 0.0,
+                 winner_index: int = 0):
         """``current``/``named`` are joint-name->position dicts; ``world`` is
-        ``{name: [x, y, z]}`` (identity orientation)."""
+        ``{name: [x, y, z]}`` (identity orientation).
+
+        ``bow`` injects that many metres of lateral deviation at mid-path on
+        Cartesian (axis-held) goalsets, so the ``cartesian_path`` straightness
+        gate can be exercised on both the accept and the reject branch.
+        ``winner_index`` is which candidate of a multi-pose goalset the server
+        "picks" (the real server reports this through ``selected_goal_index``).
+        """
         cur = dict(current) if current else {}
         # a nondegenerate default pose outside the straight-arm singularity
         # (must be set BEFORE the zero-fill loop or it's a no-op)
@@ -113,9 +122,17 @@ class MockCuroboServer(RobotInterface):
         self.executed = []  # PlanRequests driven via execute()
         self.plan_calls = 0
         self.batch_calls = 0
+        self.fk_batch_calls = 0
+        self.last_hold: list = []  # trajectory_constraints of the last solve
+        #: One entry per goalset of every plan() call, in solve order, so a
+        #: test can assert the hold of a *particular* stage rather than only
+        #: the last one.
+        self.holds: list = []
         self.planner = None
         self.n_steps = n_steps
         self.fail_ik = fail_ik
+        self.bow = float(bow)
+        self.winner_index = int(winner_index)
 
     # ------------------------------------------------------------------
     # state
@@ -148,6 +165,12 @@ class MockCuroboServer(RobotInterface):
         xyz = fk_positions(_positions(joint_state))
         return pose_to_any(Pose3(xyz, [0.0, 0.0, 0.0, 1.0]), None)
 
+    def fk_batch(self, joint_states: list, link: Optional[str] = None) -> list:
+        # Stands in for Fk.srv's JointState[] -> Pose[] round trip; the point
+        # of the test is that the stage makes ONE call for a whole trajectory.
+        self.fk_batch_calls += 1
+        return [self.fk(js, link) for js in (joint_states or [])]
+
     def ik(self, pose, seed: Optional[dict] = None):
         if self.fail_ik:
             return None
@@ -173,9 +196,19 @@ class MockCuroboServer(RobotInterface):
             return [float(v) for v in goalset.target_joint_positions]
         poses = getattr(goalset, "poses", None)
         if poses:
-            joint = self.ik(poses[0])
+            joint = self.ik(poses[self._winner(poses)])
             return list(getattr(joint, "position", [])) if joint else None
         return None
+
+    def _winner(self, poses) -> int:
+        """Which candidate of a goalset the (simulated) server picks."""
+        return min(self.winner_index, len(poses) - 1)
+
+    def _hold_of(self, goalset) -> list:
+        """int8[6] whole-path axis holds on a goalset ([] = free)."""
+        hold = [int(c) for c in (getattr(goalset, "trajectory_constraints", None)
+                                 or [])]
+        return hold if len(hold) == 6 else []
 
     def plan(self, request: PlanRequest) -> PlanResult:
         self.plan_calls += 1
@@ -185,11 +218,50 @@ class MockCuroboServer(RobotInterface):
         a = list(getattr(start, "position", []) or [])
         result_names = names
         trajectory = [start]
+        selected: list = []
 
         def stub(pos):
             return JointStateStub(names=result_names, positions=pos)
 
         for goalset in getattr(request, "goalsets", []) or []:
+            poses = list(getattr(goalset, "poses", None) or [])
+            if poses:
+                selected.append(self._winner(poses))
+            # [theta_x, theta_y, theta_z, x, y, z] where 1 = HOLD that axis
+            # along the whole path. The positional tail therefore says which
+            # axes are pinned to the goal and which may travel. A constraint
+            # that pins nothing or pins everything is no constraint at all ->
+            # plain joint interpolation below.
+            hold = self._hold_of(goalset)
+            self.holds.append(hold)
+            self.last_hold = hold
+            held = hold[3:]
+            is_line = bool(held) and any(held) and not all(held)
+            if poses and is_line:
+                # A goalset with partial axis holds asks for a STRAIGHT line.
+                # The mock honours it the way the real server does: interpolate
+                # the tool through Cartesian space and IK each waypoint back,
+                # so held axes stay on the segment by construction. ``bow`` is
+                # applied LAST (it is the soft cost losing) so the straightness
+                # gate has a failing branch to catch.
+                p0 = fk_positions(dict(zip(names, a)))
+                p1 = _xyz(poses[self._winner(poses)])
+                seed = dict(zip(names, a))
+                n = self.n_steps
+                for k in range(1, n + 1):
+                    t = k / n
+                    p = [p1[i] if held[i] else p0[i] + (p1[i] - p0[i]) * t
+                         for i in range(3)]
+                    if self.bow:
+                        p[0] += self.bow * math.sin(math.pi * t)
+                    joint = ik_positions(p, seed)
+                    if joint is None:
+                        return PlanResult(False, "goal unreachable (ik failed)")
+                    trajectory.append(stub(
+                        [joint.get(nm, a[i]) for i, nm in enumerate(names)]))
+                a = [float(v) for v in
+                     (getattr(trajectory[-1], "position", None) or a)]
+                continue
             b = self._goal_joints(goalset)
             if b is None:
                 return PlanResult(False, "goal unreachable (ik failed)")
@@ -201,12 +273,20 @@ class MockCuroboServer(RobotInterface):
                 trajectory.append(stub(
                     [ai + (bi - ai) * t for ai, bi in zip(a, b)]))
             a = b
+        self.last_hold = self._hold_of(
+            (getattr(request, "goalsets", []) or [None])[0]) \
+            if getattr(request, "goalsets", None) else []
         return PlanResult(
             success=True,
             message="ok",
             trajectory=trajectory,
-            cost=float(len(trajectory)),
+            # inf, exactly like the rclpy adapter: the framework owns ranking
+            # and falls back to its own term (cost::PathLength). A mock that
+            # invented a cost here would silently shadow that, and a
+            # waypoint-count "cost" would make PathLength untestable.
+            cost=float("inf"),
             raw="mock-trajectory-result",
+            selected_goal_index=selected,
         )
 
     def plan_batch(self, requests: list) -> list:

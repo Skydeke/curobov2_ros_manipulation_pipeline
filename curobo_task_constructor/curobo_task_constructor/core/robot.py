@@ -116,6 +116,18 @@ class RobotInterface(ABC):
     def fk(self, joint_state: Any, link: Optional[str] = None) -> Any:
         """Forward kinematics: pose of ``link`` (default: tool tip)."""
 
+    def fk_batch(self, joint_states: list,
+                 link: Optional[str] = None) -> list:
+        """FK for several states at once, returning one pose per input.
+
+        The wire carries this natively (``Fk.srv`` takes a
+        ``JointState[]``), so the ROS adapter overrides it with a single
+        round-trip; the default loops so tests need no batch support. Used by
+        the Cartesian stage to measure a whole trajectory's straightness in one
+        call instead of one per waypoint.
+        """
+        return [self.fk(js, link) for js in (joint_states or [])]
+
     @abstractmethod
     def ik(self, pose: Any, seed: Optional[Any] = None) -> Any:
         """Inverse kinematics: joint state reaching ``pose`` or None."""
