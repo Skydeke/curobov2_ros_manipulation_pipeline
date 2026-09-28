@@ -186,6 +186,48 @@ Two behaviors to know:
 - The call is **refused while an execution goal is active** (`success: false`) — cancel the goal first.
 - On success the solvers are **rebuilt automatically** (blocking, ~20 s). Do not call `update_motion_gen_config` afterwards; the response message ends with `- solvers rebuilt (blocking, ~20s)`.
 
+## Services — robot model
+
+### `/unified_planner/set_joint_locks`
+
+Type: `curobo_msgs/srv/SetJointLocks`. Overrides the robot config's `kinematics.lock_joints` at runtime — the joints curobo pins to a fixed value and drops from the optimizable cspace.
+
+The request names the joints it changes, like the response reports the effective state:
+
+- `joint_names` (`string[]`) + `positions` (`float64[]`, parallel) — pin the named joints at those values. A joint may be one the config already locks (re-pin it) or one the config leaves in the cspace (locking it takes it out).
+- `unlock_joint_names` (`string[]`) — release joints back into the optimizable cspace.
+- `restore` (`bool`) — `true` drops the whole override and reloads the robot YAML's own `lock_joints`; the other fields are ignored.
+
+A joint in **neither** list keeps the value already in force, so one call can move a single joint (or a single value) and leave the rest of the model alone, and successive calls compose. The response always reports *every* joint locked after the call, in the robot model's own joint order — you never have to remember what was locked before you sent the request.
+
+On the Franka the config locks the two gripper fingers, and the value is **collision geometry, not a tuning knob**: it sets how wide the gripper's collision spheres are, so 0.04 and 0.025 describe two different robots. Use this to solve against a specific gripper spread, or to match another planner's config per dataset — curobo's reference benchmark, for example, pins the fingers at 0.025 for the mpinets problems and keeps the bundled 0.04 for motion_benchmaker.
+
+Behaviors to know, matching `set_collision_cache`:
+
+- The call is **refused while an execution goal is active** (`success: false`) — cancel the goal first.
+- On success the robot model and **every solver built from it are rebuilt** (motion planner, IK, FK, MPC, retargeter) because the lock is baked into the parsed kinematics config. Blocking, ~20 s. Do not call `update_motion_gen_config` afterwards.
+- Repeating the state already in force is a no-op: the model is only re-parsed and the solvers rebuilt when it actually changes. Releasing a joint that is already free is a no-op too, so a caller can assert a state without tracking it. An empty request is a read-only query of the state: no rebuild, and the response reports what is in force.
+- A joint has to be part of the robot model to be locked or unlocked, and cannot be named in both lists of one call. A joint can only be *unlocked* if the robot config's `cspace.joint_names` already lists it — that list is what defines the optimizable cspace. The bundled Franka config optimises the 7 arm joints, so its fingers can be re-pinned but not freed.
+- A rejected change (`success: false`, reason in `message`) leaves the running model untouched — the report is then the state still in force.
+
+```bash
+# Pin both gripper fingers at 0.025 m (mpinets' spread), then read back the state.
+ros2 service call /unified_planner/set_joint_locks curobo_msgs/srv/SetJointLocks \
+  "{joint_names: [panda_finger_joint1, panda_finger_joint2], positions: [0.025, 0.025]}"
+
+# Move one joint only — the other finger keeps the value it already has.
+ros2 service call /unified_planner/set_joint_locks curobo_msgs/srv/SetJointLocks \
+  "{joint_names: [panda_finger_joint1], positions: [0.04]}"
+
+# Release a joint from the cspace (needs it in the config's cspace.joint_names).
+ros2 service call /unified_planner/set_joint_locks curobo_msgs/srv/SetJointLocks \
+  "{unlock_joint_names: [panda_finger_joint1]}"
+
+# Back to the robot YAML's own values.
+ros2 service call /unified_planner/set_joint_locks curobo_msgs/srv/SetJointLocks \
+  "{restore: true}"
+```
+
 ## Services — kinematics (IK / FK)
 
 IK and FK solvers are **lazy**: they do not exist until you call the matching warmup service. Calling `ik` or `fk` before warmup fails.

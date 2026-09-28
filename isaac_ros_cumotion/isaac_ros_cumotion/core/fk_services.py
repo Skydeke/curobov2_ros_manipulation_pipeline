@@ -211,7 +211,6 @@ class FKServices:
         # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
         scene = self._obstacle_manager.collision_world_scene()
         self._collision_checker.update_world(scene)
-        self._node.get_logger().info("FKServices: world updated")
 
     def rebuild(self):
         """Recreate the FK model after a robot-config change. No-op if the

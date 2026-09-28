@@ -249,6 +249,15 @@ def launch_setup(context, *args, **kwargs):
                 # Planning retries per request (MotionPlanner.plan_pose).
                 'max_attempts': ParameterValue(
                     LaunchConfiguration('max_attempts'), value_type=int),
+                # Rewind the solver RNG before every plan (benchmark parity:
+                # each request then sees the same candidate stream, as the
+                # native leg's per-problem reset_seed does). Plan-time — a
+                # `ros2 param set` re-takes effect on the next request, no
+                # rebuild. The parity benchmark's server launches with
+                # reset_seed_per_plan:=true; every other launch leaves the
+                # stream advancing.
+                'reset_seed_per_plan': ParameterValue(
+                    LaunchConfiguration('reset_seed_per_plan'), value_type=bool),
                 # Trajopt candidate trajectories per problem (the seed axis: each
                 # seed is a full trajectory-optimization solve, so per-plan latency
                 # scales ~linearly with it; baked into solver buffers at build
@@ -469,6 +478,14 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_attempts', default_value='1',
             description='Planning retries per request (MotionPlanner.plan_pose)'
+        ),
+        DeclareLaunchArgument(
+            'reset_seed_per_plan', default_value='false',
+            description='Rewind the solver RNG before every plan, so each '
+                        'request sees the same candidate stream (the '
+                        'reference benchmark\'s per-problem reset_seed — '
+                        'benchmark parity only; a live server otherwise draws '
+                        'fresh seeds per request)'
         ),
         DeclareLaunchArgument(
             'num_trajopt_seeds', default_value='12',

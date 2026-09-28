@@ -86,9 +86,16 @@ def _seed_knobs(args) -> Dict[str, bool]:
     ``--unseeded`` implies ``--no-reset-seed``: the server reseeds neither the
     global generators nor the per-solve solver RNG, so both flags together
     reproduce its drifting-RNG condition.
+
+    ``--unseeded`` is read with ``getattr`` because it only exists where the
+    fixed global seeds do, i.e. on the subcommands that run a native leg: the
+    ROS-only ``ros`` subcommand skips the *server's* per-plan reseed
+    (``--no-reset-seed``, which it does declare) but has no global seeding of
+    its own to skip.
     """
-    reset_seed_per_problem = not (args.no_reset_seed or args.unseeded)
-    seed_globals = not args.unseeded
+    unseeded = getattr(args, "unseeded", False)
+    reset_seed_per_problem = not (args.no_reset_seed or unseeded)
+    seed_globals = not unseeded
     return {
         "seed_globals": seed_globals,
         "reset_seed_per_problem": reset_seed_per_problem,
@@ -126,12 +133,16 @@ def cmd_ros(args) -> int:
         service_timeout=args.service_timeout,
         call_timeout=args.call_timeout,
         size_collision_cache=not args.no_size_cache,
+        apply_mpinets_locks=not args.no_mpinets_locks,
         use_dynamics=args.use_dynamics,
         mass=args.mass,
         # Whole-benchmark envelope: pin the server's plan-time max_attempts
         # to this run's own --max-attempts (default 100 = the page's budget),
         # so a standalone ROS leg retries exactly like every other leg.
         server_max_attempts=args.max_attempts,
+        # …and its per-plan RNG rewind to this run's own seed diagnostic, so
+        # --no-reset-seed A/Bs both legs instead of one.
+        server_reset_seed=_seed_knobs(args)["reset_seed_per_problem"],
     )
     if args.output:
         _dump(results, args.output)
@@ -262,7 +273,9 @@ def cmd_webpage(args) -> int:
             dataset=args.dataset, scene=args.scene,
             use_dynamics=False, mass=args.mass, verbose=False,
             server_dynamics=False, server_payload_mass=0.0,
-            server_max_attempts=args.max_attempts, **service,
+            server_max_attempts=args.max_attempts,
+            server_reset_seed=_seed_knobs(args)["reset_seed_per_problem"],
+            apply_mpinets_locks=not args.no_mpinets_locks, **service,
         )
 
     print("== [1/3] motion generation: pass 2/2 (with torque limits) ==",
@@ -276,7 +289,9 @@ def cmd_webpage(args) -> int:
             dataset=args.dataset, scene=args.scene,
             use_dynamics=True, mass=args.mass, verbose=False,
             server_dynamics=True, server_payload_mass=args.mass,
-            server_max_attempts=args.max_attempts, **service,
+            server_max_attempts=args.max_attempts,
+            server_reset_seed=_seed_knobs(args)["reset_seed_per_problem"],
+            apply_mpinets_locks=not args.no_mpinets_locks, **service,
         )
 
     print("== [2/3] inverse kinematics ==", flush=True)
@@ -422,6 +437,9 @@ def cmd_all(args) -> int:
         # the whole benchmark), so both legs share one envelope regardless of
         # how the server was launched.
         server_max_attempts=args.max_attempts,
+        # Same for the per-plan RNG rewind, so --no-reset-seed A/Bs both legs
+        # whatever the server was launched with.
+        server_reset_seed=_seed_knobs(args)["reset_seed_per_problem"],
     )
     ros_path = _sidecar(args.output, "ros")
     if ros_path:
@@ -672,6 +690,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="attached_object payload mass in kg (reference "
                             "default 3.0 = full payload) used client-side for "
                             "the Energy (J) / Torque (N·m) reconstruction")
+    _add_max_attempts_opt(p_ros)
+    _add_reset_seed_opt(p_ros)
+    _add_motion_lock_opt(p_ros)
     p_ros.add_argument("--output", "-o", default=None)
     p_ros.set_defaults(func=cmd_ros)
 
@@ -711,6 +732,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--no-size-cache", action="store_true",
                        help="DIAGNOSTIC: leave the server's default collision "
                             "cache in place (see `ros --no-size-cache`)")
+    _add_motion_lock_opt(p_all)
     _add_compare_opts(p_all)
     p_all.add_argument("--output", "-o", default=None)
     p_all.set_defaults(func=cmd_all)
@@ -763,7 +785,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_webpage.add_argument("--robot-config", type=str, default=DEFAULT_ROBOT_CONFIG)
     p_webpage.add_argument("--service-timeout", type=float, default=30.0)
     p_webpage.add_argument("--call-timeout", type=float, default=120.0)
-    p_webpage.add_argument("--no-size-cache", action="store_true")
+    p_webpage.add_argument("--no-size-cache", action="store_true",
+                           help="DIAGNOSTIC: leave the server's default collision "
+                                "cache in place (see `ros --no-size-cache`)")
+    _add_motion_lock_opt(p_webpage)
     p_webpage.add_argument("--output", "-o", default=None)
     p_webpage.set_defaults(func=cmd_webpage)
 
@@ -849,15 +874,7 @@ def _add_solver_opts(
                         help="IK seeds (curobo reference benchmark default: 32)")
     parser.add_argument("--num-trajopt-seeds", type=int, default=4,
                         help="trajopt seeds (reference default: 4)")
-    max_attempts_help = (
-        "plan_pose retry budget per problem (default 100 — the page's "
-        "real-solve budget, for the WHOLE benchmark: its retry loop produces "
-        "the 99.73 % success rate, and the ROS runner pins the server's "
-        "plan-time max_attempts to this value so native and ROS always share "
-        "the same envelope; lower it for a fast smoke pass)"
-    )
-    parser.add_argument("--max-attempts", type=int, default=max_attempts_default,
-                        help=max_attempts_help)
+    _add_max_attempts_opt(parser, max_attempts_default)
     parser.add_argument("--mesh", action="store_true",
                         help="convert obstacles to meshes instead of OBBs "
                              "(reference --mesh; default: OBB worlds)")
@@ -875,14 +892,45 @@ def _add_solver_opts(
                              "energy/torque model")
     parser.add_argument("--no-cuda-graph", action="store_true",
                         help="disable CUDA graphs (debug only)")
-    parser.add_argument("--no-reset-seed", action="store_true",
-                        help="DIAGNOSTIC: skip mg.reset_seed() before each "
-                             "solve (native leg mimics the ROS server's "
-                             "drifting RNG; see README 'timing attribution')")
+    _add_reset_seed_opt(parser)
     parser.add_argument("--unseeded", action="store_true",
                         help="DIAGNOSTIC: skip the upstream fixed seeds AND "
                              "per-problem reset_seed() — full server-like RNG "
                              "drift (implies --no-reset-seed)")
+
+
+def _add_max_attempts_opt(parser, max_attempts_default: int = 100) -> None:
+    """``--max-attempts``: the retry budget the ROS leg pins onto the server.
+
+    Split out of ``_add_solver_opts`` for the same reason as
+    ``_add_reset_seed_opt``: the ROS-only ``ros`` subcommand declares its own
+    ``--use-dynamics``/``--mass`` help text, so it cannot call
+    ``_add_solver_opts``, yet ``cmd_ros`` reads ``args.max_attempts`` to pin
+    the server's plan-time budget.
+    """
+    max_attempts_help = (
+        "plan_pose retry budget per problem (default 100 — the page's "
+        "real-solve budget, for the WHOLE benchmark: its retry loop produces "
+        "the 99.73 % success rate, and the ROS runner pins the server's "
+        "plan-time max_attempts to this value so native and ROS always share "
+        "the same envelope; lower it for a fast smoke pass)"
+    )
+    parser.add_argument("--max-attempts", type=int, default=max_attempts_default,
+                        help=max_attempts_help)
+
+
+def _add_reset_seed_opt(parser) -> None:
+    """``--no-reset-seed``: A/B whether the solver RNG is rewound per solve.
+
+    Declared separately from ``_add_solver_opts`` because the ROS-only
+    ``ros`` subcommand has no native leg, yet still needs the flag: it pins
+    the server's plan-time ``reset_seed_per_plan`` off for the A/B, which is
+    the whole point of the knob when only the server reseeds.
+    """
+    parser.add_argument("--no-reset-seed", action="store_true",
+                        help="DIAGNOSTIC: skip mg.reset_seed() before each "
+                             "solve (native leg mimics the ROS server's "
+                             "drifting RNG; see README 'timing attribution')")
 
 
 def _add_compare_opts(parser) -> None:
@@ -928,6 +976,18 @@ def _add_ros_service_opts(parser) -> None:
                              "cache (cuboid=32, mesh=4 + voxel) in place "
                              "instead of sizing it to the synthetic world "
                              "(padded kernel grids — A/B diagnostic)")
+
+
+def _add_motion_lock_opt(parser) -> None:
+    """Gripper-lock parity knob (motion legs only: they are the only ones that
+    solve trajectories through the server's locked-finger robot model)."""
+    parser.add_argument(
+        "--no-mpinets-locks", action="store_true",
+        help="DIAGNOSTIC: solve every motion scene with the robot config's "
+             "gripper lock (0.04) instead of switching the server to the "
+             "per-dataset lock upstream's reference benchmark uses "
+             "(mpinets=0.025) — A/B for the success-rate delta",
+    )
 
 
 def _add_pose_compare_opts(parser) -> None:

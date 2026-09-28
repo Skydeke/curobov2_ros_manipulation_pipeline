@@ -221,6 +221,8 @@ class TestWebpageLegs:
                 kw.get('server_dynamics'),
                 kw.get('server_payload_mass'),
                 kw.get('server_max_attempts'),
+                kw.get('apply_mpinets_locks'),
+                kw.get('server_reset_seed'),
             ))
             return []
 
@@ -243,9 +245,12 @@ class TestWebpageLegs:
 
         # plain (False) then torque (True) - both native and ROS, in page order,
         # each ROS leg pinning the server's max_attempts to this run's budget
+        # and switching the gripper lock per scene by default
         assert calls == [
-            (False, False, 0.0, 100),  # without torque: plain server, no payload
-            (True, True, 3.0, 100),    # with torque limits: torque + --mass payload
+            # without torque: plain, no payload
+            (False, False, 0.0, 100, True, True),
+            # with torque limits: torque + payload
+            (True, True, 3.0, 100, True, True),
         ]
         # native legs always run: both motion modes + IK + cost
         assert core_calls == [
@@ -278,6 +283,173 @@ class TestWebpageLegs:
         ]
         out = capsys.readouterr().out
         assert 'SKIPPED' not in out
+
+
+class TestMpinetsLockFlag:
+    """`--no-mpinets-locks` must exist on exactly the subcommands that run a
+    motion ROS leg, and on those alone.
+
+    Regression: the flag was first declared in the shared `_add_ros_service_opts`
+    helper, which only the ik/cost parsers use — so `ros`/`all`/`webpage`, the
+    three subcommands that read `args.no_mpinets_locks` and pass it to
+    `run_ros`, would have died with AttributeError at run time while the flag
+    sat uselessly on subcommands that never solve a trajectory.
+    """
+
+    MOTION_SUBCOMMANDS = ('ros', 'all', 'webpage')
+    NON_MOTION_SUBCOMMANDS = ('ik', 'cost', 'ik-ros', 'cost-ros', 'core')
+
+    def test_present_on_every_motion_subcommand(self):
+        parser = build_parser()
+        for cmd in self.MOTION_SUBCOMMANDS:
+            args = parser.parse_args([cmd])
+            assert args.no_mpinets_locks is False, cmd
+            assert parser.parse_args([cmd, '--no-mpinets-locks']
+                                     ).no_mpinets_locks is True, cmd
+
+    def test_absent_from_subcommands_without_a_motion_ros_leg(self):
+        parser = build_parser()
+        for cmd in self.NON_MOTION_SUBCOMMANDS:
+            args = parser.parse_args([cmd])
+            assert not hasattr(args, 'no_mpinets_locks'), cmd
+
+    def test_cmd_ros_forwards_the_flag(self, monkeypatch):
+        pytest.importorskip('rclpy')  # cmd_ros imports the ROS leg module
+        from isaac_ros_cumotion_extra.benchmark import ros_runner
+        from isaac_ros_cumotion_extra.benchmark.run import build_parser, cmd_ros
+
+        seen = {}
+        monkeypatch.setattr(
+            ros_runner, 'run_ros',
+            lambda **kw: seen.update(kw) or [],
+        )
+        cmd_ros(build_parser().parse_args(
+            ['ros', '--dataset', 'demo', '--no-mpinets-locks'],
+        ))
+        assert seen['apply_mpinets_locks'] is False
+
+        cmd_ros(build_parser().parse_args(['ros', '--dataset', 'demo']))
+        assert seen['apply_mpinets_locks'] is True
+
+
+class TestServerResetSeedPin:
+    """`--no-reset-seed` must reach the *server*, not just the native leg.
+
+    The node gates its per-plan RNG rewind behind `reset_seed_per_plan`, which
+    defaults to False and is enabled only by the benchmark launch file. The
+    runner therefore pins the parameter per leg (mirroring
+    `set_server_max_attempts`) so an A/B holds regardless of how the server
+    was launched - otherwise `--no-reset-seed` would only ever A/B the
+    in-process leg and the ROS leg would keep reseeding silently.
+    """
+
+    def _webpage_leg_seeds(self, monkeypatch, extra_args):
+        pytest.importorskip('rclpy')  # cmd_webpage imports the ROS leg modules
+        from isaac_ros_cumotion_extra.benchmark.run import build_parser, cmd_webpage
+
+        holder = TestWebpageLegs()
+        calls, core_calls = [], []
+        holder._stub_legs(monkeypatch, calls, core_calls)
+        args = build_parser().parse_args(
+            ['webpage', '--run-ros', '--dataset', 'demo'] + extra_args,
+        )
+        assert cmd_webpage(args) == 0
+        # both motion legs pinned, in page order
+        return [c[5] for c in calls]
+
+    def test_webpage_motion_legs_pin_the_server_reset_seed(
+        self, monkeypatch, capsys,
+    ):
+        assert self._webpage_leg_seeds(monkeypatch, []) == [True, True]
+        capsys.readouterr()
+
+    def test_webpage_no_reset_seed_reaches_both_motion_legs(
+        self, monkeypatch, capsys,
+    ):
+        assert self._webpage_leg_seeds(
+            monkeypatch, ['--no-reset-seed'],
+        ) == [False, False]
+        capsys.readouterr()
+
+    def test_webpage_unseeded_implies_the_server_reset_seed_is_off(
+        self, monkeypatch, capsys,
+    ):
+        assert self._webpage_leg_seeds(monkeypatch, ['--unseeded']) == [False, False]
+        capsys.readouterr()
+
+    def test_cmd_ros_forwards_the_flag(self, monkeypatch):
+        pytest.importorskip('rclpy')  # cmd_ros imports the ROS leg module
+        from isaac_ros_cumotion_extra.benchmark import ros_runner
+        from isaac_ros_cumotion_extra.benchmark.run import build_parser, cmd_ros
+
+        seen = {}
+        monkeypatch.setattr(
+            ros_runner, 'run_ros',
+            lambda **kw: seen.update(kw) or [],
+        )
+        cmd_ros(build_parser().parse_args(
+            ['ros', '--dataset', 'demo', '--no-reset-seed'],
+        ))
+        assert seen['server_reset_seed'] is False
+
+        cmd_ros(build_parser().parse_args(['ros', '--dataset', 'demo']))
+        assert seen['server_reset_seed'] is True
+
+    def test_present_on_every_subcommand_that_reads_it(self):
+        # Regression: `cmd_ros` reads `args.no_reset_seed` to pin the server,
+        # but `p_ros` never declared the flag (it builds its options by hand
+        # instead of calling `_add_solver_opts`), so every `ros` invocation
+        # would have died in argparse before the A/B could be requested.
+        parser = build_parser()
+        for cmd in ('core', 'ros', 'all', 'reference', 'webpage'):
+            assert parser.parse_args([cmd]).no_reset_seed is False, cmd
+            assert parser.parse_args(
+                [cmd, '--no-reset-seed'],
+            ).no_reset_seed is True, cmd
+
+    def test_unseeded_stays_off_subcommands_without_a_native_leg(self):
+        # `--unseeded` also skips the native leg's fixed global seeds, so it
+        # is only meaningful where a native leg runs; `_seed_knobs` reads it
+        # defensively so `ros --no-reset-seed` does not need it.
+        parser = build_parser()
+        for cmd in ('core', 'all', 'reference', 'webpage'):
+            assert parser.parse_args([cmd, '--unseeded']).unseeded is True, cmd
+        assert not hasattr(parser.parse_args(['ros']), 'unseeded')
+
+
+class TestRosSubcommandServerPins:
+    """`cmd_ros` reads parser attributes, so `p_ros` must declare them.
+
+    `p_ros` builds its options by hand instead of calling `_add_solver_opts`
+    (it needs ROS-leg-specific `--use-dynamics`/`--mass` help text), which is
+    exactly how these drifts happen: `cmd_ros` grew a `server_max_attempts`
+    pin reading `args.max_attempts` that `p_ros` never declared, so every
+    `curobo_benchmark ros` died with AttributeError. The cmd-level tests
+    catch it too, but they are `importorskip('rclpy')`-gated and therefore
+    silent in a non-ROS env, so assert the surface directly.
+
+    (`--no-mpinets-locks` is covered ungated by TestMpinetsLockFlag.)
+    """
+
+    def test_ros_declares_the_pins_cmd_ros_reads(self):
+        args = build_parser().parse_args(['ros'])
+        assert args.max_attempts == 100
+        assert args.no_reset_seed is False
+
+    def test_max_attempts_reaches_cmd_ros(self, monkeypatch):
+        pytest.importorskip('rclpy')
+        from isaac_ros_cumotion_extra.benchmark import ros_runner
+        from isaac_ros_cumotion_extra.benchmark.run import build_parser, cmd_ros
+
+        seen = {}
+        monkeypatch.setattr(
+            ros_runner, 'run_ros',
+            lambda **kw: seen.update(kw) or [],
+        )
+        cmd_ros(build_parser().parse_args(
+            ['ros', '--dataset', 'demo', '--max-attempts', '7'],
+        ))
+        assert seen['server_max_attempts'] == 7
 
 
 class TestSidecar:

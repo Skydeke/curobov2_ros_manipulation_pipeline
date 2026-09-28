@@ -635,6 +635,9 @@ class SinglePlanner(TrajectoryPlanner):
             config: Dictionary with planner-specific parameters
                    Common parameters:
                    - max_attempts: Number of planning attempts
+                   - reset_seed_per_plan: rewind the solver RNG before
+                     solving (benchmark parity; see the `reset_seed_per_plan`
+                     parameter)
             robot_context: Optional RobotContext for trajectory visualization
 
         Returns:
@@ -673,6 +676,24 @@ class SinglePlanner(TrajectoryPlanner):
         self._considered_rows = None
         self._waypoint_tolerance = self._request_waypoint_tolerance(goal_request)
         self._log_considered = self._request_log_considered(goal_request)
+
+        # Reproduce the reference benchmark's per-problem seed reset
+        # (curobo/benchmark/motion_plan_benchmark.py: update_world +
+        # reset_seed() before every real plan_pose solve). Without it the
+        # solver RNG drifts across requests, so each problem's ik/trajopt
+        # candidate stream depends on everything solved before — a different
+        # winner than the reset native leg on marginal problems (divergent
+        # motion times on shared solves) and outright failures where the
+        # reference stream succeeds. Resetting makes every request
+        # deterministic and request-independent.
+        #
+        # That parity is the point, and it is a benchmark concern, so it is off
+        # by default: rewinding before every request makes a live server
+        # replay the same first candidate for every goal, so a request that
+        # failed on its first seeds gets the identical ones on the next
+        # attempt. The parity benchmark turns it on for its own server launch.
+        if config.get('reset_seed_per_plan', False):
+            self.motion_planner.reset_seed()
 
         _t_plan_start = time.monotonic()
         try:
@@ -1371,6 +1392,7 @@ class SinglePlanner(TrajectoryPlanner):
         """
         return [
             'max_attempts',
+            'reset_seed_per_plan',
             'time_dilation_factor',
             'voxel_size',
             'collision_activation_distance',

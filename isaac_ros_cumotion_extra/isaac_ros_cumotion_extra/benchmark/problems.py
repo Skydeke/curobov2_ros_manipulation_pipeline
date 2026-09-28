@@ -28,6 +28,13 @@ from typing import Any, Dict, List, Optional, Tuple
 # mpinets classification.
 DATASET_NAMES = ("demo", "motion_benchmaker", "mpinets", "full")
 
+# Gripper joint lock (m) per dataset file, mirroring upstream's `load_curobo`
+# mpinets branch and the bundled `franka.yml` default. See
+# `mpinets_lock_for_scene` — a locked joint's value is collision geometry, so
+# the two values must not be interchanged.
+MPINETS_LOCK = 0.025
+DEFAULT_LOCK = 0.04
+
 _LOADERS: Dict[str, Any] = {}
 
 
@@ -104,6 +111,59 @@ def mpinets_scene_keys() -> frozenset:
             _get_loaders()["mpinets"]().keys()
         )
     return _MPINETS_SCENE_KEYS_CACHE
+
+
+def is_mpinets_scene(
+    scene_key: str,
+    mpinets_scenes: Optional[frozenset],
+    dataset: str,
+) -> bool:
+    """Whether ``scene_key`` came from the mpinets dataset (upstream's ``mpinets`` flag).
+
+    Upstream's reference benchmark iterates one ``file_path`` at a time and sets
+    ``load_curobo(..., mpinets_data=…)`` per file, so this is a property of the
+    *dataset*, not of the scene in isolation. For the combined "full" dataset
+    ``mpinets_scenes`` (``mpinets_scene_keys()``) classifies each scene; for a
+    single-dataset run it is ``None`` and the whole run is one file_path, so one
+    probe of an mpinets-only scene decides for every scene.
+
+    Both legs read the answer from here so they cannot drift: the native leg
+    feeds it into ``load_curobo`` per scene (``core_runner._run_scene``), the
+    ROS leg pins the running server's gripper to the matching lock value
+    (``RosBenchmarkRunner.set_server_lock_joints``).
+    """
+    if mpinets_scenes is not None:
+        return scene_key in mpinets_scenes
+    # Single dataset == one file_path upstream: probe an mpinets-only scene.
+    return "dresser_task_oriented" in _get_loaders()[dataset]().keys()
+
+
+def mpinets_lock_for_scene(
+    scene_key: str,
+    mpinets_scenes: Optional[frozenset],
+    dataset: str,
+) -> float:
+    """The gripper joint lock (m) upstream's reference benchmark uses for ``scene_key``.
+
+    Upstream builds a **separate planner per dataset file** and the only
+    difference in the robot config is the gripper lock
+    (``benchmark/motion_plan_benchmark.py`` ``load_curobo``):
+
+        if mpinets:
+            robot_cfg["kinematics"]["lock_joints"] = {
+                "panda_finger_joint1": 0.025,
+                "panda_finger_joint2": 0.025,
+            }
+
+    motion_benchmaker keeps the bundled ``franka.yml`` value (0.04). Because a
+    locked joint's value is collision *geometry* — it sets how wide the
+    gripper's collision spheres are — this is not a tuning knob: solving an
+    mpinets goal with the 0.04 gripper can put the goal configuration itself
+    in collision, and the plan fails where the native leg succeeds.
+    """
+    if is_mpinets_scene(scene_key, mpinets_scenes, dataset):
+        return MPINETS_LOCK
+    return DEFAULT_LOCK
 
 
 def load_problems(dataset: str = "demo") -> Dict[str, List[Dict[str, Any]]]:

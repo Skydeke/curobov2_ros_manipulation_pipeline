@@ -12,7 +12,7 @@ There are three kinds of knobs, and they differ in *when* a change is applied:
 | **Build-time parameters** | `ros2 param set …` then call `/unified_planner/update_motion_gen_config` | After the solver rebuild (blocking, ~20 s) |
 | **Robot YAML configuration** | Edit the cuRobo robot config file | Restart, or `update_motion_gen_config` |
 
-`update_motion_gen_config` (`std_srvs/srv/Trigger`) rebuilds the motion-planning solver from the current parameters. Exception: `set_collision_cache` rebuilds the solvers by itself — no extra call needed (see [ROS Interfaces](ros-interfaces.md)).
+`update_motion_gen_config` (`std_srvs/srv/Trigger`) rebuilds the motion-planning solver from the current parameters. Exception: `set_collision_cache` and `set_joint_locks` rebuild the solvers by themselves — no extra call needed (see [ROS Interfaces](ros-interfaces.md)).
 
 ## Launch arguments (`gen_traj.launch.py`)
 
@@ -30,6 +30,7 @@ These are the launch arguments that actually configure the system:
 | `voxel_size` | `0.05` | Perception/collision voxel size (m) |
 | `mapper_extent_xyz` | `[2.56, 2.56, 2.56]` | Perception volume extent (m), centred on the robot base |
 | `max_attempts` | `1` | Planning retries per request (the compose benchmark launch passes `${CUROBO_MAX_ATTEMPTS:-100}` — the page's budget) |
+| `reset_seed_per_plan` | `false` | Rewind the solver RNG before every plan, so each request sees the same candidate stream (benchmark parity — the compose benchmark launch passes `${CUROBO_RESET_SEED:-true}`, and nothing else does) |
 | `time_dilation_factor` | `1.0` | Trajectory re-timing: 1.0 = nominal interpolation_dt pacing; <1.0 slows the motion, >1.0 speeds it up. Also gates execute() feedback re-reads |
 | `collision_activation_distance` | `0.025` | Distance (m) at which the collision cost activates |
 | `publish_plan_debug_image` | `false` | Publish the per-plan joint-trajectory plot as an RGB image on `/<node>/motion_plan_debug` (RViz/viser display). Enabled (`:=true`) in the franka/ur10e compose demos |
@@ -46,6 +47,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 |---|---|---|---|
 | `planner_type` | `'classic'` | Planner selected at startup (`classic`, `mpc`, `joint_space`, `retarget`) — switch at runtime with `set_planner` | Startup |
 | `max_attempts` | `1` | Planning retries per request (plan-time — no rebuild: the benchmark runner pins it to the run's own `--max-attempts` before each motion ROS leg, so native and ROS share one envelope — 100 for the whole benchmark, the page's budget) | Plan-time |
+| `reset_seed_per_plan` | `false` | Rewind the solver RNG before every plan (`MotionPlanner.reset_seed`), reproducing the reference benchmark's per-problem seed reset so each request's ik/trajopt candidate stream does not depend on what was solved before. Plan-time, no rebuild: a `ros2 param set` re-takes effect on the next request. Off by default — a live server should draw fresh seeds per request rather than replay the same first candidates forever; only the parity benchmark needs the rewind, and it launches with `reset_seed_per_plan:=true` | Plan-time |
 | `load_dynamics` | `false` | Build the robot's inverse-dynamics model (torque-limited planning — the reference benchmarks page's "with torque limits" variant). Build-time: `RobotModelManager.set_torque_mode` re-wraps the robot_cfg from the current param on every solver rebuild, so a running server flips modes via `set_parameters` + `update_motion_gen_config` | Build-time |
 | `robot_payload_mass` | `0.0` | Attached-object payload mass (kg) patched onto the MotionPlanner (`update_links_inertial`, like the reference script). Only applies with `load_dynamics:=true` | Build-time |
 | `interpolation_dt` | `0.025` | Time step (s) of the interpolated output trajectory | Build-time |
@@ -156,6 +158,8 @@ unique stream.
 ## Robot YAML configuration
 
 The cuRobo robot configuration (provided by each robot's own repo, e.g. a Kortex package supplies `config/kortex.curobo.yml`) defines kinematics (`urdf_path`, `base_link`, `ee_link`), the cspace with joint limits (position/velocity/acceleration/jerk), and the collision spheres. This is also where the robot's *speed* is set — scale the cspace velocity/acceleration/jerk limits and rebuild with `update_motion_gen_config`.
+
+Most of the robot YAML is a **build-time** property, like the parameters above. `lock_joints` is the one you can change on a running server: it pins named joints to a fixed value, and on a gripper-equipped arm that value is collision *geometry* (how wide the gripper's spheres are), so different values describe different robots. Switch it with the `set_joint_locks` service instead of relaunching — it re-parses the robot YAML and rebuilds the solvers for you (~20 s, refused while an execution goal is active). The service is per-joint: name the joints to re-pin or release and everything else keeps the value it has, and the response reports every joint locked after the call. See [ROS 2 Interfaces Reference](ros-interfaces.md#unified_plannerset_joint_locks).
 
 See [Tutorial 2: Adding Your Robot](../tutorials/02-adding-your-robot.md) for the full anatomy.
 
