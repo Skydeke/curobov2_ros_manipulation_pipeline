@@ -1,0 +1,45 @@
+# Runtime override of the robot config's `kinematics.lock_joints`.
+#
+# `lock_joints` pins named joints to a fixed value and drops them from the
+# optimizable cspace: the locked value is what kinematics, the collision
+# spheres and every solver see (curobo bakes it into
+# `KinematicsConfig.lock_jointstate` at config load). On the Franka that is the
+# two gripper fingers — their spread sets how wide the gripper's collision
+# spheres are, so the value is part of the model's collision geometry, not a
+# tuning knob.
+#
+# The request names the joints it changes, exactly like the response reports the
+# effective state: `joint_names` + `positions` lock the named joints at the
+# given values, `unlock_joint_names` release joints back into the optimizable
+# cspace. Joints in NEITHER list keep the value already in force, so one call
+# can move a single joint (or a single value) and leave the rest of the model
+# alone, and successive calls compose. A joint has to be part of the robot
+# model to be locked or unlocked, and cannot be in both lists at once.
+#
+# An empty request (restore=false, nothing named) therefore changes nothing and
+# just reports the state in force — a read-only query, no rebuild.
+#
+# `restore: true` drops the whole override and reloads the robot YAML's own
+# `lock_joints`; the other request fields are ignored.
+#
+# A joint can only be *unlocked* if the robot config's `cspace.joint_names`
+# already lists it — that list is what defines the optimizable cspace, and a
+# joint missing from it is rejected at re-parse. The bundled Franka config
+# optimises the 7 arm joints, so its fingers can be re-pinned but not freed.
+#
+# Because the lock is baked into the parsed kinematics config, a change
+# rebuilds the robot model AND every solver built from it (motion planner, IK,
+# MPC, retargeter) — blocking, ~20 s. Refused while an execution goal is
+# active (same guard/lock as set_collision_cache).
+
+# Request
+string[] joint_names         # joints to lock, at the matching `positions` value
+float64[] positions          # value to pin each named joint at (parallel to `joint_names`)
+string[] unlock_joint_names  # joints to release back to the optimizable cspace
+bool restore                 # true -> drop the whole override, reload the robot YAML's own values
+---
+# Response
+bool success          # true when the model was rebuilt (or already matched)
+string message        # status
+string[] joint_names  # every joint locked after the call, in robot model order
+float64[] positions   # lock value of each name in `joint_names`

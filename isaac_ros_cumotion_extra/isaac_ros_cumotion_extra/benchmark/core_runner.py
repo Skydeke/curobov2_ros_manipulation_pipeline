@@ -47,7 +47,12 @@ from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 from .compare import trajectory_metrics
-from .problems import filter_scenes, load_problems, mpinets_scene_keys
+from .problems import (
+    filter_scenes,
+    is_mpinets_scene,
+    load_problems,
+    mpinets_scene_keys,
+)
 
 _REL_WITHIN_PACKAGE = os.path.join("curobo", "benchmark", "motion_plan_benchmark.py")
 _REL_AT_ROOT = os.path.join("benchmark", "motion_plan_benchmark.py")
@@ -462,10 +467,7 @@ def run_core(
     all_results: List[Dict[str, Any]] = []
     args = _reference_args(mesh, use_cuda_graph, use_dynamics, mass)
     for scene_key, scene_problems in problems.items():
-        if mpinets_scenes is not None:
-            mpinets_data = scene_key in mpinets_scenes
-        else:
-            mpinets_data = "dresser_task_oriented" in list(full_problems.keys())
+        mpinets_data = is_mpinets_scene(scene_key, mpinets_scenes, dataset)
         n_cubes = check_problems(scene_problems)
         mg, _robot_cfg = load_curobo(
             n_cubes,

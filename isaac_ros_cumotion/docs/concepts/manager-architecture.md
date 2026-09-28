@@ -73,7 +73,7 @@ These are the rules the code is written against — keep them when contributing:
 - **Lock order**: `gpu_lock > strategy_lock > buffer_lock` (documented in `robot_context.py`). Never acquire in the other direction.
 - **`gpu_lock`** (an RLock on the node) serializes CUDA-graph capture against camera integration. Capture is process-global — no other thread may issue ANY CUDA op while it's in progress — but replaying a captured graph is not. So the lock is held **only around calls that may capture**: reactive steps use `_step_guard`, open-loop plans use `_plan_lock` (both gated on `take_graph_capture_pending()`). Camera callbacks and viz/mapper-stats use a *non-blocking* acquire and skip their work if a capture holds the lock — they must never block on it.
 - **One live CUDA graph**: the node tracks graph ownership across solvers (`_ensure_exclusive_graph`); a planner switch releases the previous solver's captured graph and sets `_graph_capture_pending` so the next plan/step in the new owner captures under the lock.
-- **Single goal admission**: `execute_trajectory` accepts one goal at a time; `set_planner` and `set_collision_cache` are refused while a goal is active.
+- **Single goal admission**: `execute_trajectory` accepts one goal at a time; `set_planner`, `set_collision_cache` and `set_joint_locks` are refused while a goal is active.
 - **Buffer epochs**: `RobotContext` stamps trajectories with an epoch and refuses commands from a superseded plan.
 
 ## Observer wiring

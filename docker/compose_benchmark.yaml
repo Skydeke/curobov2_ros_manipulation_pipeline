@@ -56,6 +56,13 @@
 #                                   capsules: cuboid (default — fast OBB, identical
 #                                   to native get_obb_world) or mesh (exact trimesh,
 #                                   legacy; ~12x slower collision kernels)
+#     CUROBO_RESET_SEED=false       the server's reset_seed_per_plan launch arg
+#                                   (default true = ON for this server only):
+#                                   rewind the solver RNG before every plan, so
+#                                   each request sees the same candidate stream
+#                                   the native leg's per-problem reset_seed()
+#                                   produces. Turn it off to A/B the seed
+#                                   rewind (the --no-reset-seed diagnostic).
 #
 #   Torque limits section (the page's "with torque limits" table — full 3 kg
 #   payload): the server gets the torque-limited recipe purely from its launch
@@ -144,13 +151,17 @@ services:
           obstacle_collision_mode:=${CUROBO_COLLISION_MODE:-cuboid} \
           use_cuda_graph:=${CUROBO_USE_CUDA_GRAPH:-true} \
           load_dynamics:=${CUROBO_LOAD_DYNAMICS:-false} \
-          robot_payload_mass:=${CUROBO_PAYLOAD_MASS:-0.0}
+          robot_payload_mass:=${CUROBO_PAYLOAD_MASS:-0.0} \
+          reset_seed_per_plan:=${CUROBO_RESET_SEED:-true}
         # Note: those two knobs are only the server's INITIAL torque mode —
         # the benchmark's webpage run flips them at runtime via
         # set_parameters + update_motion_gen_config. max_attempts is
         # plan-time: the runner re-pins it per leg (default 100 for every
         # subcommand — webpage, parity, standalone ros) via set_parameters
-        # with no rebuild.
+        # with no rebuild. reset_seed_per_plan is the only launch that enables
+        # the per-problem RNG rewind: it is what makes every request see the
+        # same candidate stream as the native leg's reset_seed, and it is off
+        # everywhere else (a live server draws fresh seeds per request).
 
   curobo_benchmark:
     container_name: curobo_benchmark

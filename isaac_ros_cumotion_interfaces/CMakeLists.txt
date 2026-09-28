@@ -48,6 +48,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetLinkCollision.srv"
   "srv/GetPlanners.srv"
   "srv/SetCollisionCache.srv"
+  "srv/SetJointLocks.srv"
   "srv/SetRobotStrategy.srv"
   "srv/GetRobotStrategies.srv"
   "srv/WarmupIK.srv"

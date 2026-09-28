@@ -45,7 +45,7 @@ README "timing attribution" section for the accepted divergence.
 
 # Standard Library
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import rclpy
 from geometry_msgs.msg import Point as RosPoint
@@ -59,6 +59,7 @@ from isaac_ros_cumotion_interfaces.msg import Goalset, PlanningOptions, Trajecto
 from isaac_ros_cumotion_interfaces.srv import (
     AddObject,
     SetCollisionCache,
+    SetJointLocks,
     TrajectoryGeneration,
 )
 from std_srvs.srv import Trigger
@@ -70,7 +71,13 @@ from .compare import (
     winner_solve_time,
 )
 from .obstacle_convert import obstacles_dict_to_add_requests
-from .problems import collision_cache_sizes, filter_scenes, load_problems
+from .problems import (
+    collision_cache_sizes,
+    filter_scenes,
+    load_problems,
+    mpinets_lock_for_scene,
+    mpinets_scene_keys,
+)
 
 # Franka active (cspace) joints, in cuRobo order — matches the robot YAML's
 # cspace.joint_names (fingers are locked by the robot config, not sent).
@@ -91,6 +98,12 @@ SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 GET_PARAMETERS_SRV = f"{SERVER_NODE}/get_parameters"
 SET_PARAMETERS_SRV = f"{SERVER_NODE}/set_parameters"
 UPDATE_MOTION_GEN_CONFIG_SRV = f"{SERVER_NODE}/update_motion_gen_config"
+# Runtime joint-lock switch: the gripper spread is part of the robot model's
+# collision geometry (curobo bakes lock_joints into the parsed kinematics
+# config), so a change re-parses the robot YAML and rebuilds the model and
+# every solver. Per-joint: we name the joints to re-pin and leave the rest of
+# the model's locks alone.
+SET_JOINT_LOCKS_SRV = f"{SERVER_NODE}/set_joint_locks"
 
 
 class RosBenchmarkRunner(Node):
@@ -114,6 +127,7 @@ class RosBenchmarkRunner(Node):
         self._rebuild_client = self.create_client(
             Trigger, UPDATE_MOTION_GEN_CONFIG_SRV
         )
+        self._lock_client = self.create_client(SetJointLocks, SET_JOINT_LOCKS_SRV)
 
         for label, client in (
             ("generate_trajectory", self._traj_client),
@@ -123,6 +137,7 @@ class RosBenchmarkRunner(Node):
             ("get_parameters", self._get_params_client),
             ("set_parameters", self._params_client),
             ("update_motion_gen_config", self._rebuild_client),
+            ("set_joint_locks", self._lock_client),
         ):
             if not client.wait_for_service(timeout_sec=service_timeout):
                 self.get_logger().error(f"{label} service not available")
@@ -221,6 +236,84 @@ class RosBenchmarkRunner(Node):
         )
         self.get_logger().info("update_motion_gen_config rebuild complete")
 
+    def server_lock_joint_names(self, rebuild_timeout: float = 300.0) -> List[str]:
+        """Return the joints the server's robot config locks at launch.
+
+        Asks the server to drop any override and reload the robot YAML's own
+        lock values, which is the server's launch state, so this costs nothing
+        beyond one round trip — and it means the caller learns the lock-joint
+        names from the server instead of hardcoding the Franka's two fingers.
+        Captured once per run; ``set_server_lock_joints`` then names those
+        joints with one value each.
+        """
+        names = self.restore_server_lock_joints(rebuild_timeout=rebuild_timeout)
+        if not names:
+            raise RuntimeError(
+                "server's robot config declares no kinematics.lock_joints — "
+                "nothing to switch"
+            )
+        return names
+
+    def restore_server_lock_joints(self, rebuild_timeout: float = 300.0) -> List[str]:
+        """Drop the server's lock override, reloading the robot YAML's values.
+
+        The inverse of :meth:`set_server_lock_joints`, and the way a run hands
+        the server back in its launch state. Idempotent server-side. Returns
+        the restored joint names so the caller can log the effective state.
+        """
+        request = SetJointLocks.Request()
+        request.restore = True
+        response = self._call(self._lock_client, request, timeout=rebuild_timeout)
+        if not response.success:
+            raise RuntimeError(f"set_joint_locks failed: {response.message}")
+        self.get_logger().info(
+            f"set_joint_locks (restore): {dict(zip(response.joint_names, response.positions))}"
+            f" — {response.message}"
+        )
+        return list(response.joint_names)
+
+    def set_server_lock_joints(
+        self,
+        positions: Sequence[float],
+        joint_names: Sequence[str],
+        rebuild_timeout: float = 300.0,
+    ) -> None:
+        """Set the running server's gripper joint locks at runtime.
+
+        Upstream's reference benchmark builds a SEPARATE planner per dataset
+        file, and the only difference in the robot config is the gripper lock:
+        ``load_curobo`` pins ``panda_finger_joint1/2`` at **0.025 for the
+        mpinets file** and leaves the bundled ``franka.yml`` value (**0.04**)
+        in place for motion_benchmaker. That value is collision geometry, not
+        a tuning knob — it is how wide the gripper's collision spheres are, so
+        at 0.04 the goal configuration of a tight mpinets reach can itself sit
+        in collision and the plan fails where the native leg succeeds. The
+        native leg mirrors the per-file split (``core_runner._run_scene`` ->
+        ``load_curobo(..., mpinets_data=...)``); this is the ROS leg's half.
+
+        ``joint_names``/``positions`` name the joints to re-pin (the names
+        ``server_lock_joint_names`` reported) and their new values; every other
+        lock is left exactly as it is, so the switch cannot disturb a joint
+        this run knows nothing about. It is idempotent server-side (the model
+        is only re-parsed and the solvers rebuilt when the values actually
+        change), so the ~20-60 s rebuild is paid once per dataset block rather
+        than per problem.
+        """
+        request = SetJointLocks.Request()
+        request.joint_names = [str(name) for name in joint_names]
+        request.positions = [float(v) for v in positions]
+        self.get_logger().info(
+            f"Setting server joint locks {dict(zip(request.joint_names, request.positions))} — "
+            "rebuilds the robot model and solvers only if they changed"
+        )
+        response = self._call(self._lock_client, request, timeout=rebuild_timeout)
+        if not response.success:
+            raise RuntimeError(f"set_joint_locks failed: {response.message}")
+        self.get_logger().info(
+            f"set_joint_locks: {dict(zip(response.joint_names, response.positions))}"
+            f" — {response.message}"
+        )
+
     def set_server_max_attempts(
         self, attempts: int, timeout: float = 30.0
     ) -> None:
@@ -270,6 +363,61 @@ class RosBenchmarkRunner(Node):
             raise RuntimeError(
                 f"set_parameters failed pinning max_attempts: {failed}"
             )
+
+    def set_server_reset_seed(self, enabled: bool, timeout: float = 30.0) -> None:
+        """Pin the server's per-plan RNG rewind to this run's.
+
+        ``reset_seed_per_plan`` is a **plan-time** parameter: the node reads it
+        fresh per request (``_get_planner_config`` -> ``SinglePlanner.plan``),
+        so a plain ``set_parameters`` takes effect immediately and nothing is
+        re-parsed or rebuilt. The runner pins it from the same ``--no-reset-seed``
+        / ``--unseeded`` diagnostic that drives the native leg, so the two legs
+        rewind (or both drift) and the seed-rewind A/B is a real two-leg
+        comparison instead of a one-sided one. Idempotent — the current value
+        is queried first and nothing is sent when the server already matches.
+
+        Left unset (``None``) the server keeps whatever it was launched with,
+        which is what the compose benchmark's ``CUROBO_RESET_SEED`` (default on)
+        decides.
+        """
+        get_req = GetParameters.Request()
+        get_req.names = ["reset_seed_per_plan"]
+        current = self._call(self._get_params_client, get_req, timeout=timeout)
+        if len(current.values) == 1 and bool(
+            current.values[0].bool_value
+        ) == bool(enabled):
+            self.get_logger().info(
+                f"Server reset_seed_per_plan already {bool(enabled)} — no "
+                "change needed"
+            )
+            return
+
+        self.get_logger().info(
+            f"Pinning server reset_seed_per_plan to {bool(enabled)} "
+            "(plan-time parameter — no rebuild needed)"
+        )
+        set_req = SetParameters.Request()
+        set_req.parameters = [
+            Parameter(
+                name="reset_seed_per_plan",
+                value=ParameterValue(
+                    type=ParameterType.PARAMETER_BOOL,
+                    bool_value=bool(enabled),
+                ),
+            ),
+        ]
+        set_resp = self._call(
+            self._params_client, set_req, timeout=timeout
+        )
+        failed = [res.reason for res in set_resp.results if not res.successful]
+        if failed:
+            raise RuntimeError(
+                f"set_parameters failed pinning reset_seed_per_plan: {failed}"
+            )
+        self.get_logger().info(
+            f"Server reset_seed_per_plan = {bool(enabled)} (the server's "
+            "launch default, set here so both legs rewind alike)"
+        )
 
     # ------------------------------------------------------------------
     # collision cache
@@ -547,6 +695,8 @@ def run_ros(
     server_dynamics: Optional[bool] = None,
     server_payload_mass: float = 0.0,
     server_max_attempts: Optional[int] = None,
+    server_reset_seed: Optional[bool] = None,
+    apply_mpinets_locks: bool = True,
     verbose: bool = True,
 ) -> List[Dict[str, Any]]:
     """Run the ROS-wrapped leg over a robometrics dataset.
@@ -589,9 +739,26 @@ def run_ros(
     ROS leg retries exactly like its native counterpart. Every benchmark
     subcommand passes its own ``--max-attempts`` — default 100, the page's
     budget, for the whole benchmark.
+
+    ``server_reset_seed`` (default ``None`` = leave the server's param alone)
+    does the same for the per-plan RNG rewind
+    (``set_server_reset_seed``, also plan-time and rebuild-free), driven by the
+    same ``--no-reset-seed`` / ``--unseeded`` diagnostic as the native leg, so
+    the seed A/B compares two rewinding legs instead of a resetting server
+    against a drifting one.
+
+    ``apply_mpinets_locks`` (default True) mirrors upstream's per-file gripper
+    lock: the running server is switched to the lock the native leg builds its
+    planner with for each scene (``problems.mpinets_lock_for_scene``) via
+    ``/unified_planner/set_joint_locks``, once per dataset block. Without it
+    every scene solves with the robot config's 0.04 gripper, whose collision
+    spheres are 30 mm wider than mpinets' 0.025 — wide enough that a tight
+    mpinets goal configuration can itself be in collision, failing reaches
+    the native leg solves. A/B with ``curobo_benchmark ros --no-mpinets-locks``.
     """
     rclpy.init()
     node: Optional[RosBenchmarkRunner] = None
+    switched_locks = False
     try:
         node = RosBenchmarkRunner(service_timeout=service_timeout)
         problems = filter_scenes(load_problems(dataset), scene)
@@ -617,7 +784,43 @@ def run_ros(
             # set_parameters, no rebuild, idempotent.
             node.set_server_max_attempts(int(server_max_attempts))
 
+        if server_reset_seed is not None:
+            # Same idea for the RNG rewind: the server only rewinds before a
+            # plan when its reset_seed_per_plan parameter says so, and the
+            # compose launch turns it on. Pin it from the run's own seed
+            # diagnostic so this leg matches the native one whatever the server
+            # was launched with (plan-time — one set_parameters, no rebuild).
+            node.set_server_reset_seed(bool(server_reset_seed))
+
         robot_model_data = _load_client_dynamics_model(node, mass)
+
+        lock_joint_names = None
+        if apply_mpinets_locks:
+            lock_joint_names = node.server_lock_joint_names()
+        else:
+            node.get_logger().info(
+                "apply_mpinets_locks=False: leaving the server's gripper locks "
+                "at the robot config value for every scene (diagnostic)"
+            )
+        mpinets_scenes = mpinets_scene_keys() if dataset == "full" else None
+
+        # Upstream builds one planner per dataset file, and the only robot-config
+        # difference is the gripper lock. ready_problems is scene-major, so this
+        # fires once per dataset block, and the server no-ops the switch when the
+        # value already matches.
+        active_lock = None
+
+        def apply_lock(scene_key: str) -> None:
+            nonlocal active_lock, switched_locks
+            if lock_joint_names is None:
+                return
+            lock = mpinets_lock_for_scene(scene_key, mpinets_scenes, dataset)
+            if lock != active_lock:
+                node.set_server_lock_joints(
+                    [lock] * len(lock_joint_names), joint_names=lock_joint_names
+                )
+                active_lock = lock
+                switched_locks = True
 
         if size_collision_cache:
             node.size_collision_cache(problems, timeout=call_timeout)
@@ -638,6 +841,10 @@ def run_ros(
 
         if warmup_probe:
             scene_key, i, first_problem = ready_problems[0]
+            # Switch to the first scene's lock BEFORE warming up, so the probe
+            # exercises the geometry the run actually solves with (the rebuild
+            # it triggers is the same one the loop would have paid anyway).
+            apply_lock(scene_key)
             node.get_logger().info(
                 f"Warmup probe: {scene_key}_{i} (world clear + add + plan)"
             )
@@ -656,6 +863,7 @@ def run_ros(
             problem_name = f"{scene_key}_{i}"
             if verbose:
                 node.get_logger().info(f"Solving {problem_name} ...")
+            apply_lock(scene_key)
             node.clear_world(timeout=call_timeout)
             node.add_world(problem["obstacles"], timeout=call_timeout)
             results.append(
@@ -671,6 +879,17 @@ def run_ros(
         )
         return results
     finally:
+        if node is not None and switched_locks:
+            # Leave the server on the robot config's own lock values, the state
+            # it was launched in: a later leg on the same server (the webpage's
+            # IK / kinematics suites, say) must not inherit this run's
+            # dataset-specific gripper. No-ops when already restored.
+            try:
+                node.restore_server_lock_joints()
+            except Exception as exc:  # noqa: BLE001 - never mask the run's result
+                node.get_logger().warn(
+                    f"Could not restore the server's joint locks: {exc}"
+                )
         if node is not None:
             node.destroy_node()
         if rclpy.ok():

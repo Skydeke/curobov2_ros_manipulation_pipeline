@@ -184,6 +184,96 @@ class TestFullMergeRegistry:
         assert mod.mpinets_scene_keys() == frozenset({'mp_a'})
 
 
+class TestMpinetsClassification:
+    """Gripper-lock classification — pure Python, no robometrics needed.
+
+    The two lock values are collision *geometry* (how wide the gripper's
+    spheres are), so a scene classified as mpinets at 0.04 instead of 0.025 can
+    fail a plan the native leg solves. Both legs read this answer, so it is
+    pinned here rather than re-derived per leg.
+    """
+
+    @pytest.fixture
+    def _fake(self, monkeypatch):
+        from isaac_ros_cumotion_extra.benchmark import problems as problems_mod
+
+        datasets = {
+            'mpinets': {'dresser_task_oriented': [], 'tabletop_task_oriented': []},
+            'motion_benchmaker': {'bookshelf_tall_panda': []},
+        }
+        monkeypatch.setattr(
+            problems_mod,
+            '_get_loaders',
+            lambda: {name: (lambda d=datasets[name]: d) for name in datasets},
+        )
+        return problems_mod
+
+    def test_full_dataset_classifies_per_scene(self, _fake):
+        from isaac_ros_cumotion_extra.benchmark.problems import (
+            DEFAULT_LOCK,
+            MPINETS_LOCK,
+            is_mpinets_scene,
+            mpinets_lock_for_scene,
+        )
+
+        mpinets_scenes = frozenset({'dresser_task_oriented', 'tabletop_task_oriented'})
+        assert is_mpinets_scene('dresser_task_oriented', mpinets_scenes, 'full')
+        assert not is_mpinets_scene('bookshelf_tall_panda', mpinets_scenes, 'full')
+        assert (
+            mpinets_lock_for_scene('dresser_task_oriented', mpinets_scenes, 'full')
+            == MPINETS_LOCK
+        )
+        assert (
+            mpinets_lock_for_scene('bookshelf_tall_panda', mpinets_scenes, 'full')
+            == DEFAULT_LOCK
+        )
+
+    def test_single_dataset_probes_one_file(self, _fake):
+        """A single-dataset run is one file_path upstream, so one probe of an
+        mpinets-only scene decides for every scene (no scene set to thread)."""
+        from isaac_ros_cumotion_extra.benchmark.problems import (
+            DEFAULT_LOCK,
+            MPINETS_LOCK,
+            is_mpinets_scene,
+            mpinets_lock_for_scene,
+        )
+
+        # mpinets dataset: the probe scene is present -> every scene is mpinets.
+        assert is_mpinets_scene('tabletop_task_oriented', None, 'mpinets')
+        assert (
+            mpinets_lock_for_scene('tabletop_task_oriented', None, 'mpinets')
+            == MPINETS_LOCK
+        )
+        # benchmaker: the probe scene is absent -> every scene keeps the default.
+        assert not is_mpinets_scene('bookshelf_tall_panda', None, 'motion_benchmaker')
+        assert (
+            mpinets_lock_for_scene('bookshelf_tall_panda', None, 'motion_benchmaker')
+            == DEFAULT_LOCK
+        )
+
+    def test_the_two_values_are_distinct_and_nonzero(self, _fake):
+        """Guard the constants themselves: swapping or aliasing them is the
+        bug this parity work exists to prevent."""
+        from isaac_ros_cumotion_extra.benchmark.problems import (
+            DEFAULT_LOCK,
+            MPINETS_LOCK,
+        )
+
+        assert MPINETS_LOCK == 0.025
+        assert DEFAULT_LOCK == 0.04
+        assert MPINETS_LOCK != DEFAULT_LOCK
+
+    def test_mpinets_gripper_is_narrower(self, _fake):
+        """The direction of the difference is load-bearing: mpinets' gripper is
+        the tighter one, so a wider lock can only ever lose reach."""
+        from isaac_ros_cumotion_extra.benchmark.problems import (
+            DEFAULT_LOCK,
+            MPINETS_LOCK,
+        )
+
+        assert MPINETS_LOCK < DEFAULT_LOCK
+
+
 class TestProblemShape:
     """Structure of each problem dict (skipped when robometrics is absent)."""
 

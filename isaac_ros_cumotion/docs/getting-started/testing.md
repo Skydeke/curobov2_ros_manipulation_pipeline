@@ -81,7 +81,7 @@ To check the generator itself hasn't drifted (e.g. after changing `ros2_test_com
 
 - **`wait_for_timeout`** *(default 10 s)* — per-test timeout for topic/service checks; a per-test `timeout:` key overrides it. Actions use a separate, larger `action_timeout` (default 60 s) since they run a whole trajectory.
 
-- **Budget a solver rebuild generously.** `set_collision_cache`, `update_motion_gen_config`, the first `add_object` and `attach_object` all rebuild and re-warm the solvers *synchronously*. Measured on an idle Jetson Orin that is ~25 s — but after ~30 minutes of sustained GPU load the SoC throttles and the same rebuild takes ~37 s. Every such call therefore uses `timeout: 90.0`. A budget sitting just above the idle cost does not detect a hang, it just turns the whole suite red on a warm or shared machine.
+- **Budget a solver rebuild generously.** `set_collision_cache`, `set_joint_locks`, `update_motion_gen_config`, the first `add_object` and `attach_object` all rebuild and re-warm the solvers *synchronously*. Measured on an idle Jetson Orin that is ~25 s — but after ~30 minutes of sustained GPU load the SoC throttles and the same rebuild takes ~37 s. Every such call therefore uses `timeout: 90.0`. A budget sitting just above the idle cost does not detect a hang, it just turns the whole suite red on a warm or shared machine.
 
 Full reference for every key: `ros2_test_compose/README.md`.
 

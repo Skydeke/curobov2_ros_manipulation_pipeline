@@ -14,6 +14,15 @@
 #     forces this to 0.0; the product default 0.004 would inflate every world/
 #     obstacle collision sphere by 4 mm the native leg does not have)
 #
+#   - joint limits widened by ±0.2 rad on both bounds via
+#     kinematics.cspace.position_limit_clip: -0.2 (a negative clip widens —
+#     the exact same math as load_curobo:
+#     https://github.com/NVlabs/curobo/blob/main/benchmark/motion_plan_benchmark.py#L288-L289
+#     K.position[0, :] -= 0.2 / K.position[1, :] += 0.2). Baked into the
+#     config at model build — no runtime re-parse — and it applies to the
+#     whole shared robot_cfg (the IK/FK services too), matching the page's
+#     single widened robot_cfg for every solver
+#
 # `attached_object` (grasp-only) is re-parented onto panda_hand so the config
 # stays self-consistent once grasping_frame is not a tool frame anymore; the
 # benchmark sends no attached payloads.
@@ -206,6 +215,17 @@ robot_cfg:
         - panda_joint5
         - panda_joint6
         - panda_joint7
+      # Widen the solved joint limits by ±0.2 rad exactly like the reference
+      # benchmark's load_curobo (NVlabs/curobo
+      # benchmark/motion_plan_benchmark.py#L288-L289:
+      #   K.position[0, :] -= 0.2
+      #   K.position[1, :] += 0.2
+      # ). cspace.position_limit_clip does the same clip at model build (a
+      # negative clip widens) on the active joints of the planning cspace —
+      # no runtime re-parse. The whole shared robot_cfg (motion solver plus
+      # IK/FK services) runs on the widened limits, like the page's single
+      # widened robot_cfg.
+      position_limit_clip: -0.2
       default_joint_position:
         - 0.0
         - -1.3

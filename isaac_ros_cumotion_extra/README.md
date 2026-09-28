@@ -198,10 +198,11 @@ leg (one `set_parameters`, no rebuild). Both legs therefore retry like the
 page: solve-time numbers stay calm for the ~99 % of problems that solve on the
 first attempt and accumulate the same retry cost as native on the rare
 failures. `CUROBO_MAX_ATTEMPTS=10` shows the cost-scaling curve at a shorter
-wall time. (The process-level explanations for
-the churn — unseeded server RNG and the denser voxel/ESDF world — remain
-candidates for *why* the server's later attempts keep being explored, but they
-no longer cost the reproduction anything.)
+wall time. (The process-level explanation of the
+churn was the unseeded server RNG — fixed now at the source by the
+per-request `MotionPlanner.reset_seed()`, so the server's attempt stream
+matches the native leg's per-problem reseed; the denser voxel/ESDF world was
+never present in the benchmark's empty-camera world.)
 
 **Root cause of the 12x single-attempt gap (resolved).** One capped server
 attempt used to cost ~0.67 s of `solve_time` vs native's ~0.055 s for its
@@ -273,7 +274,12 @@ The native-leg seed knobs are secondary (they reproduce the server's RNG
 drift; useful for ruling it out cheaply): `--no-reset-seed` skips
 `mg.reset_seed()` before each solve, `--unseeded` also skips the upstream
 fixed seeds (`seed_globals`, `np/random/torch.manual_seed(2)`).
-`curobo_benchmark core --unseeded` should stay at ~0.06 s.
+`curobo_benchmark core --unseeded` should stay at ~0.06 s. On the motion ROS
+legs (`ros`, `all`, `webpage`) the same `--no-reset-seed` also pins the
+server's plan-time `reset_seed_per_plan` parameter off, so the A/B moves both
+legs at once instead of only the native one — the parameter is off by default
+in the node and on only in this compose, so the pin is what makes the flag
+mean the same thing on either leg.
 
 Each leg is also printed as a `Metric`/`Value` grid table in the same layout
 as the upstream `curobo/benchmark/motion_plan_benchmark.py` report ("native
@@ -352,9 +358,24 @@ sphere/cylinder/capsule obstacles to the same OBB cuboids via `get_cuboid()`
 — and the ROS leg additionally sizes the server's collision cache to the
 dataset's actual per-type counts with the (empty, no-camera) voxel layer
 disabled, so the solver kernel grids match native's too. The remaining
-difference between the two legs is RNG: the server process does not seed its
-RNG the way the native leg's `seed(2)` does, so its seed candidate selection
-can pick a different (equally valid) trajectory. Residual path/motion deltas
+structural delta was RNG: the server process never reseeded
+its solver, so the candidate stream for each request depended on everything
+solved before it, and the native leg's per-problem reset was not reproduced.
+This is now fixed at the source: every request runs
+`MotionPlanner.reset_seed()` (in `SinglePlanner.plan()`, the single-problem
+path the benchmark exercises), the same per-problem `mg.reset_seed()` the
+upstream script and the native leg perform before every real `plan_pose`
+solve. The rewind is the node's `reset_seed_per_plan` parameter — this
+benchmark's server compose is the only launch that turns it on
+(`CUROBO_RESET_SEED`, default on), because a parity run needs every request to
+draw the same stream while a live server is better off drawing fresh seeds.
+Both legs therefore draw the same ik/trajopt candidate population for
+each problem and pick the same winner. The drift cost more than "a
+different, equally valid trajectory" on the pre-fix box: 167 problems failed
+on ROS that the reset native stream solved (93.28 % vs 99.69 %, identical in
+both torque modes, clustered in the tight box/table scenes; the failed
+results carried empty solver traces — store_debug is off, so the only
+readout is "last attempt invalid"). Residual path/motion deltas, if any,
 are reported by the parity verdict, not hidden.
 
 Scene keys are printed at the start of each leg's run. Restrict a run with
@@ -418,14 +439,51 @@ like any other dataset.
   `robot_payload_mass` envelope knobs as the page, on
   `config/franka.curobo.reference.yml` (`tool_frames: [panda_hand]`,
   `collision_sphere_buffer: 0.0` — the benchmark forces 0.0, not the 0.004
-  product default). Two **accepted** deltas vs upstream `load_curobo` remain:
-  (1) the page widens the solver's joint limits by ±0.2 rad; the server
-  plans with the raw URDF limits (the shared `robot_cfg` also feeds the
-  IK/FK services, whose native legs use raw limits — widening motion-gen
-  only would require a solver-local cfg copy); (2) dresser (mpinets)
-  scenes lock the finger joints at 0.025 in the page vs the yml's 0.04 on
-  the server (affects finger-sphere geometry only; the `panda_hand`
-  tool-frame result is unaffected).
+  product default). The joint limits are widened by ±0.2 rad on both bounds
+  exactly like `load_curobo`: `config/franka.curobo.reference.yml` sets
+  `kinematics.cspace.position_limit_clip: -0.2` (a negative clip widens —
+  same math as the page's two lines, NVlabs/curobo
+  [benchmark/motion_plan_benchmark.py#L288-L289](https://github.com/NVlabs/curobo/blob/main/benchmark/motion_plan_benchmark.py#L288-L289)),
+  baked into the config at model build instead of a runtime re-parse. It
+  applies to the whole shared `robot_cfg` — the motion solver and the IK/FK
+  services alike — matching the page's single widened `robot_cfg` for every
+  solver. The solver seed is reset per request too
+  (`MotionPlanner.reset_seed()` in `SinglePlanner.plan()`, gated on the
+  `reset_seed_per_plan` parameter this benchmark's server compose sets), matching the
+  native leg's per-problem `mg.reset_seed()`; a drifting server RNG was
+  failing 167 problems on ROS that the reset native stream solves (pre-fix
+  box: 93.28 % vs 99.69 %, identical in both torque modes).
+  One **accepted** delta vs upstream `load_curobo` remains: the ROS leg's
+  `Motion Time` column is ~30 % above native's. It is definitional, not a
+  solver difference — the native leg scores the page's control-point
+  `motion_time_curobo` (the trajopt solution's own duration), while the wire
+  only carries the `dt` the server interpolated at, and `dt` is not
+  reconstructible from the returned plan. Path length, position/orientation
+  error, energy and torque all match; only that column is left as-is.
+- **Gripper joint locks, per dataset (success-rate parity).** Upstream builds a
+  separate planner per dataset *file*, and the only robot-config difference is
+  the finger lock: `load_curobo` pins `panda_finger_joint1/2` at **0.025 for
+  mpinets** and leaves the bundled `franka.yml` **0.04** for motion_benchmaker
+  ([benchmark/motion_plan_benchmark.py#L263-L267](https://github.com/NVlabs/curobo/blob/main/benchmark/motion_plan_benchmark.py#L263-L267)).
+  A locked joint's value is collision *geometry* — 0.04 vs 0.025 moves each
+  finger sphere 15 mm, a 30 mm wider gripper — so it is not a tuning knob. The
+  server's single robot config cannot be both at once, and the previous
+  "accepted delta" note was wrong about the consequence: the `panda_hand`
+  tool-frame pose is indeed unaffected, but **collision validity is not**, and a
+  30 mm-wider gripper can put a tight mpinets goal configuration itself in
+  collision. That was 32 of the 33 ROS-only failures (98.46 % ROS vs 99.69 %
+  native), and it moved the mpinets position error +78 % (0.0412 vs 0.0231).
+  Both legs now classify scenes the same way
+  (`problems.is_mpinets_scene`): the native leg passes it to `load_curobo`
+  per scene as before, and the ROS leg switches the running server per scene
+  block over the new `/unified_planner/set_joint_locks` service — a request
+  naming the two finger joints with their new values (the service is per-joint,
+  so any other lock the server holds is left alone), which re-parses the robot
+  YAML and rebuilds the solvers (~20 s, once per dataset block, no relaunch).
+  The runner restores the robot config's own lock values when it finishes, so
+  the server is left as it was launched. A/B the switch with
+  `curobo_benchmark ros --no-mpinets-locks` (solves every scene with 0.04 and
+  reproduces the old 98.46 %).
 
 The webpage order, both legs — `webpage` runs the page's suites in the page's
 order (motion generation → IK → kinematics & collision), each once with the
@@ -589,4 +647,7 @@ Module layout (`isaac_ros_cumotion_extra/benchmark/`):
 | `run.py` | `curobo_benchmark` CLI (`core`/`ros`/`webpage`/`reference`/`all`/`compare`, `ik`/`ik-core`/`ik-ros`, `cost`/`cost-core`/`cost-ros`) |
 
 Pure-Python tests live in `benchmark/tests/` and run without curobo/torch/ROS
-(robometrics-gated tests skip when robometrics is absent).
+(robometrics-gated tests skip when robometrics is absent). The joint-lock
+switch's own control flow is covered by
+`isaac_ros_cumotion/test/test_robot_model_manager.py`, which stubs curobo and
+torch and so needs neither a GPU nor a robot.

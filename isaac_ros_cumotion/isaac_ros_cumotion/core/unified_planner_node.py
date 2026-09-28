@@ -296,6 +296,15 @@ class UnifiedPlannerNode(Node):
         # plan time (classic / joint-space / multi-waypoint). Default 1 = the
         # single-attempt behavior.
         self.declare_parameter('max_attempts', 1)
+        # Rewind the solver RNG before every plan (MotionPlanner.reset_seed),
+        # reproducing the reference benchmark's per-problem seed reset so each
+        # request sees the same ik/trajopt candidate stream. Read per request
+        # (like max_attempts), so a `ros2 param set` takes effect immediately.
+        # OFF by default: a live server should draw fresh seeds per request
+        # rather than replay the same first candidates forever — only the
+        # parity benchmark needs the rewind, and it launches with
+        # reset_seed_per_plan:=true.
+        self.declare_parameter('reset_seed_per_plan', False)
         # Torque-limited planning (the reference benchmarks page's "with
         # torque limits" table): `load_dynamics` builds the robot's pinocchio
         # inverse-dynamics model (RobotModelManager must see it at startup —
@@ -805,6 +814,21 @@ class UnifiedPlannerNode(Node):
         The collision cache is allocated at solver creation, so a change
         requires recreating the solvers (a world update is not sufficient).
         Registered as ObstacleManager's cache-change observer.
+        """
+        self._rebuild_all_solvers("collision cache changed")
+
+    def _rebuild_all_solvers(self, reason: str, robot_model_changed: bool = False):
+        """Rebuild every solver built from the current robot cfg / world.
+
+        Shared by the two build-time switches a plain world update cannot
+        absorb: a collision-cache change (the cache is allocated at solver
+        creation) and a joint-lock change (which re-parses the robot YAML
+        first — see ``RobotModelManager.set_lock_joints``).
+
+        ``robot_model_changed`` says the robot model itself was re-parsed, not
+        just the world. Only then is the FK model stale — it holds its own GPU
+        ``Kinematics`` built from the robot cfg at init (see ``FKServices``),
+        whereas a cache change leaves the robot cfg untouched.
 
         Held under gpu_lock: this (re)captures CUDA graphs, same invariant as
         every other graph-capturing path in this node (see gpu_lock's other
@@ -813,7 +837,7 @@ class UnifiedPlannerNode(Node):
         (cudaErrorStreamCaptureInvalidated).
         """
         self.get_logger().info(
-            "Collision cache changed - rebuilding solvers (blocking, ~20s)...")
+            f"{reason} - rebuilding solvers (blocking, ~20s)...")
 
         with self.gpu_lock:
             # Motion planner (present after the initial warmup).
@@ -824,6 +848,13 @@ class UnifiedPlannerNode(Node):
             # IK (only if it was initialized). IKServices reads the canonical
             # (motion) cache directly, so no sync is needed.
             self.ik_services.rebuild()
+
+            # FK keeps its own GPU model, so it only needs the rebuild when the
+            # robot model behind it was re-parsed.
+            if robot_model_changed:
+                fk_services = getattr(self, 'fk_services', None)
+                if fk_services is not None:
+                    fk_services.rebuild()
 
             # Reactive controllers (only if initialized). Built from the SAME
             # shared cache, so just rebuild their solvers — no manual cache copy.
@@ -836,7 +867,7 @@ class UnifiedPlannerNode(Node):
             # capture, so mark it pending (see take_graph_capture_pending).
             self._set_graph_capture_pending()
 
-        self.get_logger().info("Solvers rebuilt after cache change")
+        self.get_logger().info(f"Solvers rebuilt after {reason}")
 
     # ------------------------------------------------------------------
     # Plan / execute callbacks
@@ -2055,6 +2086,9 @@ class UnifiedPlannerNode(Node):
                 'max_attempts': self.get_parameter('max_attempts')
                 .get_parameter_value()
                 .integer_value,
+                'reset_seed_per_plan': self.get_parameter('reset_seed_per_plan')
+                .get_parameter_value()
+                .bool_value,
             }
         if isinstance(planner, ReactiveController):
             return {

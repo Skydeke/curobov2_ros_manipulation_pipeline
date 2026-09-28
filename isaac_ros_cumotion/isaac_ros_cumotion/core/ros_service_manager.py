@@ -1,6 +1,6 @@
 from functools import partial
 from std_srvs.srv import Trigger, SetBool
-from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetLinkCollision, SetMask
+from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetJointLocks, SetLinkCollision, SetMask
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
 from geometry_msgs.msg import Point
@@ -52,6 +52,7 @@ class RosServiceManager:
         self.get_voxel_map_srv = None
         self.get_collision_distance_srv = None
         self.set_collision_cache_srv = None
+        self.set_joint_locks_srv = None
         # Robot-segmentation mask services (registered lazily via
         # register_robot_segmentation once the component exists).
         self.set_mask_srv = None
@@ -130,6 +131,17 @@ class RosServiceManager:
             SetCollisionCache,
             self.node.get_name() + '/set_collision_cache',
             partial(self._callback_set_collision_cache, self.node)
+        )
+
+        # Runtime override of the robot config's kinematics.lock_joints (the
+        # gripper's spread, i.e. part of the collision model). Per-joint, so a
+        # call can move one joint and leave the rest of the model alone. Like
+        # the cache change it is a build-time property, so it re-parses the
+        # robot YAML and rebuilds every solver.
+        self.set_joint_locks_srv = self.node.create_service(
+            SetJointLocks,
+            self.node.get_name() + '/set_joint_locks',
+            self._callback_set_joint_locks
         )
 
         # Service to get available robot strategies (for RViz plugin)
@@ -474,6 +486,89 @@ class RosServiceManager:
         response = self.obstacle_manager.set_collision_cache(node, request, response)
         if response.success:
             response.message += " - solvers rebuilt (blocking, ~20s)"
+        return response
+
+    def _callback_set_joint_locks(self, request: SetJointLocks.Request, response: SetJointLocks.Response):
+        """Override the robot config's ``kinematics.lock_joints``, joint by joint.
+
+        ``joint_names``/``positions`` pin the named joints and
+        ``unlock_joint_names`` release joints back into the optimizable cspace;
+        a joint in neither list keeps the value already in force, so one call
+        can move a single joint. ``restore`` drops the whole override and
+        reloads the robot YAML's own values. The response always reports every
+        joint locked after the call, so a caller never has to remember what it
+        sent — nor what was locked before it.
+
+        A change re-parses the robot YAML and rebuilds the robot model and
+        every solver, so it takes the same guard as ``set_collision_cache``:
+        refused while an execution goal is active, since a ~20 s blocking
+        rebuild is not safe to run against an in-progress trajectory.
+        """
+        manager = self.robot_model_manager
+
+        def _fill(success, message):
+            response.success = success
+            response.message = message
+            active = manager.lock_joints()
+            response.joint_names = list(active.keys())
+            response.positions = [active[name] for name in active]
+
+        goal_lock = getattr(self.node, '_goal_lock', None)
+        if goal_lock is not None:
+            with goal_lock:
+                if getattr(self.node, '_goal_active', False):
+                    _fill(
+                        False,
+                        "Cannot change joint locks while an execution goal is "
+                        "active — cancel it first.",
+                    )
+                    self.node.get_logger().error(response.message)
+                    return response
+
+        lock_names = [str(name) for name in request.joint_names]
+        unlock_names = [str(name) for name in request.unlock_joint_names]
+        try:
+            if request.restore:
+                changed = manager.set_lock_joints(None)
+            else:
+                if len(lock_names) != len(request.positions):
+                    _fill(
+                        False,
+                        f"Got {len(lock_names)} joint_names but "
+                        f"{len(request.positions)} positions — one value per "
+                        "named joint (or send restore: true to drop the "
+                        "override entirely)",
+                    )
+                    self.node.get_logger().error(response.message)
+                    return response
+                changed = manager.update_lock_joints(
+                    lock=dict(zip(lock_names, request.positions)),
+                    unlock=unlock_names,
+                )
+        except Exception as exc:  # noqa: BLE001 - report, never crash the node
+            _fill(False, f"Joint-lock change failed: {exc}")
+            self.node.get_logger().error(response.message)
+            return response
+
+        if not changed:
+            # An empty request (restore=false, nothing named) is the read-only
+            # query: it changes nothing, so say so rather than claiming a
+            # caller restated the state it already had.
+            _fill(
+                True,
+                "Joint locks already match the requested state"
+                if (request.restore or lock_names or unlock_names)
+                else "No change requested - reporting the joint locks in force",
+            )
+            return response
+
+        # The lock is baked into the parsed kinematics config, so a plain world
+        # update is not enough — rebuild the solvers (no-op standalone: the
+        # rebuild lives on the node).
+        rebuild = getattr(self.node, '_rebuild_all_solvers', None)
+        if rebuild is not None:
+            rebuild("joint locks changed", robot_model_changed=True)
+        _fill(True, "Joint locks updated - solvers rebuilt (blocking, ~20s)")
         return response
 
     def _callback_get_robot_strategies(self, node, request: GetRobotStrategies.Request, response: GetRobotStrategies.Response):
