@@ -16,7 +16,7 @@ from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.robot import GoalsetSpec
 from curobo_task_constructor.core.stage import PropagatingEitherWay
 from curobo_task_constructor.core.state import InterfaceState
-from curobo_task_constructor.stages._util import full_request
+from curobo_task_constructor.stages._util import axis_holds, cost_of, full_request
 
 
 @register_stage("move_relative")
@@ -59,7 +59,8 @@ class MoveRelative(PropagatingEitherWay):
                 [p + q for p, q in zip(pose.position, self._delta_world(pose, d))],
                 pose.orientation)
             goal = GoalsetSpec(poses=[pose_to_any(target, getattr(self.robot, "pose_cls", None))],
-                               allowed_collisions=allowed)
+                               allowed_collisions=allowed,
+                               trajectory_constraints=self._hold(pose, target))
             req = full_request(self.robot, state.joint_state, [goal], self.params)
             try:
                 result = self.robot.plan(req)
@@ -93,7 +94,8 @@ class MoveRelative(PropagatingEitherWay):
                 continue
             goal = GoalsetSpec(target_joint_positions=list(
                 getattr(state.joint_state, "position", []) or []),
-                allowed_collisions=allowed)
+                allowed_collisions=allowed,
+                trajectory_constraints=self._hold(start_pose, pose))
             req = full_request(self.robot, seed, [goal], self.params)
             try:
                 result = self.robot.plan(req)
@@ -112,7 +114,24 @@ class MoveRelative(PropagatingEitherWay):
         if not made:
             self._fail(state, None, "move_relative backward produced no solution")
 
+    def _hold(self, start_pose: Pose3, target: Pose3) -> list:
+        """int8[6] axis holds for one sampled segment, or [] for none.
+
+        ``MoveRelative`` exists to interpolate a straight line, so by default it
+        derives the whole-path holds exactly like ``CartesianPath`` does: the
+        offset changes only the axes the motion actually moves along, and every
+        axis the start and the target agree on is pinned. A ``hold`` param
+        overrides it (pass ``[0, 0, 0, 0, 0, 0]`` for a free-space relative
+        move). Only the classic planner reads the field, so this is a no-op on
+        any other planner.
+        """
+        explicit = self.params.get("hold")
+        if explicit is not None:
+            hold = [int(c) for c in (explicit or [])]
+            return hold if len(hold) == 6 else []
+        return axis_holds(start_pose, [target],
+                          pos_tol=float(self.params.get("pos_tol", 0.005)),
+                          rot_tol=float(self.params.get("rot_tol", 0.05)))
+
     def _cost_of(self, result) -> float:
-        if result.cost != float("inf"):
-            return float(result.cost)
-        return float(len(result.trajectory)) if result.trajectory else 0.0
+        return cost_of(result, self.params)

@@ -174,11 +174,12 @@ class CuroboServerInterface(RobotInterface):
         ``on_ready`` — clients that gate on that advertisement observe the
         full readiness chain.
 
-        The IK solver is deliberately NOT warmed here: ``WarmupIK`` builds the
-        solver for its requested batch size and a second warmer would
-        re-initialize the solver, clobbering the batch size configured by
-        whichever node owns the warm-up (the grasp orchestrator primes
-        batch 2 and gates its first task on that warm-up completing).
+        Neither the IK solver nor the FK model is warmed here: the server
+        builds both during its own startup (``warmup_ik`` / ``warmup_fk``, both
+        on by default), so a client that also called ``WarmupIK`` would
+        re-initialize the solver and clobber the batch size the server chose.
+        Call ``/warmup_ik`` only to change that batch size — the service is
+        still the way to ask for a different one.
         """
         state = {"done": False, "timer": None}
 
@@ -294,6 +295,25 @@ class CuroboServerInterface(RobotInterface):
                 f"fk(link={link!r}) degrades to tool-pose FK "
                 "(Fk.srv does not target arbitrary links)")
         return res.poses[0]
+
+    def fk_batch(self, joint_states: list, link: Optional[str] = None) -> list:
+        """Whole-trajectory FK in ONE round trip.
+
+        ``Fk.srv`` already takes a ``JointState[]`` and returns a parallel
+        ``Pose[]``, so measuring a 100-waypoint trajectory's straightness costs
+        a single service call instead of 100.
+        """
+        states = list(joint_states or [])
+        if not states:
+            return []
+        req = Fk.Request()
+        for js in states:
+            req.joint_states.append(js)
+        res = self._call(self._fk_client, req)
+        if not res.poses:
+            raise ServiceError(
+                f"fk_batch failed: {getattr(res, 'error_msg', '') or 'no pose returned'}")
+        return list(res.poses)
 
     def ik(self, pose, seed: Optional[Any] = None):
         req = Ik.Request()
@@ -529,6 +549,16 @@ class CuroboServerInterface(RobotInterface):
         for pose in gs.poses or []:
             g.poses.append(parse_pose_msg(pose, self.pose_cls))
         g.target_joint_positions = [float(v) for v in (gs.target_joint_positions or [])]
+        # Whole-path Cartesian axis holds, int8[6] = [theta_x, theta_y,
+        # theta_z, x, y, z] (1 = hold that axis). This is the only way to ask
+        # for a straight-line (rather than free-space) approach / descent /
+        # retreat: the server reads it into ToolPoseCriteria
+        # (SinglePlanner._apply_pose_constraints) and scores every non-terminal
+        # waypoint against the goal on the held axes. The wire is strict about
+        # the length — a malformed vector is dropped with a warning — so emit
+        # either [] (unconstrained) or exactly 6 ints.
+        hold = [int(c) for c in (gs.trajectory_constraints or [])]
+        g.trajectory_constraints = hold if len(hold) == 6 else []
         return g
 
     @staticmethod

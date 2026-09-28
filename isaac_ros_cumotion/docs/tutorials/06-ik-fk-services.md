@@ -9,7 +9,9 @@ This tutorial covers how to use the Inverse Kinematics (IK) and Forward Kinemati
 - **IK**: Compute joint configurations that achieve a desired end-effector pose
 - **FK**: Compute end-effector pose from a set of joint positions
 
-Both solvers are **lazy-initialized** — they are not created at startup. You must call the warmup service before using IK or FK. This allows the node to start quickly and avoids allocating GPU memory for solvers you don't need.
+Both solvers are **warmed at startup by default**, so they answer as soon as the node is up. The warmup is what actually allocates them: the service constructors only register the endpoints, and every request path short-circuits on an unbuilt model with "not initialized". Startup runs `warmup_ik` and `warmup_fk` for you; the `/warmup_ik` and `/warmup_fk` services are still there for the one thing startup cannot know — the batch size you actually intend to use.
+
+Set `warmup_ik:=false` (or `warmup_fk:=false`) to restore the lazy behaviour and skip the build for a node that never uses that solver; you then own the warmup call.
 
 **For detailed information about cuRobo's kinematics capabilities and underlying algorithms, visit [curobo.org](https://curobo.org).**
 

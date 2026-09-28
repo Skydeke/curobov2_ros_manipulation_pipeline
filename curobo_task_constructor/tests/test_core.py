@@ -40,7 +40,7 @@ from tests.mock_curobo import JOINT_NAMES, MockCuroboServer
 def test_registry_builtins_are_registered():
     for name in ("current_state", "fixed_state", "generate_grasp_pose",
                  "compute_ik", "move_to", "move_relative", "modify_scene",
-                 "connect"):
+                 "connect", "cartesian_path"):
         assert name in STAGE_REGISTRY, f"{name} not registered"
 
 
