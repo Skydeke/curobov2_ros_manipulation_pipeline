@@ -450,22 +450,48 @@ class CuroboServerInterface(RobotInterface):
             self._set_links_collision(requests, True)
 
     def execute(self, request: PlanRequest) -> PlanResult:
+        """Drive one segment: SendTrajectory, which re-solves the goalset
+        server-side and then streams the result.
+
+        The goalset's ``allowed_collisions`` is applied here exactly as in
+        ``plan`` / ``plan_batch``. It has to be: the wire ``Goalset`` carries
+        no collision concept, so this adapter's ``set_link_collision`` call is
+        the ONLY way the server ever learns that e.g. the finger spheres may
+        touch the grasped object. The server's execute path re-solves the
+        goalset from scratch whenever the trajectory cache misses (it is a
+        single slot, so a mid-chain segment almost always misses), and it
+        re-solves against whatever sphere state is current — with the spheres
+        restored, a grasp close that planned cleanly (spheres off) fails its
+        goal state with "finger -> object" contacts that the plan itself proved
+        were acceptable.
+
+        The window here is wider than in ``plan``: the allowance is held off for
+        the whole physical motion, not just the solve. That is correct for a
+        grasp — the fingers legitimately stay against the object from the
+        descent until the retreat ends — and inert everywhere else, because
+        ``_set_links_collision`` returns early when a request allows no links,
+        so stages like ``return`` / ``open`` do not touch the spheres at all.
+        """
         self._ensure_planner(request.planner)
         if not self._exec_client.wait_for_server(timeout_sec=self._service_timeout):
             raise ServiceError("execute_trajectory action unavailable")
         goal = SendTrajectory.Goal()
         goal.goal = self._to_goal(request)
         goal.allow_cached = True
-        gh = self._await(
-            self._exec_client.send_goal_async(goal),
-            "execute_trajectory goal handshake", self._service_timeout)
-        if gh is None or not gh.accepted:
-            return PlanResult(False, "execute_trajectory goal rejected")
-        res = self._await(gh.get_result_async(), "execute_trajectory result",
-                          self._service_timeout)
-        if res is None:
-            return PlanResult(False, "execute_trajectory result timeout")
-        return self._from_result(res.result.result)
+        self._set_links_collision([request], False)
+        try:
+            gh = self._await(
+                self._exec_client.send_goal_async(goal),
+                "execute_trajectory goal handshake", self._service_timeout)
+            if gh is None or not gh.accepted:
+                return PlanResult(False, "execute_trajectory goal rejected")
+            res = self._await(gh.get_result_async(), "execute_trajectory result",
+                              self._service_timeout)
+            if res is None:
+                return PlanResult(False, "execute_trajectory result timeout")
+            return self._from_result(res.result.result)
+        finally:
+            self._set_links_collision([request], True)
 
     # ------------------------------------------------------------------
     # scene
