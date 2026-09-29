@@ -265,3 +265,17 @@ def test_scene_ops_before_the_broken_segment_still_applied():
     sol.children[0].scene_ops = [("add", spec)]
     ex.execute(sol)
     assert applied == [spec]
+
+
+def test_the_continuity_tolerance_is_moveits_allowed_start_tolerance():
+    """One start-agreement number for the whole pipeline: 0.01 rad.
+
+    ``iki_kortex_moveit_config/config/moveit_controllers.yaml`` sets
+    ``allowed_start_tolerance: 0.01``. A curobo chain must refuse to drive a
+    segment from a configuration that differs more than that from where the
+    previous segment anchored it - the same wall the MoveIt stack enforces
+    before it plans. A larger value here would let a segment land where the
+    plan was not and have the next one drive anyway, which is the measured
+    failure this whole module exists to pin.
+    """
+    assert EXECUTE_CONTINUITY_TOLERANCE == pytest.approx(0.01)

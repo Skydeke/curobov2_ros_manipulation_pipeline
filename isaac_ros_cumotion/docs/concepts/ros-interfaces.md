@@ -282,6 +282,7 @@ Goal (mirrors `TrajectoryGeneration`; the active planner decides which fields it
 | `start_pose` | `sensor_msgs/JointState` | Empty = current state |
 | `goalsets` | `Goalset[]` | One segment per waypoint; `poses` = candidate set (Classic resolves, Multi-point loops, MPC/Retarget require exactly one pose), `target_joint_positions` = joint-space segment |
 | `allow_cached` | `bool` (default `true`) | Reuse a matching, non-expired trajectory from a previous `generate_trajectory` call |
+| `force_cached` | `bool` (default `false`) | When `true` and no matching cached trajectory exists, FAIL instead of re-solving — the caller only ever drives a trajectory it validated. A cache miss with a live chain means conditions changed (cache cleared, TTL expired, world mutated); re-solving blindly is how a multi-solution pose goal jumps IK branches mid-chain |
 
 Feedback (status is carried only here — there is no separate status topic):
 

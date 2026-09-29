@@ -491,16 +491,26 @@ class UnifiedPlannerNode(Node):
         # Lifetime (s) of a pre-planned (preview) trajectory cached by
         # generate_trajectory and reused by the execute action.
         self.declare_parameter('trajectory_cache_ttl', 30.0)
+        # Max open-loop trajectories kept in the reuse cache. Multi-entry so
+        # EVERY segment of a chain is replayable at execute time (see
+        # _store_pending_plan); this cap bounds the GPU-side trajectory tensors
+        # a long multi-task run accumulates between TTL prunes.
+        self.declare_parameter('trajectory_cache_size', 64)
         # How far the arm may have strayed from the state a request says it
         # starts in, for a cache MISS in the execute path to be trusted. See
-        # _check_execution_start_drift. 0.1 rad is a little under 6 degrees:
-        # enough to absorb real servo tracking error, and well under the
-        # fraction of a joint's range that a wrong IK branch moves.
-        self.declare_parameter('execution_start_tolerance', 0.1)
+        # _check_execution_start_drift. 0.01 rad matches the MoveIt pipeline's
+        # `allowed_start_tolerance` (iki_kortex_moveit_config/config/
+        # moveit_controllers.yaml): the curobo chain must not accept a start
+        # state that MoveIt would have refused to plan from - one number for
+        # the wall, whichever planner is behind it. It absorbs ordinary
+        # encoder/servo noise and stays far under the fraction of a joint's
+        # range that a wrong IK branch moves.
+        self.declare_parameter('execution_start_tolerance', 0.01)
         # Drift below this (but above 0) is reported and allowed: ordinary
         # servo tracking error, where re-solving from the arm's ACTUAL pose is
-        # exactly the right thing to do.
-        self.declare_parameter('execution_start_warn_drift', 0.05)
+        # exactly the right thing to do. Sits an order of magnitude below the
+        # refuse tier, as before.
+        self.declare_parameter('execution_start_warn_drift', 0.005)
 
         # Single shared context for every solver (robot + obstacles + scene +
         # collision cache). The MPC solver is built lazily from this same context.
@@ -590,9 +600,16 @@ class UnifiedPlannerNode(Node):
         # Registers its own attach_object/detach_object services.
         self.attachment_services = AttachmentServices(self, self.config_wrapper_motion)
 
-        # Cached open-loop plan from a generate_trajectory (preview) call, reused
-        # by the execute action when its target matches. See _pending_plan_*.
-        self._pending_plan = None  # {'planner': key, 'signature': sig, 'stamp': monotonic}
+        # Cached open-loop plans from generate_trajectory (preview) calls,
+        # reused by the execute action when a target matches. MULTI-entry now:
+        # one entry per planned segment (keyed by target signature, holding
+        # that segment's trajectory), because a chain executes segment-by-
+        # segment and a single slot could only ever serve the LAST segment
+        # planned - the rest re-solved at execute time, and a re-solve of a
+        # multi-solution pose goal can pick the OTHER IK branch (the exact
+        # divergence the chain-continuity check exists to catch). See
+        # _store_pending_plan / _pending_plan_matches / _prune_plan_cache.
+        self._pending_plan = []
 
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_motion)
@@ -990,14 +1007,13 @@ class UnifiedPlannerNode(Node):
             response.start_state_collisions = result.start_state_collisions
             response.end_state_collisions = result.end_state_collisions
 
-            # Preview workflow: cache a successful open-loop trajectory so the
-            # execute action can reuse it (matching target) without recomputing.
-            # Reactive controllers have no trajectory to cache.
-            if result.success and planner.is_open_loop():
-                _, start_state = self._resolve_start_state(request.request)
-                self._store_pending_plan(start_state, request.request)
-            elif not planner.is_open_loop():
-                self._pending_plan = None
+            # Open-loop caching now lives inside _plan_trajectory_goal (it is
+            # shared by the batch surfaces too), so every planned segment lands
+            # in the multi-entry cache. Reactive controllers have no
+            # trajectory to cache, and a reactive solve invalidates any cached
+            # open-loop plan.
+            if not planner.is_open_loop():
+                self._pending_plan = []
             return response
         except Exception as e:
             self.get_logger().error(f"Trajectory generation error: {e}")
@@ -1057,8 +1073,15 @@ class UnifiedPlannerNode(Node):
                 f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
             )
 
-            return self._fill_result_insight(
+            self._fill_result_insight(
                 result_msg, planner, goal, result, start_state)
+            # Every successful open-loop plan lands in the multi-entry cache
+            # here (single srv AND the batch surfaces, which reuse this path):
+            # a chain executing later replays each planned segment instead of
+            # re-solving it. See _store_pending_plan.
+            if result_msg.success and planner.is_open_loop():
+                self._store_pending_plan(start_state, goal)
+            return result_msg
 
         except Exception as e:
             self.get_logger().error(f"Trajectory generation error: {e}")
@@ -1115,11 +1138,18 @@ class UnifiedPlannerNode(Node):
                 raise RuntimeError(
                     f"plan_batch returned {len(planned)} results for "
                     f"{len(goals)} problems")
-            return [
-                self._fill_result_insight(
+            response_msgs = []
+            for g, r, s in zip(goals, planned, start_states):
+                result_msg = self._fill_result_insight(
                     TrajectoryResult(), planner, g, r, s)
-                for g, r, s in zip(goals, planned, start_states)
-            ]
+                # Each batched problem keeps its OWN trajectory: the
+                # planner's planned_trajectory slot ends up holding only the
+                # last problem's after plan_batch, so store per-result.
+                if result_msg.success and planner.is_open_loop():
+                    self._store_pending_plan(
+                        s, g, traj=getattr(r, 'trajectory', None))
+                response_msgs.append(result_msg)
+            return response_msgs
         except Exception as e:
             self.get_logger().error(f"Batch planning error (falling back to "
                                     f"sequential per-goal planning): {e}")
@@ -1194,8 +1224,12 @@ class UnifiedPlannerNode(Node):
         Writes success/message, the winner goal+seed / per-waypoint status
         arrays, always-populated stats (with gated considered rows) and the
         StateCollisions diagnostics (cleared on success, populated on failure).
-        ``fill_arrays`` toggles the trajectory/dt serialization — kept off for
-        the execute action, which only executes the plan.
+        ``fill_arrays`` toggles the trajectory/dt serialization. The execute
+        action keeps it ON for successful re-solves: the executor's
+        chain-continuity check compares the plan-time endpoints against the
+        DRIVEN trajectory, and a result without waypoints is skipped as
+        "nothing to compare", silently driving a diverged chain on. It stays
+        OFF on the execution-failure path (already returning False).
         """
         meta = result.metadata or {}
         self._fill_insight_fields(
@@ -1212,7 +1246,7 @@ class UnifiedPlannerNode(Node):
             return result_msg
 
         if fill_arrays and result.trajectory is not None:
-            waypoints, dt, n = self._result_trajectory(planner, result)
+            waypoints, dt, n = self._result_trajectory(planner, result.trajectory)
             result_msg.trajectory = waypoints
             result_msg.dt = dt
             result_msg.start_state_collisions = StateCollisions()
@@ -1253,15 +1287,14 @@ class UnifiedPlannerNode(Node):
                 goal_joints=list(goal_joints) if goal_joints else None)
         return result_msg
 
-    def _result_trajectory(self, planner, result):
-        """Flip a successful PlannerResult trajectory into ([JointState], dt, n).
+    def _result_trajectory(self, planner, traj):
+        """Flip a successful plan's trajectory into ([JointState], dt, n).
 
         Shared by every surface so the trajectory serialization (interpolated
         [B, T, D] → one JointState per waypoint, dt from the planner's trajopt
         config) stays identical across the single srv, batch srv, and action.
-        Returns ``([], 0.0, 0)`` when the result carries no trajectory.
+        Returns ``([], 0.0, 0)`` when ``traj`` carries no position data.
         """
-        traj = result.trajectory
         if traj is None or getattr(traj, 'position', None) is None:
             return [], 0.0, 0
         dt = self.get_parameter('interpolation_dt').get_parameter_value().double_value
@@ -1295,6 +1328,30 @@ class UnifiedPlannerNode(Node):
                 waypoint.velocity = vel_list[i]
             trajectory_msgs.append(waypoint)
         return trajectory_msgs, dt, n_waypoints
+
+    def _fill_reused_trajectory(self, result_msg: TrajectoryResult, planner,
+                                traj=None) -> None:
+        """Fill trajectory/dt on a cache-hit execute from the replayed plan.
+
+        With the multi-entry cache a hit can replay a MID-chain segment,
+        whose plan is no longer the planner's own slot (``planned_trajectory``
+        only ever holds the last segment planned), so the replaying entry's
+        trajectory is passed in; it falls back to the planner slot for the
+        single-segment preview workflow. That trajectory IS what gets driven,
+        and it has to reach the caller's TrajectoryResult for the same reason
+        the re-solve path fills arrays: the executor's chain-continuity check
+        compares the plan-time endpoints against the DRIVEN trajectory, and a
+        result without waypoints is skipped as "nothing to compare" - which
+        would let a bad reuse drive a chain silently.
+        """
+        if traj is None:
+            traj = getattr(planner, 'planned_trajectory', None)
+        if traj is None or getattr(traj, 'position', None) is None:
+            return
+        waypoints, dt, n = self._result_trajectory(planner, traj)
+        if n:
+            result_msg.trajectory = waypoints
+            result_msg.dt = dt
 
     def _build_planning_stats(self, goal, meta: dict, problems: int = 1) -> PlanningStats:
         """PlanningStats for one problem — ALWAYS populated.
@@ -1636,6 +1693,22 @@ class UnifiedPlannerNode(Node):
                     # execution/display mismatch, and it is silent: the goal
                     # succeeds, the controller reports success, and only the
                     # joint values disagree. Refuse rather than drive it.
+                    if bool(getattr(goal_handle.request, 'force_cached', False)):
+                        # force_cached: the caller demands the validated plan
+                        # and forbids a fresh solve here. With the multi-entry
+                        # cache every chain segment has a matching entry, so a
+                        # miss means the conditions genuinely changed (cache
+                        # cleared, TTL expired, world mutated) - driving a
+                        # fresh solve is exactly the IK-branch jump this
+                        # pipeline exists to avoid. Fail loudly instead.
+                        msg = ("force_cached: no matching cached trajectory "
+                               "for this target; refusing to re-solve")
+                        self.get_logger().error(f"{planner.get_planner_name()}: {msg}")
+                        result_msg.result = TrajectoryResult()
+                        result_msg.result.success = False
+                        result_msg.result.message = msg
+                        goal_handle.abort()
+                        return result_msg
                     drift_ok, drift_msg = self._check_execution_start_drift(goal)
                     if not drift_ok:
                         self.get_logger().error(drift_msg)
@@ -1672,7 +1745,11 @@ class UnifiedPlannerNode(Node):
                         result_msg.result.message = f"Planning failed: {result.message}"
                         goal_handle.abort()
                         return result_msg
-                self._pending_plan = None  # consumed
+                # A hit CONSUMED its entry; a miss re-solved this target, which
+                # supersedes its plan-time entry. Either way the arm is no
+                # longer where that plan's start_pose says — keep every
+                # OTHER segment's entry for the rest of the chain.
+                self._drop_pending_plan(start_state, goal, entry=reuse)
             else:
                 # Reactive: (re)set the goal on the solver before servoing.
                 self.refresh_perception_world()
@@ -1702,21 +1779,43 @@ class UnifiedPlannerNode(Node):
                     return result_msg
 
             if result is not None:
-                # Winner-per-waypoint insight + stats for the fresh plan.
+                # Winner-per-waypoint insight + stats for the fresh plan, plus
+                # the trajectory that is about to be driven. This must not be
+                # fill_arrays=False: the re-solve can move the endpoints from
+                # what the plan-time solve produced, and the executor's
+                # chain-continuity check needs those DRIVEN endpoints. A result
+                # with no waypoints reads as "nothing to compare" there, and
+                # the chain silently drives on into segments anchored to the
+                # old end state - which is the bug this trajectory reporting
+                # exists to stop.
                 self._fill_result_insight(
                     result_msg.result, planner, goal, result, start_state,
-                    fill_arrays=False)
+                    fill_arrays=True)
             else:
                 # Reused a matching cached preview: report the planner's own
-                # (preview-plan) insight fields.
+                # (preview-plan) insight fields and the replayed trajectory.
+                # Same reasoning: a cache hit replays exactly the cached plan,
+                # so the executor must be able to verify where it is driving,
+                # or an off-spec reuse is indistinguishable from a clean one.
                 meta = self._result_meta_from_planner(planner)
                 self._fill_insight_fields(
                     result_msg.result, goal, meta, planner,
                     success=True, message="Execution completed",
                     start_state=start_state)
+                self._fill_reused_trajectory(
+                    result_msg.result, planner, reuse['trajectory'])
 
             self.get_logger().info(f"Executing with {planner.get_planner_name()}")
-            success = planner.execute(self.robot_context, goal_handle)
+            if result is not None:
+                # Freshly solved (re-solve or reactive): plan() already staged
+                # it into robot_context's command buffer.
+                success = planner.execute(self.robot_context, goal_handle)
+            else:
+                # Replayed cache entry: the planner's slot and the command
+                # buffer only hold the LAST segment planned, which for a
+                # mid-chain hit is NOT this segment — stage it then stream.
+                success = planner.replay(
+                    reuse['trajectory'], self.robot_context, goal_handle)
 
             # Cancel takes precedence over the planner's return value.
             if goal_handle.is_cancel_requested:
@@ -2319,25 +2418,84 @@ class UnifiedPlannerNode(Node):
                 f"Re-solving from the arm's actual pose; worst {where}.")
         return True, ''
 
-    def _store_pending_plan(self, start_state, req):
-        """Cache the just-planned open-loop trajectory's identity for reuse."""
-        self._pending_plan = {
+    def _prune_plan_cache(self):
+        """Drop expired entries and bound the pool's size (oldest first).
+
+        Called on store and on lookup, so an expired entry is never handed
+        out and a long multi-task run cannot accumulate entries between TTL
+        prunes. Bounded by ``trajectory_cache_size`` (default 64), far more
+        than any single chain's segment count.
+        """
+        ttl = self.get_parameter('trajectory_cache_ttl').get_parameter_value().double_value
+        cap = self.get_parameter('trajectory_cache_size').get_parameter_value().integer_value
+        now = time.monotonic()
+        alive = [e for e in self._pending_plan if (now - e['stamp']) <= ttl]
+        if len(alive) > cap:
+            alive = alive[-cap:]
+        self._pending_plan = alive
+
+    def _store_pending_plan(self, start_state, req, traj=None):
+        """Cache a just-planned open-loop trajectory for execute-time reuse.
+
+        Multi-entry, keyed by target signature, so EVERY segment of a chain
+        is replayable. The single-slot predecessor only ever knew the LAST
+        segment planned, so a mid-chain execute always missed and re-solved —
+        and a re-solve of a multi-solution pose goal is free to pick the
+        OTHER IK branch, which is exactly the divergence the chain-continuity
+        check exists to catch. Each entry keeps the trajectory itself: the
+        planner's ``planned_trajectory`` slot is overwritten by the next
+        segment's solve before that segment executes.
+        """
+        if traj is None:
+            planner = self.planner_manager.get_current_planner()
+            traj = getattr(planner, 'planned_trajectory', None)
+        self._prune_plan_cache()
+        self._pending_plan.append({
             'planner': self.planner_manager.get_current_planner_type(),
             'signature': self._target_signature(start_state, req),
             'stamp': time.monotonic(),
-        }
+            'trajectory': traj,
+        })
 
-    def _pending_plan_matches(self, start_state, req) -> bool:
-        """True if the cached plan is fresh and targets the same goal/start."""
-        pp = self._pending_plan
-        if pp is None:
-            return False
-        ttl = self.get_parameter('trajectory_cache_ttl').get_parameter_value().double_value
-        if (time.monotonic() - pp['stamp']) > ttl:
-            return False
-        if pp['planner'] != self.planner_manager.get_current_planner_type():
-            return False
-        return self._signatures_match(pp['signature'], self._target_signature(start_state, req))
+    def _pending_plan_matches(self, start_state, req):
+        """The fresh cached plan entry matching this target, or None.
+
+        Returns the whole entry (with its stored trajectory), not a bool:
+        the execute action replays THAT trajectory. The signature includes
+        the start state, so a match also proves the arm has not drifted from
+        the plan.
+        """
+        self._prune_plan_cache()
+        sig = self._target_signature(start_state, req)
+        planner_key = self.planner_manager.get_current_planner_type()
+        for entry in self._pending_plan:
+            if entry['planner'] != planner_key:
+                continue
+            if self._signatures_match(entry['signature'], sig):
+                return entry
+        return None
+
+    def _drop_pending_plan(self, start_state, req, entry=None):
+        """Drop plan-cache entries that execution consumed or superseded.
+
+        A replay CONSUMES its entry (identity drop) so a later identical
+        request cannot replay a trajectory the arm has already driven. A
+        re-solve supersedes the plan-time entry for the same target
+        (signature drop): the arm is now on the re-solved path, and replaying
+        the old plan anchored to a stale ``start_pose`` would strand the
+        chain somewhere the plan never validated. Either way only THIS
+        segment's entries go; the rest of the chain's stay replayable.
+        """
+        if entry:
+            self._pending_plan = [e for e in self._pending_plan if e is not entry]
+            return
+        sig = self._target_signature(start_state, req)
+        planner_key = self.planner_manager.get_current_planner_type()
+        self._pending_plan = [
+            e for e in self._pending_plan
+            if e['planner'] != planner_key
+            or not self._signatures_match(e['signature'], sig)
+        ]
 
     @staticmethod
     def _pose_tuple(p):
@@ -2415,9 +2573,9 @@ class UnifiedPlannerNode(Node):
         return True
 
     def clear_trajectory_callback(self, request, response):
-        """Discard any cached (preview) trajectory on user request."""
-        had = self._pending_plan is not None
-        self._pending_plan = None
+        """Discard every cached (preview) trajectory on user request."""
+        had = bool(self._pending_plan)
+        self._pending_plan = []
         response.success = True
         response.message = "Cached trajectory cleared" if had else "No cached trajectory"
         self.get_logger().info(response.message)

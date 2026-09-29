@@ -827,58 +827,7 @@ class SinglePlanner(TrajectoryPlanner):
 
         # Send trajectory to robot context for visualization
         if robot_context is not None:
-            traj = self.planned_trajectory
-            # v2: position/velocity/acceleration may have shape [B, T, D];
-            # robot_context expects [T, D] (one row of floats per waypoint).
-            # Flatten all leading dims down to 2 so `.tolist()` yields a
-            # list[list[float]] regardless of batch rank.
-            def _to_2d_list(t):
-                if t is None:
-                    return None
-                while t.ndim > 2:
-                    t = t[0]
-                return t.detach().cpu().tolist()
-
-            self.node.get_logger().debug(
-                f"Trajectory shapes - pos: {tuple(traj.position.shape)}, "
-                f"vel: {tuple(traj.velocity.shape) if traj.velocity is not None else None}, "
-                f"acc: {tuple(traj.acceleration.shape) if traj.acceleration is not None else None}"
-            )
-            pos_list = _to_2d_list(traj.position)
-            vel_list = _to_2d_list(traj.velocity)
-            acc_list = _to_2d_list(traj.acceleration)
-
-            # Ensure velocity/acceleration arrays align with positions even
-            # if the planner omitted them (rare but possible for a stubbed
-            # trajectory).
-            if vel_list is None:
-                vel_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
-            if acc_list is None:
-                acc_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
-
-            # Interpolated plans are in FULL joint space: cuRobo augments
-            # locked joints (e.g. a gripper finger_joint) via
-            # get_full_dof_from_solution(), so rows can be wider than
-            # joint_names (Kortex: 8 columns vs 7 names). Project the
-            # streamed command back onto ACTIVE joints by name so it matches
-            # the controller's arm joints — same active-joint projection the
-            # preview/ghost pipeline (robot_context) applies to set_command().
-            joint_names, cols = self._active_joint_projection(traj)
-            if cols is not None:
-                pos_list = [[r[i] for i in cols] for r in pos_list]
-                vel_list = [[r[i] for i in cols] for r in vel_list]
-                acc_list = [[r[i] for i in cols] for r in acc_list]
-                joint_names = [joint_names[i] for i in cols]
-
-            self._command_epoch = robot_context.set_command(
-                joint_names,
-                vel_list,
-                acc_list,
-                pos_list,
-            )
-            self.node.get_logger().info(
-                "Trajectory sent to robot context for visualization"
-            )
+            self._stage_trajectory(self.planned_trajectory, robot_context)
 
         return PlannerResult(
             success=True,
@@ -1222,6 +1171,98 @@ class SinglePlanner(TrajectoryPlanner):
         if any(n not in index for n in active_names):
             return full, None
         return full, [index[n] for n in active_names]
+
+    def _stage_trajectory(self, traj, robot_context) -> bool:
+        """Project + buffer a trajectory into robot_context's command buffer.
+
+        Shared by plan() (render the freshly solved trajectory for preview and
+        the later open-loop stream) and replay() (render a cached trajectory
+        for the cache-hit execute path). Returns True when the command was
+        buffered and ``_command_epoch`` advanced.
+        """
+        if robot_context is None or traj is None \
+                or getattr(traj, 'position', None) is None:
+            return False
+        # v2: position/velocity/acceleration may have shape [B, T, D];
+        # robot_context expects [T, D] (one row of floats per waypoint).
+        # Flatten all leading dims down to 2 so `.tolist()` yields a
+        # list[list[float]] regardless of batch rank.
+        def _to_2d_list(t):
+            if t is None:
+                return None
+            while t.ndim > 2:
+                t = t[0]
+            return t.detach().cpu().tolist()
+
+        self.node.get_logger().debug(
+            f"Trajectory shapes - pos: {tuple(traj.position.shape)}, "
+            f"vel: {tuple(traj.velocity.shape) if traj.velocity is not None else None}, "
+            f"acc: {tuple(traj.acceleration.shape) if traj.acceleration is not None else None}"
+        )
+        pos_list = _to_2d_list(traj.position)
+        vel_list = _to_2d_list(traj.velocity)
+        acc_list = _to_2d_list(traj.acceleration)
+
+        # Ensure velocity/acceleration arrays align with positions even
+        # if the planner omitted them (rare but possible for a stubbed
+        # trajectory).
+        if vel_list is None:
+            vel_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
+        if acc_list is None:
+            acc_list = [[0.0] * len(pos_list[0]) for _ in pos_list]
+
+        # Interpolated plans are in FULL joint space: cuRobo augments
+        # locked joints (e.g. a gripper finger_joint) via
+        # get_full_dof_from_solution(), so rows can be wider than
+        # joint_names (Kortex: 8 columns vs 7 names). Project the
+        # streamed command back onto ACTIVE joints by name so it matches
+        # the controller's arm joints — same active-joint projection the
+        # preview/ghost pipeline (robot_context) applies to set_command().
+        joint_names, cols = self._active_joint_projection(traj)
+        if cols is not None:
+            pos_list = [[r[i] for i in cols] for r in pos_list]
+            vel_list = [[r[i] for i in cols] for r in vel_list]
+            acc_list = [[r[i] for i in cols] for r in acc_list]
+            joint_names = [joint_names[i] for i in cols]
+
+        self._command_epoch = robot_context.set_command(
+            joint_names,
+            vel_list,
+            acc_list,
+            pos_list,
+        )
+        self.node.get_logger().info(
+            "Trajectory sent to robot context for visualization"
+        )
+        return True
+
+    def replay(self, traj, robot_context, goal_handle=None) -> bool:
+        """Drive a replayed (cached) trajectory through the open-loop streamer.
+
+        The execute action's cache-hit path can replay a MID-chain segment,
+        while ``planned_trajectory`` and robot_context's command buffer only
+        ever hold the LAST segment planned — so a plain ``execute()`` would
+        stream the wrong trajectory. ``replay`` stages the cached trajectory
+        into the command buffer (same active-joint projection as plan(), so
+        the streamed joints match the controller) and then streams it.
+
+        Args:
+            traj: the cached trajectory to drive.
+            robot_context: RobotContext for command sending.
+            goal_handle: Optional ROS action goal handle for feedback.
+
+        Returns:
+            True if execution completed successfully, otherwise False.
+        """
+        if traj is None or robot_context is None \
+                or getattr(traj, 'position', None) is None:
+            self.node.get_logger().error(
+                "No trajectory to replay; call plan() first.")
+            return False
+        self.planned_trajectory = traj
+        if not self._stage_trajectory(traj, robot_context):
+            return False
+        return self.execute(robot_context, goal_handle)
 
     def execute(self, robot_context, goal_handle=None) -> bool:
         """
