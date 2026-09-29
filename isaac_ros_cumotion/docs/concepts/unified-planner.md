@@ -62,7 +62,7 @@ IK and FK are hosted by the same node but initialized **lazily**: call `warmup_i
 
 ## Trajectory caching
 
-`generate_trajectory` caches its result for `trajectory_cache_ttl` seconds (default 30). A subsequent `execute_trajectory` goal with `allow_cached: true` (the default) and a matching target reuses it instead of re-planning — this is what makes the RViz "Generate" then "Send" workflow cheap. `clear_trajectory` empties the cache and the preview.
+`generate_trajectory` caches every planned open-loop trajectory in a multi-entry cache (bounded by `trajectory_cache_size`, expired by `trajectory_cache_ttl`). A subsequent `execute_trajectory` goal with `allow_cached: true` (the default) and a matching target replays the cached entry instead of re-planning — this is what makes the RViz "Generate" then "Send" workflow cheap. The cache is per-segment, so a multi-segment chain executes the trajectory it planned for EACH segment rather than re-solving them one by one (a fresh solve of a multi-solution pose goal is free to pick the other IK branch, which is precisely the divergence the task-constructor's chain-continuity check exists to catch). Setting `force_cached: true` on the goal turns any cache miss into an explicit failure instead of a fallback re-solve. `clear_trajectory` empties the cache and the preview.
 
 ## Source files
 

@@ -4,6 +4,7 @@
 # execution feedback timeline carries (§5: "feedback: unchanged").
 TrajectoryGoal goal              # start_pose + goalsets + PlanningOptions
 bool allow_cached                # reuse a matching, non-expired pre-planned trajectory
+bool force_cached                # ON: a cache miss FAILS instead of re-solving
 ---
 TrajectoryResult result          # success / message / trajectory / stats / collisions
 ---

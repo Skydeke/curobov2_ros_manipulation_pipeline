@@ -56,6 +56,7 @@ There is no world floor added automatically at startup: if you want a ground pla
 | `use_cuda_graph` | `true` | Capture/replay CUDA graphs in the solvers (faster). Env var `CUROBO_USE_CUDA_GRAPH=0` overrides for A/B testing | Startup |
 | `time_dilation_factor` | `1.0` | Trajectory RE-TIMING: the stamped per-point dt of every sent trajectory becomes `interpolation_dt / tdf` — 1.0 = nominal, <1.0 slower, >1.0 faster (cuRobo convention). Also gates how often execute() re-reads progression | Plan-time |
 | `trajectory_cache_ttl` | `30.0` | Lifetime (s) of a trajectory cached by `generate_trajectory` and reusable by the execute action (`allow_cached`) | Plan-time |
+| `trajectory_cache_size` | `64` | Max open-loop trajectories in the reuse cache (one per planned chain segment, keyed by target signature). Large enough for any chain; bounds GPU-side trajectory tensors between TTL prunes | Plan-time |
 | `sparse_voxel_publish_rate` | `7.0` | Publish rate (Hz) of `/unified_planner/voxel_grid_sparse`; `<= 0` disables | Startup |
 | `publish_plan_debug_image` | `false` | Publish the per-plan joint-trajectory pos/vel/acc/jerk plot as an RGB image on `/<node>/motion_plan_debug` (latched; independent of `enable_curobo_debug_mode`) | Plan-time |
 | `push_esdf_to_solvers` | `true` | Diagnostic toggle — `false` withholds the camera ESDF from the solvers and disables camera-based avoidance | Runtime |

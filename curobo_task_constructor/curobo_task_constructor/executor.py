@@ -44,10 +44,14 @@ __all__ = ["TaskExecutor", "EXECUTE_CONTINUITY_TOLERANCE"]
 #: This is about chain CONTINUITY, not trajectory identity: a re-solve may
 #: legitimately wobble through free space, but it has to still start and end
 #: where the plan said, or the next segment's baked ``start_pose`` is wrong.
-#: 0.05 rad is a little under 3 degrees - far above encoder/servo noise, far
+#: ``0.01 rad`` is the same value as the MoveIt pipeline's
+#: ``allowed_start_tolerance`` (iki_kortex_moveit_config/config/
+#: moveit_controllers.yaml): one start-agreement number for both stacks, so a
+#: chain refuses to drive on to a segment in a configuration that MoveIt would
+#: likewise refuse to plan from. It sits far above encoder/servo noise and far
 #: below the fraction of a joint's range that choosing a different IK branch
 #: moves (the failure this was added for was ~1.7 rad on one joint).
-EXECUTE_CONTINUITY_TOLERANCE = 0.05
+EXECUTE_CONTINUITY_TOLERANCE = 0.01
 
 
 def _joint_positions(state) -> list:
@@ -211,8 +215,12 @@ class TaskExecutor:
 
     def execute(self, sol: Solution) -> list:
         """Play back one solution: materialize each segment's scene delta on
-        the curobo server in chain order, then re-solve + drive each motion
-        segment (SendTrajectory). Returns the list of drive results.
+        the curobo server in chain order, then drive each motion segment
+        (SendTrajectory). The server replays the segment's PLANNED trajectory
+        from its multi-entry cache — every chain segment was cached at plan
+        time, so execution reproduces the validated plan; only a genuine miss
+        (cache cleared, TTL expired, world mutated) falls back to re-solving.
+        Returns the list of drive results.
 
         The chain STOPS at the first segment that does not land where the plan
         said it would - either because the drive failed, or because the server

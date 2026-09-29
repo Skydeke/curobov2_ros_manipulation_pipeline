@@ -278,3 +278,49 @@ def test_both_documented_thresholds_are_read_from_parameters_at_call_time():
     assert len(gets) >= 2, "both thresholds must be fetched here"
     names = {getattr(g.args[0], "value", None) for g in gets}
     assert names == {"execution_start_warn_drift", "execution_start_tolerance"}
+
+
+def test_start_tolerance_default_matches_moveit_allowed_start_tolerance():
+    """One start-agreement number for the whole pipeline: 0.01 rad.
+
+    ``iki_kortex_moveit_config/config/moveit_controllers.yaml`` sets
+    ``allowed_start_tolerance: 0.01``. The curobo chain must not accept a
+    start state MoveIt would have refused to plan from - if the two stacks
+    disagree on the wall, a handoff between MoveIt-planned and curobo-driven
+    segments silently plans from configurations the other would reject. The
+    warn tier must stay below it.
+    """
+    defaults = {}
+    for n in ast.walk(_module()):
+        if (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "declare_parameter" and len(n.args) > 1
+                and isinstance(n.args[0], ast.Constant)):
+            defaults[n.args[0].value] = n.args[1]
+    tol = defaults.get("execution_start_tolerance")
+    warn = defaults.get("execution_start_warn_drift")
+    assert tol is not None and warn is not None
+    assert tol.value == pytest.approx(0.01), (
+        f"execution_start_tolerance is {tol.value}, must match MoveIt's "
+        f"allowed_start_tolerance of 0.01")
+    assert 0.0 < warn.value < tol.value, \
+        "the warn tier must sit below the refuse tier"
+
+
+def test_the_execute_action_reports_the_driven_trajectory():
+    """An execute result with no waypoints is how a diverged chain drove on.
+
+    ``TaskExecutor._diverged_from_plan`` compares the plan-time endpoints
+    against the DRIVEN trajectory; when the execute action's TrajectoryResult
+    carries no trajectory it returns "nothing to compare" and the chain
+    continues into segments that are anchored to the PLANNED endpoint - which
+    is the execution/display mismatch this suite exists to prevent. Both
+    open-loop paths must therefore report the trajectory they are about to
+    drive: the freshly re-solved plan on the re-solve path, the replayed
+    cached plan on the cache-hit path.
+    """
+    execute = _func("_execute_goal")
+    text = ast.unparse(execute)
+    assert "fill_arrays=True" in text, \
+        "the re-solve path must return the executed trajectory"
+    assert "_fill_reused_trajectory" in text, \
+        "the cache-hit path must return the replayed trajectory"

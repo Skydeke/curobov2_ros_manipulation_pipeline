@@ -450,20 +450,28 @@ class CuroboServerInterface(RobotInterface):
             self._set_links_collision(requests, True)
 
     def execute(self, request: PlanRequest) -> PlanResult:
-        """Drive one segment: SendTrajectory, which re-solves the goalset
-        server-side and then streams the result.
+        """Drive one segment: SendTrajectory, which replays the matching
+        cached (pre-planned) trajectory when it can and re-solves on a miss.
 
         The goalset's ``allowed_collisions`` is applied here exactly as in
         ``plan`` / ``plan_batch``. It has to be: the wire ``Goalset`` carries
         no collision concept, so this adapter's ``set_link_collision`` call is
         the ONLY way the server ever learns that e.g. the finger spheres may
-        touch the grasped object. The server's execute path re-solves the
-        goalset from scratch whenever the trajectory cache misses (it is a
-        single slot, so a mid-chain segment almost always misses), and it
-        re-solves against whatever sphere state is current — with the spheres
-        restored, a grasp close that planned cleanly (spheres off) fails its
-        goal state with "finger -> object" contacts that the plan itself proved
-        were acceptable.
+        touch the grasped object. The server's execute path replays the
+        cached plan whenever the request matches one — with the multi-entry
+        trajectory cache, EVERY segment of a chain hits, so the driven
+        trajectory is the validated plan rather than a fresh solve (a fresh
+        solve of a multi-solution pose goal is free to pick the OTHER IK
+        branch, which is exactly the divergence the chain-continuity check
+        exists to catch). Only a genuine miss (cache cleared, TTL expired,
+        world mutated) falls back to re-solving, against whatever sphere state
+        is current — with the spheres restored, a grasp close that planned
+        cleanly (spheres off) fails its goal state with "finger -> object"
+        contacts that the plan itself proved were acceptable.
+
+        ``force_cached`` stays OFF: the task-constructor prefers the graceful
+        re-solve fallback on a genuine miss. Callers that demand "replay or
+        fail" can set it on the action goal directly.
 
         The window here is wider than in ``plan``: the allowance is held off for
         the whole physical motion, not just the solve. That is correct for a
@@ -478,6 +486,7 @@ class CuroboServerInterface(RobotInterface):
         goal = SendTrajectory.Goal()
         goal.goal = self._to_goal(request)
         goal.allow_cached = True
+        goal.force_cached = False  # replay-or-fail knob for explicit callers
         self._set_links_collision([request], False)
         try:
             gh = self._await(
