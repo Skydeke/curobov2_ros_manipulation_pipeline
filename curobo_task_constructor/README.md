@@ -30,7 +30,7 @@ built and unit-tested without ROS.
 | `move_relative` | `MoveRelative` | Plan a translation with the tool orientation frozen. `axis` (named config) or `distance`, or sample `min_distance`..`max_distance` in `num_samples` steps. `hold`, `pos_tol`, `rot_tol`, `link`, `direction`. |
 | `cartesian_path` | `CartesianPath` | Plan a **straight line**. See below. |
 | `connect` | `Connect` | Plan a motion between two already-known states. |
-| `modify_scene` | `ModifyScene` | `add` / `remove` / `attach` / `detach` an object, or `allow_collisions: {object, links, enabled}`. |
+| `modify_scene` | `ModifyScene` | `add` (an object spec: `name`, `shape`, `pose` as a flat `{x,y,z,qx,qy,qz,qw}` dict, `dimensions`) / `remove` (by name) / `remove_all` (clear the server world) / `attach` / `detach` an object, `detach_all` (release whatever is attached — clears the attach state that `remove_all` does not), or `allow_collisions: {object, links, enabled}`. |
 
 `goal: {joints: {j: v}}` is a **sparse** goal: the listed joints are merged onto
 the start state and everything else holds. That is the "close the fingers, park
