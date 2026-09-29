@@ -372,3 +372,78 @@ def test_pick_chain_is_continuous():
     chain = _chain(ex)
     for prev, nxt in zip(chain, chain[1:]):
         assert prev.end is nxt.start
+
+
+# -----------------------------------------------------------------------------
+# the scene-setup task (scene_root)
+# -----------------------------------------------------------------------------
+
+def _scene_specs():
+    """Two perceived cuboids, the shape ``_scene_object_specs`` produces."""
+    return [
+        pick_tree.scene_object(
+            "object_0", pick_tree.PoseLike(pick_tree._Vec(0.40, 0.0, 0.24),
+                                           TOP_DOWN_Q),
+            pick_tree._Vec(0.05, 0.05, 0.03)),
+        pick_tree.scene_object(
+            "plane_0", pick_tree.PoseLike(pick_tree._Vec(0.0, 0.0, 0.17),
+                                          TOP_DOWN_Q),
+            pick_tree._Vec(0.40, 0.40, 0.01)),
+    ]
+
+
+def test_scene_setup_task_clears_a_stale_attach_and_world_then_re_adds():
+    """``scene_root`` must return the server to EXACTLY the perceived world —
+    objects only, nothing attached — even when a previous cycle left an object
+    attached and boxes behind. That is what stops a stale attach leaking into
+    the next pick (the ``current_state`` 'already attached' refusal, or the
+    re-added box left collision-inert by reapply_attached_disables)."""
+    robot = _robot()
+    # A leftover world: last cycle's box AND an object still in the hand.
+    robot.add_object(ObjectSpec(name="old_box", shape="cuboid",
+                                dimensions=[0.1] * 3))
+    robot.add_object(ObjectSpec(name=OBJECT, shape="cuboid",
+                                dimensions=[0.05] * 3))
+    assert robot.attach_object(OBJECT)
+    seed_ops = len(robot.world_ops)  # the two seed adds above
+
+    specs = _scene_specs()
+    root = pick_tree.scene_root(specs, remove_all=True)
+    ex = TaskExecutor(StageSpec.from_dict(root), robot, task_id="scene")
+    ex.base_scene = ex.build_base_scene()  # the node's own construction
+    assert ex.init(), ex.describe()["comment"]
+    assert ex.plan(), "a mutation-only scene task must always solve"
+    sol = ex.best()
+    assert sol is not None
+    # Mutation-only leaves drive nothing, so execute() yields [] (the task
+    # node's own motion-leaves filter treats that as success); the record is
+    # the ops it applied on the server.
+    ex.execute(sol)
+
+    # Chain order (the task's own ops only): clear the hand, clear the world,
+    # then the adds. The detach_all must precede the adds, or the re-added
+    # object stays disabled.
+    kinds = [kind for kind, _ in robot.world_ops[seed_ops:]]
+    assert kinds == ["detach_all", "remove_all", "add", "add"]
+
+    # The world is exactly the new specs and nothing is in the hand.
+    assert sorted(robot.world) == [s["name"] for s in specs]
+    assert robot.get_attached_objects() == []
+
+
+def test_scene_add_flat_pose_dict_parses_through_the_stage():
+    """``scene_object`` rides as YAML, so the pose is a flat
+    ``{x,y,z,qx,qy,qz,qw}`` dict — message types cannot ride YAML — and the
+    ``add`` stage must rebuild a Pose-like from it, not pass the dict on."""
+    robot = _robot()
+    spec = pick_tree.scene_object(
+        OBJECT, pick_tree.PoseLike(pick_tree._Vec(0.30, 0.0, 0.24),
+                                   TOP_DOWN_Q),
+        pick_tree._Vec(0.05, 0.05, 0.03))
+    root = pick_tree.scene_root([spec], remove_all=False)
+    ex = TaskExecutor(StageSpec.from_dict(root), robot, task_id="scene")
+    assert ex.init(), ex.describe()["comment"]
+    assert ex.plan()
+    ex.execute(ex.best())  # mutation-only: [] results == success (see above)
+    assert sorted(robot.world) == [OBJECT]
+    assert robot.world[OBJECT] == pytest.approx([0.30, 0.0, 0.24])

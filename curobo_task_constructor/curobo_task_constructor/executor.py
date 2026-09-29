@@ -296,6 +296,14 @@ class TaskExecutor:
             self.robot.add_object(payload)
         elif kind == "remove":
             self.robot.remove_object(payload)
+        elif kind == "remove_all":
+            self.robot.remove_all_objects()
+        elif kind == "detach_all":
+            # Clear the attach unconditionally (name-agnostic, the server's
+            # /detach_object Trigger): remove_all_objects alone drops the
+            # obstacle list but not the attach, whose name-based disable the
+            # checkers re-assert after the re-add.
+            self.robot.detach_object(None)
         elif kind == "attach":
             self.robot.attach_object(payload)
         elif kind == "detach":

@@ -301,7 +301,7 @@ class MockCuroboServer(RobotInterface):
     # scene
     # ------------------------------------------------------------------
     def add_object(self, spec) -> bool:
-        xyz = _xyz(spec) if spec.pose is not None else None
+        xyz = _xyz(spec.pose) if spec.pose is not None else None
         self.world[spec.name] = xyz or [0.0, 0.0, 0.5]
         self.world_ops.append(("add", spec.name))
         return True
@@ -314,6 +314,7 @@ class MockCuroboServer(RobotInterface):
     def remove_all_objects(self) -> None:
         self.world.clear()
         self.attached.clear()
+        self.world_ops.append(("remove_all", None))
 
     def attach_object(self, name: str) -> bool:
         self.attached.add(name)
@@ -324,11 +325,15 @@ class MockCuroboServer(RobotInterface):
         return True
 
     def detach_object(self, name: Optional[str] = None) -> bool:
-        if name is not None and name in self.attached:
+        # name None = detach-all (the server's /detach_object Trigger:
+        # releases whatever is attached, no name needed).
+        if name is None:
+            self.attached.clear()
+            self.world_ops.append(("detach_all", None))
+        else:
             self.attached.discard(name)
             self.world_ops.append(("detach", name))
-            return True
-        return name is None and bool(self.attached)  # detach-all stub
+        return True
 
 
 #: A reachable object pose for pick&place tests (the mock arm's reachable
