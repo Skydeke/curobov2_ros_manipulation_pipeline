@@ -132,8 +132,13 @@ def test_pick_tree_solves():
 
 
 def test_pick_tree_shape():
-    """current_state -> fallbacks(strategies) -> return -> forbid -> open ->
-    detach, with contact allowed ABOVE the descent inside each strategy."""
+    """current_state -> ready -> fallbacks(strategies) -> allow -> return.
+
+    The pick task stops with the finger still CLOSED: the orchestrator has to
+    be able to read whether the grasp actually took hold, and a task that
+    reopened the gripper on its way out would erase that evidence. The reopen
+    and the detach are ``release_root``, sent as a separate task afterwards.
+    """
     root = pick_tree.pick_root(
         _grasp_poses(_robot()), object_name=OBJECT)
     assert root["container_type"] == "serial"
@@ -141,16 +146,18 @@ def test_pick_tree_shape():
            for c in root["children"]]
     assert top == [
         ("current_state", "current_state", ""),
+        ("ready", "move_to", ""),
         ("strategies", "", "fallbacks"),
+        ("allow", "modify_scene", ""),
         ("return", "move_to", ""),
-        ("forbid", "modify_scene", ""),
-        ("open", "move_to", ""),
-        ("detach", "modify_scene", ""),
     ]
-    strat = root["children"][1]["children"][0]
+    strat = root["children"][2]["children"][0]
     assert strat["name"] == "strategy_0"
+    # attach BEFORE close, as the reference does: the attach fits the object's
+    # collision geometry to the gripper, and it also puts the one stage that
+    # must never run on a failed grasp ahead of the stage that fails it.
     assert [c["name"] for c in strat["children"]] == [
-        "pre_grasp_0", "allow_0", "descend_0", "close_0", "attach_0",
+        "pre_grasp_0", "allow_0", "descend_0", "attach_0", "close_0",
         "retreat_0"]
 
 
@@ -185,8 +192,8 @@ def test_pick_tree_takes_the_cheapest_strategy_first():
     _, ex = _executor()
     assert ex.plan()
     names = [l.stage.name for l in _chain(ex)]
-    assert names[:7] == ["current_state", "pre_grasp_0", "allow_0",
-                         "descend_0", "close_0", "attach_0", "retreat_0"]
+    assert names[:7] == ["current_state", "ready", "pre_grasp_0", "allow_0",
+                         "descend_0", "attach_0", "close_0"]
     assert not any(n.endswith(("_1", "_2")) for n in names)
 
 
@@ -275,7 +282,7 @@ def test_a_bowed_descent_falls_through_to_the_next_strategy():
     # with free_space available it succeeds, on the unconstrained leg
     robot, ex = _executor(bow=0.04)
     assert ex.plan()
-    assert [l.stage.name for l in _chain(ex)][3] == "descend_2"
+    assert "descend_2" in [l.stage.name for l in _chain(ex)]
 
 
 def test_high_approach_stands_off_further():
@@ -338,14 +345,25 @@ def test_contact_is_allowed_before_the_descent_not_after():
         sorted(pick_tree.GRIPPER_CONTACT_LINKS)
 
 
-def test_attach_happens_between_the_close_and_the_retreat():
+def test_attach_happens_after_the_descent_and_before_the_close():
+    """The reference's order: descend, attach, close, retreat.
+
+    The attach fits the object's collision geometry to the gripper, so doing
+    it first means the close is planned against an object already accounted
+    for - and it means the stage that must never run on a failed grasp comes
+    before the stage that fails the grasp. The detach is no longer here: the
+    pick task ends holding the finger closed so the caller can read whether it
+    holds anything, and the release is a separate task.
+    """
     robot, ex = _executor()
     assert ex.plan()
     names = [l.stage.name for l in _chain(ex)]
-    assert names.index("close_0") < names.index("attach_0")
-    assert names.index("attach_0") < names.index("retreat_0")
+    assert names.index("descend_0") < names.index("attach_0")
+    assert names.index("attach_0") < names.index("close_0")
+    assert names.index("close_0") < names.index("retreat_0")
     assert ex.execute(ex.best())
-    assert [kind for kind, _ in robot.world_ops] == ["attach", "detach"]
+    # The pick task attaches and stops there.
+    assert [kind for kind, _ in robot.world_ops] == ["attach"]
 
 
 def test_pick_chain_is_continuous():

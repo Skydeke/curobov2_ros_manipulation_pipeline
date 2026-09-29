@@ -29,13 +29,49 @@ from __future__ import annotations
 from typing import Optional
 
 from curobo_task_constructor.core.container import GENERATE_INTERFACE
-from curobo_task_constructor.core.robot import ObjectSpec, RobotInterface
+from curobo_task_constructor.core.robot import ObjectSpec, PlanResult, RobotInterface
 from curobo_task_constructor.core.stage import InitStageError, Solution
 from curobo_task_constructor.core.state import SceneDiff
 from curobo_task_constructor.graph.builder import build_tree
 from curobo_task_constructor.graph.spec import StageSpec
 
-__all__ = ["TaskExecutor"]
+__all__ = ["TaskExecutor", "EXECUTE_CONTINUITY_TOLERANCE"]
+
+#: Largest per-joint difference (rad) tolerated between a segment's PLANNED
+#: endpoint and the endpoint that was actually driven before the chain is
+#: declared broken. See ``TaskExecutor._diverged_from_plan``.
+#:
+#: This is about chain CONTINUITY, not trajectory identity: a re-solve may
+#: legitimately wobble through free space, but it has to still start and end
+#: where the plan said, or the next segment's baked ``start_pose`` is wrong.
+#: 0.05 rad is a little under 3 degrees - far above encoder/servo noise, far
+#: below the fraction of a joint's range that choosing a different IK branch
+#: moves (the failure this was added for was ~1.7 rad on one joint).
+EXECUTE_CONTINUITY_TOLERANCE = 0.05
+
+
+def _joint_positions(state) -> list:
+    """Joint values out of a waypoint, whatever shape it arrived in.
+
+    Waypoints reach here as JointState messages, as the raw responses they
+    were built from, and as plain lists in tests, so all three are accepted.
+    """
+    positions = getattr(state, "position", state)
+    return [float(x) for x in positions]
+
+
+def _max_joint_delta(a, b) -> float:
+    """Largest per-joint difference between two waypoints, in rad.
+
+    A missing trailing DOF (a 7-DOF arm group against a 8-joint arm) is
+    compared only over the joints both carry, matching how
+    ``_resolve_start_state`` pads a short start pose.
+    """
+    pa, pb = _joint_positions(a), _joint_positions(b)
+    n = min(len(pa), len(pb))
+    if n == 0:
+        return 0.0
+    return max(abs(x - y) for x, y in zip(pa[:n], pb[:n]))
 
 
 class TaskExecutor:
@@ -176,16 +212,80 @@ class TaskExecutor:
     def execute(self, sol: Solution) -> list:
         """Play back one solution: materialize each segment's scene delta on
         the curobo server in chain order, then re-solve + drive each motion
-        segment (SendTrajectory). Returns the list of drive results."""
+        segment (SendTrajectory). Returns the list of drive results.
+
+        The chain STOPS at the first segment that does not land where the plan
+        said it would - either because the drive failed, or because the server
+        did not use the cached plan and re-solved into a different trajectory
+        (see ``_diverged_from_plan``). The remaining segments are not driven,
+        because every one of them carries a ``start_pose`` baked from the
+        PLANNED end state of its predecessor, so a chain that has already
+        drifted is a chain whose remaining requests are anchored to poses the
+        arm was never asked to be at. Driving them anyway is how one bad
+        segment becomes a self-collision three segments later.
+
+        The returned list is truncated at the failure, so the caller's
+        zip-with-motion-leaves pairs each result with the leaf that produced
+        it and reports the right stage name.
+        """
         self._applied_ops = []
         results = []
         for leaf in self.flatten_leaves(sol):
             for kind, payload in leaf.scene_ops or []:
                 self._apply_op(kind, payload)
-            if leaf.plan_request is not None:
-                results.append(
-                    self.robot.execute(leaf.plan_request))
+            if leaf.plan_request is None:
+                continue
+            result = self.robot.execute(leaf.plan_request)
+            if not result.success:
+                results.append(result)
+                break
+            divergence = self._diverged_from_plan(leaf, result)
+            if divergence is not None:
+                results.append(PlanResult(
+                    False, divergence, trajectory=result.trajectory))
+                break
+            results.append(result)
         return results
+
+    @staticmethod
+    def _diverged_from_plan(leaf: Solution, result: PlanResult):
+        """Did the executed trajectory differ from the planned one?
+
+        Only the two ENDPOINTS are compared, and that is deliberate. A
+        re-solve from the same start to the same goal is free to take a
+        different path through free space - trajopt is stochastic - and a
+        different path is not a defect. What the chain depends on is only
+        where each segment BEGINS and ENDS: the next segment's request
+        ``start_pose`` is the planned end of this one. If either endpoint
+        moved, the rest of the chain is anchored to poses that no longer
+        describe where the arm is, and continuing is what turns a small
+        mismatch into a runaway.
+
+        Returns an error message, or None when the endpoints agree.
+
+        The comparison is against ``leaf.trajectory``, the waypoints this
+        segment produced at PLAN time, which the Solution carries. That is the
+        trajectory the caller was shown and that collision checking accepted -
+        so a mismatch here is precisely the execution/display divergence, and
+        it is detectable without any protocol change.
+        """
+        planned = leaf.trajectory
+        driven = result.trajectory
+        if not planned or not driven:
+            # Nothing to compare: a mutation leaf, or a result that carried no
+            # trajectory. Not evidence of divergence.
+            return None
+        for label, want, got in (("start", planned[0], driven[0]),
+                                 ("end", planned[-1], driven[-1])):
+            delta = _max_joint_delta(want, got)
+            if delta > EXECUTE_CONTINUITY_TOLERANCE:
+                name = getattr(leaf.stage, "name", "<unnamed>")
+                return (f"cache miss: '{name}' was re-solved and its {label} "
+                        f"state moved {delta:.3f} rad from the plan "
+                        f"(> {EXECUTE_CONTINUITY_TOLERANCE} rad); the rest of "
+                        f"the chain is anchored to the planned trajectory and "
+                        f"was not executed")
+        return None
 
     def _apply_op(self, kind: str, payload) -> None:
         key = (kind, payload.name if kind == "add" else payload)

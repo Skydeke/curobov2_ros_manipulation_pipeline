@@ -491,6 +491,16 @@ class UnifiedPlannerNode(Node):
         # Lifetime (s) of a pre-planned (preview) trajectory cached by
         # generate_trajectory and reused by the execute action.
         self.declare_parameter('trajectory_cache_ttl', 30.0)
+        # How far the arm may have strayed from the state a request says it
+        # starts in, for a cache MISS in the execute path to be trusted. See
+        # _check_execution_start_drift. 0.1 rad is a little under 6 degrees:
+        # enough to absorb real servo tracking error, and well under the
+        # fraction of a joint's range that a wrong IK branch moves.
+        self.declare_parameter('execution_start_tolerance', 0.1)
+        # Drift below this (but above 0) is reported and allowed: ordinary
+        # servo tracking error, where re-solving from the arm's ACTUAL pose is
+        # exactly the right thing to do.
+        self.declare_parameter('execution_start_warn_drift', 0.05)
 
         # Single shared context for every solver (robot + obstacles + scene +
         # collision cache). The MPC solver is built lazily from this same context.
@@ -1617,6 +1627,23 @@ class UnifiedPlannerNode(Node):
                         f"[plan-perf] Reusing cached (pre-planned) trajectory "
                         f"(setup {(_t_reuse - _t_total) * 1e3:.1f} ms TOTAL)")
                 else:
+                    # The plan that was displayed and validated is about to be
+                    # discarded and re-solved from scratch. The re-solve is
+                    # anchored to the request's start_pose, which was baked in
+                    # when the chain was PLANNED - so if the arm is not there
+                    # now, the trajectory produced is a different one, not a
+                    # re-run of the one that was checked. That is the
+                    # execution/display mismatch, and it is silent: the goal
+                    # succeeds, the controller reports success, and only the
+                    # joint values disagree. Refuse rather than drive it.
+                    drift_ok, drift_msg = self._check_execution_start_drift(goal)
+                    if not drift_ok:
+                        self.get_logger().error(drift_msg)
+                        result_msg.result = TrajectoryResult()
+                        result_msg.result.success = False
+                        result_msg.result.message = drift_msg
+                        goal_handle.abort()
+                        return result_msg
                     self.refresh_perception_world()
                     _t_world = time.monotonic()
                     self.get_logger().info(f"Planning with {planner.get_planner_name()}")
@@ -2217,6 +2244,80 @@ class UnifiedPlannerNode(Node):
             )
         )
         return start_joint_pose, start_state
+
+    def _check_execution_start_drift(self, goal):
+        """Is the arm still where this goal says it starts?
+
+        Only meaningful on the re-solve path. On a cache hit the signature
+        already pins the start state, so a hit means the arm has not moved and
+        there is nothing to compare. On a miss the request's ``start_pose`` is
+        the plan-time pose, and ``_resolve_start_state`` prefers it over the
+        arm's real one ("Using start position from request") - so a stale pose
+        silently anchors the new solve to a configuration the arm is not in.
+        cuRobo then finds a different IK branch, and the trajectory that gets
+        driven is not the trajectory that was planned and displayed.
+
+        Two outcomes, because the two situations mean opposite things:
+
+          * small drift - ordinary servo tracking error. The arm really is
+            slightly off, re-solving from where it actually is is the correct
+            response, and the new plan IS the right plan. Warn, proceed.
+          * large drift - the arm is somewhere the chain never put it (an
+            earlier segment failed, was skipped, or the arm was moved
+            externally). Re-solving produces a trajectory unrelated to the
+            validated one. Refuse, and leave the arm where it is so the caller
+            can recover deliberately rather than inherit a mystery motion.
+
+        Returns ``(ok, message)``; ``message`` is the log/error text.
+        """
+        start_pose = getattr(goal, 'start_pose', None)
+        if start_pose is None or len(start_pose.position) == 0:
+            # No start_pose in the goal: the planner is already anchored to the
+            # arm's live pose, so there is nothing stale to catch.
+            return True, ''
+        try:
+            requested = [float(x) for x in start_pose.position]
+            current = [float(x) for x in self.robot_context.get_joint_pose()]
+        except (TypeError, RuntimeError, ValueError) as exc:
+            # A tensor that will not convert is not evidence of drift. Do not
+            # turn a type problem into a refused motion.
+            self.get_logger().warn(
+                f"Could not compare requested start pose against the arm's "
+                f"actual pose ({exc}); trusting the request.")
+            return True, ''
+
+        # A short start pose (e.g. a 7-DOF arm group) is padded from the live
+        # pose in _resolve_start_state, so pad the same way before comparing.
+        n = min(len(requested), len(current))
+        if n == 0:
+            return True, ''
+        requested, current = requested[:n], current[:n]
+        deltas = [abs(a - b) for a, b in zip(requested, current)]
+        worst = max(range(n), key=deltas.__getitem__)
+        drift = deltas[worst]
+        fmt = lambda v: [f'{x:.3f}' for x in v]  # noqa: E731
+        where = (f"joint {worst}: requested {requested[worst]:.3f} rad, "
+                 f"arm is at {current[worst]:.3f} rad ({drift:.3f} rad off)")
+
+        warn = self.get_parameter(
+            'execution_start_warn_drift').get_parameter_value().double_value
+        tol = self.get_parameter(
+            'execution_start_tolerance').get_parameter_value().double_value
+        if drift > tol:
+            return False, (
+                f"Refusing to re-solve for execution: the arm is {drift:.3f} rad "
+                f"from the start state this goal was planned from, over the "
+                f"{tol:.3f} rad execution_start_tolerance. The cached plan "
+                f"missed (scene or cache state changed) and re-solving from the "
+                f"planned start pose would drive a trajectory that is not the "
+                f"one that was planned. Requested {fmt(requested)}, actual "
+                f"{fmt(current)}; worst {where}.")
+        if drift > warn:
+            self.get_logger().warn(
+                f"Execute re-solve with {drift:.3f} rad of start-pose drift "
+                f"(within tolerance {tol:.3f}, warn above {warn:.3f}). "
+                f"Re-solving from the arm's actual pose; worst {where}.")
+        return True, ''
 
     def _store_pending_plan(self, start_state, req):
         """Cache the just-planned open-loop trajectory's identity for reuse."""
