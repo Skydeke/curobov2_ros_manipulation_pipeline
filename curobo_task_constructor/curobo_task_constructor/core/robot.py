@@ -32,16 +32,6 @@ class GoalsetSpec:
 
 
 @dataclass
-class PlanningOptionsSpec:
-    """Per-request planning options (mirror of PlanningOptions.msg)."""
-
-    num_seeds: int = 0
-    waypoint_tolerance: float = 0.0  # 0 -> planner default
-    exact_joints: list = field(default_factory=list)  # e.g. ["finger_joint"]
-    log_considered_trajectories: bool = False
-
-
-@dataclass
 class PlanRequest:
     """A whole-task planning request (mirror of TrajectoryGoal.msg).
 
@@ -51,7 +41,6 @@ class PlanRequest:
 
     goalsets: list = field(default_factory=list)
     start_pose: Any = None  # JointStateLike or None (server uses current)
-    options: Optional[PlanningOptionsSpec] = field(default_factory=PlanningOptionsSpec)
     planner: Any = None  # planner key/int; None -> server default
 
 
@@ -116,8 +105,7 @@ class RobotInterface(ABC):
     def fk(self, joint_state: Any, link: Optional[str] = None) -> Any:
         """Forward kinematics: pose of ``link`` (default: tool tip)."""
 
-    def fk_batch(self, joint_states: list,
-                 link: Optional[str] = None) -> list:
+    def fk_batch(self, joint_states: list, link: Optional[str] = None) -> list:
         """FK for several states at once, returning one pose per input.
 
         The wire carries this natively (``Fk.srv`` takes a

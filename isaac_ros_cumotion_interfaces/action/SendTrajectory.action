@@ -2,7 +2,7 @@
 # (TrajectoryGoal → TrajectoryResult), not mirrored by hand.  Feedback keeps
 # the classic per-step fields (state / step_progression / error) that the
 # execution feedback timeline carries (§5: "feedback: unchanged").
-TrajectoryGoal goal              # start_pose + goalsets + PlanningOptions
+TrajectoryGoal goal              # start_pose + goalsets
 bool allow_cached                # reuse a matching, non-expired pre-planned trajectory
 bool force_cached                # ON: a cache miss FAILS instead of re-solving
 ---

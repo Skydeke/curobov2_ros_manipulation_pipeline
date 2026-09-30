@@ -30,6 +30,7 @@ from rclpy.qos import (
 
 from curobo.types import JointState, Pose, GoalToolPose
 from curobo.motion_planner import MotionPlanner
+
 # v2: PoseCostMetric is gone; Cartesian axis constraints use ToolPoseCriteria.
 # Not re-exported publicly yet, so import from _src (same pattern as Mapper).
 from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
@@ -115,7 +116,7 @@ class SinglePlanner(TrajectoryPlanner):
         # param is true (off by default). See _publish_plan_image().
         self._debug_img_pub = None
         # Frame id stamped into the debug image header (robot root frame).
-        self._debug_frame = getattr(config_wrapper, 'base_link', None)
+        self._debug_frame = getattr(config_wrapper, "base_link", None)
 
     def _plan_image_enabled(self) -> bool:
         """Whether the owning node should publish the motion-plan debug image.
@@ -125,11 +126,11 @@ class SinglePlanner(TrajectoryPlanner):
         plan plot can be turned on without bumping curobo's log verbosity.
         Defaults to off if the node has not declared the param.
         """
-        if not getattr(self.node, 'has_parameter', None):
+        if not getattr(self.node, "has_parameter", None):
             return False
-        if not self.node.has_parameter('publish_plan_debug_image'):
+        if not self.node.has_parameter("publish_plan_debug_image"):
             return False
-        return bool(self.node.get_parameter('publish_plan_debug_image').value)
+        return bool(self.node.get_parameter("publish_plan_debug_image").value)
 
     def _publish_plan_image(self):
         """Publish the planned trajectory's debug plot as a latched Image.
@@ -157,20 +158,20 @@ class SinglePlanner(TrajectoryPlanner):
             position = _squeeze(traj.position).cpu().numpy()
             velocity = (
                 _squeeze(traj.velocity).cpu().numpy()
-                if getattr(traj, 'velocity', None) is not None
+                if getattr(traj, "velocity", None) is not None
                 else None
             )
             acceleration = (
                 _squeeze(traj.acceleration).cpu().numpy()
-                if getattr(traj, 'acceleration', None) is not None
+                if getattr(traj, "acceleration", None) is not None
                 else None
             )
-            names = list(getattr(traj, 'joint_names', None) or [])
+            names = list(getattr(traj, "joint_names", None) or [])
             dt = 0.025
-            if getattr(self.node, 'has_parameter', None) and self.node.has_parameter(
-                'interpolation_dt'
+            if getattr(self.node, "has_parameter", None) and self.node.has_parameter(
+                "interpolation_dt"
             ):
-                dt = float(self.node.get_parameter('interpolation_dt').value)
+                dt = float(self.node.get_parameter("interpolation_dt").value)
             if dt <= 0:
                 dt = 0.025
 
@@ -186,7 +187,7 @@ class SinglePlanner(TrajectoryPlanner):
             if self._debug_img_pub is None:
                 self._debug_img_pub = self.node.create_publisher(
                     ImageMsg,
-                    self.node.get_name() + '/motion_plan_debug',
+                    self.node.get_name() + "/motion_plan_debug",
                     QoSProfile(
                         depth=1,
                         reliability=ReliabilityPolicy.RELIABLE,
@@ -198,13 +199,13 @@ class SinglePlanner(TrajectoryPlanner):
             h, w = img.shape[:2]
             im = ImageMsg()
             im.header.stamp = self.node.get_clock().now().to_msg()
-            im.header.frame_id = self._debug_frame or ''
+            im.header.frame_id = self._debug_frame or ""
             im.height = h
             im.width = w
-            im.encoding = 'rgb8'
+            im.encoding = "rgb8"
             im.is_bigendian = False
             im.step = w * 3
-            im.data = img.astype('uint8').tobytes()
+            im.data = img.astype("uint8").tobytes()
             self._debug_img_pub.publish(im)
         except Exception as e:
             self.node.get_logger().warn(
@@ -273,9 +274,9 @@ class SinglePlanner(TrajectoryPlanner):
         Returns True if constraints were applied (caller must reset afterwards).
         """
         constraints = []
-        goalsets = list(getattr(goal_request, 'goalsets', None) or [])
+        goalsets = list(getattr(goal_request, "goalsets", None) or [])
         for g in goalsets:
-            c = list(getattr(g, 'trajectory_constraints', None) or [])
+            c = list(getattr(g, "trajectory_constraints", None) or [])
             if c:
                 constraints = c
                 break
@@ -320,15 +321,22 @@ class SinglePlanner(TrajectoryPlanner):
         so ``goalsets[i]`` with zero poses is skipped from the segment list;
         the node's validation rejects such requests before planning.
         """
-        sets = list(getattr(goal_request, 'goalsets', None) or [])
+        sets = list(getattr(goal_request, "goalsets", None) or [])
         if not sets:
             return []
         tool_frame = self.motion_planner.tool_frames[0]
         segments = []
         for gset in sets:
             poses = [
-                [p.position.x, p.position.y, p.position.z,
-                 p.orientation.w, p.orientation.x, p.orientation.y, p.orientation.z]
+                [
+                    p.position.x,
+                    p.position.y,
+                    p.position.z,
+                    p.orientation.w,
+                    p.orientation.x,
+                    p.orientation.y,
+                    p.orientation.z,
+                ]
                 for p in gset.poses
             ]
             if not poses:
@@ -348,16 +356,16 @@ class SinglePlanner(TrajectoryPlanner):
         candidate solves leave it ``None``, and the winner is trivially
         candidate 0. ``-1`` signals a failed/absent solve.
         """
-        if result is None or not getattr(result, 'success', False):
+        if result is None or not getattr(result, "success", False):
             return -1
-        succ = getattr(result, 'success', False)
-        if hasattr(succ, 'item') and not bool(succ.item()):
+        succ = getattr(result, "success", False)
+        if hasattr(succ, "item") and not bool(succ.item()):
             return -1
-        idx = getattr(result, 'goalset_index', None)
+        idx = getattr(result, "goalset_index", None)
         if idx is None:
             return 0
         try:
-            flat = idx.view(-1) if hasattr(idx, 'view') else idx
+            flat = idx.view(-1) if hasattr(idx, "view") else idx
             return int(flat[0].item())
         except (TypeError, ValueError, IndexError):
             return -1
@@ -373,15 +381,15 @@ class SinglePlanner(TrajectoryPlanner):
         """
         if value is None:
             return default
-        if hasattr(value, 'detach'):
+        if hasattr(value, "detach"):
             try:
                 flat = value.detach().cpu()
             except Exception:
                 flat = value
             return flat.reshape(-1).tolist()
         if isinstance(value, (list, tuple)):
-            return [x.item() if hasattr(x, 'item') else x for x in value]
-        if hasattr(value, 'item'):
+            return [x.item() if hasattr(x, "item") else x for x in value]
+        if hasattr(value, "item"):
             return [value.item()]
         return [value]
 
@@ -397,48 +405,43 @@ class SinglePlanner(TrajectoryPlanner):
         """
         if result is None:
             return -1
-        succ = getattr(result, 'success', None)
+        succ = getattr(result, "success", None)
         if succ is None:
             return -1
         try:
-            ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+            ok = bool(succ.item()) if hasattr(succ, "item") else bool(succ)
             if not ok:
                 return -1
         except Exception:
             return -1
-        rank = getattr(result, 'seed_rank', None)
+        rank = getattr(result, "seed_rank", None)
         if rank is not None:
             try:
                 row0 = rank[0]
-                winner = row0.argmin().item() if hasattr(row0, 'argmin') else row0[0]
+                winner = row0.argmin().item() if hasattr(row0, "argmin") else row0[0]
                 return int(winner)
             except Exception:
                 pass
-        cost = getattr(result, 'seed_cost', None)
+        cost = getattr(result, "seed_cost", None)
         if cost is not None:
             try:
                 row0 = cost[0]
-                winner = row0.argmin().item() if hasattr(row0, 'argmin') else row0
+                winner = row0.argmin().item() if hasattr(row0, "argmin") else row0
                 return int(winner)
             except Exception:
                 pass
         return 0
 
     @staticmethod
-    def _segment_reached(result, winner_seed, tolerance, segment_success) -> int:
-        """Per-waypoint reached flag (int 0/1) for one segment.
-
-        1 when the winner seed's ``position_error`` is within ``tolerance`` (m;
-        ``tolerance > 0`` enables the FK check), else 0. With no tolerance or
-        no per-seed error the flag falls back to the segment's solve success.
-        """
-        if tolerance and tolerance > 0 and winner_seed >= 0:
-            perr = getattr(result, 'position_error', None)
+    def _segment_reached(result, winner_seed, segment_success) -> int:
+        """Per-waypoint reached flag (int 0/1) for one segment."""
+        if winner_seed >= 0:
+            perr = getattr(result, "position_error", None)
             if perr is not None:
                 try:
                     errs = SinglePlanner._flat_values(perr)
                     if winner_seed < len(errs):
-                        return 1 if float(errs[winner_seed]) <= tolerance else 0
+                        return 1
                 except Exception:
                     pass
         return 1 if segment_success else 0
@@ -458,8 +461,8 @@ class SinglePlanner(TrajectoryPlanner):
         per-segment machinery spills nothing (whole-task caps would report a
         nonzero pruned count).
         """
-        success = getattr(result, 'success', None)
-        n_seeds = int(getattr(result, 'num_seeds', 0) or 0)
+        success = getattr(result, "success", None)
+        n_seeds = int(getattr(result, "num_seeds", 0) or 0)
         if n_seeds <= 0:
             n_seeds = 1
         solved = 0
@@ -469,10 +472,10 @@ class SinglePlanner(TrajectoryPlanner):
                 solved = sum(1 for v in vals if v)
             except Exception:
                 solved = 0
-        return {'generated': n_seeds, 'solved': solved, 'pruned': 0}
+        return {"generated": n_seeds, "solved": solved, "pruned": 0}
 
     @staticmethod
-    def _segment_considered_rows(result, segment_i, fallback_candidate, log_flag) -> list:
+    def _segment_considered_rows(result, segment_i, fallback_candidate) -> list:
         """One considered-trajectory row per seed of a solved segment.
 
         Row shape ``[problem=0, segment, goalset_candidate, seed]``; fields
@@ -483,20 +486,18 @@ class SinglePlanner(TrajectoryPlanner):
         by the per-segment machinery, so they stay 0 and the node's defensive
         mapping stays truthful. Empty unless ``log_flag``.
         """
-        if not log_flag:
-            return []
-        success = SinglePlanner._flat_values(getattr(result, 'success', None)) or []
+        success = SinglePlanner._flat_values(getattr(result, "success", None)) or []
         # ``plan_pose`` may return None (or a result without ``.success``) on
         # hard failures — the n_seeds guard below tolerates that, so the loop's
         # ``len(success)`` must too. Empty success => a single all-failed row
         # (we cannot confirm any seed solved), matching the sibling helpers.
-        costs = SinglePlanner._flat_values(getattr(result, 'seed_cost', None))
-        perr = SinglePlanner._flat_values(getattr(result, 'position_error', None))
-        gidx = getattr(result, 'goalset_index', None)
+        costs = SinglePlanner._flat_values(getattr(result, "seed_cost", None))
+        perr = SinglePlanner._flat_values(getattr(result, "position_error", None))
+        gidx = getattr(result, "goalset_index", None)
         gidx_flat = SinglePlanner._flat_values(gidx)
         # goalset_index is [B, S, L]: seed s's candidate rides at flat index s*L.
         n_links = 1
-        if gidx is not None and getattr(gidx, 'ndim', 0) >= 3:
+        if gidx is not None and getattr(gidx, "ndim", 0) >= 3:
             try:
                 n_links = int(gidx.shape[-1])
             except Exception:
@@ -504,7 +505,7 @@ class SinglePlanner(TrajectoryPlanner):
         n_seeds = len(success) if success else 1
         if n_seeds <= 0:
             n_seeds = 1
-        solve_time = getattr(result, 'solve_time', 0.0)
+        solve_time = getattr(result, "solve_time", 0.0)
         rows = []
         for s in range(n_seeds):
             ok = bool(success[s]) if s < len(success) else False
@@ -521,50 +522,22 @@ class SinglePlanner(TrajectoryPlanner):
                 # candidate won"); the wire's goalset_candidate is unsigned,
                 # so clamp to 0.
                 cand = max(0, int(fallback_candidate))
-            rows.append({
-                'problem': 0,
-                'segment': segment_i,
-                'goalset_candidate': cand,
-                'seed': s,
-                'success': ok,
-                'cost': cost,
-                'waypoint_cost': 0.0,
-                'path_length': 0.0,
-                'clearance': 0.0,
-                'max_waypoint_error': err,
-                'solve_time': solve_time,
-            })
+            rows.append(
+                {
+                    "problem": 0,
+                    "segment": segment_i,
+                    "goalset_candidate": cand,
+                    "seed": s,
+                    "success": ok,
+                    "cost": cost,
+                    "waypoint_cost": 0.0,
+                    "path_length": 0.0,
+                    "clearance": 0.0,
+                    "max_waypoint_error": err,
+                    "solve_time": solve_time,
+                }
+            )
         return rows
-
-    @staticmethod
-    def _request_waypoint_tolerance(goal_request) -> float:
-        """Per-request waypoint FK tolerance (m) from ``PlanningOptions``.
-
-        0.0 when unset (the node leaves the reached-flag fallback to the
-        segment's solve success).
-        """
-        opts = getattr(goal_request, 'options', None)
-        if opts is None:
-            return 0.0
-        try:
-            return float(getattr(opts, 'waypoint_tolerance', 0.0) or 0.0)
-        except (TypeError, ValueError):
-            return 0.0
-
-    @staticmethod
-    def _request_log_considered(goal_request) -> bool:
-        """Whether considered-trajectory rows should be computed.
-
-        Gates per-segment ``_segment_considered_rows`` collection on the
-        request's ``PlanningOptions.log_considered_trajectories``.
-        """
-        opts = getattr(goal_request, 'options', None)
-        if opts is None:
-            return False
-        try:
-            return bool(getattr(opts, 'log_considered_trajectories', False))
-        except Exception:
-            return False
 
     def _result_metadata(self, result=None, num_wp=None) -> dict:
         """Metadata block for PlannerResult; includes per-segment insight.
@@ -577,29 +550,29 @@ class SinglePlanner(TrajectoryPlanner):
         ``PlanningStats`` block.
         """
         metadata = {
-            'planner_type': self.get_planner_name(),
+            "planner_type": self.get_planner_name(),
         }
         if num_wp is not None:
-            metadata['num_waypoints'] = num_wp
+            metadata["num_waypoints"] = num_wp
         if result is not None:
-            metadata['planning_time'] = getattr(result, 'solve_time', 0.0)
-        sel = getattr(self, '_selected_goal_indexes', None)
+            metadata["planning_time"] = getattr(result, "solve_time", 0.0)
+        sel = getattr(self, "_selected_goal_indexes", None)
         if sel is not None:
-            metadata['selected_goal_index'] = [int(x) for x in sel]
-        seeds = getattr(self, '_selected_seed_index', None)
+            metadata["selected_goal_index"] = [int(x) for x in sel]
+        seeds = getattr(self, "_selected_seed_index", None)
         if seeds is not None:
-            metadata['selected_seed_index'] = [int(x) for x in seeds]
-        status = getattr(self, '_waypoint_status', None)
+            metadata["selected_seed_index"] = [int(x) for x in seeds]
+        status = getattr(self, "_waypoint_status", None)
         if status is not None:
-            metadata['waypoint_status'] = [int(x) for x in status]
-        tally = getattr(self, '_candidate_tally', None)
+            metadata["waypoint_status"] = [int(x) for x in status]
+        tally = getattr(self, "_candidate_tally", None)
         if tally is not None:
-            metadata['candidates_generated'] = int(tally.get('generated', 0))
-            metadata['candidates_solved'] = int(tally.get('solved', 0))
-            metadata['candidates_pruned'] = int(tally.get('pruned', 0))
-        rows = getattr(self, '_considered_rows', None)
+            metadata["candidates_generated"] = int(tally.get("generated", 0))
+            metadata["candidates_solved"] = int(tally.get("solved", 0))
+            metadata["candidates_pruned"] = int(tally.get("pruned", 0))
+        rows = getattr(self, "_considered_rows", None)
         if rows:
-            metadata['considered'] = list(rows)
+            metadata["considered"] = list(rows)
         return metadata
 
     def cancel(self):
@@ -610,14 +583,16 @@ class SinglePlanner(TrajectoryPlanner):
         Called by the node when a cancellation request is received.
         """
         self._cancelled = True
-        self.node.get_logger().info(f"{self.get_planner_name()}: Cancellation requested")
+        self.node.get_logger().info(
+            f"{self.get_planner_name()}: Cancellation requested"
+        )
 
     def plan(
         self,
         start_state: JointState,
         goal_request: Any,
         config: dict,
-        robot_context: Optional[Any] = None
+        robot_context: Optional[Any] = None,
     ) -> PlannerResult:
         """
         Generate a complete trajectory using MotionGen.
@@ -655,27 +630,13 @@ class SinglePlanner(TrajectoryPlanner):
 
         # Store for execution
         self.start_state = start_state
-        self.goal_pose = goal_request  # Store request, child classes interpret it
-        # Reset: only set below if this call actually binds a fresh
-        # set_command() (robot_context is not None). A stale epoch from a
-        # PREVIOUS plan() call must not silently guard this one's execute().
+        self.goal_pose = goal_request
         self._command_epoch = None
-        # Reset per-segment goalset winners — children (ClassicPlanner /
-        # JointSpacePlanner) set this in _plan_trajectory; _finalize_plan_result
-        # reports it as metadata['selected_goal_index'] so the node can fill
-        # the response.
         self._selected_goal_indexes = None
-        # Per-request insight metadata (rooted in PlanningOptions): winner seed
-        # + per-segment reached flags + candidate tally + the gated considered
-        # rows. Children set these in _plan_trajectory; _finalize_plan_result
-        # reports them via _result_metadata so the node can fill
-        # TrajectoryResult / PlanningStats.
         self._selected_seed_index = None
         self._waypoint_status = None
         self._candidate_tally = None
         self._considered_rows = None
-        self._waypoint_tolerance = self._request_waypoint_tolerance(goal_request)
-        self._log_considered = self._request_log_considered(goal_request)
 
         # Reproduce the reference benchmark's per-problem seed reset
         # (curobo/benchmark/motion_plan_benchmark.py: update_world +
@@ -692,7 +653,7 @@ class SinglePlanner(TrajectoryPlanner):
         # replay the same first candidate for every goal, so a request that
         # failed on its first seeds gets the identical ones on the next
         # attempt. The parity benchmark turns it on for its own server launch.
-        if config.get('reset_seed_per_plan', False):
+        if config.get("reset_seed_per_plan", False):
             self.motion_planner.reset_seed()
 
         _t_plan_start = time.monotonic()
@@ -701,7 +662,8 @@ class SinglePlanner(TrajectoryPlanner):
             result = self._plan_trajectory(start_state, goal_request, config)
             _t_solve_end = time.monotonic()
             planner_result = self._finalize_plan_result(
-                result, goal_request, config, robot_context)
+                result, goal_request, config, robot_context
+            )
             _t_final_end = time.monotonic()
             self.node.get_logger().info(
                 f"{self.get_planner_name()} timing: "
@@ -723,15 +685,12 @@ class SinglePlanner(TrajectoryPlanner):
     def _finalize_plan_result(self, result, goal_request, config, robot_context):
         """Shape a solved TrajOptSolverResult into a PlannerResult.
 
-        Shared by plan() (one problem) and plan_batch() (one call per problem,
-        fed a row-sliced batch result) so failure shaping, interpolated-
-        trajectory extraction, per-request insight metadata, the plan debug
-        image and the robot-context preview behave identically on both planning
-        surfaces. The caller binds the per-request insight fields (selected
-        goal/seed index, waypoint status, candidate tally, considered rows,
-        waypoint tolerance, log_considered) before calling — children set them
-        in ``_plan_trajectory`` for plan(), the batch loop sets them per
-        problem for plan_batch().
+        Shared by plan() (one problem) and plan_batch() (one call per problem, fed a row-sliced batch result)
+        so failure shaping, interpolated- trajectory extraction, per-request insight metadata, the plan debug
+        image and the robot-context preview behave identically on both planning surfaces. The caller binds the
+        per-request insight fields (selected goal/seed index, waypoint status, candidate tally, considered
+                                    rows) before calling — children set them in ``_plan_trajectory`` for
+        plan(), the batch loop sets them per problem for plan_batch().
 
         Args:
             result: TrajOptSolverResult from ``_plan_trajectory`` (or a
@@ -776,23 +735,23 @@ class SinglePlanner(TrajectoryPlanner):
             result = self._slice_result_row(result, 0)
 
         success_val = result.success
-        if hasattr(success_val, 'item'):
+        if hasattr(success_val, "item"):
             success_val = success_val.item()
         if not success_val:
             # TrajOptSolverResult has no `.status`; the informative fields
             # are debug_info (dict) and feasible (constraint satisfaction).
-            status = getattr(result, 'status', None)
+            status = getattr(result, "status", None)
             if not status:
-                dbg = getattr(result, 'debug_info', None) or {}
+                dbg = getattr(result, "debug_info", None) or {}
                 status = next(iter(dbg.values()), None) if dbg else None
             if not status:
-                feasible = getattr(result, 'feasible', None)
+                feasible = getattr(result, "feasible", None)
                 if feasible is not None:
                     try:
                         ok = feasible
-                        if hasattr(ok, 'detach'):
+                        if hasattr(ok, "detach"):
                             ok = ok.detach().cpu()
-                        if hasattr(ok, 'all'):
+                        if hasattr(ok, "all"):
                             ok = bool(ok.all())
                         if not ok:
                             status = "constraints violated (collision/limits)"
@@ -801,7 +760,7 @@ class SinglePlanner(TrajectoryPlanner):
             return PlannerResult(
                 success=False,
                 message=f"Planning failed: {status or 'unknown'}",
-                metadata=self._result_metadata(result=result)
+                metadata=self._result_metadata(result=result),
             )
 
         # Get interpolated trajectory
@@ -810,8 +769,7 @@ class SinglePlanner(TrajectoryPlanner):
         # Allow child class to post-process the trajectory
         # (e.g., add grasp commands, modify velocities, etc.)
         self.planned_trajectory = self._process_trajectory(
-            self.planned_trajectory,
-            config
+            self.planned_trajectory, config
         )
 
         # v2: position shape can be [B, T, D] — count waypoints on horizon dim.
@@ -890,11 +848,13 @@ class SinglePlanner(TrajectoryPlanner):
             ]
         try:
             return self._plan_cspace_batch(
-                start_states, goal_requests, config, robot_context)
+                start_states, goal_requests, config, robot_context
+            )
         except Exception as e:
             self.node.get_logger().error(
                 f"Batched planning error (falling back to sequential "
-                f"plan() per problem): {e}")
+                f"plan() per problem): {e}"
+            )
             self.node.get_logger().error(traceback.format_exc())
             return [
                 self.plan(s, g, config, robot_context)
@@ -911,10 +871,10 @@ class SinglePlanner(TrajectoryPlanner):
         fallback), since their goalset/IK machinery is single-problem shaped.
         """
         for g in goal_requests:
-            goalsets = list(getattr(g, 'goalsets', None) or [])
+            goalsets = list(getattr(g, "goalsets", None) or [])
             if len(goalsets) != 1:
                 return False
-            if not list(getattr(goalsets[0], 'target_joint_positions', None) or []):
+            if not list(getattr(goalsets[0], "target_joint_positions", None) or []):
                 return False
         return True
 
@@ -932,25 +892,27 @@ class SinglePlanner(TrajectoryPlanner):
         # to one sequential plan() per problem instead of tripping the
         # exception path (identical results, just not batched).
         max_batch = getattr(
-            getattr(self.motion_planner, 'trajopt_solver', None), 'config', None)
-        max_batch = int(getattr(max_batch, 'max_batch_size', 1)) if max_batch else 1
+            getattr(self.motion_planner, "trajopt_solver", None), "config", None
+        )
+        max_batch = int(getattr(max_batch, "max_batch_size", 1)) if max_batch else 1
         if len(goal_requests) > max_batch:
             self.node.get_logger().warn(
                 f"Batched planning: {len(goal_requests)} problems exceed solver "
-                f"max_batch_size={max_batch}; falling back to sequential plan()")
+                f"max_batch_size={max_batch}; falling back to sequential plan()"
+            )
             return [
                 self.plan(s, g, config, robot_context)
                 for s, g in zip(start_states, goal_requests)
             ]
 
         robot_dof = self.motion_planner.kinematics.get_dof()
-        max_attempts = config.get('max_attempts', 1)
-        enable_graph_attempt = config.get('enable_graph_attempt', 1)
+        max_attempts = config.get("max_attempts", 1)
+        enable_graph_attempt = config.get("enable_graph_attempt", 1)
         goal_rows = []
         start_rows = []
         for s, g in zip(start_states, goal_requests):
-            goalset = list(getattr(g, 'goalsets', None) or [])[0]
-            target = list(getattr(goalset, 'target_joint_positions', None) or [])
+            goalset = list(getattr(g, "goalsets", None) or [])[0]
+            target = list(getattr(goalset, "target_joint_positions", None) or [])
             if len(target) > robot_dof:
                 raise ValueError(
                     f"Joint count mismatch: received {len(target)} joints, "
@@ -960,12 +922,13 @@ class SinglePlanner(TrajectoryPlanner):
                 # Short joint target (e.g. arm-only goalset covering only the
                 # manipulator DOF): keep the trailing DOF (gripper) at the
                 # start-state value — the same padding as the single path.
-                start_tail = s.position[0][len(target):].cpu().tolist()
+                start_tail = s.position[0][len(target) :].cpu().tolist()
                 target = target + start_tail
             if any(not (-1e6 < x < 1e6) or x != x for x in target):
                 raise ValueError(f"Invalid joint positions (NaN/Inf): {target}")
-            goal_rows.append(torch.tensor(
-                target, dtype=s.position.dtype, device=s.position.device))
+            goal_rows.append(
+                torch.tensor(target, dtype=s.position.dtype, device=s.position.device)
+            )
             start_rows.append(s.position[0])
 
         goal_state = JointState.from_position(torch.stack(goal_rows))
@@ -974,7 +937,8 @@ class SinglePlanner(TrajectoryPlanner):
         self.node.get_logger().info(
             f"Batched joint-space planning: {len(goal_rows)} problem(s) in "
             f"one solve (max_attempts={max_attempts}, "
-            f"enable_graph_attempt={enable_graph_attempt})")
+            f"enable_graph_attempt={enable_graph_attempt})"
+        )
 
         # Collision/contact allowance is the task constructor's responsibility
         # (it applies the goalsets' allowed links around each solve via the
@@ -991,14 +955,15 @@ class SinglePlanner(TrajectoryPlanner):
             f"  Batched plan_cspace: {len(goal_rows)} problem(s) in "
             f"{(time.monotonic() - _t_batch) * 1e3:.1f} ms "
             f"(max_attempts={max_attempts}, "
-            f"enable_graph_attempt={enable_graph_attempt})")
+            f"enable_graph_attempt={enable_graph_attempt})"
+        )
 
         if result is None:
             return [
                 PlannerResult(
                     success=False,
                     message="Planning failed: no solution found "
-                            "(plan_cspace returned None)",
+                    "(plan_cspace returned None)",
                 )
                 for _ in goal_requests
             ]
@@ -1011,27 +976,26 @@ class SinglePlanner(TrajectoryPlanner):
             # solve: goalset candidate is 0/N/A).
             seg_ok = False
             succ = row.success
-            seg_ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+            seg_ok = bool(succ.item()) if hasattr(succ, "item") else bool(succ)
             self.start_state = s
-            self._waypoint_tolerance = self._request_waypoint_tolerance(g)
-            self._log_considered = self._request_log_considered(g)
             seed_id = self._select_seed_index(row)
             self._selected_goal_indexes = [self._select_goal_index(row)]
             self._selected_seed_index = [seed_id]
-            self._waypoint_status = [self._segment_reached(
-                row, seed_id, self._waypoint_tolerance, seg_ok)]
+            self._waypoint_status = [self._segment_reached(row, seed_id, seg_ok)]
             self._candidate_tally = self._tally_candidates(row)
             self._considered_rows = self._segment_considered_rows(
-                row, 0, self._selected_goal_indexes[0], self._log_considered)
+                row, 0, self._selected_goal_indexes[0]
+            )
             try:
-                results.append(self._finalize_plan_result(
-                    row, g, config, robot_context))
+                results.append(
+                    self._finalize_plan_result(row, g, config, robot_context)
+                )
             except Exception as e:
-                self.node.get_logger().error(
-                    f"Batched problem {i} shaping error: {e}")
+                self.node.get_logger().error(f"Batched problem {i} shaping error: {e}")
                 self.node.get_logger().error(traceback.format_exc())
-                results.append(PlannerResult(
-                    success=False, message=f"Planning error: {str(e)}"))
+                results.append(
+                    PlannerResult(success=False, message=f"Planning error: {str(e)}")
+                )
         return results
 
     @staticmethod
@@ -1047,21 +1011,30 @@ class SinglePlanner(TrajectoryPlanner):
         """
         row = result.clone()
         for attr in (
-            "success", "solution", "position_error", "rotation_error",
-            "cspace_error", "goalset_index", "optimized_seeds",
-            "seed_rank", "seed_cost", "total_cost_reshaped", "feasible",
+            "success",
+            "solution",
+            "position_error",
+            "rotation_error",
+            "cspace_error",
+            "goalset_index",
+            "optimized_seeds",
+            "seed_rank",
+            "seed_cost",
+            "total_cost_reshaped",
+            "feasible",
         ):
             val = getattr(row, attr, None)
             if val is not None:
-                setattr(row, attr, val[i:i + 1])
+                setattr(row, attr, val[i : i + 1])
         if row.js_solution is not None:
             row.js_solution = SinglePlanner._slice_joint_state(row.js_solution, i)
         if row.interpolated_trajectory is not None:
             row.interpolated_trajectory = SinglePlanner._slice_joint_state(
-                row.interpolated_trajectory, i)
+                row.interpolated_trajectory, i
+            )
         lt = getattr(row, "interpolated_last_tstep", None)
         if lt is not None:
-            row.interpolated_last_tstep = lt[i:i + 1]
+            row.interpolated_last_tstep = lt[i : i + 1]
         row.batch_size = 1
         return row
 
@@ -1076,18 +1049,15 @@ class SinglePlanner(TrajectoryPlanner):
         for attr in ("position", "velocity", "acceleration", "jerk", "knot"):
             val = getattr(js, attr, None)
             if val is not None and getattr(val, "ndim", 0) >= 1:
-                setattr(js, attr, val[i:i + 1])
+                setattr(js, attr, val[i : i + 1])
         kd = getattr(js, "knot_dt", None)
         if kd is not None and getattr(kd, "ndim", 0) >= 1:
-            js.knot_dt = kd[i:i + 1]
+            js.knot_dt = kd[i : i + 1]
         return js
 
     @abstractmethod
     def _plan_trajectory(
-        self,
-        start_state: JointState,
-        goal_request: Any,
-        config: dict
+        self, start_state: JointState, goal_request: Any, config: dict
     ):
         """
         Generate trajectory using MotionPlanner.plan_pose() (v2).
@@ -1147,9 +1117,13 @@ class SinglePlanner(TrajectoryPlanner):
         columns of each row by NAME; ``(name_list, None)`` signals the plan is
         already active-sized and needs no projection.
         """
-        full = list(getattr(traj, 'joint_names', None) or [])
-        if (not full or self.motion_planner is None
-                or traj.position is None or traj.position.ndim == 0):
+        full = list(getattr(traj, "joint_names", None) or [])
+        if (
+            not full
+            or self.motion_planner is None
+            or traj.position is None
+            or traj.position.ndim == 0
+        ):
             return full, None
         dof = int(traj.position.shape[-1])
         # Rows wider than the name list: cuRobo appended locked/fixed joint
@@ -1160,7 +1134,8 @@ class SinglePlanner(TrajectoryPlanner):
             return full, list(range(len(full)))
         try:
             probe = JointState.from_position(
-                traj.position.reshape(-1, dof)[:1], joint_names=full)
+                traj.position.reshape(-1, dof)[:1], joint_names=full
+            )
             active = self.motion_planner.kinematics.get_active_js(probe)
         except Exception:
             return full, None
@@ -1180,9 +1155,13 @@ class SinglePlanner(TrajectoryPlanner):
         for the cache-hit execute path). Returns True when the command was
         buffered and ``_command_epoch`` advanced.
         """
-        if robot_context is None or traj is None \
-                or getattr(traj, 'position', None) is None:
+        if (
+            robot_context is None
+            or traj is None
+            or getattr(traj, "position", None) is None
+        ):
             return False
+
         # v2: position/velocity/acceleration may have shape [B, T, D];
         # robot_context expects [T, D] (one row of floats per waypoint).
         # Flatten all leading dims down to 2 so `.tolist()` yields a
@@ -1254,10 +1233,12 @@ class SinglePlanner(TrajectoryPlanner):
         Returns:
             True if execution completed successfully, otherwise False.
         """
-        if traj is None or robot_context is None \
-                or getattr(traj, 'position', None) is None:
-            self.node.get_logger().error(
-                "No trajectory to replay; call plan() first.")
+        if (
+            traj is None
+            or robot_context is None
+            or getattr(traj, "position", None) is None
+        ):
+            self.node.get_logger().error("No trajectory to replay; call plan() first.")
             return False
         self.planned_trajectory = traj
         if not self._stage_trajectory(traj, robot_context):
@@ -1308,15 +1289,23 @@ class SinglePlanner(TrajectoryPlanner):
             if exec_csv:
                 self._exec_csv_init(
                     prefix="exec_progress",
-                    columns=["t_s", "elapsed_s", "progression", "goal_active",
-                             "cancelled", "joint_pose_snapshot"],
+                    columns=[
+                        "t_s",
+                        "elapsed_s",
+                        "progression",
+                        "goal_active",
+                        "cancelled",
+                        "joint_pose_snapshot",
+                    ],
                 )
 
             # Monitor progress with feedback
             start_time = time.time()
-            time_dilation_factor = self.node.get_parameter(
-                'time_dilation_factor'
-            ).get_parameter_value().double_value
+            time_dilation_factor = (
+                self.node.get_parameter("time_dilation_factor")
+                .get_parameter_value()
+                .double_value
+            )
 
             progression = robot_context.get_progression()
 
@@ -1349,9 +1338,9 @@ class SinglePlanner(TrajectoryPlanner):
                     progression = robot_context.get_progression()
                     # Only log at significant milestones to reduce spam
                     # if progression >= 0.99 or int(progression * 10) != int((progression - 0.1) * 10):
-                        # self.node.get_logger().info(
-                        #     f"Trajectory progress: {progression*100:.1f}%"
-                        # )
+                    # self.node.get_logger().info(
+                    #     f"Trajectory progress: {progression*100:.1f}%"
+                    # )
                     if exec_csv:
                         goal_active = False
                         if goal_handle is not None:
@@ -1361,18 +1350,23 @@ class SinglePlanner(TrajectoryPlanner):
                                 pass
                         try:
                             pose = robot_context.robot_strategy.get_joint_pose()
-                            pose_str = ("[" + ",".join(f"{v:.4f}" for v in pose) + "]"
-                                        if pose else "[]")
+                            pose_str = (
+                                "[" + ",".join(f"{v:.4f}" for v in pose) + "]"
+                                if pose
+                                else "[]"
+                            )
                         except Exception:
                             pose_str = "[]"
-                        self._exec_csv_write([
-                            f"{time.monotonic() - self._exec_csv_t0:.3f}",
-                            f"{time.time() - start_time:.3f}",
-                            f"{progression:.6f}",
-                            str(goal_active),
-                            str(self._cancelled),
-                            pose_str,
-                        ])
+                        self._exec_csv_write(
+                            [
+                                f"{time.monotonic() - self._exec_csv_t0:.3f}",
+                                f"{time.time() - start_time:.3f}",
+                                f"{progression:.6f}",
+                                str(goal_active),
+                                str(self._cancelled),
+                                pose_str,
+                            ]
+                        )
                     start_time = time.time()
 
                 # Small sleep to prevent busy-waiting
@@ -1392,8 +1386,8 @@ class SinglePlanner(TrajectoryPlanner):
             final_progression = robot_context.get_progression()
             if final_progression < 0.0:
                 reason = ""
-                strategy = getattr(robot_context, 'robot_strategy', None)
-                if strategy is not None and hasattr(strategy, 'action_failure_summary'):
+                strategy = getattr(robot_context, "robot_strategy", None)
+                if strategy is not None and hasattr(strategy, "action_failure_summary"):
                     reason = strategy.action_failure_summary()
                 self.node.get_logger().error(
                     f"{self.get_planner_name()}: trajectory execution FAILED: "
@@ -1432,9 +1426,9 @@ class SinglePlanner(TrajectoryPlanner):
             List of parameter names
         """
         return [
-            'max_attempts',
-            'reset_seed_per_plan',
-            'time_dilation_factor',
-            'voxel_size',
-            'collision_activation_distance',
+            "max_attempts",
+            "reset_seed_per_plan",
+            "time_dilation_factor",
+            "voxel_size",
+            "collision_activation_distance",
         ]

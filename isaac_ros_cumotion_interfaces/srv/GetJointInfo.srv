@@ -1,0 +1,47 @@
+# GetJointInfo.srv — read-only robot-joint introspection for tooling.
+#
+# WHY THIS EXISTS
+#   TrajectoryGoal.goalsets[i].target_joint_positions is a bare float list
+#   that the node resolves VERBATIM in the robot config's cspace order
+#   (`kinematics.cspace.joint_names`). A client that wants to plan in joint
+#   space therefore has to know that order — and there was no way to ask for
+#   it. The only place it leaked out was the /ik RESPONSE (its
+#   `joint_states.name`), i.e. only as a side effect of paying for a GPU IK
+#   solve. This service reports it directly, together with the position
+#   limits a UI needs to bound its sliders, so an rviz joint-state panel can
+#   be correct without guessing.
+#
+# READ-ONLY AND CHEAP
+#   It touches no solver and rebuilds nothing: it only reads the already
+#   parsed kinematics model. It is therefore safe to poll. A joint-lock
+#   CHANGE (SetJointLocks) rebuilds the model and every solver (~20 s) — this
+#   service does not, it just reports.
+#
+# AFTER set_joint_locks
+#   `joint_names` is the cspace AFTER the change: a locked joint is dropped
+#   from it (that is what "locked out of the cspace" means), and reappears
+#   under `locked_joint_names` at the value it is pinned to.
+
+# --- Request (empty: this is a pure query) ---
+---
+
+# --- Response ---
+bool success
+string message
+
+# cspace order — exactly the order `target_joint_positions` expects, and the
+# order of lower_limits/upper_limits. Empty only if the model has no cspace.
+string[] joint_names
+
+# Position limits, parallel to joint_names. math.inf (not 0) marks a joint the
+# model reports no bound for, so a UI can leave that slider unbounded instead
+# of clamping the user to a zero-width range.
+float64[] lower_limits
+float64[] upper_limits
+
+# Joints currently pinned out of the cspace (the robot YAML's own
+# `kinematics.lock_joints` unless a SetJointLocks override is in force),
+# parallel to each other. Same values a read-only SetJointLocks query
+# reports — repeated here so one call is enough to render the whole panel.
+string[] locked_joint_names
+float64[] locked_positions

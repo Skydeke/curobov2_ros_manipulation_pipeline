@@ -37,23 +37,11 @@ the start state and everything else holds. That is the "close the fingers, park
 the arm" goal, and it needs no IK result for the arm — so a client can command
 a gripper without ever learning the arm's solved joints.
 
-All motion stages also accept `planner`, `cost`, `link`, `direction`, and the
-`PlanningOptions` keys below.
+All motion stages also accept `planner`, `cost`, `link`, `direction`.
 
 Containers: `serial`, `alternatives` (plan all, rank, take the best),
 `fallbacks` (plan in priority order, take the first that solves),
 `independent_components`.
-
-### Planning options
-
-`planner` selects the cuRobo planner: `classic` (pose goals, `ToolPoseCriteria`
-honoured) or `joint_space` (open-loop joint interpolation, ignores
-`trajectory_constraints`).
-
-`exact_joints`, `waypoint_tolerance`, `log_considered`, `num_seeds` become the
-request's `PlanningOptions`. **The classic planner rejects any non-default
-`PlanningOptions`** ("classic/reactive planners carry zero options"), so send
-options only on `joint_space` stages.
 
 ### `cost` — how solutions are ranked
 

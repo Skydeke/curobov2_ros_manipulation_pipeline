@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compare the native (curobo_core) and ROS-wrapped benchmark results.
+"""Compare the native (curobo) and ROS-wrapped benchmark results.
 
 The interesting parity fields are planning *outcomes*: success, trajectory
 path length, motion time and waypoint count. Timing is informational and is
@@ -1245,7 +1245,7 @@ def print_report(
     print("cuRobo planner parity report: native core vs ROS wrapper")
     print("=" * 78)
     if core_results is not None:
-        print_curobo_table("native (curobo_core)", core_results)
+        print_curobo_table("native (curobo)", core_results)
     if ros_results is not None:
         print_curobo_table("ros (unified_planner)", ros_results)
     print(
@@ -1401,9 +1401,9 @@ def _print_pose_parity_report(
     print(title)
     print("=" * 78)
     if core_results is not None and report["capability"] == "ik":
-        print_ik_table("native (curobo_core)", core_results)
+        print_ik_table("native (curobo)", core_results)
     elif core_results is not None:
-        print_cost_table("native (curobo_core)", core_results)
+        print_cost_table("native (curobo)", core_results)
     if ros_results is not None and report["capability"] == "ik":
         print_ik_table("ros (unified_planner)", ros_results)
     elif ros_results is not None:

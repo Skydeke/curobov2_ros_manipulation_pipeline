@@ -55,7 +55,10 @@ class ClassicPlanner(SinglePlanner):
             MotionPlannerResult-like object.
         """
         num_goalset = max(
-            (len(getattr(g, 'poses', [])) for g in getattr(goal_request, 'goalsets', [])),
+            (
+                len(getattr(g, "poses", []))
+                for g in getattr(goal_request, "goalsets", [])
+            ),
             default=0,
         )
         # Node validation rejects empty goalsets for classic; be defensive since
@@ -87,18 +90,22 @@ class ClassicPlanner(SinglePlanner):
                 goal = self._build_goal_segments(goal_request)[0]
             else:
                 # Single fixed waypoint — today's single-goal plan.
-                goal = Pose.from_list([
-                    goal_request.goalsets[0].poses[0].position.x,
-                    goal_request.goalsets[0].poses[0].position.y,
-                    goal_request.goalsets[0].poses[0].position.z,
-                    goal_request.goalsets[0].poses[0].orientation.w,
-                    goal_request.goalsets[0].poses[0].orientation.x,
-                    goal_request.goalsets[0].poses[0].orientation.y,
-                    goal_request.goalsets[0].poses[0].orientation.z,
-                ])
-                goal = GoalToolPose.from_poses({self.motion_planner.tool_frames[0]: goal})
+                goal = Pose.from_list(
+                    [
+                        goal_request.goalsets[0].poses[0].position.x,
+                        goal_request.goalsets[0].poses[0].position.y,
+                        goal_request.goalsets[0].poses[0].position.z,
+                        goal_request.goalsets[0].poses[0].orientation.w,
+                        goal_request.goalsets[0].poses[0].orientation.x,
+                        goal_request.goalsets[0].poses[0].orientation.y,
+                        goal_request.goalsets[0].poses[0].orientation.z,
+                    ]
+                )
+                goal = GoalToolPose.from_poses(
+                    {self.motion_planner.tool_frames[0]: goal}
+                )
 
-            max_attempts = config.get('max_attempts', 1)
+            max_attempts = config.get("max_attempts", 1)
 
             self.node.get_logger().info(f"Planning with max_attempts={max_attempts}")
 
@@ -116,14 +123,14 @@ class ClassicPlanner(SinglePlanner):
         seg_ok = False
         if result is not None:
             succ = result.success
-            seg_ok = bool(succ.item()) if hasattr(succ, 'item') else bool(succ)
+            seg_ok = bool(succ.item()) if hasattr(succ, "item") else bool(succ)
         seed_id = self._select_seed_index(result)
         self._selected_seed_index = [seed_id]
-        self._waypoint_status = [self._segment_reached(
-            result, seed_id, self._waypoint_tolerance, seg_ok)]
+        self._waypoint_status = [self._segment_reached(result, seed_id, seg_ok)]
         self._candidate_tally = self._tally_candidates(result)
         self._considered_rows = self._segment_considered_rows(
-            result, 0, self._selected_goal_indexes[0], self._log_considered)
+            result, 0, self._selected_goal_indexes[0]
+        )
         return result
 
     # _process_trajectory(): default (no-op) from SinglePlanner is fine.

@@ -137,7 +137,7 @@ def obstacles_dict_to_add_requests(obstacles: Dict[str, Any]) -> List[Dict[str, 
             raise ValueError(
                 f"Unsupported obstacle bucket {bucket!r} in scene; "
                 f"supported: {sorted(_SUPPORTED_BUCKETS)}. "
-                f"Use the curobo_core benchmark world conversion for "
+                f"Use the curobo benchmark world conversion for "
                 f"voxel/other types."
             )
 

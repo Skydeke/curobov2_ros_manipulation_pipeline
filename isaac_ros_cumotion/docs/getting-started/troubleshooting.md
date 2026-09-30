@@ -366,7 +366,7 @@ When the same name is re-loaded with a different mesh, the cache logs
 `Mesh already in cache, reusing existing instance: <name>` and reuses the stale
 geometry unless the cache is explicitly invalidated (`clear_warp_cache=True`).
 This invalidation cannot be performed from `isaac_ros_cumotion` because the
-relevant code lives in the `curobo_core` submodule, which must not be modified.
+relevant code lives in the `curobo` submodule, which must not be modified.
 
 **Scope**
 - Moving, resizing, or editing an obstacle **does not** trigger this — geometry
@@ -382,6 +382,6 @@ distinct name gets its own cache entry, so the fresh geometry loads correctly.
 
 **Status**
 Open (mesh mode only). Documented as a known limitation rather than fixed, per
-the constraint that `curobo_core` must not be altered. A proper fix would make
+the constraint that `curobo` must not be altered. A proper fix would make
 `_load_mesh_into_cache` geometry-aware or invalidate the warp cache on scene
-updates from within `curobo_core`.
+updates from within `curobo`.

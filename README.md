@@ -10,7 +10,7 @@
 >   **Apache License 2.0** (see `LICENSE` in each package).
 > - `isaac_ros_cumotion_moveit` is from NVIDIA and retains the
 >   **NVIDIA Isaac ROS Software License**.
-> - `curobo_core` vendors NVIDIA's cuRobo library, which carries its own
+> - `curobo` vendors NVIDIA's cuRobo library, which carries its own
 >   license terms.
 
 NVIDIA cuRobo v2 wrapped as a single GPU-accelerated ROS 2 node (`curobo_trajectory_planner`)
@@ -21,7 +21,7 @@ depth-to-ESDF mapping, robot segmentation, and trajectory optimization.
 
 | Package | Purpose |
 |---|---|
-| `curobo_core` | cuRobo v2 library (vendored) |
+| `curobo` | cuRobo v2 library (vendored) |
 | `curobo_task_constructor` | Task-constructor stages and containers over the cuRobo server — see its [README](curobo_task_constructor/README.md) |
 | `isaac_ros_cumotion_interfaces` | ROS actions/services/messages |
 | `isaac_ros_cumotion` | The unified node `curobo_trajectory_planner` and supporting services |
@@ -33,7 +33,7 @@ depth-to-ESDF mapping, robot segmentation, and trajectory optimization.
 
 ```bash
 colcon build --symlink-install \
-  --packages-select curobo_core isaac_ros_cumotion_interfaces \
+  --packages-select curobo isaac_ros_cumotion_interfaces \
   isaac_ros_cumotion isaac_ros_cumotion_moveit isaac_ros_cumotion_rviz \
   isaac_ros_cumotion_extra
 ```
@@ -85,7 +85,7 @@ and a working `ROS_DOMAIN_ID`/`DISPLAY`.
 The fork reproduces the [cuRobo benchmarks
 page](https://nvlabs.github.io/curobo/latest/reference/benchmarks.html) —
 motion generation (with and without torque limits), inverse kinematics, and
-kinematics & collision — running every problem **twice**: through curobo_core
+kinematics & collision — running every problem **twice**: through curobo
 natively and through the ROS-wrapped planner (`/unified_planner/...`), then
 printing all metrics and a parity verdict. Neither leg is ever skipped.
 
@@ -123,7 +123,7 @@ docker compose -f docker/compose_benchmark.yaml up
 This project builds on the work of:
 
 - **[NVIDIA cuRobo](https://github.com/NVlabs/curobo)** — the motion-planning
-  library at the core of this node (vendored under `curobo_core/`).
+  library at the core of this node (vendored under `curobo/`).
 - **[Isaac ROS](https://github.com/isaac-ros/isaac_ros_common)** — the ROS 2
   framework the package integrates with.
 - **[curobo_ros](https://github.com/Lab-CORO/curobo_ros)** — the ROS wrapping of

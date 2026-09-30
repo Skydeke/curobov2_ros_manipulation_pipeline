@@ -17,7 +17,22 @@
 
 from setuptools import find_namespace_packages, setup
 
-package_name = 'curobo_core'
+package_name = 'curobo'
+
+# This package is the ONLY installer of the cuRobo python library: `colcon build`
+# ships the importable tree, its CUDA kernel sources, its pybind sources and its
+# runtime content (robot assets, YAML configs) via `package_data` below. Nothing
+# pip-installs `curobo/curobo/` any more, so there is no second, divergent copy
+# on sys.path and no setuptools-scm version to guess at inside the image.
+#
+# `version` is pinned here rather than derived from git. The vendored tree is a
+# nested git submodule, so `COPY` into the image brings no .git and
+# setuptools-scm has nothing to read -- which is what the
+# SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=... hack in the Dockerfile
+# used to paper over. A static version is honest: the ROS package version and the
+# vendored upstream version are then visible side by side in this file and in
+# .gitmodules' pinned commit, instead of one being inferred from the other.
+version = '4.3.0'
 
 all_packages = find_namespace_packages(where='curobo')
 packages = [
@@ -29,7 +44,7 @@ packages = [
 
 setup(
     name=package_name,
-    version='4.3.0',
+    version=version,
     packages=packages,
     package_dir={'': 'curobo'},
     data_files=[

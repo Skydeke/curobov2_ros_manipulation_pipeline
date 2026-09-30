@@ -1,0 +1,30 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>curobo</name>
+  <version>4.3.0</version>
+  <description>This package wraps the cuRobo library as a ROS 2 package. cuRobo serves as the current backend for cuMotion.</description>
+  <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
+  <license>NVIDIA Isaac ROS Software License</license>
+
+  <!-- PYTHON DEPENDENCIES ARE NOT DECLARED HERE, ON PURPOSE.
+       cuRobo's runtime dependencies (torch, warp-lang, trimesh, yourdfpy,
+       viser, numpy-quaternion, ...) are ordinary pip distributions, and
+       declaring them as rosdep keys here made rosdep install them a second
+       time, in a layer that is invalidated by any package.xml change in the
+       workspace, and with its own idea of the warp-lang version, which is what
+       forced the "Rosdep fucks up warp-lang version" fixup in the Dockerfile.
+
+       requirements.txt, next to this file, is now the single source of truth.
+       The Dockerfile COPYs it and pip-installs it in its own early layer, so
+       dependency downloads are cached across source-only rebuilds. -->
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

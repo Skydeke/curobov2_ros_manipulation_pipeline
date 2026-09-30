@@ -55,7 +55,7 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import JointState as RosJointState
 
-from isaac_ros_cumotion_interfaces.msg import Goalset, PlanningOptions, TrajectoryGoal
+from isaac_ros_cumotion_interfaces.msg import Goalset, TrajectoryGoal
 from isaac_ros_cumotion_interfaces.srv import (
     AddObject,
     SetCollisionCache,
@@ -82,8 +82,13 @@ from .problems import (
 # Franka active (cspace) joints, in cuRobo order — matches the robot YAML's
 # cspace.joint_names (fingers are locked by the robot config, not sent).
 FRANKA_JOINT_NAMES = [
-    "panda_joint1", "panda_joint2", "panda_joint3", "panda_joint4",
-    "panda_joint5", "panda_joint6", "panda_joint7",
+    "panda_joint1",
+    "panda_joint2",
+    "panda_joint3",
+    "panda_joint4",
+    "panda_joint5",
+    "panda_joint6",
+    "panda_joint7",
 ]
 
 SERVER_NODE = "unified_planner"
@@ -118,15 +123,9 @@ class RosBenchmarkRunner(Node):
         self._cache_client = self.create_client(
             SetCollisionCache, SET_COLLISION_CACHE_SRV
         )
-        self._get_params_client = self.create_client(
-            GetParameters, GET_PARAMETERS_SRV
-        )
-        self._params_client = self.create_client(
-            SetParameters, SET_PARAMETERS_SRV
-        )
-        self._rebuild_client = self.create_client(
-            Trigger, UPDATE_MOTION_GEN_CONFIG_SRV
-        )
+        self._get_params_client = self.create_client(GetParameters, GET_PARAMETERS_SRV)
+        self._params_client = self.create_client(SetParameters, SET_PARAMETERS_SRV)
+        self._rebuild_client = self.create_client(Trigger, UPDATE_MOTION_GEN_CONFIG_SRV)
         self._lock_client = self.create_client(SetJointLocks, SET_JOINT_LOCKS_SRV)
 
         for label, client in (
@@ -185,15 +184,14 @@ class RosBenchmarkRunner(Node):
         # they already match this leg's requested mode.
         get_req = GetParameters.Request()
         get_req.names = ["load_dynamics", "robot_payload_mass"]
-        current = self._call(
-            self._get_params_client, get_req, timeout=rebuild_timeout
-        )
+        current = self._call(self._get_params_client, get_req, timeout=rebuild_timeout)
         if len(current.values) == 2:
             dyn = current.values[0].bool_value
             mass = current.values[1].double_value
-            if bool(dyn) == bool(load_dynamics) and abs(
-                mass - float(payload_mass)
-            ) < 1e-9:
+            if (
+                bool(dyn) == bool(load_dynamics)
+                and abs(mass - float(payload_mass)) < 1e-9
+            ):
                 self.get_logger().info(
                     f"Server already in the requested torque mode "
                     f"(load_dynamics={str(load_dynamics).lower()}, "
@@ -223,17 +221,11 @@ class RosBenchmarkRunner(Node):
                 ),
             ),
         ]
-        set_resp = self._call(
-            self._params_client, set_req, timeout=rebuild_timeout
-        )
+        set_resp = self._call(self._params_client, set_req, timeout=rebuild_timeout)
         failed = [res.reason for res in set_resp.results if not res.successful]
         if failed:
-            raise RuntimeError(
-                f"set_parameters failed switching torque mode: {failed}"
-            )
-        self._call(
-            self._rebuild_client, Trigger.Request(), timeout=rebuild_timeout
-        )
+            raise RuntimeError(f"set_parameters failed switching torque mode: {failed}")
+        self._call(self._rebuild_client, Trigger.Request(), timeout=rebuild_timeout)
         self.get_logger().info("update_motion_gen_config rebuild complete")
 
     def server_lock_joint_names(self, rebuild_timeout: float = 300.0) -> List[str]:
@@ -314,9 +306,7 @@ class RosBenchmarkRunner(Node):
             f" — {response.message}"
         )
 
-    def set_server_max_attempts(
-        self, attempts: int, timeout: float = 30.0
-    ) -> None:
+    def set_server_max_attempts(self, attempts: int, timeout: float = 30.0) -> None:
         """Pin the server's plan_pose retry budget to match this run's.
 
         ``max_attempts`` is a **plan-time** parameter: the node reads it fresh
@@ -330,9 +320,7 @@ class RosBenchmarkRunner(Node):
         """
         get_req = GetParameters.Request()
         get_req.names = ["max_attempts"]
-        current = self._call(
-            self._get_params_client, get_req, timeout=timeout
-        )
+        current = self._call(self._get_params_client, get_req, timeout=timeout)
         if len(current.values) == 1 and (
             current.values[0].integer_value == int(attempts)
         ):
@@ -355,14 +343,10 @@ class RosBenchmarkRunner(Node):
                 ),
             ),
         ]
-        set_resp = self._call(
-            self._params_client, set_req, timeout=timeout
-        )
+        set_resp = self._call(self._params_client, set_req, timeout=timeout)
         failed = [res.reason for res in set_resp.results if not res.successful]
         if failed:
-            raise RuntimeError(
-                f"set_parameters failed pinning max_attempts: {failed}"
-            )
+            raise RuntimeError(f"set_parameters failed pinning max_attempts: {failed}")
 
     def set_server_reset_seed(self, enabled: bool, timeout: float = 30.0) -> None:
         """Pin the server's per-plan RNG rewind to this run's.
@@ -383,9 +367,9 @@ class RosBenchmarkRunner(Node):
         get_req = GetParameters.Request()
         get_req.names = ["reset_seed_per_plan"]
         current = self._call(self._get_params_client, get_req, timeout=timeout)
-        if len(current.values) == 1 and bool(
-            current.values[0].bool_value
-        ) == bool(enabled):
+        if len(current.values) == 1 and bool(current.values[0].bool_value) == bool(
+            enabled
+        ):
             self.get_logger().info(
                 f"Server reset_seed_per_plan already {bool(enabled)} — no "
                 "change needed"
@@ -406,9 +390,7 @@ class RosBenchmarkRunner(Node):
                 ),
             ),
         ]
-        set_resp = self._call(
-            self._params_client, set_req, timeout=timeout
-        )
+        set_resp = self._call(self._params_client, set_req, timeout=timeout)
         failed = [res.reason for res in set_resp.results if not res.successful]
         if failed:
             raise RuntimeError(
@@ -538,12 +520,14 @@ class RosBenchmarkRunner(Node):
         return TrajectoryGoal(
             start_pose=start,
             goalsets=[goalset],
-            options=PlanningOptions(log_considered_trajectories=True),
         )
 
     @staticmethod
     def _client_energy_torque(
-        waypoints, waypoint_velocities, dt, robot_model_data,
+        waypoints,
+        waypoint_velocities,
+        dt,
+        robot_model_data,
     ):
         """Reconstruct Energy (J) / max Torque (N·m) client-side.
 
@@ -582,8 +566,12 @@ class RosBenchmarkRunner(Node):
         return energy, max_torque
 
     def plan_one(
-        self, problem: Dict[str, Any], problem_name: str, scene_key: str,
-        timeout: float = 120.0, robot_model_data=None,
+        self,
+        problem: Dict[str, Any],
+        problem_name: str,
+        scene_key: str,
+        timeout: float = 120.0,
+        robot_model_data=None,
     ) -> Dict[str, Any]:
         goal = self._build_goal(problem)
         request = TrajectoryGeneration.Request()
@@ -631,14 +619,15 @@ class RosBenchmarkRunner(Node):
                 ):
                     velocities = [list(w.velocity) for w in result.trajectory]
                 energy_j, torque_nm = self._client_energy_torque(
-                    waypoints, velocities, float(result.dt), robot_model_data,
+                    waypoints,
+                    velocities,
+                    float(result.dt),
+                    robot_model_data,
                 )
                 entry["energy_j"] = energy_j
                 entry["torque_nm"] = torque_nm
             except Exception as exc:  # noqa: BLE001 - degrade, not fail
-                self.get_logger().warn(
-                    f"Failed to reconstruct energy/torque: {exc}"
-                )
+                self.get_logger().warn(f"Failed to reconstruct energy/torque: {exc}")
         return entry
 
     @staticmethod
@@ -852,8 +841,11 @@ def run_ros(
             node.add_world(first_problem["obstacles"], timeout=call_timeout)
             try:
                 node.plan_one(
-                    first_problem, f"{scene_key}_{i}", scene_key,
-                    timeout=call_timeout, robot_model_data=robot_model_data,
+                    first_problem,
+                    f"{scene_key}_{i}",
+                    scene_key,
+                    timeout=call_timeout,
+                    robot_model_data=robot_model_data,
                 )
             except RuntimeError as exc:
                 node.get_logger().warn(f"Warmup probe failed (continuing): {exc}")
@@ -868,8 +860,11 @@ def run_ros(
             node.add_world(problem["obstacles"], timeout=call_timeout)
             results.append(
                 node.plan_one(
-                    problem, problem_name, scene_key,
-                    timeout=call_timeout, robot_model_data=robot_model_data,
+                    problem,
+                    problem_name,
+                    scene_key,
+                    timeout=call_timeout,
+                    robot_model_data=robot_model_data,
                 )
             )
 

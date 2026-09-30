@@ -9,14 +9,17 @@ from curobo_task_constructor.core.geom import (
     pose_to_any,
     quat_rotation_angle,
 )
-from curobo_task_constructor.core.robot import GoalsetSpec, PlanRequest, PlanningOptionsSpec
+from curobo_task_constructor.core.robot import GoalsetSpec, PlanRequest
 
 #: SetPlanner mirror (CLASSIC=0, MPC=1, BATCH=2, JOINT_SPACE=5, RETARGET=6).
 #: MULTIPOINT=4 was removed together with the old MultiPointPlanner server
 #: planner (the enum constant still exists in SetPlanner.srv for ABI).
 PLANNER_KEYS = {
-    "classic": 0, "mpc": 1, "batch": 2,
-    "joint_space": 5, "retarget": 6,
+    "classic": 0,
+    "mpc": 1,
+    "batch": 2,
+    "joint_space": 5,
+    "retarget": 6,
 }
 
 
@@ -28,26 +31,23 @@ def planner_key(params: dict):
     try:
         return PLANNER_KEYS[str(planner).lower()]
     except KeyError:
-        raise ValueError(f"unknown planner {planner!r}; expected one of "
-                         f"{sorted(PLANNER_KEYS)}") from None
-
-
-def planning_options(params: dict) -> PlanningOptionsSpec:
-    return PlanningOptionsSpec(
-        num_seeds=int(params.get("num_seeds", 0) or 0),
-        waypoint_tolerance=float(params.get("waypoint_tolerance", 0.0) or 0.0),
-        exact_joints=list(params.get("exact_joints", []) or []),
-        log_considered_trajectories=bool(params.get("log_considered", False)),
-    )
+        raise ValueError(
+            f"unknown planner {planner!r}; expected one of " f"{sorted(PLANNER_KEYS)}"
+        ) from None
 
 
 def pose_from_params(cfg: dict, robot) -> object:
     """Build a Pose-like from a params dict ``{x,y,z,qx,qy,qz,qw}``."""
     p = cfg if isinstance(cfg, dict) else {}
-    pose = Pose3([float(p.get("x", 0.0)), float(p.get("y", 0.0)),
-                  float(p.get("z", 0.0))],
-                 [float(p.get("qx", 0.0)), float(p.get("qy", 0.0)),
-                  float(p.get("qz", 0.0)), float(p.get("qw", 1.0))])
+    pose = Pose3(
+        [float(p.get("x", 0.0)), float(p.get("y", 0.0)), float(p.get("z", 0.0))],
+        [
+            float(p.get("qx", 0.0)),
+            float(p.get("qy", 0.0)),
+            float(p.get("qz", 0.0)),
+            float(p.get("qw", 1.0)),
+        ],
+    )
     return pose_to_any(pose, getattr(robot, "pose_cls", None))
 
 
@@ -63,7 +63,6 @@ def full_request(robot, start_joints, goalsets, params, planner=None) -> PlanReq
     return PlanRequest(
         start_pose=start_joints,
         goalsets=goalsets,
-        options=planning_options(params),
         planner=planner if planner is not None else planner_key(params),
     )
 
@@ -75,8 +74,9 @@ def full_request(robot, start_joints, goalsets, params, planner=None) -> PlanReq
 CONSTRAINT_ORDER = "theta_x theta_y theta_z x y z"
 
 
-def axis_holds(start_pose, goal_poses, pos_tol: float = 0.005,
-               rot_tol: float = 0.05) -> list:
+def axis_holds(
+    start_pose, goal_poses, pos_tol: float = 0.005, rot_tol: float = 0.05
+) -> list:
     """``int8[6]`` holds that pin a path onto its straight segment.
 
     cuRobo scores a *non-terminal* waypoint's held-axis error against the GOAL
@@ -103,9 +103,13 @@ def axis_holds(start_pose, goal_poses, pos_tol: float = 0.005,
     goals = [Pose3.from_any(g) for g in (goal_poses or [])]
     if not goals:
         return []
-    hold_rot = 1 if all(
-        quat_rotation_angle(s.orientation, g.orientation) <= rot_tol for g in goals
-    ) else 0
+    hold_rot = (
+        1
+        if all(
+            quat_rotation_angle(s.orientation, g.orientation) <= rot_tol for g in goals
+        )
+        else 0
+    )
     hold_pos = [
         1 if all(abs(s.position[i] - g.position[i]) <= pos_tol for g in goals) else 0
         for i in range(3)
@@ -127,9 +131,9 @@ def path_length_cost(trajectory, skip_tail: int = 0) -> float:
     ``finger_joint``), so a gripper close does not register as arm motion.
     """
     pts = []
-    for wp in (trajectory or []):
+    for wp in trajectory or []:
         pos = list(getattr(wp, "position", None) or [])
-        pts.append(pos[:len(pos) - skip_tail] if skip_tail > 0 else pos)
+        pts.append(pos[: len(pos) - skip_tail] if skip_tail > 0 else pos)
     total = 0.0
     for a, b in zip(pts, pts[1:]):
         n = min(len(a), len(b))

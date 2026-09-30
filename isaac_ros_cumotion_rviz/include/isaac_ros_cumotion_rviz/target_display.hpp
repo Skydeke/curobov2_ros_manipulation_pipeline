@@ -40,7 +40,7 @@ namespace isaac_ros_cumotion_rviz
  * in-place interactive 6-DOF gizmo and exposes it through getPose()/setPose().
  * It owns NO planner clients, services, actions or goal streams -- deciding
  * what the planner does with the pose (plan, execute, MPC track ...) is the
- * job of the RvizArgsPanel.
+ * job of the Planning tab (PlanningTab).
  *
  * Like ReachabilityMapDisplay it embeds BOTH halves of the interactive-marker
  * stack:
@@ -61,7 +61,7 @@ public:
   TargetDisplay();
   ~TargetDisplay() override;
 
-  // --- Panel interface (used by RvizArgsPanel) ---
+  // --- Panel interface (used by PlanningTab) ---
   geometry_msgs::msg::Pose getPose() const;
   void setPose(const geometry_msgs::msg::Pose & pose);
 

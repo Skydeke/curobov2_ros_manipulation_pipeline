@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load the robometrics benchmark problems.
 
-Reuses the exact datasets ``curobo_core/curobo/benchmark/motion_plan_benchmark.py``
+Reuses the exact datasets ``curobo/curobo/benchmark/motion_plan_benchmark.py``
 benchmarks against (``demo``, ``motion_benchmaker``, ``mpinets``), so the two
 legs here solve the same problems as the upstream native benchmark.
 

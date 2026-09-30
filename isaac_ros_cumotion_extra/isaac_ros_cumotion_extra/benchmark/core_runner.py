@@ -66,7 +66,7 @@ def _reference_benchmark_module():
     package dir) without ``__init__.py``, so the reference script is meant to be
     **run as a file** and cannot be imported as
     ``curobo.benchmark.motion_plan_benchmark`` (hence the box failure
-    ``No module named 'curobo.benchmark'``). curobo_core is read-only here — we
+    ``No module named 'curobo.benchmark'``). curobo is read-only here — we
     must not create the missing ``__init__.py`` in it — so instead this locates
     the script from the installed ``curobo`` package and loads it through
     ``importlib``, reusing the exact reference machinery without touching it.
@@ -122,9 +122,10 @@ def _reference_benchmark_module():
 
     raise ImportError(
         "Could not locate the curobo reference benchmark script "
-        "`curobo/benchmark/motion_plan_benchmark.py` next to the installed "
-        "curobo package or on sys.path. Install curobo_core (the docker image "
-        "does `pip install -e .../curobo_core/curobo[benchmark]`)."
+        "`benchmark/motion_plan_benchmark.py` beside the installed curobo "
+        "package or on sys.path. The `curobo` ROS package ships the library "
+        "(colcon build --packages-select curobo); check that it is on "
+        "PYTHONPATH and that ${ROS_WS}/src/curobo/curobo/benchmark exists."
     )
 
 

@@ -1,6 +1,6 @@
 from functools import partial
 from std_srvs.srv import Trigger, SetBool
-from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetJointLocks, SetLinkCollision, SetMask
+from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetJointLocks, GetJointInfo, SetLinkCollision, SetMask
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
 from geometry_msgs.msg import Point
@@ -142,6 +142,16 @@ class RosServiceManager:
             SetJointLocks,
             self.node.get_name() + '/set_joint_locks',
             self._callback_set_joint_locks
+        )
+
+        # Read-only cspace/limit introspection. Registered unconditionally and
+        # deliberately cheap (it reads the parsed kinematics model, touches no
+        # solver) so an rviz joint-state panel can poll it instead of guessing
+        # the order that `target_joint_positions` is resolved in.
+        self.get_joint_info_srv = self.node.create_service(
+            GetJointInfo,
+            self.node.get_name() + '/get_joint_info',
+            self._callback_get_joint_info
         )
 
         # Service to get available robot strategies (for RViz plugin)
@@ -569,6 +579,63 @@ class RosServiceManager:
         if rebuild is not None:
             rebuild("joint locks changed", robot_model_changed=True)
         _fill(True, "Joint locks updated - solvers rebuilt (blocking, ~20s)")
+        return response
+
+    def _callback_get_joint_info(self, request: GetJointInfo.Request, response: GetJointInfo.Response):
+        """Report the cspace order, position limits, and joint locks in force.
+
+        Pure introspection over the already-parsed kinematics model: it builds
+        no solver and reads no GPU tensor beyond the small limit table, so it
+        is cheap enough to poll. That matters because the rviz curobo panel
+        calls it to learn the order `Goalset.target_joint_positions` is
+        resolved in, which is the one thing a joint-space client cannot
+        otherwise know.
+        """
+        try:
+            kin = self.robot_model_manager.kin_model
+            names = [str(name) for name in kin.joint_names]
+            response.joint_names = names
+
+            # limits come back in the MODEL's joint order, which is a superset
+            # of the cspace (locked joints are in the model but not the
+            # cspace), so index by name rather than position.
+            limit_names, limit_pos = [], []
+            try:
+                limits = kin.get_joint_limits()
+                limit_names = [str(name) for name in limits.joint_names]
+                limit_pos = limits.position.detach().cpu().numpy()
+            except Exception as exc:  # noqa: BLE001 - a missing limit table is not fatal
+                self.node.get_logger().warning(
+                    f"get_joint_info: no joint limits available ({exc}) - "
+                    "reporting unbounded joints")
+
+            limit_idx = {name: i for i, name in enumerate(limit_names)}
+            response.lower_limits = [
+                float(limit_pos[0, limit_idx[name]]) if name in limit_idx else -float('inf')
+                for name in names
+            ]
+            response.upper_limits = [
+                float(limit_pos[1, limit_idx[name]]) if name in limit_idx else float('inf')
+                for name in names
+            ]
+
+            # The locks a joint-space client must know about: a locked joint is
+            # pinned outside the cspace, so it is absent from joint_names and
+            # the plan cannot move it whatever the target says.
+            active = self.robot_model_manager.lock_joints()
+            response.locked_joint_names = [str(name) for name in active]
+            response.locked_positions = [
+                float(active[name]) for name in response.locked_joint_names]
+
+            response.success = True
+            response.message = (
+                f"{len(names)} joints in cspace"
+                + (f", {len(response.locked_joint_names)} locked" if active else "")
+            )
+        except Exception as exc:  # noqa: BLE001 - report, never crash the node
+            response.success = False
+            response.message = f"get_joint_info failed: {exc}"
+            self.node.get_logger().error(response.message)
         return response
 
     def _callback_get_robot_strategies(self, node, request: GetRobotStrategies.Request, response: GetRobotStrategies.Response):

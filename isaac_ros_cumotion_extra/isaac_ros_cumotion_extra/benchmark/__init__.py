@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Planner parity benchmark: ``curobo_core`` native vs the ROS-wrapped planner.
+"""Planner parity benchmark: ``curobo`` native vs the ROS-wrapped planner.
 
 Two legs replay the *identical* robometrics problems (the same datasets the
-``curobo_core`` ``motion_plan_benchmark`` uses -- ``demo``,
+``curobo`` ``motion_plan_benchmark`` uses -- ``demo``,
 ``motion_benchmaker``, ``mpinets``):
 
 - ``core_runner`` drives ``curobo``'s ``MotionPlanner`` directly, configured
