@@ -1,4 +1,4 @@
-# Planner parity benchmark: curobo_core native vs the ROS-wrapped planner.
+# Planner parity benchmark: curobo native vs the ROS-wrapped planner.
 #
 #   curobo_server    launches the unified planner (gen_traj.launch.py,
 #                    node `unified_planner`, robot:=franka) in the

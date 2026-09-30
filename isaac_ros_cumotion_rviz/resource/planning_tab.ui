@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Planning tab, against MoveIt's own Planning tab group for group:
+
+    Commands            [&Plan] [&Execute] [Plan && Execute] [&Stop]   [OURS]
+    Query               "Planning Group:" "Start State:" "Goal State:"  [OURS]
+    Path Constraints    a constraint-profile combo                        [NO EQUIVALENT]
+    Options             "Planning Time (s):" "Planning Attempts:"
+                        "Velocity Scaling:" "Accel. Scaling:" + 6
+                        checkboxes                                        [PARTLY OURS]
+
+  The two deliberate deviations, both because curobo's server has no service
+  for them:
+
+  * "Path Constraints" is absent. Path constraints are a profile the planner
+    interpolates a Cartesian path against; curobo's TrajectoryGoal has no such
+    field, so a combo would select nothing.
+  * "Options" keeps ONE of MoveIt's five numbers. Planning Time and Planning
+    Attempts are search-budget knobs with no curobo equivalent on the classic
+    path, and num_seeds / waypoint_tolerance are REJECTED by the server's
+    _validate_planning_options, so exposing them would be a control that
+    silently fails. Velocity and Acceleration scaling DO exist, and are the one
+    row here ("Speed (Time dilatation)"). The rest of the Options group is
+    checkboxes, which a single checkbox already stands in for elsewhere on this
+    panel (the Context tab's collision-sphere toggle).
+
+  The "Query" group holds the goal POSE rather than MoveIt's three state
+  selectors, because MoveIt edits the goal pose on an interactive marker in the
+  3D view, not inline: its "Goal State:" combo picks WHICH state, and the pose
+  itself belongs to the MotionPlanningRequest dialog. curobo's panel has no
+  marker, so the pose has to be typed here, and a QFormLayout row is the
+  cheapest honest place for it. The row label is MoveIt's own "Goal State:".
+
+  The bare triples follow MoveIt's Workspace group, which puts three
+  unlabelled spinboxes under "Center (XYZ):" and three under "Size (XYZ):" —
+  the components are named in the row label, not repeated per field.
+-->
+<ui version="4.0">
+ <class>PlanningTabForm</class>
+ <widget class="QWidget" name="PlanningTabForm">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>461</width>
+    <height>300</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Planning</string>
+  </property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <property name="leftMargin">
+    <number>4</number>
+   </property>
+   <property name="topMargin">
+    <number>4</number>
+   </property>
+   <property name="rightMargin">
+    <number>4</number>
+   </property>
+   <property name="bottomMargin">
+    <number>4</number>
+   </property>
+   <property name="spacing">
+    <number>6</number>
+   </property>
+   <item>
+    <widget class="QGroupBox" name="queryGroupBox">
+     <property name="title">
+      <string>Query</string>
+     </property>
+     <layout class="QFormLayout" name="queryFormLayout">
+      <property name="horizontalSpacing">
+       <number>4</number>
+      </property>
+      <property name="verticalSpacing">
+       <number>4</number>
+      </property>
+      <property name="fieldGrowthPolicy">
+       <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+      </property>
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelGoalPosition">
+        <property name="text">
+         <string>Goal State:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <layout class="QHBoxLayout" name="goalPositionLayout">
+        <property name="spacing">
+         <number>3</number>
+        </property>
+        <item>
+         <widget class="QDoubleSpinBox" name="spinBoxPosX">
+          <property name="toolTip">
+           <string>Goal position X, in the world frame of the planner node</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QDoubleSpinBox" name="spinBoxPosY">
+          <property name="toolTip">
+           <string>Goal position Y, in the world frame of the planner node</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QDoubleSpinBox" name="spinBoxPosZ">
+          <property name="toolTip">
+           <string>Goal position Z, in the world frame of the planner node</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelGoalPositionUnits">
+          <property name="text">
+           <string>(m)</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="goalPositionSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelGoalOrientation">
+        <property name="text">
+         <string>Orientation (RPY):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <layout class="QHBoxLayout" name="goalOrientationLayout">
+        <property name="spacing">
+         <number>3</number>
+        </property>
+        <item>
+         <widget class="QDoubleSpinBox" name="spinBoxRoll">
+          <property name="toolTip">
+           <string>Goal orientation, roll about X, in radians</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QDoubleSpinBox" name="spinBoxPitch">
+          <property name="toolTip">
+           <string>Goal orientation, pitch about Y, in radians</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QDoubleSpinBox" name="spinBoxYaw">
+          <property name="toolTip">
+           <string>Goal orientation, yaw about Z, in radians</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QLabel" name="labelGoalOrientationUnits">
+          <property name="text">
+           <string>(rad)</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <spacer name="goalOrientationSpacer">
+          <property name="orientation">
+           <enum>Qt::Horizontal</enum>
+          </property>
+          <property name="sizeHint" stdset="0">
+           <size>
+            <width>40</width>
+            <height>20</height>
+           </size>
+          </property>
+         </spacer>
+        </item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="optionsGroupBox">
+     <property name="title">
+      <string>Options</string>
+     </property>
+     <layout class="QFormLayout" name="optionsFormLayout">
+      <property name="horizontalSpacing">
+       <number>4</number>
+      </property>
+      <property name="verticalSpacing">
+       <number>4</number>
+      </property>
+      <property name="fieldGrowthPolicy">
+       <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+      </property>
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelTimeDilation">
+        <property name="text">
+         <string>Speed (Time dilatation):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <widget class="QDoubleSpinBox" name="doubleSpinBoxTimeDilationFactor">
+        <property name="decimals">
+         <number>2</number>
+        </property>
+        <property name="minimum">
+         <double>0.000000000000000</double>
+        </property>
+        <property name="maximum">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="singleStep">
+         <double>0.100000000000000</double>
+        </property>
+        <property name="value">
+         <double>1.000000000000000</double>
+        </property>
+        <property name="toolTip">
+         <string>How much slower than real time the generated trajectory is played
+at. 1.0 is real time; 0.5 is half speed. Sent as the strategy's
+time_dilation_factor.</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="labelPlannerNode">
+        <property name="text">
+         <string>Planner node:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="1">
+       <widget class="QLabel" name="plannerNodeEcho">
+        <property name="text">
+         <string />
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="commandsGroupBox">
+     <property name="title">
+      <string>Commands</string>
+     </property>
+     <layout class="QFormLayout" name="commandsFormLayout">
+      <property name="horizontalSpacing">
+       <number>4</number>
+      </property>
+      <property name="verticalSpacing">
+       <number>4</number>
+      </property>
+      <property name="fieldGrowthPolicy">
+       <enum>QFormLayout::AllNonFixedFieldsGrow</enum>
+      </property>
+      <item row="0" column="0">
+       <widget class="QLabel" name="labelExecute">
+        <property name="text">
+         <string>Execute:</string>
+        </property>
+       </widget>
+      </item>
+      <item row="0" column="1">
+       <layout class="QHBoxLayout" name="executeButtonLayout">
+        <property name="spacing">
+         <number>3</number>
+        </property>
+        <item>
+         <widget class="QPushButton" name="clearGoal">
+          <property name="text">
+           <string>Clear</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="generateTrajectory">
+          <property name="text">
+           <string>Compute</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="sendTrajectory">
+          <property name="text">
+           <string>Execute</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="generateAndSend">
+          <property name="text">
+           <string>Compute + Execute</string>
+          </property>
+         </widget>
+        </item>
+        <item>
+         <widget class="QPushButton" name="stopRobot">
+          <property name="text">
+           <string>Cancel</string>
+          </property>
+         </widget>
+        </item>
+       </layout>
+      </item>
+      <item row="1" column="0" colspan="2">
+       <widget class="QLabel" name="statusLabel">
+        <property name="text">
+         <string>waiting for the planner...</string>
+        </property>
+        <property name="wordWrap">
+         <bool>true</bool>
+        </property>
+        <property name="toolTip">
+         <string>The full result of the last plan or execution. The same text is
+set as the tooltip, because the line is elided when the dock is narrow and the
+waypoint counts are worth reading in full.</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

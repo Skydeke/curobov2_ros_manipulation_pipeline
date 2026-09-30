@@ -10,7 +10,7 @@ on:
       - isaac_ros_cumotion_moveit/**
       - isaac_ros_cumotion_rviz/**
       - isaac_ros_cumotion_extra/**
-      - curobo_core/**
+      - curobo/**
       - .github/workflows/**
   workflow_dispatch:
 
@@ -34,31 +34,23 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
-      - name: Prepare submodule git metadata for Docker
+      # NOTE: there is deliberately no step that materialises the nested
+      # curobo/curobo .git into the build context any more. It used to run
+      # `rm .git; cp -a "$gitdir" .git` so that COPY brought a real .git
+      # directory, purely so setuptools-scm could derive a version inside the
+      # image (hence SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO). The
+      # curobo ROS package now pins the version itself, so nothing in the build
+      # reads that metadata -- and since there is no .dockerignore, materialising
+      # it was copying cuRobo's whole git history into both the build context and
+      # the image. actions/checkout already populated the worktree, which is all
+      # COPY needs.
+
+      - name: Verify vendored curobo checkout
         shell: bash
         run: |
           set -euxo pipefail
 
-          for sub in curobo_core; do
-            (
-              cd "$sub"
-
-              git fetch --force --tags origin || true
-
-              if [ -f .git ]; then
-                gitdir=$(sed 's/^gitdir: //' .git)
-                rm .git
-                cp -a "$gitdir" .git
-              fi
-            )
-          done
-
-      - name: Verify curobo git metadata
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          cd curobo_core
+          cd curobo/curobo
 
           pwd
           ls -la

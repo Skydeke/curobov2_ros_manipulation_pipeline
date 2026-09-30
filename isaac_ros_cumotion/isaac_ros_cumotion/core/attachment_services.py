@@ -188,7 +188,7 @@ class AttachmentServices:
         returns shape ``(num_spheres, 3)`` (see geom/transform.py) and the
         following ``.squeeze(0)`` collapses ``[1, 3] -> [3]``, so the
         ``torch.cat`` in the body hits "Tensors must have same number of
-        dimensions: got 1 and 2". We cannot patch curobo_core, so:
+        dimensions: got 1 and 2". We cannot patch curobo, so:
 
         * ``fit_spheres`` is called the same way (world-frame centers — the fit
           bakes the obstacle world pose into the mesh, ``transform_with_pose``);

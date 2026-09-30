@@ -10,7 +10,12 @@ def generate_launch_description():
     declare_planner_node_name = DeclareLaunchArgument(
         'planner_node_name',
         default_value='unified_planner',
-        description='Planner node name the RvizArgsPanel binds its clients to'
+        description=(
+            'Planner node name the Curobo panel binds its clients to. Applied '
+            'only if the running rviz node exposes it as a parameter; the value '
+            'saved in the rviz config (Context tab -> planner_node_name) is what '
+            'the panel actually uses, and it wins when both are present.'
+        )
     )
 
     declare_base_link = DeclareLaunchArgument(

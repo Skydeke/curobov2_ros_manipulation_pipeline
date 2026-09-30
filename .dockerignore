@@ -1,0 +1,39 @@
+# Keep VCS metadata out of the Docker build context.
+#
+# Not just hygiene -- `curobo` breaks at import time if this is wrong.
+#
+# curobo/curobo/_src/util/version.py::get_version() (vendored upstream, not
+# ours to patch) picks its strategy on whether `<submodule root>/.git` EXISTS:
+#
+#     if (root / ".git").exists() and not (root / ".git/shallow").exists():
+#         return setuptools_scm.get_version(root=root, ...)   # NOT in a try/except
+#     else:
+#         try:    return version("nvidia_curobo")
+#         except: return "v0.8.0-no-tag"                       # bare except
+#
+# A submodule's `.git` is a regular FILE (a `gitdir:` pointer), and
+# `Path.exists()` is true for a file. So copying it into the image sends
+# get_version() down the setuptools_scm branch against a pointer to a gitdir
+# that does not exist in the container, and setuptools_scm raises LookupError
+# from inside `import curobo`. That takes down every node in the workspace.
+#
+# With `.git` absent, the else-branch runs: the metadata lookup misses and the
+# bare except degrades to the literal "v0.8.0-no-tag". curobo.__version__ is
+# documentation-only upstream (docs/conf.py and the bug-report template), so a
+# constant there costs nothing -- the ROS package version that ROS actually
+# reports is pinned in curobo/setup.py.
+#
+# This also stops cuRobo's entire git history from being copied into the build
+# context and the image, which is why the CI "prepare submodule git metadata"
+# step is gone: actions/checkout already populates the worktree, which is all
+# COPY needs.
+.git
+**/.git
+
+# Python/ament build droppings. The colcon build runs inside the image, but a
+# stale tree from a local build would otherwise be copied in and can shadow the
+# freshly built one.
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/*.so

@@ -45,7 +45,18 @@ add_library(${PROJECT_NAME} SHARED
 )
 
 target_include_directories(${PROJECT_NAME}
-  PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    # Populates INTERFACE_INCLUDE_DIRECTORIES on the exported target, so any
+    # consumer linking `curobo_task_constructor_rviz::curobo_task_constructor_rviz`
+    # inherits this package's include dir from the target itself rather than from
+    # ament_export_include_directories() below, which only reaches targets created
+    # after the consumer's find_package(). Without it a consumer that links the
+    # imported target inherits nothing and fails with
+    #   fatal error: curobo_task_constructor_rviz/task_constructor_panel.hpp:
+    #   No such file or directory
+    # even though the header is sitting in the install tree.
+    $<INSTALL_INTERFACE:include>
 )
 ament_target_dependencies(${PROJECT_NAME}
   curobo_task_constructor_interfaces
@@ -70,7 +81,14 @@ target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--no-undefined")
 # which class_loader cannot resolve as libfoo.so — the panel then fails to
 # load with "Could not find library corresponding to plugin ...".
 
+# EXPORT + ament_export_targets (below) is what lets a DOWNSTREAM package link
+# this library. isaac_ros_cumotion_rviz builds its composite "curobo" panel by
+# instantiating TaskConstructorPanel directly as a tab's widget, so it needs the
+# target — and without the export it could only do so by re-implementing the
+# panel or by dlopen'ing it back through pluginlib, both of which lose the C++
+# type.
 install(TARGETS ${PROJECT_NAME}
+  EXPORT export_${PROJECT_NAME}
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -81,9 +99,25 @@ install(DIRECTORY rviz
   OPTIONAL
 )
 
+# Install the header next to the library, because this package is now linked by
+# a downstream one (isaac_ros_cumotion_rviz builds its composite "curobo" panel
+# by instantiating TaskConstructorPanel as a tab widget, so it needs both the C++
+# type AND its declaration).
+#
+# `ament_export_include_directories(include)` below DECLARES the directory in the
+# package config, but declaring a directory does not create it. Without this
+# install the exported INTERFACE_INCLUDE_DIRECTORIES pointed at a path that does
+# not exist, CMake warned about it, and the consumer failed with
+#   fatal error: curobo_task_constructor_rviz/task_constructor_panel.hpp:
+#   No such file or directory
+install(DIRECTORY include/
+  DESTINATION include
+)
+
 pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
 
 ament_export_include_directories(include)
+ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(ament_cmake)
 ament_export_dependencies(curobo_task_constructor_interfaces)
 ament_export_dependencies(pluginlib)

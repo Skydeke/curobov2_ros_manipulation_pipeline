@@ -26,7 +26,7 @@
   <depend>std_srvs</depend>
   <depend>trajectory_msgs</depend>
   <depend>geometric_shapes</depend>
-  <depend>curobo_core</depend>
+  <depend>curobo</depend>
 
   <exec_depend>ros2launch</exec_depend>
 

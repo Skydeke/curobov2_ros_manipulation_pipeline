@@ -82,7 +82,7 @@ Leave `nodes` empty to start all eight demo nodes (each on its own viser port).
 ## cuRobo benchmarks reproduction: `curobo_benchmark`
 
 Re-created replacement for the deleted `isaac_ros_cumotion_benchmark` package.
-It runs **curobo_core's native planning benchmark** (the same solver/machinery
+It runs **curobo's native planning benchmark** (the same solver/machinery
 the [cuRobo benchmarks page](https://nvlabs.github.io/curobo/latest/reference/benchmarks.html)
 is generated with) and replays the **same problems through the ROS-wrapped
 planner** (`/unified_planner/generate_trajectory` on the node started by
@@ -283,7 +283,7 @@ mean the same thing on either leg.
 
 Each leg is also printed as a `Metric`/`Value` grid table in the same layout
 as the upstream `curobo/benchmark/motion_plan_benchmark.py` report ("native
-(curobo_core)" and "ros (unified_planner)"), so the two can be compared at a
+(curobo)" and "ros (unified_planner)"), so the two can be compared at a
 glance against the numbers on the
 [cuRobo benchmarks page](https://nvlabs.github.io/curobo/latest/reference/benchmarks.html).
 

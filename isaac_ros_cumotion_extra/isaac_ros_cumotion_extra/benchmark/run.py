@@ -4,7 +4,7 @@
 
 Subcommands:
 
-    curobo_benchmark core [options]          native curobo_core leg (planning)
+    curobo_benchmark core [options]          native curobo leg (planning)
     curobo_benchmark ros  [options]          ROS-wrapped planning leg (server up)
     curobo_benchmark compare C R [opts]      compare two result JSONs
     curobo_benchmark all [options]           core + ros + compare in one go
@@ -403,7 +403,7 @@ def cmd_all(args) -> int:
     from .core_runner import run_core
     from .ros_runner import run_ros
 
-    print("== core leg (native curobo_core) ==", flush=True)
+    print("== core leg (native curobo) ==", flush=True)
     core_results = run_core(
         dataset=args.dataset,
         scene=args.scene,
@@ -652,13 +652,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="curobo_benchmark",
         description=(
-            "Planner parity benchmark: curobo_core native vs the ROS-wrapped "
+            "Planner parity benchmark: curobo native vs the ROS-wrapped "
             "planner on the same robometrics problems."
         ),
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    p_core = subparsers.add_parser("core", help="native curobo_core leg")
+    p_core = subparsers.add_parser("core", help="native curobo leg")
     _add_dataset(p_core)
     _add_scene(p_core)
     _add_solver_opts(p_core)

@@ -31,7 +31,7 @@ from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
 from isaac_ros_cumotion_interfaces.action import SendTrajectory
-from isaac_ros_cumotion_interfaces.msg import Goalset, PlanningOptions, TrajectoryGoal
+from isaac_ros_cumotion_interfaces.msg import Goalset, TrajectoryGoal
 from isaac_ros_cumotion_interfaces.srv import (
     AddObject,
     AttachObject,
@@ -49,7 +49,6 @@ from curobo_task_constructor.core.robot import (
     GoalsetSpec,
     PlanRequest,
     PlanResult,
-    PlanningOptionsSpec,
     RobotInterface,
     ServiceError,
 )
@@ -83,10 +82,14 @@ class CuroboServerInterface(RobotInterface):
     joint_state_cls = JointState
     pose_cls = RosPose
 
-    def __init__(self, node, planner: Optional[int] = None,
-                 planner_service: Optional[str] = None,
-                 robot_config_path: Optional[str] = None,
-                 service_timeout: Optional[float] = None):
+    def __init__(
+        self,
+        node,
+        planner: Optional[int] = None,
+        planner_service: Optional[str] = None,
+        robot_config_path: Optional[str] = None,
+        service_timeout: Optional[float] = None,
+    ):
         #: the owning rclpy Node (clients are created on it)
         self._node = node
         self._planner = planner
@@ -96,13 +99,14 @@ class CuroboServerInterface(RobotInterface):
         #: canonical cspace joint order derived from the descriptor (None = no
         #: joint-order knowledge; joint-state readings pass through verbatim)
         self._joint_order = (
-            canonical_joint_order(robot_config_path)
-            if robot_config_path else None)
+            canonical_joint_order(robot_config_path) if robot_config_path else None
+        )
         #: once-flag for the reorder log in ``normalize_joint_state``
         self._joint_order_logged = False
         #: per-call service/action budget (see _SERVICE_TIMEOUT)
-        self._service_timeout = (service_timeout if service_timeout is not None
-                                 else _SERVICE_TIMEOUT)
+        self._service_timeout = (
+            service_timeout if service_timeout is not None else _SERVICE_TIMEOUT
+        )
         self._planner_active = False
         #: SetPlanner enum of the planner currently active on the server (None
         #: until the first explicit switch). ``_ensure_planner`` re-issues a
@@ -110,24 +114,28 @@ class CuroboServerInterface(RobotInterface):
         #: per-stage planners (joint moves -> JOINT_SPACE, lift pose -> CLASSIC).
         self._active_planner = None
 
-        self._traj_client = self._client(TrajectoryGeneration,
-                                         "/curobo_server/generate_trajectory")
-        self._batch_client = self._client(TrajectoryGenerationBatch,
-                                          "/curobo_server/trajectory_generation_batch")
+        self._traj_client = self._client(
+            TrajectoryGeneration, "/curobo_server/generate_trajectory"
+        )
+        self._batch_client = self._client(
+            TrajectoryGenerationBatch, "/curobo_server/trajectory_generation_batch"
+        )
         self._ik_client = self._client(Ik, "/curobo_server/ik")
         self._fk_client = self._client(Fk, "/curobo_server/fk")
         self._add_client = self._client(AddObject, "/curobo_server/add_object")
         self._remove_client = self._client(RemoveObject, "/curobo_server/remove_object")
-        self._remove_all_client = self._client(Trigger,
-                                               "/curobo_server/remove_all_objects")
-        self._attach_client = self._client(AttachObject,
-                                           "/curobo_server/attach_object")
+        self._remove_all_client = self._client(
+            Trigger, "/curobo_server/remove_all_objects"
+        )
+        self._attach_client = self._client(AttachObject, "/curobo_server/attach_object")
         self._detach_client = self._client(Trigger, "/curobo_server/detach_object")
         self._planner_client = self._client(SetPlanner, self._planner_service)
         self._link_collision_client = self._client(
-            SetLinkCollision, "/curobo_server/set_link_collision")
-        self._exec_client = ActionClient(node, SendTrajectory,
-                                         "/curobo_server/execute_trajectory")
+            SetLinkCollision, "/curobo_server/set_link_collision"
+        )
+        self._exec_client = ActionClient(
+            node, SendTrajectory, "/curobo_server/execute_trajectory"
+        )
 
         #: (label, client) pairs polled by ``start_ready_poll`` — everything
         #: the interface touches, minus the warm-up (see that method's doc):
@@ -194,12 +202,12 @@ class CuroboServerInterface(RobotInterface):
             state["done"] = True
             state["timer"].cancel()
             self._node.get_logger().info(
-                "curobo_server services + execute_trajectory action reachable")
+                "curobo_server services + execute_trajectory action reachable"
+            )
             try:
                 on_ready()
             except Exception as exc:  # noqa: BLE001 - see _await repr notes
-                self._node.get_logger().error(
-                    f"readiness handler failed: {exc}")
+                self._node.get_logger().error(f"readiness handler failed: {exc}")
 
         state["timer"] = self._node.create_timer(period, _tick)
 
@@ -219,16 +227,19 @@ class CuroboServerInterface(RobotInterface):
         """
         order = self._joint_order
         names = list(getattr(joint_state, "name", []) or [])
-        if not order or not names or names == order[:len(names)]:
+        if not order or not names or names == order[: len(names)]:
             return joint_state
         position = list(getattr(joint_state, "position", []) or [])
         if len(position) != len(names):
             # malformed reading — leave it for the server to reject as-is
             return joint_state
         new_names, new_position, new_velocity, new_effort = reorder_joint_vectors(
-            order, names, position,
+            order,
+            names,
+            position,
             velocity=getattr(joint_state, "velocity", None),
-            effort=getattr(joint_state, "effort", None))
+            effort=getattr(joint_state, "effort", None),
+        )
         js = type(joint_state)()
         js.header = joint_state.header
         js.name = new_names
@@ -239,7 +250,8 @@ class CuroboServerInterface(RobotInterface):
             self._joint_order_logged = True
             self._node.get_logger().info(
                 f"reordered /joint_states {dict(zip(names, position))} "
-                f"into cspace order {dict(zip(new_names, new_position))}")
+                f"into cspace order {dict(zip(new_names, new_position))}"
+            )
         return js
 
     def get_current_joint_state(self):
@@ -263,6 +275,7 @@ class CuroboServerInterface(RobotInterface):
         from curobo_task_constructor.core.robot_config import (
             resolve_named_config,
         )
+
         path = self._robot_config_path
         if not path:
             return None
@@ -289,11 +302,13 @@ class CuroboServerInterface(RobotInterface):
         res = self._call(self._fk_client, req)
         if not res.poses:
             raise ServiceError(
-                f"fk failed: {getattr(res, 'error_msg', '') or 'no pose returned'}")
+                f"fk failed: {getattr(res, 'error_msg', '') or 'no pose returned'}"
+            )
         if link is not None and link != "tool_link":
             self._node.get_logger().debug(
                 f"fk(link={link!r}) degrades to tool-pose FK "
-                "(Fk.srv does not target arbitrary links)")
+                "(Fk.srv does not target arbitrary links)"
+            )
         return res.poses[0]
 
     def fk_batch(self, joint_states: list, link: Optional[str] = None) -> list:
@@ -312,7 +327,8 @@ class CuroboServerInterface(RobotInterface):
         res = self._call(self._fk_client, req)
         if not res.poses:
             raise ServiceError(
-                f"fk_batch failed: {getattr(res, 'error_msg', '') or 'no pose returned'}")
+                f"fk_batch failed: {getattr(res, 'error_msg', '') or 'no pose returned'}"
+            )
         return list(res.poses)
 
     def ik(self, pose, seed: Optional[Any] = None):
@@ -340,7 +356,7 @@ class CuroboServerInterface(RobotInterface):
         seed_pos = list(getattr(seed, "position", []) or [])
         out_pos = list(result.position)
         if len(out_pos) < len(seed_pos):
-            out_pos = out_pos + seed_pos[len(out_pos):]
+            out_pos = out_pos + seed_pos[len(out_pos) :]
         js = JointState()
         js.name = list(getattr(seed, "name", []))
         js.position = [float(v) for v in out_pos]
@@ -390,12 +406,14 @@ class CuroboServerInterface(RobotInterface):
         restores the check. The wire ``Goalset`` carries no collision concept;
         the planning interfaces never see it.
         """
-        links = sorted({
-            link
-            for r in (requests or [])
-            for gs in (r.goalsets or [])
-            for link in (gs.allowed_collisions or [])
-        })
+        links = sorted(
+            {
+                link
+                for r in (requests or [])
+                for gs in (r.goalsets or [])
+                for link in (gs.allowed_collisions or [])
+            }
+        )
         if not links:
             return
         req = SetLinkCollision.Request()
@@ -439,12 +457,16 @@ class CuroboServerInterface(RobotInterface):
                 batch.requests.append(self._to_goal(r))
             res = self._call(self._batch_client, batch)
             if not res.success and not res.responses:
-                return [PlanResult(False, res.error_msg or "plan_batch failed")
-                        for _ in requests]
+                return [
+                    PlanResult(False, res.error_msg or "plan_batch failed")
+                    for _ in requests
+                ]
             out = [self._from_result(r) for r in res.responses]
             if len(out) < len(requests):
-                out += [PlanResult(False, "missing batch response")
-                        for _ in range(len(requests) - len(out))]
+                out += [
+                    PlanResult(False, "missing batch response")
+                    for _ in range(len(requests) - len(out))
+                ]
             return out
         finally:
             self._set_links_collision(requests, True)
@@ -491,11 +513,16 @@ class CuroboServerInterface(RobotInterface):
         try:
             gh = self._await(
                 self._exec_client.send_goal_async(goal),
-                "execute_trajectory goal handshake", self._service_timeout)
+                "execute_trajectory goal handshake",
+                self._service_timeout,
+            )
             if gh is None or not gh.accepted:
                 return PlanResult(False, "execute_trajectory goal rejected")
-            res = self._await(gh.get_result_async(), "execute_trajectory result",
-                              self._service_timeout)
+            res = self._await(
+                gh.get_result_async(),
+                "execute_trajectory result",
+                self._service_timeout,
+            )
             if res is None:
                 return PlanResult(False, "execute_trajectory result timeout")
             return self._from_result(res.result.result)
@@ -512,9 +539,11 @@ class CuroboServerInterface(RobotInterface):
         if spec.pose is not None:
             req.pose = parse_pose_msg(spec.pose, self.pose_cls)
         dims = list(spec.dimensions or [0.0, 0.0, 0.0])
-        req.dimensions = Vector3(x=float(dims[0]) if len(dims) > 0 else 0.0,
-                                 y=float(dims[1]) if len(dims) > 1 else 0.0,
-                                 z=float(dims[2]) if len(dims) > 2 else 0.0)
+        req.dimensions = Vector3(
+            x=float(dims[0]) if len(dims) > 0 else 0.0,
+            y=float(dims[1]) if len(dims) > 1 else 0.0,
+            z=float(dims[2]) if len(dims) > 2 else 0.0,
+        )
         if spec.shape == "mesh":
             if spec.vertices:
                 for v in spec.vertices:
@@ -526,9 +555,11 @@ class CuroboServerInterface(RobotInterface):
                 req.mesh_file_path = spec.mesh_path
         res = self._call(self._add_client, req)
         if res.success:
-            self._object_poses[spec.name] = Pose3.from_any(spec.pose) \
-                if spec.pose is not None else Pose3([0.0, 0.0, 0.5],
-                                                    [0.0, 0.0, 0.0, 1.0])
+            self._object_poses[spec.name] = (
+                Pose3.from_any(spec.pose)
+                if spec.pose is not None
+                else Pose3([0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 1.0])
+            )
         return res.success
 
     def remove_object(self, name: str) -> bool:
@@ -569,7 +600,6 @@ class CuroboServerInterface(RobotInterface):
             goal.start_pose = self._to_joint_msg(request.start_pose)
         for gs in request.goalsets or []:
             goal.goalsets.append(self._to_goalset(gs))
-        goal.options = self._to_options(request.options)
         return goal
 
     @staticmethod
@@ -595,17 +625,6 @@ class CuroboServerInterface(RobotInterface):
         hold = [int(c) for c in (gs.trajectory_constraints or [])]
         g.trajectory_constraints = hold if len(hold) == 6 else []
         return g
-
-    @staticmethod
-    def _to_options(opts: Optional[PlanningOptionsSpec]) -> PlanningOptions:
-        options = PlanningOptions()
-        if opts is None:
-            return options
-        options.num_seeds = int(opts.num_seeds or 0)
-        options.waypoint_tolerance = float(opts.waypoint_tolerance or 0.0)
-        options.exact_joints = list(opts.exact_joints or [])
-        options.log_considered_trajectories = bool(opts.log_considered_trajectories)
-        return options
 
     @staticmethod
     def _from_result(res) -> PlanResult:
@@ -637,7 +656,8 @@ class CuroboServerInterface(RobotInterface):
             # call anyway.
             self._node.get_logger().debug(
                 f"{what}: wait_for_service preflight raised {exc!r} — "
-                "attempting the call; the _await deadline is authoritative")
+                "attempting the call; the _await deadline is authoritative"
+            )
             ready = True
         if not ready:
             raise ServiceError(f"service '{client.srv_name}' unavailable")

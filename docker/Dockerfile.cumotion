@@ -6,7 +6,7 @@ ENV ROS_WS=/root/ros2_ws
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 SHELL ["/bin/bash", "-c"]
 
-# Always-installed tooling (needed regardless of whether ROS is pre-installed)
+# Always-installed tooling
 RUN apt-get update && apt-get install -y --no-install-recommends \
   build-essential \
   curl \
@@ -23,8 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   (command -v colcon >/dev/null 2>&1) || pip install colcon-common-extensions
 
 # Install ROS 2 Jazzy + rosdep only if not already present in BASE_IMAGE.
-# When BASE_IMAGE already has ROS (e.g. kortex:jazzy), skip to avoid
-# Signed-By conflicts with the pre-installed ROS apt source.
+# When BASE_IMAGE already has ROS
 RUN if [ ! -f /opt/ros/jazzy/setup.bash ]; then \
   apt-get update && apt-get install -y --no-install-recommends \
   curl gnupg2 ca-certificates && \
@@ -77,6 +76,10 @@ RUN apt-get update && apt-get install -y --reinstall \
   ros-jazzy-moveit-msgs && \
   rm -rf /var/lib/apt/lists/*
 
+# --- cuRobo v2: dependencies FIRST, sources LAST ---
+COPY curobo/requirements.txt /tmp/curobo_requirements.txt
+RUN pip install --no-cache-dir -r /tmp/curobo_requirements.txt
+
 # --- isaac_ros_cumotion packages ---
 COPY isaac_ros_cumotion ${ROS_WS}/src/isaac_ros_cumotion
 COPY isaac_ros_cumotion_interfaces ${ROS_WS}/src/isaac_ros_cumotion_interfaces
@@ -84,37 +87,25 @@ COPY isaac_ros_cumotion_moveit ${ROS_WS}/src/isaac_ros_cumotion_moveit
 COPY isaac_ros_cumotion_rviz ${ROS_WS}/src/isaac_ros_cumotion_rviz
 COPY isaac_ros_cumotion_extra ${ROS_WS}/src/isaac_ros_cumotion_extra
 
-# --- task-constructor packages (declarative task layer over the unified
-# planner; the grasp orchestrator drives every motion through its Task
-# action) ---
+# --- task-constructor packages
 COPY curobo_task_constructor_interfaces ${ROS_WS}/src/curobo_task_constructor_interfaces
 COPY curobo_task_constructor ${ROS_WS}/src/curobo_task_constructor
 COPY curobo_task_constructor_rviz ${ROS_WS}/src/curobo_task_constructor_rviz
 
 # --- cuRobo v2 ---
-COPY curobo_core ${ROS_WS}/src/curobo_core
+COPY curobo ${ROS_WS}/src/curobo
 
 WORKDIR ${ROS_WS}
-# curobo_core/curobo is a nested git repo (gitfile pointing into the outer
-# workspace's .git/modules), so its .git metadata is not present in this build
-# context and setuptools-scm can't derive a version. Pin the version it would
-# otherwise compute from the vendored repo's v0.8.0 tag.
-RUN SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=0.8.0 \
-  pip install -e "${ROS_WS}/src/curobo_core/curobo[benchmark]"
 
 RUN source /opt/ros/jazzy/setup.bash && \
   apt-get update && \
   rosdep install --from-paths ${ROS_WS}/src --ignore-src -r -y && \
   rm -rf /var/lib/apt/lists/*
 
-# Rosdep fucks up warp-lang version
-RUN pip install --upgrade "warp-lang>=1.10.0,<1.15.0"
-RUN pip install "setuptools<70"
-
 RUN source /opt/ros/jazzy/setup.bash && \
   colcon build --symlink-install \
   --packages-select \
-  curobo_core isaac_ros_cumotion_interfaces \
+  curobo isaac_ros_cumotion_interfaces \
   isaac_ros_cumotion isaac_ros_cumotion_moveit \
   isaac_ros_cumotion_rviz isaac_ros_cumotion_extra \
   curobo_task_constructor_interfaces \

@@ -4,7 +4,7 @@
 
 ``_reference_benchmark_module`` must locate the upstream
 ``benchmark/motion_plan_benchmark.py`` by file path (``curobo.benchmark`` is
-not an importable package) and load it without ever touching curobo_core, so it
+not an importable package) and load it without ever touching curobo, so it
 is exercised here with stub scripts on a synthetic sys.path.
 """
 

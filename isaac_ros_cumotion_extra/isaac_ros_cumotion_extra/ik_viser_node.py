@@ -21,7 +21,7 @@ Keeps the ROS2 service architecture (IK is computed on ``curobo_server`` via the
 ``Ik`` service) while adding an interactive viser GUI on top:
 
 - a draggable 6-DOF control frame on the tool link sets the IK target,
-- dragging it re-solves IK continuously (mirroring curobo_core's interactive
+- dragging it re-solves IK continuously (mirroring curobo's interactive
   examples), and the solved configuration is rendered on the robot,
 - optional reachability mode: a draggable slice gizmo with a green/red heatmap
   showing which workspace positions are IK-solvable. The whole grid is solved

@@ -208,6 +208,14 @@ class TaskConstructorNode(rclpy.node.Node):
         try:
             return self._run_task(goal_handle)
         finally:
+            # Clear the panel LAST, after the result is on its way, so the
+            # operator can still read the stage tree for a finished task. The
+            # publish is the panel's only "nothing is running" signal: without
+            # it the tree keeps showing the last task with its Re-run button
+            # live, which reads as a pending/idle plan rather than a finished
+            # one. The pick pipeline fires a dozen tasks through this one
+            # action, so the stale tree is the normal case, not the exception.
+            self._publish_task_cleared()
             self._active_goal_handle = None
             self._active_task_id = ""
             with self._solve_lock:
@@ -336,6 +344,22 @@ class TaskConstructorNode(rclpy.node.Node):
         msg.stage_count = int(desc["stage_count"])
         msg.valid = bool(desc["valid"])
         msg.comment = desc["comment"] or ""
+        self._pub_desc.publish(msg)
+
+    def _publish_task_cleared(self) -> None:
+        """Publish an EMPTY task description: the panel's "task finished" signal.
+
+        An empty ``stages`` list (and ``stage_count`` 0) is unambiguous — the
+        executor's real description is never stage-less, since ``init()``
+        rejects a spec with no root stage, and a spec is rejected before
+        ``_publish_task_description`` ever runs. So an empty message cannot be
+        confused with a real one, and any client (the rviz panel, a log tap, a
+        test) can treat it as "there is no task in flight".
+
+        Transient-local durability means a panel that opens LATER still sees
+        the cleared state instead of replaying the previous task's structure.
+        """
+        msg = TaskDescription()
         self._pub_desc.publish(msg)
 
     def _publish_solution(self, stg, sol) -> None:

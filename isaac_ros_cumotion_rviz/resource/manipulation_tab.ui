@@ -1,0 +1,148 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Manipulation tab, against MoveIt's own Manipulation tab
+  (motion_planning_rviz_plugin_frame.ui, tab `manipulation`).
+
+  MoveIt's tab is a QGridLayout, two columns:
+
+    row 0, col 0, rowspan 2   Detected Objects    detected_objects_list
+                                                 detect_objects_button  &Detect
+    row 0, col 1              Support Surfaces    support_surfaces_list
+                                                 pick_button            &Pick
+                                                 place_button           P&lace
+    row 1, col 1              ROI                 "Center (m):" roi_center_x/y/z
+                                                 "Size (m):"   roi_size_x/y/z
+
+  WHAT MOVEIT'S MANIPULATION TAB IS
+  It is an OBJECT PERCEPTION tab, not a gripper tab. Its three groups are fed
+  by moveit_ros_perception: &Detect fires the ObjectRecognition action,
+  Support Surfaces is a table/plane detector, and ROI is the region of the
+  camera image that recognition is run over. There is no open/close control
+  anywhere on it; a ParallelJawGripper is driven from MoveIt's separate
+  ACTUATOR panel.
+
+  EVERY CONTROL ON THIS TAB IS ABSENT HERE, AND WHY
+  curobo has no perception at all, so all three groups have nothing behind
+  them. They are not stubbed: there is no disabled [Detect] that could ever
+  turn green, and no ROI spinbox wired to a field that does not exist. What
+  remains is MoveIt's frame — the grid, the three group boxes in MoveIt's own
+  positions, MoveIt's own titles — and two empty lists, each carrying one
+  disabled row that says which service is missing (added from
+  manipulation_tab.cpp, so this file stays a transcription).
+
+    &Detect          needs moveit_ros_perception's ObjectRecognition action.
+                     curobo publishes no perception action, and has no service
+                     that returns a detected object.
+    &Pick / P&lace   need a support-surface list, i.e. a table or plane
+                     detector. There is no such thing in the service list.
+    Center / Size    ROI is the window the recogniser is run over. With no
+                     recogniser there is no window, and TrajectoryGoal carries
+                     no ROI field, so these would have to be typed for nobody.
+
+  WHAT REPLACED THE GRIPPER TABLE THAT WAS HERE
+  This tab used to be MoveIt's Joints table scoped to the gripper joints, with
+  Open / Close / Plan / Plan+send on it. That was a misreading of the tab: it
+  looked like MoveIt's Joints tab, not its Manipulation tab, and it duplicated
+  the Joints tab. Nothing is lost by deleting it — `finger_joint` is in the
+  cspace like every other joint, so the Joints tab's table already lists it,
+  its bar already spans its own limits, and Plan / Plan + send already plan to
+  it. See manipulation_tab.hpp.
+-->
+<ui version="4.0">
+ <class>ManipulationTabForm</class>
+ <widget class="QWidget" name="ManipulationTabForm">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>461</width>
+    <height>300</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Manipulation</string>
+  </property>
+  <layout class="QGridLayout" name="gridLayout_13">
+   <property name="leftMargin">
+    <number>4</number>
+   </property>
+   <property name="topMargin">
+    <number>4</number>
+   </property>
+   <property name="rightMargin">
+    <number>4</number>
+   </property>
+   <property name="bottomMargin">
+    <number>4</number>
+   </property>
+   <property name="horizontalSpacing">
+    <number>6</number>
+   </property>
+   <property name="verticalSpacing">
+    <number>6</number>
+   </property>
+   <item row="0" column="0" rowspan="2">
+    <widget class="QGroupBox" name="groupBox_13">
+     <property name="title">
+      <string>Detected Objects</string>
+     </property>
+     <layout class="QVBoxLayout" name="verticalLayout_8">
+      <item>
+       <widget class="QListWidget" name="detected_objects_list"/>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item row="0" column="1">
+    <widget class="QGroupBox" name="groupBox_14">
+     <property name="title">
+      <string>Support Surfaces</string>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_12">
+      <item row="0" column="0" rowspan="3">
+       <widget class="QListWidget" name="support_surfaces_list"/>
+      </item>
+      <item row="2" column="1">
+       <spacer name="verticalSpacer">
+        <property name="orientation">
+         <enum>Qt::Vertical</enum>
+        </property>
+        <property name="sizeHint" stdset="0">
+         <size>
+          <width>20</width>
+          <height>40</height>
+         </size>
+        </property>
+       </spacer>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item row="1" column="1">
+    <widget class="QGroupBox" name="groupBox_7">
+     <property name="title">
+      <string>ROI</string>
+     </property>
+     <layout class="QGridLayout" name="gridLayout_14">
+      <item row="0" column="0">
+       <widget class="QLabel" name="label_12">
+        <property name="text">
+         <string>Center (m):</string>
+        </property>
+       </widget>
+      </item>
+      <item row="1" column="0">
+       <widget class="QLabel" name="label_14">
+        <property name="text">
+         <string>Size (m):</string>
+        </property>
+       </widget>
+      </item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

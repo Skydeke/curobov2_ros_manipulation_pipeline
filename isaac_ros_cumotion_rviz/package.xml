@@ -30,7 +30,7 @@
   <depend>urdf</depend>
   <depend>eigen3_cmake_module</depend>
   <build_depend>Eigen3</build_depend>
-  <depend>curobo_core</depend>
+  <depend>curobo</depend>
 
   <exec_depend>libqt5-core</exec_depend>
   <exec_depend>libqt5-gui</exec_depend>

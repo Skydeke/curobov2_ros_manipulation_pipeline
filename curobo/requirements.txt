@@ -1,0 +1,75 @@
+# Python dependencies of the cuRobo library.
+#
+# WHY THIS FILE EXISTS
+#   It used to be implicit. The Dockerfile ran
+#       pip install -e "${ROS_WS}/src/curobo_core/curobo[benchmark]"
+#   which resolved and downloaded the whole dependency set from the vendored
+#   tree's pyproject.toml. That RUN sat directly after the `COPY curobo_core ...`
+#   layer, so editing ANY curobo source file invalidated it and every build
+#   re-downloaded and re-resolved ~1 GB of wheels from PyPI.
+#
+#   Two problems, one fix:
+#     1. Caching -- the Dockerfile now COPYs this file on its own, pip-installs
+#        it, and only then COPYs the sources. The dependency layer is keyed on
+#        THIS file, so source edits no longer invalidate it.
+#     2. The setuptools-scm hack -- the vendored tree is a nested git submodule,
+#        so `COPY` brings no .git and setuptools-scm could not derive a version.
+#        That needed
+#          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=0.8.0
+#        on the pip line. curobo/setup.py now pins the version itself and this
+#        package is the only installer of the library, so the guess is gone.
+#
+# SOURCE OF TRUTH
+#   Mirrors curobo/curobo/pyproject.toml's [project.dependencies]. That file
+#   belongs to the pinned upstream submodule and cannot be edited from here, so
+#   when the submodule is bumped, diff its dependency list against this one.
+#
+# ALREADY IN THE IMAGE, deliberately not repeated: torch (pulled in by
+# torchvision), numpy<2, cuda-python, cuda-bindings~=12.9, cuda-core[cu12],
+# cupy-cuda12x, timm, einops, hdbscan, viser -- all installed by the
+# "Core numerical stack" layer in docker/Dockerfile.cumotion, which is itself
+# already ahead of any source COPY.
+
+# --- curobo runtime (pyproject [project.dependencies]) ---
+importlib_resources
+matplotlib
+networkx
+numpy-quaternion
+pyyaml
+scipy>=1.7.0
+tqdm
+trimesh
+wheel
+yourdfpy>=0.0.53
+
+# nvidia-cuda-runtime-cu12: from the [cu12] extra. The base image is CUDA 13 but
+# the whole stack above is deliberately cu12-pinned (cuda-bindings~=12.9,
+# cuda-core[cu12], cupy-cuda12x), so the runtime library has to match.
+nvidia-cuda-runtime-cu12>=12
+
+# warp-lang was previously declared as a rosdep key (python3-warp-lang-pip-shim)
+# in package.xml AND force-upgraded afterwards with the comment "Rosdep fucks up
+# warp-lang version". Two sources of truth for one version is what caused that;
+# the pin lives here now, and the rosdep key is gone from package.xml.
+warp-lang>=1.10.0,<1.15.0
+
+# Only needed to BUILD the vendored tree (setuptools_scm drives its version, and
+# the optional pybind extension path in curobo/curobo/setup.py), never at
+# runtime. Kept so a manual `CUROBO_USE_PYBIND=1 pip install` inside the
+# container still works now that the image no longer builds it for us.
+setuptools_scm>=6.2
+
+# Someone was misusing setuptools pinning. Kept in the cached layer so it also
+# covers every later `pip install` in the image, not just the curobo build.
+setuptools<70
+
+# --- benchmark only (pyproject [benchmark] extra) -----------------------------
+# Used by isaac_ros_cumotion_extra's parity benchmark, which loads the vendored
+# curobo/benchmark/motion_plan_benchmark.py by file path. Kept in this file
+# rather than split into a second requirements file because one image serves
+# both the sim and the benchmark compose; split it if that ever changes.
+tabulate
+pandas
+pin
+seaborn
+robometrics[evaluator] @ git+https://github.com/fishbotics/robometrics.git

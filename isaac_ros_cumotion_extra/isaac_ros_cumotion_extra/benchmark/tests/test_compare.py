@@ -268,7 +268,7 @@ class TestPrintReport:
             ros_results=ros,
         )
         out = capsys.readouterr().out
-        assert '== native (curobo_core) ==' in out
+        assert '== native (curobo) ==' in out
         assert '== ros (unified_planner) ==' in out
         assert '+====' in out  # tabulate grid header separator
         assert '| Success %' in out

@@ -38,9 +38,31 @@ enum Column
   COL_COUNT
 };
 
-// soft success/failure tints (scheme-agnostic; message text carries the detail)
-const QColor kSuccessBg(0xE8, 0xF5, 0xE9);
-const QColor kFailureBg(0xFD, 0xEB, 0xEC);
+// Soft success/failure tints, DERIVED FROM THE ACTIVE PALETTE rather than
+// hardcoded. The rows are painted with the palette's Text/TextHighlight
+// colours, so a fixed light wash (the old 0xE8F5E9 / 0xFDEBEC) put a light
+// background under the dark theme's light text and every row turned
+// unreadable — that is the "some parts aren't really nicely visible" case.
+// Blending a low-saturation hue into Base keeps the wash inside whatever
+// light/dark scheme the stylesheet established, so it works in both.
+QColor blend(const QColor & base, const QColor & tint, qreal amount)
+{
+  return QColor::fromRgbF(
+    base.redF() * (1.0 - amount) + tint.redF() * amount,
+    base.greenF() * (1.0 - amount) + tint.greenF() * amount,
+    base.blueF() * (1.0 - amount) + tint.blueF() * amount);
+}
+
+QColor stateTint(const QWidget * widget, bool success)
+{
+  const QColor base = widget->palette().color(QPalette::Base);
+  const bool dark = base.lightness() < 128;
+  const QColor hue = success ? QColor(0x35, 0x9E, 0x63)   // green
+                             : QColor(0xD1, 0x48, 0x48); // red
+  // A dark scheme needs a slightly stronger wash to read as a state at all;
+  // both are kept far below the point where they start fighting the text.
+  return blend(base, hue, dark ? 0.24 : 0.30);
+}
 
 // introspection topics (must match node.py's _INTROSPECT_QOS_TOPICS and the
 // action server name)
@@ -133,7 +155,16 @@ void TaskConstructorPanel::onInitialize()
   // The base class must see an initialized display context first.
   rviz_common::Panel::onInitialize();
 
-  auto ros_node_abstraction = getDisplayContext()->getRosNodeAbstraction().lock();
+  // Non-null in the normal case by construction (rviz installed it before calling
+  // onInitialize()); guarded because a panel whose base onInitialize() failed
+  // leaves it null, and dereferencing it took the whole panel down with it.
+  rviz_common::DisplayContext * display_context = getDisplayContext();
+  if (display_context == nullptr) {
+    setStatus(QStringLiteral("internal error: no display context from rviz"));
+    return;
+  }
+
+  auto ros_node_abstraction = display_context->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction) {
     setStatus(QStringLiteral("internal error: no ROS node from rviz"));
     return;
@@ -191,6 +222,13 @@ void TaskConstructorPanel::onInitialize()
 
 void TaskConstructorPanel::load(const rviz_common::Config & config)
 {
+  // The base class is what restores this panel's own "Class" + "Name" keys.
+  // VisualizationFrame::loadPanels() can only match a panel entry it finds
+  // both keys on, so skipping this makes the panel unrecoverable from a .rviz
+  // file. It is harmless (and required) even when nested as a tab widget of
+  // another panel — that parent never calls this overload for us.
+  rviz_common::Panel::load(config);
+
   QVariant execute;
   if (config.mapGetValue("ExecuteOnServer", &execute) && execute.canConvert<bool>()) {
     execute_checkbox_->setChecked(execute.toBool());
@@ -199,6 +237,13 @@ void TaskConstructorPanel::load(const rviz_common::Config & config)
 
 void TaskConstructorPanel::save(rviz_common::Config config) const
 {
+  // Panel::save() is the ONLY writer of "Class" and "Name" (see
+  // rviz_common/src/rviz_common/visualization_frame.cpp: savePanels() hands
+  // each panel a fresh list entry and writes nothing itself). Omitting the
+  // base call is what used to make this panel un-saveable: rviz wrote a
+  // nameless orphan entry into the config and then dropped the panel on the
+  // next load, because loadPanels() requires both keys to resolve a class.
+  rviz_common::Panel::save(config);
   config.mapSetValue("ExecuteOnServer", execute_checkbox_->isChecked());
 }
 
@@ -250,6 +295,23 @@ void TaskConstructorPanel::refreshTaskDescription()
 
   if (!last_task_) {
     setStatus(tr("waiting for task_description..."));
+    return;
+  }
+
+  // An EMPTY task description is the "cleared" signal the executor publishes
+  // when a task finishes (see curobo_task_constructor/node.py) — the pick
+  // pipeline drives many tasks through this one panel, and without this the
+  // tree (and its Re-run button) would keep showing the previous task, which
+  // looks like a stale/live plan. Drop every cached per-stage result too, not
+  // just the rows, so a later task never inherits the previous one's colours.
+  if (last_task_->stages.empty() || last_task_->stage_count == 0) {
+    last_solution_.clear();
+    stage_stats_.clear();
+    stage_markers_.clear();
+    setStatus(last_task_->task_id.empty()
+                  ? tr("no task — waiting for task_description...")
+                  : tr("task '%1' finished — panel cleared")
+                        .arg(QString::fromStdString(last_task_->task_id)));
     return;
   }
 
@@ -330,7 +392,7 @@ void TaskConstructorPanel::applySolutionToItem(
   } else {
     item->setText(COL_COST, QStringLiteral("—"));
   }
-  const QBrush bg(sol.success ? kSuccessBg : kFailureBg);
+  const QBrush bg(stateTint(tree_, sol.success));
   for (int col = 0; col < COL_COUNT; ++col) {
     item->setBackground(col, bg);
   }

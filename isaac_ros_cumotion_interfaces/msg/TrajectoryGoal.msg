@@ -15,7 +15,3 @@ sensor_msgs/JointState start_pose
 
 # The whole-task waypoint path (one Goalset per segment, in request order).
 Goalset[] goalsets
-
-# Per-request planner options. Defaults are honored; non-default values are
-# validated per-planner (classic planners reject non-defaults).
-PlanningOptions options

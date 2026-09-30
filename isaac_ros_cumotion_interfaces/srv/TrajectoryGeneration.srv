@@ -2,7 +2,7 @@
 # (TrajectoryGoal → TrajectoryResult), not mirrored by hand.  Additional
 # ROS-level fields (start_state_collisions / StateCollisions) preserved so
 # failures carry the structured scene diagnostics the node always populates.
-TrajectoryGoal request    # start_pose + goalsets + PlanningOptions (§5 DRY)
+TrajectoryGoal request    # start_pose + goalsets
 ---
 TrajectoryResult response # success / message / trajectory / stats / collisions
 StateCollisions start_state_collisions   # collision diagnostics (populated on failure)
