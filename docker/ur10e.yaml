@@ -24,7 +24,7 @@
 services:
   curobo:
     container_name: isaac_cumotion_ur10e
-    image: ghcr.io/skydeke/curobov2_ros/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion

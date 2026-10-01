@@ -165,7 +165,7 @@ services:
 
   curobo_benchmark:
     container_name: curobo_benchmark
-    image: ghcr.io/skydeke/curobov2_ros/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     depends_on:
       curobo_server:
         condition: service_started
