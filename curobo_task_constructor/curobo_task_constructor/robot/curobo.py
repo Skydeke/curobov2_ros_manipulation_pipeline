@@ -15,9 +15,12 @@ Known wire limitations (mirror of the framework contract):
 - ``Fk.srv`` solves the tool-tip pose only; a ``link`` argument is accepted
   but the server-side FK does not target arbitrary links, so a non-tool
   ``link`` degrades to the tool pose (documented per-call).
-- Object poses are tracked locally: the server's ``/get_obstacles`` returns
-  names only (the Sec. 6d gap), so ``get_object_pose`` returns the pose
-  recorded at the last ``add_object`` from this interface.
+- Object state is read back from the server, not mirrored locally:
+  ``get_scene_objects`` reports every object's type, pose, size and attach
+  state from the scene the solver holds. It replaces a local mirror of this
+  interface's own ``add_object`` calls, which could not see an object another
+  client added and reported a stale pose for a name that had been removed and
+  re-added.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from isaac_ros_cumotion_interfaces.srv import (
     AddObject,
     AttachObject,
     Fk,
+    GetSceneObjects,
     Ik,
     RemoveObject,
     SetLinkCollision,
@@ -45,6 +49,7 @@ from isaac_ros_cumotion_interfaces.srv import (
 )
 
 from curobo_task_constructor.core.geom import Pose3, pose_to_any
+from curobo_task_constructor.core.state import ObjectSpec
 from curobo_task_constructor.core.robot import (
     GoalsetSpec,
     PlanRequest,
@@ -58,7 +63,7 @@ from curobo_task_constructor.core.robot_config import (
     reorder_joint_vectors,
 )
 
-#: SetPlanner planner_type constants (mirror of the srv).
+#: ObjectSpec.shape -> AddObject type constant (mirror of the srv).
 _ADD_OBJECT_SHAPES = {
     "cuboid": AddObject.Request.CUBOID,
     "box": AddObject.Request.CUBOID,
@@ -74,6 +79,28 @@ _ADD_OBJECT_SHAPES = {
 #: yet still bounded — parity with the C++ client's kDefaultServiceTimeoutSeconds
 #: (60s). Overridable per node via the `service_timeout` ROS parameter.
 _SERVICE_TIMEOUT = 60.0  # s per call
+
+#: How long a `get_scene_objects` reply is reused before asking again. The
+#: executor's reverse sync walks every object in the scene, so an uncached query
+#: per object would be one service call per object per stage. Short enough that a
+#: stage's own `add_object` is visible to its next `get_object_pose`; the add path
+#: invalidates the cache outright, so this bound only governs changes made by
+#: OTHER clients.
+_SCENE_CACHE_SECONDS = 1.0
+
+#: GetSceneObjects type constant -> the `ObjectSpec.shape` spelling the rest of
+#: the task constructor uses. The constants are AddObject's; rosidl cannot import
+#: constants across .srv files, so the reply carries them and this maps them.
+#: An unknown value falls back to "cuboid", which is AddObject's own default and
+#: the most likely wrong answer to be harmless for (a wrong shape only changes how
+#: a re-added object is sized).
+_SCENE_SHAPES = {
+    0: "cuboid",
+    1: "sphere",
+    2: "capsule",
+    3: "cylinder",
+    4: "mesh",
+}
 
 
 class CuroboServerInterface(RobotInterface):
@@ -127,6 +154,9 @@ class CuroboServerInterface(RobotInterface):
         self._remove_all_client = self._client(
             Trigger, "/curobo_server/remove_all_objects"
         )
+        self._scene_objects_client = self._client(
+            GetSceneObjects, "/curobo_server/get_scene_objects"
+        )
         self._attach_client = self._client(AttachObject, "/curobo_server/attach_object")
         self._detach_client = self._client(Trigger, "/curobo_server/detach_object")
         self._planner_client = self._client(SetPlanner, self._planner_service)
@@ -152,11 +182,18 @@ class CuroboServerInterface(RobotInterface):
             ("remove_all_objects", self._remove_all_client),
             ("attach_object", self._attach_client),
             ("detach_object", self._detach_client),
+            ("get_scene_objects", self._scene_objects_client),
         ]
 
-        # Local mirror of the server world (see class docstring).
-        self._object_poses: dict = {}  # name -> Pose3
-        self._attached: set = set()
+        # Last successful `get_scene_objects` reply, as {name: object record}. A
+        # CACHE of the server, not a record of this interface's own writes: it is
+        # replaced wholesale on every successful query, so it describes the whole
+        # scene including objects another client added. Empty until the first
+        # query succeeds -- deliberately, because an empty dict here must never
+        # be mistaken for "the scene is empty"; see `_query_scene_objects`.
+        self._scene_objects: dict = {}
+        self._scene_objects_at: float = 0.0
+        self._scene_objects_queried: bool = False
 
     def _client(self, srv_cls, name):
         # Creation is non-blocking — the node starts even when the curobo
@@ -266,10 +303,10 @@ class CuroboServerInterface(RobotInterface):
         raise ServiceError("no cached /joint_states reading available")
 
     def get_object_pose(self, name: str):
-        pose = self._object_poses.get(name)
-        if pose is None:
+        rec = self._query_scene_objects().get(name)
+        if rec is None:
             return None
-        return pose_to_any(pose, self.pose_cls)
+        return pose_to_any(rec["pose"], self.pose_cls)
 
     def get_named_joint_config(self, name: str) -> Optional[NamedJointConfig]:
         from curobo_task_constructor.core.robot_config import (
@@ -282,16 +319,125 @@ class CuroboServerInterface(RobotInterface):
         return resolve_named_config(path, name)
 
     def get_attached_objects(self) -> list:
-        return sorted(self._attached)
+        """Names of objects attached to the robot, per the server.
+
+        The attach link holds one payload, so this is a 0- or 1-element list.
+        """
+        return sorted(
+            name for name, rec in self._query_scene_objects().items()
+            if rec.get("attached")
+        )
 
     def get_object_names(self) -> list:
-        """Names of objects registered through this interface.
+        """Names of every object in the server's scene.
 
-        The server's ``/get_obstacles`` is names-only (the Sec. 6d gap), so
-        this is the local mirror recorded at each ``add_object`` — enough for
-        the executor's ``build_base_scene`` reverse sync.
+        Includes objects this interface never touched — the task constructor's
+        own stage, the grasp orchestrator, a ``ros2 service call`` — which a
+        local mirror of this interface's own ``add_object`` calls could not.
         """
-        return sorted(self._object_poses)
+        return sorted(self._query_scene_objects())
+
+    def get_object_spec(self, name: str) -> Optional[ObjectSpec]:
+        """A server-reported object as an ``ObjectSpec``, or None if unknown.
+
+        This is what ``build_base_scene`` wants: a name alone cannot rebuild an
+        object, and hardcoding ``shape="mesh""`` for every entry made the
+        reverse sync describe the world wrong for anything that was not a mesh.
+        """
+        rec = self._query_scene_objects().get(name)
+        if rec is None:
+            return None
+        return ObjectSpec(
+            name=name,
+            shape=rec["shape"],
+            pose=pose_to_any(rec["pose"], self.pose_cls),
+            dimensions=list(rec["dimensions"]),
+            # Empty for an inline mesh: the server does not echo vertices, so a
+            # re-add from this spec would be wrong for one. Left None rather than
+            # "" so a caller can tell "no path" from "path unknown".
+            mesh_path=rec["mesh_path"] or None,
+        )
+
+    def _query_scene_objects(self) -> dict:
+        """Ask the server for the whole scene, and return {name: record}.
+
+        Cached, and re-queried at most once per ``_SCENE_CACHE_SECONDS``, because
+        the executor's reverse sync walks every object and would otherwise make
+        one service call per object per stage.
+
+        On failure the PREVIOUS reply is returned rather than an empty dict. That
+        distinction is the whole reason ``_scene_objects_queried`` exists: an
+        unreachable server and an empty scene must not look the same, because
+        ``build_base_scene`` would then clear the task's base scene and plan
+        against a world it merely failed to read. A first query that fails
+        returns empty, which is the honest answer given nothing is known yet, and
+        ``_scene_objects_queried`` stays False so callers can tell.
+        """
+        now = time.monotonic()
+        if self._scene_objects_queried and (
+            now - self._scene_objects_at < _SCENE_CACHE_SECONDS
+        ):
+            return self._scene_objects
+
+        try:
+            res = self._call(self._scene_objects_client, GetSceneObjects.Request())
+        except ServiceError as exc:
+            self._node.get_logger().warning(
+                f"get_scene_objects failed ({exc}); reusing the last known scene"
+            )
+            return self._scene_objects
+
+        if not res.success:
+            self._node.get_logger().warning(
+                f"get_scene_objects refused: {res.message}; "
+                "reusing the last known scene"
+            )
+            return self._scene_objects
+
+        # Parallel arrays, so index i of each describes the same object. Every
+        # access is bounds-checked: a short array must not silently misalign the
+        # rest of the scene, which would attribute one object's pose to another.
+        n = len(res.names)
+        scene: dict = {}
+        for i in range(n):
+            name = res.names[i]
+            if not name:
+                continue
+            if (i >= len(res.poses) or i >= len(res.dimensions)
+                    or i >= len(res.types)):
+                self._node.get_logger().warning(
+                    f"get_scene_objects returned a short array for {name!r}; "
+                    "omitting it rather than reporting misaligned values"
+                )
+                continue
+
+            pose = res.poses[i]
+            rec = {
+                "shape": _SCENE_SHAPES.get(int(res.types[i]), "cuboid"),
+                "pose": Pose3(
+                    [float(pose.position.x), float(pose.position.y),
+                     float(pose.position.z)],
+                    [float(pose.orientation.x), float(pose.orientation.y),
+                     float(pose.orientation.z), float(pose.orientation.w)],
+                ),
+                "dimensions": [
+                    float(res.dimensions[i].x),
+                    float(res.dimensions[i].y),
+                    float(res.dimensions[i].z),
+                ],
+                "mesh_path": (
+                    res.mesh_file_paths[i] if i < len(res.mesh_file_paths) else ""
+                ),
+                "attached": (
+                    bool(res.attached[i]) if i < len(res.attached) else False
+                ),
+            }
+            scene[name] = rec
+
+        self._scene_objects = scene
+        self._scene_objects_at = now
+        self._scene_objects_queried = True
+        return scene
 
     # ------------------------------------------------------------------
     # kinematics
@@ -555,11 +701,11 @@ class CuroboServerInterface(RobotInterface):
                 req.mesh_file_path = spec.mesh_path
         res = self._call(self._add_client, req)
         if res.success:
-            self._object_poses[spec.name] = (
-                Pose3.from_any(spec.pose)
-                if spec.pose is not None
-                else Pose3([0.0, 0.0, 0.5], [0.0, 0.0, 0.0, 1.0])
-            )
+            # Drop the cached reply rather than patching it: the next query asks
+            # the server what it actually stored, which is not always what was
+            # sent (AddObject rejects non-positive dimensions, and for a capsule
+            # or cylinder the third component is ignored entirely).
+            self._invalidate_scene_cache()
         return res.success
 
     def remove_object(self, name: str) -> bool:
@@ -567,29 +713,42 @@ class CuroboServerInterface(RobotInterface):
         req.name = name
         res = self._call(self._remove_client, req)
         if res.success:
-            self._object_poses.pop(name, None)
+            self._invalidate_scene_cache()
         return res.success
 
     def remove_all_objects(self) -> None:
         self._call(self._remove_all_client, Trigger.Request())
-        self._object_poses.clear()
-        self._attached.clear()
+        self._invalidate_scene_cache()
 
     def attach_object(self, name: str) -> bool:
         req = AttachObject.Request()
         req.object_name = name
         res = self._call(self._attach_client, req)
         if res.success:
-            self._attached.add(name)
+            # attach keeps the object LISTED (it is disabled by name, not
+            # removed) and changes only the flag, so the name set is unchanged —
+            # but `get_attached_objects` reads that flag, so the cached reply is
+            # stale either way.
+            self._invalidate_scene_cache()
         return res.success
 
     def detach_object(self, name: Optional[str] = None) -> bool:
+        # `name` is accepted for interface parity and ignored: the server's
+        # detach is a bare Trigger over the single attach link and takes no
+        # argument. Which object it released comes back from get_scene_objects.
         res = self._call(self._detach_client, Trigger.Request())
-        if name is not None:
-            self._attached.discard(name)
-        else:
-            self._attached.clear()
+        if res.success:
+            self._invalidate_scene_cache()
         return res.success
+
+    def _invalidate_scene_cache(self) -> None:
+        """Force the next `_query_scene_objects` to actually ask the server.
+
+        Called after every mutating scene call THIS interface makes. Without it a
+        stage that adds an object and then reads its pose back could be served the
+        pre-add reply, and would see its own write missing.
+        """
+        self._scene_objects_queried = False
 
     # ------------------------------------------------------------------
     # conversions

@@ -41,8 +41,11 @@ namespace isaac_ros_cumotion_rviz
 ///    of the planner node and the trajectory type; see "who owns what" below.
 ///  * **Planning** — PlanningTab, the EXISTING planner-args panel (formerly the
 ///    standalone "RvizArgsPanel"), re-laid out to MoveIt's Planning tab: a
-///    "Query" group holding the goal pose as position and orientation-RPY
-///    triples, an "Options" group with time dilation and a read-only echo of the
+///    "Query" group holding the goal pose as a position triple and an
+///    orientation quaternion (x, y, z, w) — a quaternion because that is what
+///    `geometry_msgs/msg/Pose` carries and what curobo's IK takes, so the whole
+///    path is one identity instead of an RPY round trip. An "Options" group with
+///    time dilation and a read-only echo of the
 ///    planner node, and a "Commands" group whose strip is Clear / Compute /
 ///    Execute / Compute + Execute / Cancel followed by the status line.
 ///  * **Joints** — JointsTab: MoveIt's Joints widget, reproduced rather than
@@ -62,7 +65,7 @@ namespace isaac_ros_cumotion_rviz
 ///    joints; that was the wrong tab, and it duplicated the Joints tab, which
 ///    already lists `finger_joint` because the cspace does.
 ///  * **Scene Objects** — SceneObjectsTab, MoveIt's two columns: "Current Scene
-///    Objects" over a live flat QListWidget fed by `get_obstacles`, then
+///    Objects" over a live flat QListWidget fed by `get_scene_objects`, then
 ///    "Add/Remove scene object(s)" with MoveIt's own three size spinboxes, shape
 ///    combo and [Add] [Del] [Clr] toolbuttons, then an "Object status" group in
 ///    the right column. The add form is part of this widget now rather than a

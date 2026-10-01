@@ -12,7 +12,7 @@
       a draggable progress bar exactly as in MoveIt), Manipulation (MoveIt's own
       object-perception grid, with its controls absent because curobo has no
       perception services) and Scene Objects (MoveIt's two columns: the
-      server-side object list from get_obstacles, the add / remove form, and the
+      server-side object list from get_scene_objects, the add / remove form, and the
       object status line). This is the only curobo planner panel: the
       planner-args panel it reuses as its Planning tab is deliberately not
       registered separately, so it cannot be added as a dock of its own. The task

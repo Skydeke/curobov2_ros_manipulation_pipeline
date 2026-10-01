@@ -30,8 +30,10 @@
   * "Scene Geometry" — Publish / Export / Import are all
     PlanningSceneMonitor operations. curobo has no PlanningSceneMonitor, no
     .scene file format, and no service that accepts or returns a whole scene
-    (the closest is `get_obstacles`, which returns newline-joined NAMES and
-    nothing else — no geometry, no pose, no colour).
+    (`get_obstacles` returns newline-joined NAMES and nothing else — no
+    geometry, no pose, no colour. `get_scene_objects` was added to fix
+    exactly that and reports every field, but it is read-only: there is still
+    no service that WRITES a pose or a scale back.)
 
   WHAT MOVED, AND WHY THE FORM IS LONGER THAN MOVEIT'S
   This group used to be a separate AddObjectsPanel widget stacked above the
@@ -40,11 +42,9 @@
   left column. AddObjectsPanel's form is now IN this group, so the columns are
   MoveIt's columns and the form sits where MoveIt puts it.
 
-  The form itself keeps every field it had, and adds MoveIt's two rows
-  AHEAD of them — the three size spinboxes (MoveIt calls them
-  shape_size_x/y/z_spin_box, tooltips "x dimension" etc.) and the shape combo
-  plus the Add / Del / Clr toolbuttons, whose text and tooltips are MoveIt's
-  own. curobo's AddObject.srv needs four things MoveIt does not ask for here,
+  The form itself keeps every field it had, and adds MoveIt's shape combo plus
+  the Add / Del / Clr toolbuttons, whose text and tooltips are MoveIt's own.
+  curobo's AddObject.srv needs four things MoveIt does not ask for here,
   because MoveIt takes them from the interactive marker it puts in the 3D view:
 
     Name         MoveIt lets you rename a listed object inline (the list is
@@ -114,7 +114,7 @@
         <item>
          <widget class="QListWidget" name="collision_objects_list">
           <property name="toolTip">
-           <string>Every object the planner has, from get_obstacles — not just the ones this panel added</string>
+           <string>Every object the planner has, from get_scene_objects — not just the ones this panel added</string>
           </property>
          </widget>
         </item>
@@ -130,52 +130,6 @@
         <property name="spacing">
          <number>4</number>
         </property>
-        <item>
-         <layout class="QHBoxLayout" name="horizontalLayout_16">
-          <property name="spacing">
-           <number>4</number>
-          </property>
-          <item>
-           <widget class="QDoubleSpinBox" name="shape_size_x_spin_box">
-            <property name="toolTip">
-             <string>x dimension</string>
-            </property>
-            <property name="singleStep">
-             <double>0.050000000000000</double>
-            </property>
-            <property name="value">
-             <double>0.200000000000000</double>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QDoubleSpinBox" name="shape_size_y_spin_box">
-            <property name="toolTip">
-             <string>y dimension</string>
-            </property>
-            <property name="singleStep">
-             <double>0.050000000000000</double>
-            </property>
-            <property name="value">
-             <double>0.200000000000000</double>
-            </property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QDoubleSpinBox" name="shape_size_z_spin_box">
-            <property name="toolTip">
-             <string>z dimension</string>
-            </property>
-            <property name="singleStep">
-             <double>0.050000000000000</double>
-            </property>
-            <property name="value">
-             <double>0.200000000000000</double>
-            </property>
-           </widget>
-          </item>
-         </layout>
-        </item>
         <item>
          <layout class="QHBoxLayout" name="horizontalLayout_13">
           <property name="spacing">
@@ -404,6 +358,77 @@
           </item>
          </layout>
         </item>
+         <item>
+          <layout class="QHBoxLayout" name="scaleRow">
+           <property name="spacing">
+            <number>4</number>
+           </property>
+           <item>
+            <widget class="QLabel" name="labelScale">
+             <property name="text">
+              <string>Scale:</string>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QDoubleSpinBox" name="shape_size_x_spin_box">
+             <property name="toolTip">
+              <string>x dimension</string>
+             </property>
+             <property name="minimum">
+              <double>0.000000000000000</double>
+             </property>
+             <property name="maximum">
+              <double>999.990000000000009</double>
+             </property>
+             <property name="singleStep">
+              <double>0.050000000000000</double>
+             </property>
+             <property name="value">
+              <double>0.200000000000000</double>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QDoubleSpinBox" name="shape_size_y_spin_box">
+             <property name="toolTip">
+              <string>y dimension</string>
+             </property>
+             <property name="minimum">
+              <double>0.000000000000000</double>
+             </property>
+             <property name="maximum">
+              <double>999.990000000000009</double>
+             </property>
+             <property name="singleStep">
+              <double>0.050000000000000</double>
+             </property>
+             <property name="value">
+              <double>0.200000000000000</double>
+             </property>
+            </widget>
+           </item>
+           <item>
+            <widget class="QDoubleSpinBox" name="shape_size_z_spin_box">
+             <property name="toolTip">
+              <string>z dimension</string>
+             </property>
+             <property name="minimum">
+              <double>0.000000000000000</double>
+             </property>
+             <property name="maximum">
+              <double>999.990000000000009</double>
+             </property>
+             <property name="singleStep">
+              <double>0.050000000000000</double>
+             </property>
+             <property name="value">
+              <double>0.200000000000000</double>
+             </property>
+            </widget>
+           </item>
+          </layout>
+         </item>
         <item>
          <layout class="QHBoxLayout" name="colorRow">
           <property name="spacing">
@@ -421,7 +446,9 @@
             <property name="maximum">
              <double>1.000000000000000</double>
             </property>
-            <property name="singleStep">
+            <property name="minimum">
+             <double>0.000000000000000</double>
+            </property>            <property name="singleStep">
              <double>0.050000000000000</double>
             </property>
             <property name="value">
@@ -434,7 +461,9 @@
             <property name="maximum">
              <double>1.000000000000000</double>
             </property>
-            <property name="singleStep">
+            <property name="minimum">
+             <double>0.000000000000000</double>
+            </property>            <property name="singleStep">
              <double>0.050000000000000</double>
             </property>
             <property name="value">
@@ -447,7 +476,9 @@
             <property name="maximum">
              <double>1.000000000000000</double>
             </property>
-            <property name="singleStep">
+            <property name="minimum">
+             <double>0.000000000000000</double>
+            </property>            <property name="singleStep">
              <double>0.050000000000000</double>
             </property>
             <property name="value">
@@ -460,7 +491,9 @@
             <property name="maximum">
              <double>1.000000000000000</double>
             </property>
-            <property name="singleStep">
+            <property name="minimum">
+             <double>0.000000000000000</double>
+            </property>            <property name="singleStep">
              <double>0.050000000000000</double>
             </property>
             <property name="value">

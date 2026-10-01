@@ -62,7 +62,7 @@ set(library_name isaac_ros_cumotion_rviz)
 set(${PROJECT_NAME}_SRCS
   # AddObjectsDisplay was removed: the objects it drew are still added server-side
   # and still listed (and removable) by SceneObjectsTab, which reads the server's
-  # own get_obstacles services rather than a display topic. See git log for the
+  # own get_scene_objects services rather than a display topic. See git log for the
   # removal if the 3D rendering of added obstacles is ever wanted back.
   #
   # AddObjectsPanel was removed too: it was the add form as a separate rviz panel,

@@ -82,16 +82,35 @@ next to the code it would have gone in.
   the cspace every 2 s, so an old config's `Manipulation: finger_joint` entry is
   ignored.
 - **Scene Objects** — MoveIt's "Current Scene Objects" group over a live,
-  flat list from the server's `get_obstacles` service, with a strip that acts on
-  the selection (Refresh / Remove / Clear / Attach / Detach), then the
+  flat list from the server's `get_scene_objects` service, with a strip that acts
+  on the selection (Refresh / Remove / Clear / Attach / Detach), then the
   "Object status" group. Above it is MoveIt's "Add/Remove scene object(s)"
   group — the `AddObjectsPanel` form. MoveIt's "Change object pose/scale" and
   "Scene Geometry" (`[Publish]`/`[Export]`/`[Import]`) groups are absent: curobo
   has no object pose/scale edit service and no `PlanningSceneMonitor` to publish,
   export or import. The list is flat rather than MoveIt's three-way split
-  (present/attached/disabled) because `get_obstacles` answers with newline-joined
-  names and no state, and because `attach` only flags an object out of the
-  rasterisation — an attached object still comes back from `get_obstacles`.
+  (present/attached/disabled) because curobo has no per-object *disabled* state
+  to report: the enable flag lives in GPU buffers and is reset by any world push.
+  `get_scene_objects` does report `attached`, so an attached object's row is
+  marked and named in `object_status`, but a group that is empty by construction
+  is worse than no group.
+
+### Scene object details come from the server, not from a local cache
+
+Clicking a row fills the form from `get_scene_objects`, which answers with each
+object's type, pose, size, colour and attach state, read from the scene the
+solver holds. `get_obstacles` is a bare `std_srvs/Trigger` whose payload is
+newline-joined names and nothing else, so before this the only way to show an
+object's real values was to remember what this panel had sent — a client-side
+record that showed nothing for an object placed by the task constructor or a
+`ros2 service call`, and that showed the *first* object's geometry for a name
+that had been removed and re-added.
+
+`get_scene_objects` is read-only and cheap: it rebuilds no solver and touches no
+GPU tensor, so the tab polls it every 2 s like it polled `get_obstacles`. The
+`attached` flag is what makes the Present/Attached split possible at all; the
+attached name previously reached the outside world only as the text of `detach`'s
+reply. `get_obstacles` is kept for clients that only want names.
 
 **The draggable joint bar.** `ProgressBarDelegate` / `ProgressBarEditor` in
 `progress_bar_delegate.{hpp,cpp}` is a faithful port of MoveIt's
@@ -184,7 +203,7 @@ automatically and talks to it via `getPose`/`setPose`).
 ### Current state
 Manages objects in the scene through the `add_object`/`remove_object` services.
 It publishes nothing: the objects it adds appear in the Curobo panel's Scene
-Objects tab, which lists them by asking the server via `get_obstacles`.
+Objects tab, which lists them by asking the server via `get_scene_objects`.
 
 Mounted inside the Curobo panel's Scene Objects tab under MoveIt's own heading
 for this control — an "Add/Remove scene object(s)" group — above the live object

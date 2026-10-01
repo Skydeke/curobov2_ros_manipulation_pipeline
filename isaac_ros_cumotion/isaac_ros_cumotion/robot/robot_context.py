@@ -7,8 +7,14 @@ from isaac_ros_cumotion_interfaces.srv import SetRobotStrategy
 
 from isaac_ros_cumotion.core.config_wrapper import resolve_interpolation_dt
 from isaac_ros_cumotion.robot.ghost_strategy import GhostStrategy
-from isaac_ros_cumotion.robot.joint_control_strategy import JointCommandStrategy, RobotState
-from isaac_ros_cumotion.robot.robot_registry import create_strategy, available_strategies
+from isaac_ros_cumotion.robot.joint_control_strategy import (
+    JointCommandStrategy,
+    RobotState,
+)
+from isaac_ros_cumotion.robot.robot_registry import (
+    create_strategy,
+    available_strategies,
+)
 from isaac_ros_cumotion.robot.robot_description import load_robot_description
 
 # ---------------------------------------------------------------------------
@@ -45,7 +51,7 @@ from isaac_ros_cumotion.robot.robot_description import load_robot_description
 
 
 class RobotContext:
-    '''
+    """
     Selects and switches the joint-command CONTROL STRATEGY at runtime.
 
     Two independent axes:
@@ -56,7 +62,8 @@ class RobotContext:
 
     Default control strategy comes from the descriptor; it can be overridden at launch
     and switched at runtime via the ``set_robot_strategy`` service (now a string key).
-    '''
+    """
+
     robot_strategy: JointCommandStrategy
 
     def __init__(self, node, dt=0.025):
@@ -72,63 +79,70 @@ class RobotContext:
         # Which robot (model + driver topics + default strategy). Robot-abstract:
         # no robot is hardcoded; 'emulator' is a no-hardware control mode and any
         # concrete robot (e.g. Kortex) is supplied at launch by its own repo.
-        if not node.has_parameter('robot'):
-            node.declare_parameter('robot', 'emulator')
-        robot = node.get_parameter('robot').get_parameter_value().string_value or 'emulator'
+        if not node.has_parameter("robot"):
+            node.declare_parameter("robot", "emulator")
+        robot = (
+            node.get_parameter("robot").get_parameter_value().string_value or "emulator"
+        )
         self.description = load_robot_description(robot)
 
         # Which control strategy (default = descriptor's, overridable).
-        if not node.has_parameter('control_strategy'):
-            node.declare_parameter('control_strategy', self.description.strategy_key)
-        self.current_strategy_name = node.get_parameter('control_strategy').get_parameter_value().string_value
+        if not node.has_parameter("control_strategy"):
+            node.declare_parameter("control_strategy", self.description.strategy_key)
+        self.current_strategy_name = (
+            node.get_parameter("control_strategy").get_parameter_value().string_value
+        )
 
         self.robot_strategy = self.select_strategy(node, self.dt)
         self.ghost_strategy = GhostStrategy(node, self.dt, self.description)
 
         self.set_strategy_srv = node.create_service(
             SetRobotStrategy,
-            node.get_name() + '/set_robot_strategy',
-            partial(self.set_robot_strategy_callback, node)
+            node.get_name() + "/set_robot_strategy",
+            partial(self.set_robot_strategy_callback, node),
         )
         self.get_strategy_srv = node.create_service(
             Trigger,
-            node.get_name() + '/get_robot_strategy',
-            self.get_robot_strategy_callback
+            node.get_name() + "/get_robot_strategy",
+            self.get_robot_strategy_callback,
         )
 
         node.get_logger().info(
             f"Control strategy initialized: {self.current_strategy_name} "
-            f"(robot: {self.description.name})")
+            f"(robot: {self.description.name})"
+        )
 
     def bind_kinematics(self, kin):
-        '''Adopt canonical joint names/DOF from the built kinematics into the descriptor.'''
+        """Adopt canonical joint names/DOF from the built kinematics into the descriptor."""
         self.description.bind_kinematics(kin)
 
     def select_strategy(self, node, dt):
-        '''Instantiate the control strategy named by the ``control_strategy`` param.
+        """Instantiate the control strategy named by the ``control_strategy`` param.
 
         ``dt`` here is the trajectory sampling step (interpolation_dt), the
         nominal (undilated) step. The strategy re-stamps every outgoing
         trajectory with ``dt / time_dilation_factor`` (see
         JointCommandStrategy._dilated_dt), so the parameter is now a real
         speed control: 1.0 = nominal, <1.0 slower, >1.0 faster.
-        '''
-        key = node.get_parameter('control_strategy').get_parameter_value().string_value
+        """
+        key = node.get_parameter("control_strategy").get_parameter_value().string_value
         strategy = create_strategy(key, node, dt, self.description)
         if strategy is None:
             node.get_logger().warn(
-                f"Unknown control strategy: '{key}'. Available: {available_strategies()}")
+                f"Unknown control strategy: '{key}'. Available: {available_strategies()}"
+            )
         return strategy
 
     def set_robot_strategy_callback(self, node, request, response):
-        '''Switch the control strategy at runtime. request.robot_strategy is a string key.'''
+        """Switch the control strategy at runtime. request.robot_strategy is a string key."""
         try:
             new_strategy_name = request.robot_strategy
             if new_strategy_name not in available_strategies():
                 response.success = False
                 response.message = (
                     f"Unknown strategy: '{new_strategy_name}'. "
-                    f"Available: {available_strategies()}")
+                    f"Available: {available_strategies()}"
+                )
                 node.get_logger().error(response.message)
                 return response
 
@@ -141,7 +155,8 @@ class RobotContext:
                 return response
 
             node.get_logger().info(
-                f"Switching control strategy '{self.current_strategy_name}' -> '{new_strategy_name}'...")
+                f"Switching control strategy '{self.current_strategy_name}' -> '{new_strategy_name}'..."
+            )
 
             with self.strategy_lock:
                 if self.robot_strategy is not None:
@@ -150,8 +165,13 @@ class RobotContext:
                     except Exception as e:
                         node.get_logger().warn(f"Could not stop previous strategy: {e}")
 
-                node.set_parameters([
-                    Parameter('control_strategy', Parameter.Type.STRING, new_strategy_name)])
+                node.set_parameters(
+                    [
+                        Parameter(
+                            "control_strategy", Parameter.Type.STRING, new_strategy_name
+                        )
+                    ]
+                )
                 # Re-read interpolation_dt so a `ros2 param set` done before this
                 # switch takes effect on the new strategy (self.dt would
                 # otherwise stay pinned to whatever was resolved at construction).
@@ -160,7 +180,9 @@ class RobotContext:
 
                 if new_strategy is None:
                     response.success = False
-                    response.message = f"Strategy '{new_strategy_name}' is not registered"
+                    response.message = (
+                        f"Strategy '{new_strategy_name}' is not registered"
+                    )
                     node.get_logger().error(response.message)
                     return response
 
@@ -172,7 +194,8 @@ class RobotContext:
                 response.current_robot_strategy = new_strategy_name
                 response.message = (
                     f"Strategy switched from '{response.previous_robot_strategy}' "
-                    f"to '{new_strategy_name}'")
+                    f"to '{new_strategy_name}'"
+                )
                 node.get_logger().info(f"{response.message}")
 
         except Exception as e:
@@ -180,32 +203,31 @@ class RobotContext:
             response.message = f"Failed to switch strategy: {str(e)}"
             node.get_logger().error(response.message)
             import traceback
+
             node.get_logger().error(traceback.format_exc())
 
         return response
 
     def get_robot_strategy_callback(self, request, response):
-        '''Return the current control strategy name (Trigger).'''
+        """Return the current control strategy name (Trigger)."""
         response.success = True
         response.message = self.current_strategy_name
         return response
 
     def get_robot_strategies_callback(self, node, request, response):
-        '''Return the list of available control strategies (string names).'''
+        """Return the list of available control strategies (string names)."""
         response.strategy_names = available_strategies()
         response.current_strategy_name = self.current_strategy_name
         response.success = True
-        node.get_logger().info(
-            f"GetRobotStrategies: {response.strategy_names}, current={self.current_strategy_name}")
         return response
 
     def set_robot_strategy(self, robot_strategy, node, dt):
-        '''DEPRECATED: use the set_robot_strategy service instead.'''
+        """DEPRECATED: use the set_robot_strategy service instead."""
         self.robot_strategy = robot_strategy
         self.ghost_strategy = GhostStrategy(node, dt, self.description)
 
     def set_command(self, joint_names, vel_command, accel_command, position_command):
-        '''Forward a command to the active strategy and the RViz ghost. Thread-safe.
+        """Forward a command to the active strategy and the RViz ghost. Thread-safe.
 
         joint_names=None => resolved INSIDE this critical section instead of
         by the caller — reading robot_context.robot_strategy.get_joint_name()
@@ -217,22 +239,29 @@ class RobotContext:
         or None if there is no active strategy. Pair with send_trajectrory(
         expect_epoch=...) when set and send happen in separate calls/threads —
         see set_and_send_command() for the atomic alternative.
-        '''
+        """
         with self.strategy_lock:
             if joint_names is None:
-                joint_names = (self.robot_strategy.get_joint_name()
-                                if self.robot_strategy is not None
-                                else list(self.description.joint_names))
+                joint_names = (
+                    self.robot_strategy.get_joint_name()
+                    if self.robot_strategy is not None
+                    else list(self.description.joint_names)
+                )
             epoch = None
             if self.robot_strategy is not None:
                 epoch = self.robot_strategy.set_command(
-                    joint_names, vel_command, accel_command, position_command)
-            self.ghost_strategy.set_command(joint_names, vel_command, accel_command, position_command)
+                    joint_names, vel_command, accel_command, position_command
+                )
+            self.ghost_strategy.set_command(
+                joint_names, vel_command, accel_command, position_command
+            )
             self.ghost_strategy.send_trajectrory()
             return epoch
 
-    def set_and_send_command(self, joint_names, vel_command, accel_command, position_command) -> bool:
-        '''Load the command buffers AND send them, in one transaction.
+    def set_and_send_command(
+        self, joint_names, vel_command, accel_command, position_command
+    ) -> bool:
+        """Load the command buffers AND send them, in one transaction.
 
         RACE FIX: set_command() and send_trajectrory() used to take
         strategy_lock SEPARATELY, so a second producer could overwrite the
@@ -251,13 +280,17 @@ class RobotContext:
         send_trajectrory() currently returns a meaningful value on its own
         (fire-and-forget), so this cannot report a downstream failure — only
         "was there a strategy to send to".
-        '''
+        """
         with self.strategy_lock:
             if joint_names is None:
-                joint_names = (self.robot_strategy.get_joint_name()
-                                if self.robot_strategy is not None
-                                else list(self.description.joint_names))
-            self.ghost_strategy.set_command(joint_names, vel_command, accel_command, position_command)
+                joint_names = (
+                    self.robot_strategy.get_joint_name()
+                    if self.robot_strategy is not None
+                    else list(self.description.joint_names)
+                )
+            self.ghost_strategy.set_command(
+                joint_names, vel_command, accel_command, position_command
+            )
             self.ghost_strategy.send_trajectrory()
             if self.robot_strategy is None:
                 return False
@@ -270,7 +303,8 @@ class RobotContext:
             # nesting (outer hold + set_command()'s own internal acquire) works.
             with self.robot_strategy.buffer_lock:
                 self.robot_strategy.set_command(
-                    joint_names, vel_command, accel_command, position_command)
+                    joint_names, vel_command, accel_command, position_command
+                )
                 self.robot_strategy.send_trajectrory()
             return True
 
@@ -322,7 +356,7 @@ class RobotContext:
             return self.robot_strategy.get_progression()
 
     def send_trajectrory(self, expect_epoch=None) -> bool:
-        '''Send the currently loaded command buffers.
+        """Send the currently loaded command buffers.
 
         expect_epoch: for producers that call set_command() and
         send_trajectrory() as two SEPARATE calls (e.g. plan() then execute(),
@@ -338,11 +372,14 @@ class RobotContext:
         success/failure report — no JointCommandStrategy's send_trajectrory()
         currently returns a meaningful value of its own (fire-and-forget); True
         only means "this call was not refused by the guard above".
-        '''
+        """
         with self.strategy_lock:
             if self.robot_strategy is None:
                 return False
-            if expect_epoch is not None and self.robot_strategy.buffer_epoch != expect_epoch:
+            if (
+                expect_epoch is not None
+                and self.robot_strategy.buffer_epoch != expect_epoch
+            ):
                 self.node.get_logger().error(
                     f"send_trajectrory: buffer epoch mismatch (expected "
                     f"{expect_epoch}, current {self.robot_strategy.buffer_epoch}) "

@@ -484,7 +484,7 @@ class SinglePlanner(TrajectoryPlanner):
         ``solve_time``). The whole-task-only fields (``waypoint_cost`` /
         ``path_length`` / ``clearance``) are measured by the task solver, not
         by the per-segment machinery, so they stay 0 and the node's defensive
-        mapping stays truthful. Empty unless ``log_flag``.
+        mapping stays truthful.
         """
         success = SinglePlanner._flat_values(getattr(result, "success", None)) or []
         # ``plan_pose`` may return None (or a result without ``.success``) on

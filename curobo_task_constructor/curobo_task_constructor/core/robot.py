@@ -89,6 +89,18 @@ class RobotInterface(ABC):
     def get_object_pose(self, name: str) -> Any:
         """World pose of scene object `name`, or None when unknown."""
 
+    def get_object_spec(self, name: str) -> Any:
+        """Full description of scene object `name` as an ``ObjectSpec``, or
+        None when unknown.
+
+        Preferred over ``get_object_pose`` wherever the caller intends to
+        RE-ADD the object, because a pose alone cannot rebuild it: the shape and
+        the size are lost, and an implementation that guesses them describes the
+        world wrongly. Default: None, so an interface that only tracks poses
+        still works — the caller falls back.
+        """
+        return None
+
     def get_named_joint_config(self, name: str) -> Optional[list]:
         """Joint positions for a named config from the robot's own config
         YAML (used by FixedState). Default: no named configs."""
