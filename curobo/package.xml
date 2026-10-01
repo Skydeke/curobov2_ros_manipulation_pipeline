@@ -3,7 +3,7 @@
 <package format="3">
   <name>curobo</name>
   <version>4.3.0</version>
-  <description>This package wraps the cuRobo library as a ROS 2 package. cuRobo serves as the current backend for cuMotion.</description>
+  <description>This package wraps the cuRobo library as a ROS 2 package.</description>
   <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
   <license>NVIDIA Isaac ROS Software License</license>
 

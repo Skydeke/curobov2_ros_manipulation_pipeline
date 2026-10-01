@@ -17,7 +17,7 @@
 
 from setuptools import find_namespace_packages, setup
 
-package_name = 'curobo'
+package_name = "curobo"
 
 # This package is the ONLY installer of the cuRobo python library: `colcon build`
 # ships the importable tree, its CUDA kernel sources, its pybind sources and its
@@ -32,40 +32,39 @@ package_name = 'curobo'
 # used to paper over. A static version is honest: the ROS package version and the
 # vendored upstream version are then visible side by side in this file and in
 # .gitmodules' pinned commit, instead of one being inferred from the other.
-version = '4.3.0'
+version = "4.3.0"
 
-all_packages = find_namespace_packages(where='curobo')
+all_packages = find_namespace_packages(where="curobo")
 packages = [
-    p for p in all_packages
-    if p.startswith('curobo')
-    and not p.startswith('curobo.tests')
-    and not p.startswith('curobo.examples')
+    p
+    for p in all_packages
+    if p.startswith("curobo")
+    and not p.startswith("curobo.tests")
+    and not p.startswith("curobo.examples")
 ]
 
 setup(
     name=package_name,
     version=version,
     packages=packages,
-    package_dir={'': 'curobo'},
+    package_dir={"": "curobo"},
     data_files=[
-        ('share/ament_index/resource_index/packages',
-            ['resource/' + package_name]),
-        ('share/' + package_name, ['package.xml']),
+        ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
+        ("share/" + package_name, ["package.xml"]),
     ],
-    install_requires=['setuptools'],
+    install_requires=["setuptools"],
     zip_safe=True,
-    maintainer='Isaac ROS Maintainers',
-    maintainer_email='isaac-ros-maintainers@nvidia.com',
-    description='This package wraps the cuRobo library as a ROS 2 package. '
-                'cuRobo serves as the current backend for cuMotion.',
-    license='NVIDIA Isaac ROS Software License',
+    maintainer="Isaac ROS Maintainers",
+    maintainer_email="isaac-ros-maintainers@nvidia.com",
+    description="This package wraps the cuRobo library as a ROS 2 package. ",
+    license="NVIDIA Isaac ROS Software License",
     entry_points={
-        'console_scripts': [],
+        "console_scripts": [],
     },
     include_package_data=True,
     package_data={
-        'curobo._src.curobolib.kernels': ['**/*.cu', '**/*.cuh', '**/*.h'],
-        'curobo._src.curobolib.backends.pybind': ['*.cpp', '*.cu'],
-        'curobo.content': ['**/*'],
+        "curobo._src.curobolib.kernels": ["**/*.cu", "**/*.cuh", "**/*.h"],
+        "curobo._src.curobolib.backends.pybind": ["*.cpp", "*.cu"],
+        "curobo.content": ["**/*"],
     },
 )
