@@ -1,5 +1,4 @@
-# Isaac ROS cuMotion
-
+# Curobov2 Manipulation Pipeline
 > **Fork notice:** This repository is a fork of NVIDIA's `isaac_ros_cumotion`
 > and related packages, forked because NVIDIA did not ship a ROS-ready version
 > of cuRobo v2.
@@ -8,7 +7,7 @@
 > - `curobov2_ros`, `curobov2_ros_interfaces`,
 >   `curobov2_ros_extra`, and `curobov2_ros_rviz` are
 >   **Apache License 2.0** (see `LICENSE` in each package).
->   The code from `curobov2_ros` wasa forked from curobo_ros (see Acknowledgements section).
+>   The code from `curobov2_ros` is forked from curobo_ros (see Acknowledgements section).
 > - `curobov2_ros_moveit` is from NVIDIA and retains the
 >   **NVIDIA Isaac ROS Software License**.
 > - `curobo` vendors NVIDIA's cuRobo library, which carries its own
