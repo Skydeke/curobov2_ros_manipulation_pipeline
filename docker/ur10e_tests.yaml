@@ -47,6 +47,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       ROS_DOMAIN_ID: $ROS_DOMAIN_ID
       # CUROBO_DEBUG_CUDA_GRAPH: "1"
+      SETUPTOOLS_SCM_PRETEND_VERSION: 0.8.0
     volumes:
       - /dev/shm:/dev/shm
       - ..:/root/ros2_ws/src
@@ -77,6 +78,7 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       ROS_DOMAIN_ID: $ROS_DOMAIN_ID
       CUROMOTION_EXTERNAL_PLANNER: "1"
+      SETUPTOOLS_SCM_PRETEND_VERSION: 0.8.0
     volumes:
       - /dev/shm:/dev/shm
       - ..:/root/ros2_ws/src
