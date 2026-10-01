@@ -60,7 +60,7 @@ CuroboPanel::CuroboPanel(QWidget * parent) : rviz_common::Panel(parent)
   // the add form used to be a separate AddObjectsPanel stacked above the list,
   // which is the main reason this tab did not look like MoveIt's. The form now
   // lives in MoveIt's "Add/Remove scene object(s)" group, and the one object
-  // list comes from the server's get_obstacles. See scene_objects_tab.hpp.
+  // list comes from the server's get_scene_objects. See scene_objects_tab.hpp.
   scene_objects_tab_ = new SceneObjectsTab();
   tabs_->addTab(scene_objects_tab_, tr("Scene Objects"));
 

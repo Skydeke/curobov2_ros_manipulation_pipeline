@@ -3,6 +3,7 @@
 // Complete Qt types, not <QtWidgets>. The tabs that need several of these
 // classes list them individually so a missing include is a compile error naming
 // the class, instead of a transitive include that only works by accident.
+#include <QColor>
 #include <QComboBox>
 #include <QDoubleSpinBox>
 #include <QLabel>
@@ -30,6 +31,18 @@ namespace
 /// is `(role, value)`, whereas `QTreeWidgetItem::setData` is
 /// `(column, role, value)`.
 constexpr int kNameRole = Qt::UserRole;
+
+/// `QDoubleSpinBox::setValue` CLAMPS to the widget's range instead of refusing
+/// the value, so restoring a recorded number the form cannot represent would
+/// silently round it into something that reads like the object and is not.
+/// Every numeric field on selection goes through here, which flags that case.
+void putValue(QDoubleSpinBox * box, double value, bool * clamped)
+{
+  if (value < box->minimum() || value > box->maximum()) {
+    *clamped = true;
+  }
+  box->setValue(value);
+}
 
 }  // namespace
 
@@ -97,7 +110,9 @@ void SceneObjectsTab::setPlannerNode(const QString & planner_node)
   }
   const std::string ns = "/" + planner_node_.toStdString() + "/";
 
-  get_obstacles_client_ = node_->create_client<std_srvs::srv::Trigger>(ns + "get_obstacles");
+  get_scene_objects_client_ =
+    node_->create_client<isaac_ros_cumotion_interfaces::srv::GetSceneObjects>(
+    ns + "get_scene_objects");
   remove_all_client_ = node_->create_client<std_srvs::srv::Trigger>(ns + "remove_all_objects");
   detach_client_ = node_->create_client<std_srvs::srv::Trigger>(ns + "detach_object");
   remove_client_ = node_->create_client<isaac_ros_cumotion_interfaces::srv::RemoveObject>(
@@ -107,9 +122,35 @@ void SceneObjectsTab::setPlannerNode(const QString & planner_node)
   add_client_ =
     node_->create_client<isaac_ros_cumotion_interfaces::srv::AddObject>(ns + "add_object");
 
+  scene_objects_.clear();
   // A different planner node is a different scene: drop what the old one said
   // rather than showing it against the new one for up to 2 s.
   known_.clear();
+  // another node's scene: whatever THIS node had fetched says nothing about it.
+  scene_objects_.clear();
+  // `setText` emits `textChanged` and `setValue` emits `valueChanged`, neither of
+  // which anything in this tab is connected to (the form is only ever READ when
+  // a request is built), so clearing the widgets below cannot re-enter
+  // showSelectedObject(). Asserted here because that is the property the whole
+  // clear-then-repopulate relies on, and a future connect would break it
+  // silently rather than loudly.
+  ui_->object_name->clear();
+  ui_->mesh_file_path->clear();
+  ui_->object_x->setValue(0.0);
+  ui_->object_y->setValue(0.0);
+  ui_->object_z->setValue(0.0);
+  ui_->object_rx->setValue(0.0);
+  ui_->object_ry->setValue(0.0);
+  ui_->object_rz->setValue(0.0);
+  ui_->object_rw->setValue(1.0);
+  ui_->shape_size_x_spin_box->setValue(0.0);
+  ui_->shape_size_y_spin_box->setValue(0.0);
+  ui_->shape_size_z_spin_box->setValue(0.0);
+  ui_->color_r->setValue(0.0);
+  ui_->color_g->setValue(0.0);
+  ui_->color_b->setValue(0.0);
+  ui_->color_a->setValue(1.0);
+
   refreshing_ = false;
   busy_ = false;
   ui_->collision_objects_list->clear();
@@ -143,11 +184,75 @@ void SceneObjectsTab::onSelectionChanged()
   // MoveIt's `object_status` describes the SELECTED object, so the selection
   // owns this label whenever there is one; a reply from a service overwrites it
   // and the next selection change puts the object back.
-  const QString name = selectedName();
-  if (!name.isEmpty()) {
-    setStatus(tr("selected '%1'").arg(name));
+  // `showSelectedObject` owns the status line while a row is selected: it can
+  // say more than just the name, and it is the one place that knows which of
+  // the two cases applies.
+  if (!selectedName().isEmpty()) {
+    showSelectedObject();
   }
   setButtonsEnabled();
+}
+
+void SceneObjectsTab::showSelectedObject()
+{
+  const QString name = selectedName();
+  if (name.isEmpty()) {
+    return;
+  }
+
+  // The name goes in first and unconditionally: it is the one field that is
+  // always knowable, because `get_scene_objects` reports names.
+  ui_->object_name->setText(name);
+
+  const auto it = scene_objects_.constFind(name);
+  if (it == scene_objects_.constEnd()) {
+    // An object in the list has no entry from the last reply. That means the
+    // server's parallel arrays were short of a record, which is a protocol
+    // violation, but is not recoverable on the GUI thread: the row still exists,
+    // so show the name and explain the remainder could not be read.
+    setStatus(
+      tr("selected '%1' — server replied without geometry for this object")
+        .arg(name));
+    return;
+  }
+
+  // Every field below is read back out of the last `get_scene_objects` reply.
+  const SceneObject & o = it.value();
+
+  // `findData`, not an index cast: the combo's item order is filled in code
+  // (curobo's own type constants), and the reply's type is the same constant,
+  // so a reorder of that list cannot turn one shape into another.
+  const int idx = ui_->shapes_combo_box->findData(o.type);
+  if (idx >= 0) {
+    ui_->shapes_combo_box->setCurrentIndex(idx);
+  }
+  ui_->mesh_file_path->setText(o.mesh_file_path);
+
+  bool clamped = false;
+  putValue(ui_->object_x, o.position[0], &clamped);
+  putValue(ui_->object_y, o.position[1], &clamped);
+  putValue(ui_->object_z, o.position[2], &clamped);
+  putValue(ui_->object_rx, o.orientation[0], &clamped);
+  putValue(ui_->object_ry, o.orientation[1], &clamped);
+  putValue(ui_->object_rz, o.orientation[2], &clamped);
+  putValue(ui_->object_rw, o.orientation[3], &clamped);
+  putValue(ui_->shape_size_x_spin_box, o.dimensions[0], &clamped);
+  putValue(ui_->shape_size_y_spin_box, o.dimensions[1], &clamped);
+  putValue(ui_->shape_size_z_spin_box, o.dimensions[2], &clamped);
+  putValue(ui_->color_r, o.color[0], &clamped);
+  putValue(ui_->color_g, o.color[1], &clamped);
+  putValue(ui_->color_b, o.color[2], &clamped);
+  putValue(ui_->color_a, o.color[3], &clamped);
+
+  if (clamped) {
+    setStatus(
+      tr("selected '%1' — some values are outside this form's range and were "
+         "clamped; the server holds the truth")
+        .arg(name));
+  } else {
+    setStatus(tr("selected '%1'%2")
+                .arg(name, o.attached ? tr(" (attached to arm)") : QString()));
+  }
 }
 
 QString SceneObjectsTab::selectedName() const
@@ -174,8 +279,20 @@ void SceneObjectsTab::rebuildList(const QStringList & names)
   const QSignalBlocker blocker(ui_->collision_objects_list);
   ui_->collision_objects_list->clear();
   for (const QString & n : names) {
-    auto * item = new QListWidgetItem(n, ui_->collision_objects_list);
+    // The row's TEXT is decorated for an attached object, but the service call
+    // is built from kNameRole, never from this text -- see kNameRole. So the
+    // decoration cannot leak a " (attached)" suffix into an `attach_object` or
+    // `remove_object` request, which is why it is safe to show at all.
+    const bool attached =
+      scene_objects_.value(n).attached;
+    auto * item = new QListWidgetItem(
+      attached ? tr("%1  [attached]").arg(n) : n, ui_->collision_objects_list);
     item->setData(kNameRole, n);
+    if (attached) {
+      // A second, non-textual signal of the same thing: colour is the part a
+      // glance picks up, and it survives any future re-translation of the text.
+      item->setForeground(QColor(Qt::darkYellow));
+    }
   }
   if (!keep.isEmpty() && names.contains(keep)) {
     for (int row = 0; row < ui_->collision_objects_list->count(); ++row) {
@@ -190,7 +307,7 @@ void SceneObjectsTab::rebuildList(const QStringList & names)
 
 void SceneObjectsTab::refreshObjects()
 {
-  if (get_obstacles_client_ == nullptr || !get_obstacles_client_->service_is_ready()) {
+  if (get_scene_objects_client_ == nullptr || !get_scene_objects_client_->service_is_ready()) {
     return;
   }
   if (refreshing_) {
@@ -198,34 +315,96 @@ void SceneObjectsTab::refreshObjects()
   }
   refreshing_ = true;
   setButtonsEnabled();
-  auto request = std::make_shared<std_srvs::srv::Trigger::Request>();
-  get_obstacles_client_->async_send_request(
-    request, [this](rclcpp::Client<std_srvs::srv::Trigger>::SharedFuture future) {
+  auto request = std::make_shared<isaac_ros_cumotion_interfaces::srv::GetSceneObjects::Request>();
+  get_scene_objects_client_->async_send_request(
+    request,
+    [this](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::GetSceneObjects>::SharedFuture future) {
       QStringList names;
       bool success = false;
       QString message;
+      QHash<QString, SceneObject> scene_objects;
       try {
         auto result = future.get();
         success = result->success;
-        // get_obstacles answers with the object names joined by newlines.
-        const QString payload = QString::fromStdString(result->message);
-        names = payload.split('\n', Qt::SkipEmptyParts);
-        for (QString & n : names) {
-          n = n.trimmed();
+        message = QString::fromStdString(result->message);
+
+        const size_t n = result->names.size();
+        // Build a map keyed by name in the order returned. If parallel arrays
+        // are ever ragged (a logic error on the server), this tolerates it by
+        // only filling for entries that have a name, but it cannot fix the rest.
+        for (size_t i = 0; i < n; ++i) {
+          const QString nm = QString::fromStdString(result->names[i]);
+          if (nm.isEmpty()) {
+            continue;  // should not happen; server must not return unnamed objects
+          }
+          SceneObject o;
+          if (i < result->types.size()) {
+            o.type = static_cast<int>(result->types[i]);
+          }
+          if (i < result->mesh_file_paths.size()) {
+            o.mesh_file_path = QString::fromStdString(result->mesh_file_paths[i]);
+          }
+          if (i < result->poses.size()) {
+            o.position[0] = result->poses[i].position.x;
+            o.position[1] = result->poses[i].position.y;
+            o.position[2] = result->poses[i].position.z;
+            o.orientation[0] = result->poses[i].orientation.x;
+            o.orientation[1] = result->poses[i].orientation.y;
+            o.orientation[2] = result->poses[i].orientation.z;
+            o.orientation[3] = result->poses[i].orientation.w;
+          }
+          if (i < result->dimensions.size()) {
+            o.dimensions[0] = result->dimensions[i].x;
+            o.dimensions[1] = result->dimensions[i].y;
+            o.dimensions[2] = result->dimensions[i].z;
+          }
+          if (i < result->colors.size()) {
+            o.color[0] = result->colors[i].r;
+            o.color[1] = result->colors[i].g;
+            o.color[2] = result->colors[i].b;
+            o.color[3] = result->colors[i].a;
+          }
+          if (i < result->attached.size()) {
+            o.attached = result->attached[i];
+          }
+          scene_objects.insert(nm, o);
+          names.append(nm);
         }
-        names.removeAll(QString());
+        // Sorted so the list does not reshuffle whenever the server's bucket
+        // walk order changes (it iterates cuboid, sphere, capsule, cylinder,
+        // mesh), and so `names != known_` below means "the set of names really
+        // changed" rather than "the same names in a new order".
+        names.sort(Qt::CaseInsensitive);
       } catch (const std::exception & e) {
         message = QString::fromStdString(e.what());
       }
-      runOnGuiThread([this, names, success, message]() {
+      runOnGuiThread([this, names, scene_objects, success, message]() {
         refreshing_ = false;
         if (!success) {
-          setStatus(message.isEmpty() ? tr("get_obstacles failed") : message);
+          setStatus(message.isEmpty() ? tr("get_scene_objects failed") : message);
           setButtonsEnabled();
           return;
         }
-        if (names != known_) {
-          known_ = names;
+        // Always replaced, never merged: the reply is the whole truth about
+        // this scene, so anything the previous reply said that this one does not
+        // is gone. This is what keeps an object removed and re-added under the
+        // same name between two polls from showing the FIRST one's geometry.
+        scene_objects_ = scene_objects;
+
+        // The rows only move when something VISIBLE changed -- the name set, or
+        // which objects are attached, since that is drawn on the row. Rebuilding
+        // on every 2 s poll would drop the selection and scroll position out from
+        // under the operator even when nothing they can see has moved.
+        //
+        // `known_` therefore holds "name=attached" pairs, not bare names: a
+        // signature is what makes "the attached set changed" detectable at all.
+        QStringList signature;
+        signature.reserve(names.size());
+        for (const QString & n : names) {
+          signature << (scene_objects.value(n).attached ? n + "=1" : n + "=0");
+        }
+        if (signature != known_) {
+          known_ = signature;
           rebuildList(names);
         }
         setStatus(
@@ -285,8 +464,9 @@ void SceneObjectsTab::addObject()
   busy_ = true;
   setButtonsEnabled();
   add_client_->async_send_request(
-    request, [this, name](rclcpp::Client<isaac_ros_cumotion_interfaces::srv::AddObject>::SharedFuture
-                           future) {
+    request,
+    [this, name](
+      rclcpp::Client<isaac_ros_cumotion_interfaces::srv::AddObject>::SharedFuture future) {
       bool success = false;
       QString message;
       try {

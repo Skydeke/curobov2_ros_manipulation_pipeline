@@ -1,0 +1,94 @@
+# GetSceneObjects.srv — full read-only description of every added scene object.
+#
+# WHY THIS EXISTS
+#   `get_obstacles` is a bare `std_srvs/Trigger` and its payload is
+#   newline-joined NAMES and nothing else. So a client could see WHICH objects
+#   the planner holds but could never learn an object's type, pose, size or
+#   colour — the one thing a scene-editor UI needs in order to show a selected
+#   object. Every consumer was forced into the same two bad options: re-derive
+#   the geometry it had itself just sent and hope nothing else changed the scene
+#   (a client-side cache that disagrees with the server the moment another client
+#   touches anything), or show the name and nothing else.
+#
+#   This reports the geometry the SOLVER actually holds, so the answer is right
+#   even for objects placed by the task constructor, the grasp orchestrator, or a
+#   plain `ros2 service call` — not just the ones this client added.
+#
+# READ-ONLY AND CHEAP
+#   It reads the ObstacleManager's already-built Scene and rebuilds nothing. It
+#   touches no solver and no GPU tensor, so it is safe to poll. Contrast
+#   SetJointLocks, which rebuilds the model and every solver (~20 s).
+#
+# RELATION TO `get_obstacles`
+#   `get_obstacles` stays, unchanged, for clients that only want the names (and
+#   for the rviz list). This one is the same information plus everything else,
+#   as structured fields rather than a string to be parsed.
+
+# Object type constants. These are AddObject.srv's values, repeated rather than
+# referenced so a client can decode a reply from this file alone. Kept as
+# identical literals on purpose: rosidl cannot import constants from another
+# .srv, and a client must not have to keep two files in sync to interpret the
+# `types` array below.
+int8 CUBOID=0
+int8 SPHERE=1
+int8 CAPSULE=2
+int8 CYLINDER=3
+int8 MESH=4
+
+# --- Request (empty: this is a pure query) ---
+---
+
+# --- Response ---
+bool success
+string message
+
+# One entry per object. EVERY array below has exactly the same length and
+# index i of each describes the same object — rosidl .srv has no nested
+# anonymous record type, so parallel arrays are the idiom here (the alternative
+# is a new msg/SceneObject.msg and one more message type to import).
+string[] names
+int8[] types
+
+# World pose. Note the curobo Scene stores this internally as
+# [x, y, z, qw, qx, qy, qz] (w FIRST); it is unpacked into a proper
+# geometry_msgs/Pose here, so clients get the conventional x,y,z,w field order.
+geometry_msgs/Pose[] poses
+
+# Size, expressed in AddObject.Request's own `dimensions` convention so a record
+# from this service can be resubmitted to `add_object` unchanged. Which
+# components are MEANINGFUL depends on the type, because curobo's Scene stores
+# each shape differently — the unused ones are filled with the used one, never
+# with a zero, precisely so the round trip is not rejected:
+#
+#   CUBOID   -> [dx, dy, dz]                      all three used
+#   SPHERE   -> [radius, radius, radius]          only x is meaningful
+#   CAPSULE  -> [radius, height, height]          x = radius, y = axis length
+#                                                  along the object's local z
+#   CYLINDER -> [radius, height, height]          as above
+#   MESH     -> [scale_x, scale_y, scale_z]       all three used; the server
+#                                                  ignores `dimensions` when the
+#                                                  mesh came in as inline
+#                                                  vertices/triangles
+#
+# AddObject rejects any non-positive component, which is why the filler is the
+# used value and not 0.
+geometry_msgs/Vector3[] dimensions
+
+# rgba as submitted, echoed back.
+std_msgs/ColorRGBA[] colors
+
+# Absolute path for a file-backed MESH, empty string for every other type and
+# for a MESH that was supplied as inline vertices/triangles. Inline geometry is
+# NOT echoed: it can be hundreds of thousands of vertices and belongs on a
+# topic, not in a polled query reply. A client that needs it must keep its own
+# copy.
+string[] mesh_file_paths
+
+# True for the object currently attached to the arm's `attached_object` link.
+# At most one entry can be true; the attach link holds a single payload.
+#
+# An ATTACHED object is still listed here: attach keeps it registered in the
+# solver scenes (it is disabled by name, not removed) and only drops it from the
+# voxel-map rasterization. That is why the flag exists at all — the name alone
+# cannot tell "on the table" from "in the gripper".
+bool[] attached

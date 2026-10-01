@@ -1,12 +1,20 @@
 import os
+import math
 import numpy as np
 import torch
 import ros2_numpy as rnp
 
 from std_srvs.srv import Trigger
-from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, SetCollisionCache
+from isaac_ros_cumotion_interfaces.srv import (
+    AddObject,
+    GetSceneObjects,
+    GetVoxelGrid,
+    RemoveObject,
+    SetCollisionCache,
+)
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
-from geometry_msgs.msg import Vector3
+from geometry_msgs.msg import Pose, Vector3
+from std_msgs.msg import ColorRGBA
 
 from curobo.scene import Scene, Cuboid, Capsule, Cylinder, Sphere, Mesh
 from curobo._src.geom.types import SceneCfg
@@ -900,6 +908,173 @@ class ObstacleManager:
     def get_obstacles(self, node, request: Trigger, response):
         response.message = "\n".join(self.obstacle_names) + ("\n" if self.obstacle_names else "")
         response.success = True
+        return response
+
+    # ------------------------------------------------------------------
+    # get_scene_objects — the structured, geometry-carrying view of the scene.
+    #
+    # `get_obstacles` above can only ever answer with names, because it is a
+    # std_srvs/Trigger and names are all the Scene's flat bookkeeping holds on
+    # its own. Everything else an object has — its type, pose, size, colour —
+    # lives on the typed bucket entries, so it is read from there.
+    # ------------------------------------------------------------------
+
+    # bucket name -> (AddObject.Request type constant, extractor)
+    #
+    # Each extractor returns (dimensions_xyz, mesh_file_path) in AddObject's own
+    # `dimensions` convention. The bucket -> type mapping is the inverse of the
+    # `match` in add_object(), so the two must be changed together; a wrong entry
+    # here reports a cylinder's radius as its length.
+    def _describe_obstacle(self, bucket: str, obs):
+        """Pull an obstacle's (dimensions, mesh_path) back out in AddObject terms.
+
+        The Scene stores each shape differently — a cuboid keeps `dims`, a
+        sphere only `radius`, a capsule a radius plus a base/tip segment, a
+        cylinder a radius and a height, a mesh a `scale`. This is the one place
+        that unwinds those differences, so `GetSceneObjects` can answer with the
+        same three numbers `add_object` was given.
+        """
+        if bucket == 'cuboid':
+            # Padded to 3 so a malformed `dims` cannot shift the response's
+            # parallel arrays out of alignment further down.
+            dims = [float(d) for d in (obs.dims or [])]
+            return (dims + [0.0, 0.0, 0.0])[:3], ""
+
+        if bucket == 'sphere':
+            # AddObject takes [radius, _, _]; fill the two it ignores with the
+            # radius rather than 0, because it rejects any non-positive
+            # component and a verbatim round trip has to be accepted.
+            r = float(obs.radius)
+            return [r, r, r], ""
+
+        if bucket == 'capsule':
+            # The axis length is the base->tip DISTANCE, not tip[2]: add_object
+            # happens to store base=[0,0,0] and tip=[0,0,h], but a capsule built
+            # any other way would report the wrong height if this read tip[2].
+            axis = [float(t) - float(b) for t, b in zip(obs.tip, obs.base)]
+            h = math.sqrt(sum(c * c for c in axis))
+            r = float(obs.radius)
+            return [r, h, h], ""
+
+        if bucket == 'cylinder':
+            r = float(obs.radius)
+            h = float(obs.height)
+            return [r, h, h], ""
+
+        if bucket == 'mesh':
+            # `scale` is the Scene's name for AddObject's `dimensions`. An inline
+            # mesh (vertices/triangles, no file) has no path to report.
+            dims = [float(d) for d in (getattr(obs, 'scale', None) or [1.0, 1.0, 1.0])]
+            inline = bool(getattr(obs, 'vertices', None) or getattr(obs, 'faces', None))
+            return dims, ("" if inline else (getattr(obs, 'file_path', None) or ""))
+
+        return [0.0, 0.0, 0.0], ""
+
+    def get_scene_objects(self, node, request, response):
+        """Report every added object's type, pose, size, colour and attach state.
+
+        Pure read over the already-built Scene: no solver rebuild, no GPU work,
+        so it is cheap enough to poll. That is what lets a UI keep the reply
+        fresh instead of caching what it once sent — and caching is precisely
+        what could not be trusted before, because another client may have added,
+        moved or removed an object at any time.
+        """
+        # Attach state lives on AttachmentServices, which is created separately.
+        # Absent before it is wired up (or in a standalone ObstacleManager), and
+        # then nothing is attached, which is the honest answer.
+        attach_svc = getattr(node, 'attachment_services', None)
+        attached_name = getattr(attach_svc, 'attached_name', None) if attach_svc else None
+
+        try:
+            recorded = []
+
+            # Iterate the BUCKETS, not self.obstacle_names: the bucket entries
+            # are where an object's geometry actually is, and walking the
+            # buckets in a fixed order keeps the parallel response arrays
+            # aligned index-for-index.
+            #
+            # The type constants come off the REQUEST class, not off the outer
+            # `GetSceneObjects` service type: rosidl_generator_py emits .srv
+            # constants onto the message struct parsed from the part of the
+            # file before `---`, so they land on `GetSceneObjects.Request`
+            # (which is what `request.CUBOID` in add_object() above resolves
+            # to) and NOT on the service class. Reading them off the outer
+            # class raises AttributeError at the first call.
+            for bucket, type_const in (
+                ('cuboid', GetSceneObjects.Request.CUBOID),
+                ('sphere', GetSceneObjects.Request.SPHERE),
+                ('capsule', GetSceneObjects.Request.CAPSULE),
+                ('cylinder', GetSceneObjects.Request.CYLINDER),
+                ('mesh', GetSceneObjects.Request.MESH),
+            ):
+                for obs in (getattr(self.scene, bucket, None) or []):
+                    dims, mesh_path = self._describe_obstacle(bucket, obs)
+
+                    # Build each nested message and APPEND it. `.add()` is the
+                    # other idiom and it is not safe here: it only exists on
+                    # rosidl's C-backed `sequence` type, while the generated
+                    # Python for this repo's interfaces hands back a plain
+                    # `list`, so `.add()` raises
+                    # "'list' object has no attribute 'add'". `append` is the
+                    # one operation every one of these fields supports.
+                    pose = Pose()
+                    raw = getattr(obs, 'pose', None)
+                    # curobo's Scene stores pose as [x, y, z, qw, qx, qy, qz] --
+                    # w FIRST. Unpacked into the conventional field order here so
+                    # that no client has to know that.
+                    if raw is not None and len(raw) >= 7:
+                        pose.position.x = float(raw[0])
+                        pose.position.y = float(raw[1])
+                        pose.position.z = float(raw[2])
+                        pose.orientation.w = float(raw[3])
+                        pose.orientation.x = float(raw[4])
+                        pose.orientation.y = float(raw[5])
+                        pose.orientation.z = float(raw[6])
+                    response.poses.append(pose)
+
+                    col = ColorRGBA()
+                    raw_col = getattr(obs, 'color', None) or [0.0, 0.0, 0.0, 1.0]
+                    for attr, i in (('r', 0), ('g', 1), ('b', 2), ('a', 3)):
+                        setattr(col, attr, float(raw_col[i]) if len(raw_col) > i else 0.0)
+                    response.colors.append(col)
+
+                    vec = Vector3()
+                    vec.x, vec.y, vec.z = dims[0], dims[1], dims[2]
+                    response.dimensions.append(vec)
+
+                    response.names.append(obs.name)
+                    response.types.append(int(type_const))
+                    response.mesh_file_paths.append(mesh_path)
+                    response.attached.append(obs.name == attached_name)
+                    recorded.append(obs.name)
+
+            response.success = True
+            msg = f"{len(response.names)} object(s)"
+            if any(response.attached):
+                msg += f", '{attached_name}' attached"
+
+            # add_object/remove_object keep obstacle_names and the buckets in
+            # step, so nothing should be missing here. If something ever is,
+            # say so loudly instead of silently answering with a short list --
+            # a client cannot tell an empty scene from a truncated reply, and a
+            # name it cannot see would look like a removed object.
+            orphans = [n for n in self.obstacle_names if n not in set(recorded)]
+            if orphans:
+                msg += f"; WARNING {len(orphans)} name(s) with no geometry: {orphans}"
+
+            # An attached object stays REGISTERED (it is disabled by name, not
+            # removed), so its absence means the two managers disagree.
+            if attached_name is not None and attached_name not in recorded:
+                msg += f"; WARNING attached object '{attached_name}' is not in the scene"
+
+            response.message = msg
+            if orphans and node is not None:
+                node.get_logger().error(response.message)
+        except Exception as exc:  # noqa: BLE001 - report, never crash the node
+            response.success = False
+            response.message = f"get_scene_objects failed: {exc}"
+            if node is not None:
+                node.get_logger().error(response.message)
         return response
 
     def _resolve_voxel_size(self, node) -> float:

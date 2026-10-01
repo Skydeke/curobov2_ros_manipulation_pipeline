@@ -1,6 +1,10 @@
 from functools import partial
 from std_srvs.srv import Trigger, SetBool
-from isaac_ros_cumotion_interfaces.srv import AddObject, RemoveObject, GetVoxelGrid, GetCollisionDistance, SetCollisionCache, GetRobotStrategies, SetJointLocks, GetJointInfo, SetLinkCollision, SetMask
+from isaac_ros_cumotion_interfaces.srv import (
+    AddObject, GetCollisionDistance, GetJointInfo, GetRobotStrategies,
+    GetSceneObjects, GetVoxelGrid, RemoveObject, SetCollisionCache, SetJointLocks,
+    SetLinkCollision, SetMask,
+)
 from isaac_ros_cumotion_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
 from geometry_msgs.msg import Point
@@ -48,6 +52,7 @@ class RosServiceManager:
         self.add_object_srv = None
         self.remove_object_srv = None
         self.get_obstacles_srv = None
+        self.get_scene_objects_srv = None
         self.remove_all_objects_srv = None
         self.get_voxel_map_srv = None
         self.get_collision_distance_srv = None
@@ -103,6 +108,16 @@ class RosServiceManager:
             Trigger,
             self.node.get_name() + '/get_obstacles',
             partial(self._callback_get_obstacles, self.node)
+        )
+
+        # The geometry-carrying view of the same scene. get_obstacles stays for
+        # clients that only need names; this one answers with type, pose, size,
+        # colour and attach state, so a UI can show a selected object instead of
+        # a client-side cache of what it once sent.
+        self.get_scene_objects_srv = self.node.create_service(
+            GetSceneObjects,
+            self.node.get_name() + '/get_scene_objects',
+            partial(self._callback_get_scene_objects, self.node)
         )
 
         # Readiness is exposed as the `node_is_available` ROS parameter
@@ -425,6 +440,12 @@ class RosServiceManager:
     def _callback_get_obstacles(self, node, request: Trigger, response):
         """Delegate get_obstacles service to ObstacleManager"""
         return self.obstacle_manager.get_obstacles(node, request, response)
+
+    def _callback_get_scene_objects(
+            self, node, request: GetSceneObjects.Request,
+            response: GetSceneObjects.Response):
+        """Delegate get_scene_objects to ObstacleManager (reads the built Scene)."""
+        return self.obstacle_manager.get_scene_objects(node, request, response)
 
     def _callback_remove_all_objects(self, node, request: Trigger, response):
         """Delegate remove_all_objects to ObstacleManager (observer propagates)."""

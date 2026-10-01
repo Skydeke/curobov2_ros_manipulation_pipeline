@@ -155,11 +155,26 @@ private Q_SLOTS:
   void refreshTargetDisplays();
   void applyPoseFromSpinboxes();
 
-  // Helper methods for quaternion <-> Euler conversion
-  void quaternionToEuler(const geometry_msgs::msg::Quaternion &q, double &roll,
-                         double &pitch, double &yaw);
-  void eulerToQuaternion(double roll, double pitch, double yaw,
-                         geometry_msgs::msg::Quaternion &q);
+  // The goal orientation is a QUATERNION, not RPY -- see the block comment above
+  // PlanningTab::canonicalize() for why. These four replace the old
+  // eulerToQuaternion/quaternionToEuler pair.
+  //
+  // Settle q vs -q (they are the same rotation, and the marker does not promise
+  // which one it reports) so repeated polls compare like with like.
+  static void canonicalize(geometry_msgs::msg::Quaternion & q);
+  /// Scale to unit length, returning false for the zero quaternion. Unlike the
+  /// RPY path it replaced, four free spin boxes CAN hold a non-rotation, so this
+  /// is checked rather than assumed.
+  static bool normalize(geometry_msgs::msg::Quaternion & q);
+  /// Read the four orientation boxes into `q`, unnormalised.
+  void readQuaternionFromSpinboxes(geometry_msgs::msg::Quaternion & q);
+  /// Write `q` into the four orientation boxes, with their signals blocked.
+  /// Blocking is this function's job, not the caller's: all four boxes have
+  /// `valueChanged` wired to `applyPoseFromSpinboxes()`, so an unblocked write
+  /// would re-enter it once per component and push a half-updated quaternion at
+  /// the marker. It uses scoped `QSignalBlocker`s rather than `blockSignals()`
+  /// pairs because the latter is a flag and not a counter -- see the definition.
+  void writeQuaternionToSpinboxes(const geometry_msgs::msg::Quaternion & q);
 
 private:
   // Set by initializeEmbedded() when this tab is hosted by CuroboPanel; null
@@ -254,13 +269,14 @@ private:
                                     std::vector<TargetDisplay *> &out);
   bool user_editing_pose_; // Flag to prevent auto-update while user is editing
 
-  // Last displayed pose to avoid unnecessary updates
+  // Last displayed pose to avoid unnecessary updates. The orientation is kept as a
+  // whole quaternion rather than three doubles: a partial update of a rotation is
+  // not a rotation, and `.w` being NaN is what marks "never displayed" for all
+  // four at once (updateMarkerPoseDisplay() relies on that).
   double last_displayed_x_;
   double last_displayed_y_;
   double last_displayed_z_;
-  double last_displayed_roll_;
-  double last_displayed_pitch_;
-  double last_displayed_yaw_;
+  geometry_msgs::msg::Quaternion last_displayed_q_;
 
   // Planner node this tab's clients currently point at. Owned by the Context
   // tab; see setPlannerNode().

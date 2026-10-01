@@ -13,6 +13,7 @@
 // &QTimer::timeout, so it needs the complete type. It was reaching it through
 // <QtWidgets> in the header, which is a transitive include that only works by
 // accident; the other four tabs all include this directly.
+#include <QSignalBlocker>
 #include <QThread>
 #include <QTimer>
 #include <cmath>
@@ -28,9 +29,6 @@ PlanningTab::PlanningTab(QWidget *parent)
       last_displayed_x_{std::numeric_limits<double>::quiet_NaN()},
       last_displayed_y_{std::numeric_limits<double>::quiet_NaN()},
       last_displayed_z_{std::numeric_limits<double>::quiet_NaN()},
-      last_displayed_roll_{std::numeric_limits<double>::quiet_NaN()},
-      last_displayed_pitch_{std::numeric_limits<double>::quiet_NaN()},
-      last_displayed_yaw_{std::numeric_limits<double>::quiet_NaN()},
       planner_node_{"unified_planner"}, mpc_goal_pub_{nullptr},
       mpc_active_{false}, mpc_starting_{false}, mpc_goal_timer_{nullptr}
       // Init list order must match declaration order (trajectory_type_ is
@@ -39,6 +37,17 @@ PlanningTab::PlanningTab(QWidget *parent)
       trajectory_type_{0}, set_planner_client_{nullptr} {
   // Extend the widget with all attributes and children from UI file
   ui_->setupUi(this);
+
+  // `last_displayed_q_` cannot be seeded in the init list above: the generated
+  // geometry_msgs Quaternion is a rosidl struct whose default `w` is 1.0, and
+  // the whole "has this ever been displayed" mechanism keys on `w` being NaN
+  // (updateMarkerPoseDisplay()). Left at its default the first poll would treat
+  // the identity rotation as already displayed and never write the boxes. The
+  // x/y/z values are irrelevant -- NaN on `w` alone forces all four.
+  last_displayed_q_.x = 0.0;
+  last_displayed_q_.y = 0.0;
+  last_displayed_q_.z = 0.0;
+  last_displayed_q_.w = std::numeric_limits<double>::quiet_NaN();
 
   // Init rclcpp node
   auto options = rclcpp::NodeOptions().arguments(
@@ -92,14 +101,18 @@ PlanningTab::PlanningTab(QWidget *parent)
           QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) { applyPoseFromSpinboxes(); });
 
-  // Connect orientation spinboxes
-  connect(ui_->spinBoxRoll,
+  // Connect orientation spinboxes. Four of them, because the goal orientation
+  // is a quaternion -- see the note above applyPoseFromSpinboxes().
+  connect(ui_->spinBoxQx,
           QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) { applyPoseFromSpinboxes(); });
-  connect(ui_->spinBoxPitch,
+  connect(ui_->spinBoxQy,
           QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) { applyPoseFromSpinboxes(); });
-  connect(ui_->spinBoxYaw, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+  connect(ui_->spinBoxQz,
+          QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
+          [this](double) { applyPoseFromSpinboxes(); });
+  connect(ui_->spinBoxQw, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
           this, [this](double) { applyPoseFromSpinboxes(); });
 
   // Detect when spinbox gets focus (user starts editing) to pause auto-update
@@ -109,19 +122,22 @@ PlanningTab::PlanningTab(QWidget *parent)
           [this]() { user_editing_pose_ = false; });
   connect(ui_->spinBoxPosZ, &QDoubleSpinBox::editingFinished, this,
           [this]() { user_editing_pose_ = false; });
-  connect(ui_->spinBoxRoll, &QDoubleSpinBox::editingFinished, this,
+  connect(ui_->spinBoxQx, &QDoubleSpinBox::editingFinished, this,
           [this]() { user_editing_pose_ = false; });
-  connect(ui_->spinBoxPitch, &QDoubleSpinBox::editingFinished, this,
+  connect(ui_->spinBoxQy, &QDoubleSpinBox::editingFinished, this,
           [this]() { user_editing_pose_ = false; });
-  connect(ui_->spinBoxYaw, &QDoubleSpinBox::editingFinished, this,
+  connect(ui_->spinBoxQz, &QDoubleSpinBox::editingFinished, this,
+          [this]() { user_editing_pose_ = false; });
+  connect(ui_->spinBoxQw, &QDoubleSpinBox::editingFinished, this,
           [this]() { user_editing_pose_ = false; });
 
   ui_->spinBoxPosX->installEventFilter(this);
   ui_->spinBoxPosY->installEventFilter(this);
   ui_->spinBoxPosZ->installEventFilter(this);
-  ui_->spinBoxRoll->installEventFilter(this);
-  ui_->spinBoxPitch->installEventFilter(this);
-  ui_->spinBoxYaw->installEventFilter(this);
+  ui_->spinBoxQx->installEventFilter(this);
+  ui_->spinBoxQy->installEventFilter(this);
+  ui_->spinBoxQz->installEventFilter(this);
+  ui_->spinBoxQw->installEventFilter(this);
 
   // Timer to update marker pose display
   QTimer *poseUpdateTimer = new QTimer(this);
@@ -905,45 +921,91 @@ PlanningTab::buildGoalsets() {
   return goalsets;
 }
 
-void PlanningTab::quaternionToEuler(const geometry_msgs::msg::Quaternion &q,
-                                    double &roll, double &pitch, double &yaw) {
-  // Convert quaternion to Euler angles (roll, pitch, yaw) in degrees
-  // Roll (x-axis rotation)
-  double sinr_cosp = 2.0 * (q.w * q.x + q.y * q.z);
-  double cosr_cosp = 1.0 - 2.0 * (q.x * q.x + q.y * q.y);
-  roll = std::atan2(sinr_cosp, cosr_cosp) * 180.0 / M_PI;
+// Why the goal orientation is a QUATERNION and not RPY
+// ------------------------------------------------------------
+// This used to be three roll/pitch/yaw spin boxes with `eulerToQuaternion` and
+// `quaternionToEuler` either side of them, and the pair disagreed with its own
+// label: the .ui said "(rad)" while both helpers multiplied by 180.0/M_PI, so
+// the boxes were in degrees and said otherwise. Neither can happen with a
+// quaternion, which is also the form every other part of the stack speaks:
+//
+//   * `geometry_msgs/msg/Pose.orientation` is a quaternion.
+//   * `TargetDisplay::getPose()` returns a Pose, so buildGoalsets() hands the
+//     planner one directly.
+//   * curobo's IK takes a Pose, so the round trip is identity either way --
+//     while the RPY path inserted a rotation that gimbal lock made lossy at
+//     pitch = +-90 deg, silently changing the goal the operator asked for.
+//
+// The cost of a quaternion is that q and -q are the same rotation, which is what
+// canonicalize() below exists to settle.
 
-  // Pitch (y-axis rotation)
-  double sinp = 2.0 * (q.w * q.y - q.z * q.x);
-  if (std::abs(sinp) >= 1)
-    pitch = std::copysign(90.0, sinp); // use 90 degrees if out of range
-  else
-    pitch = std::asin(sinp) * 180.0 / M_PI;
+void PlanningTab::canonicalize(geometry_msgs::msg::Quaternion & q) {
+  // Pick the sign from the largest-magnitude component rather than from w.
+  // The w >= 0 convention breaks down at exactly the orientations that matter
+  // here -- a 180 deg turn about Z has w == 0, so the sign of w is pure noise
+  // and the operator's fields would flip on every poll.
+  // An explicit array, not `(&q.x)[i]`: indexing across a struct's members by
+  // pointer arithmetic only works while rosidl happens to emit four adjacent
+  // doubles in x,y,z,w order, and it reads the wrong field silently if that ever
+  // changes.
+  const double c[4] = {q.x, q.y, q.z, q.w};
+  int sign_ref = 0;
+  for (int i = 1; i < 4; ++i) {
+    if (std::fabs(c[i]) > std::fabs(c[sign_ref])) {
+      sign_ref = i;
+    }
+  }
 
-  // Yaw (z-axis rotation)
-  double siny_cosp = 2.0 * (q.w * q.z + q.x * q.y);
-  double cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z);
-  yaw = std::atan2(siny_cosp, cosy_cosp) * 180.0 / M_PI;
+  if (c[sign_ref] < 0.0) {
+    q.x = -q.x;
+    q.y = -q.y;
+    q.z = -q.z;
+    q.w = -q.w;
+  }
 }
 
-void PlanningTab::eulerToQuaternion(double roll, double pitch, double yaw,
-                                    geometry_msgs::msg::Quaternion &q) {
-  // Convert Euler angles (in degrees) to quaternion
-  double roll_rad = roll * M_PI / 180.0;
-  double pitch_rad = pitch * M_PI / 180.0;
-  double yaw_rad = yaw * M_PI / 180.0;
+bool PlanningTab::normalize(geometry_msgs::msg::Quaternion & q) {
+  // A quaternion is only a rotation if it is unit length. Four independent spin
+  // boxes can be typed to anything at all, so unlike the RPY path -- which could
+  // not represent a non-rotation -- this has to be checked here rather than
+  // assumed. Returns false for a zero quaternion, where there is no direction to
+  // preserve and no honest value to fall back to.
+  const double norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
+  if (norm < 1e-9) {
+    return false;
+  }
+  q.x /= norm;
+  q.y /= norm;
+  q.z /= norm;
+  q.w /= norm;
+  return true;
+}
 
-  double cy = std::cos(yaw_rad * 0.5);
-  double sy = std::sin(yaw_rad * 0.5);
-  double cp = std::cos(pitch_rad * 0.5);
-  double sp = std::sin(pitch_rad * 0.5);
-  double cr = std::cos(roll_rad * 0.5);
-  double sr = std::sin(roll_rad * 0.5);
+void PlanningTab::readQuaternionFromSpinboxes(geometry_msgs::msg::Quaternion & q) {
+  q.x = ui_->spinBoxQx->value();
+  q.y = ui_->spinBoxQy->value();
+  q.z = ui_->spinBoxQz->value();
+  q.w = ui_->spinBoxQw->value();
+}
 
-  q.w = cr * cp * cy + sr * sp * sy;
-  q.x = sr * cp * cy - cr * sp * sy;
-  q.y = cr * sp * cy + sr * cp * sy;
-  q.z = cr * cp * sy - sr * sp * cy;
+void PlanningTab::writeQuaternionToSpinboxes(const geometry_msgs::msg::Quaternion & q) {
+  // Every one of these boxes has valueChanged connected to
+  // applyPoseFromSpinboxes(), so an unblocked setValue re-enters it once per
+  // component and pushes a half-updated quaternion at the marker.
+  //
+  // Scoped (QSignalBlocker) rather than blockSignals() pairs on purpose:
+  // blockSignals() sets a flag rather than counting, so a nested
+  // block-then-unblock here would RE-ENABLE these boxes while the caller still
+  // believed they were muted. RAII also means an early return cannot leave a
+  // widget permanently muted.
+  const QSignalBlocker bq(ui_->spinBoxQx);
+  const QSignalBlocker by(ui_->spinBoxQy);
+  const QSignalBlocker bz(ui_->spinBoxQz);
+  const QSignalBlocker bw(ui_->spinBoxQw);
+  ui_->spinBoxQx->setValue(q.x);
+  ui_->spinBoxQy->setValue(q.y);
+  ui_->spinBoxQz->setValue(q.z);
+  ui_->spinBoxQw->setValue(q.w);
 }
 
 void PlanningTab::applyPoseFromSpinboxes() {
@@ -958,11 +1020,24 @@ void PlanningTab::applyPoseFromSpinboxes() {
   pose.position.y = ui_->spinBoxPosY->value();
   pose.position.z = ui_->spinBoxPosZ->value();
 
-  // Get orientation from spinboxes and convert to quaternion
-  double roll = ui_->spinBoxRoll->value();
-  double pitch = ui_->spinBoxPitch->value();
-  double yaw = ui_->spinBoxYaw->value();
-  eulerToQuaternion(roll, pitch, yaw, pose.orientation);
+  // The orientation is read, normalised and canonicalised, then WRITTEN BACK to
+  // the boxes, so what is on screen is exactly what went to the marker. Skipping
+  // the write-back is the subtle version of the bug: the operator types 0.5 into
+  // x, the marker turns by some angle neither of them can read off the boxes,
+  // and the boxes still read 0.5.
+  geometry_msgs::msg::Quaternion q;
+  readQuaternionFromSpinboxes(q);
+  const bool usable = normalize(q);
+  if (!usable) {
+    RCLCPP_WARN(
+        node_->get_logger(),
+        "Goal orientation is a zero quaternion (0,0,0,0), which is not a "
+        "rotation; leaving the goal orientation alone. w=1 is the identity.");
+    return;
+  }
+  canonicalize(q);
+  writeQuaternionToSpinboxes(q);
+  pose.orientation = q;
 
   // Apply the new pose to the marker
   target_display_->setPose(pose);
@@ -971,22 +1046,21 @@ void PlanningTab::applyPoseFromSpinboxes() {
   last_displayed_x_ = pose.position.x;
   last_displayed_y_ = pose.position.y;
   last_displayed_z_ = pose.position.z;
-  last_displayed_roll_ = roll;
-  last_displayed_pitch_ = pitch;
-  last_displayed_yaw_ = yaw;
+  last_displayed_q_ = q;
 
   RCLCPP_INFO(
       node_->get_logger(),
-      "Applied pose: X=%.3f, Y=%.3f, Z=%.3f, Roll=%.2f, Pitch=%.2f, Yaw=%.2f",
-      pose.position.x, pose.position.y, pose.position.z, roll, pitch, yaw);
+      "Applied pose: X=%.3f, Y=%.3f, Z=%.3f, Q=(%.4f, %.4f, %.4f, %.4f)",
+      pose.position.x, pose.position.y, pose.position.z, q.x, q.y, q.z, q.w);
 }
 
 bool PlanningTab::eventFilter(QObject *obj, QEvent *event) {
   // Check if the event is a FocusIn event on one of the pose spinboxes
   if (event->type() == QEvent::FocusIn) {
     if (obj == ui_->spinBoxPosX || obj == ui_->spinBoxPosY ||
-        obj == ui_->spinBoxPosZ || obj == ui_->spinBoxRoll ||
-        obj == ui_->spinBoxPitch || obj == ui_->spinBoxYaw) {
+        obj == ui_->spinBoxPosZ || obj == ui_->spinBoxQx ||
+        obj == ui_->spinBoxQy || obj == ui_->spinBoxQz ||
+        obj == ui_->spinBoxQw) {
       user_editing_pose_ = true;
     }
   }
@@ -1002,13 +1076,17 @@ void PlanningTab::updateMarkerPoseDisplay() {
 
   auto pose = target_display_->getPose();
 
-  // Convert quaternion to Euler angles
-  double roll, pitch, yaw;
-  quaternionToEuler(pose.orientation, roll, pitch, yaw);
+  // Canonicalised BEFORE the comparison, so that dragging the gizmo round a 180
+  // deg turn -- where the marker may report either of two equal representations
+  // -- is not mistaken for the operator changing the goal on every single poll.
+  geometry_msgs::msg::Quaternion q = pose.orientation;
+  canonicalize(q);
 
   // Compare with last displayed values - only update if changed
-  constexpr double epsilon_pos = 1e-6; // Small threshold for position
-  constexpr double epsilon_rot = 0.01; // Small threshold for rotation (degrees)
+  constexpr double epsilon_pos = 1e-6;  // metres
+  // Quaternion components live in [-1, 1], so the threshold is an absolute one
+  // on the components rather than an angle in degrees.
+  constexpr double epsilon_rot = 1e-4;
 
   bool x_changed = std::isnan(last_displayed_x_) ||
                    std::fabs(pose.position.x - last_displayed_x_) > epsilon_pos;
@@ -1016,16 +1094,18 @@ void PlanningTab::updateMarkerPoseDisplay() {
                    std::fabs(pose.position.y - last_displayed_y_) > epsilon_pos;
   bool z_changed = std::isnan(last_displayed_z_) ||
                    std::fabs(pose.position.z - last_displayed_z_) > epsilon_pos;
-  bool roll_changed = std::isnan(last_displayed_roll_) ||
-                      std::fabs(roll - last_displayed_roll_) > epsilon_rot;
-  bool pitch_changed = std::isnan(last_displayed_pitch_) ||
-                       std::fabs(pitch - last_displayed_pitch_) > epsilon_rot;
-  bool yaw_changed = std::isnan(last_displayed_yaw_) ||
-                     std::fabs(yaw - last_displayed_yaw_) > epsilon_rot;
+  // A quaternion has no meaningful per-component "change" on its own -- the
+  // shortest-arc distance between two rotations is what changed. Comparing
+  // components is sufficient here only because both sides are canonicalised
+  // first, which puts them in the same hemisphere.
+  const bool q_changed = std::isnan(last_displayed_q_.w) ||
+                         std::fabs(q.x - last_displayed_q_.x) > epsilon_rot ||
+                         std::fabs(q.y - last_displayed_q_.y) > epsilon_rot ||
+                         std::fabs(q.z - last_displayed_q_.z) > epsilon_rot ||
+                         std::fabs(q.w - last_displayed_q_.w) > epsilon_rot;
 
   // Only update if at least one value has changed
-  if (!x_changed && !y_changed && !z_changed && !roll_changed &&
-      !pitch_changed && !yaw_changed) {
+  if (!x_changed && !y_changed && !z_changed && !q_changed) {
     return;
   }
 
@@ -1034,9 +1114,8 @@ void PlanningTab::updateMarkerPoseDisplay() {
   ui_->spinBoxPosX->blockSignals(true);
   ui_->spinBoxPosY->blockSignals(true);
   ui_->spinBoxPosZ->blockSignals(true);
-  ui_->spinBoxRoll->blockSignals(true);
-  ui_->spinBoxPitch->blockSignals(true);
-  ui_->spinBoxYaw->blockSignals(true);
+  // The four quaternion boxes are muted inside writeQuaternionToSpinboxes();
+  // doing it here too would be the nested-blockSignals hazard described there.
 
   if (x_changed) {
     ui_->spinBoxPosX->setValue(pose.position.x);
@@ -1050,25 +1129,14 @@ void PlanningTab::updateMarkerPoseDisplay() {
     ui_->spinBoxPosZ->setValue(pose.position.z);
     last_displayed_z_ = pose.position.z;
   }
-  if (roll_changed) {
-    ui_->spinBoxRoll->setValue(roll);
-    last_displayed_roll_ = roll;
-  }
-  if (pitch_changed) {
-    ui_->spinBoxPitch->setValue(pitch);
-    last_displayed_pitch_ = pitch;
-  }
-  if (yaw_changed) {
-    ui_->spinBoxYaw->setValue(yaw);
-    last_displayed_yaw_ = yaw;
+  if (q_changed) {
+    writeQuaternionToSpinboxes(q);
+    last_displayed_q_ = q;
   }
 
   ui_->spinBoxPosX->blockSignals(false);
   ui_->spinBoxPosY->blockSignals(false);
   ui_->spinBoxPosZ->blockSignals(false);
-  ui_->spinBoxRoll->blockSignals(false);
-  ui_->spinBoxPitch->blockSignals(false);
-  ui_->spinBoxYaw->blockSignals(false);
 }
 
 // ---------------------------------------------------------------------
@@ -1098,9 +1166,12 @@ void PlanningTab::on_clearGoal_clicked() {
   last_displayed_x_ = std::numeric_limits<double>::quiet_NaN();
   last_displayed_y_ = std::numeric_limits<double>::quiet_NaN();
   last_displayed_z_ = std::numeric_limits<double>::quiet_NaN();
-  last_displayed_roll_ = std::numeric_limits<double>::quiet_NaN();
-  last_displayed_pitch_ = std::numeric_limits<double>::quiet_NaN();
-  last_displayed_yaw_ = std::numeric_limits<double>::quiet_NaN();
+  // `.w` alone is the "never displayed" sentinel; updateMarkerPoseDisplay()
+  // tests it with isnan and then compares all four components.
+  last_displayed_q_.x = 0.0;
+  last_displayed_q_.y = 0.0;
+  last_displayed_q_.z = 0.0;
+  last_displayed_q_.w = std::numeric_limits<double>::quiet_NaN();
 
   updateMarkerPoseDisplay();
   RCLCPP_INFO(node_->get_logger(),

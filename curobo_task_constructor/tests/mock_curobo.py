@@ -27,7 +27,7 @@ from curobo_task_constructor.core.robot import (
     RobotInterface,
 )
 from curobo_task_constructor.core.robot_config import NamedJointConfig
-from curobo_task_constructor.core.state import JointStateStub
+from curobo_task_constructor.core.state import JointStateStub, ObjectSpec
 
 #: Canonical joint order: 6 arm joints + finger. The analytic FK only uses
 #: the first three; the rest pass through untouched.
@@ -48,6 +48,14 @@ def _xyz(pose) -> list:
     if hasattr(p, "x"):
         return [float(p.x), float(p.y), float(p.z)]
     return [float(p[0]), float(p[1]), float(p[2])]
+
+
+def _quat(pose) -> list:
+    """Orientation as [x, y, z, w], from either a message or a Pose3."""
+    q = pose.orientation
+    if hasattr(q, "x"):
+        return [float(q.x), float(q.y), float(q.z), float(q.w)]
+    return [float(q[0]), float(q[1]), float(q[2]), float(q[3])]
 
 
 def fk_positions(pos: dict) -> list:
@@ -117,6 +125,21 @@ class MockCuroboServer(RobotInterface):
                 self.named[cfg_name] = NamedJointConfig(
                     cfg_name, [], [float(v) for v in value])
         self.world = dict(world or {})  # name -> [x, y, z]
+        #: Full per-object records behind `world`, the way the real server's
+        #: get_scene_objects reports them. `world` stays the position-only view
+        #: many tests read directly; this is what get_object_spec answers from,
+        #: so a test cannot pass on a description the real interface could not
+        #: produce (a pose with no shape, a shape with no size).
+        self.records = {
+            name: {
+                "shape": "cuboid",
+                "position": list(xyz),
+                "orientation": [0.0, 0.0, 0.0, 1.0],
+                "dimensions": [0.1, 0.1, 0.1],
+                "mesh_path": "",
+            }
+            for name, xyz in self.world.items()
+        }
         self.attached = set()
         self.world_ops = []  # ("add"|"remove"|"attach"|"detach", name)
         self.executed = []  # PlanRequests driven via execute()
@@ -144,10 +167,24 @@ class MockCuroboServer(RobotInterface):
         return sorted(self.world)
 
     def get_object_pose(self, name: str):
-        if name not in self.world:
+        rec = self.records.get(name)
+        if rec is None:
             return None
-        xyz = self.world[name]
-        return pose_to_any(Pose3(list(xyz), [0.0, 0.0, 0.0, 1.0]), None)
+        return pose_to_any(
+            Pose3(list(rec["position"]), list(rec["orientation"])), None)
+
+    def get_object_spec(self, name: str) -> Optional[ObjectSpec]:
+        rec = self.records.get(name)
+        if rec is None:
+            return None
+        return ObjectSpec(
+            name=name,
+            shape=rec["shape"],
+            pose=pose_to_any(
+                Pose3(list(rec["position"]), list(rec["orientation"])), None),
+            dimensions=list(rec["dimensions"]),
+            mesh_path=rec["mesh_path"] or None,
+        )
 
     def get_named_joint_config(self, name: str):
         try:
@@ -303,16 +340,29 @@ class MockCuroboServer(RobotInterface):
     def add_object(self, spec) -> bool:
         xyz = _xyz(spec.pose) if spec.pose is not None else None
         self.world[spec.name] = xyz or [0.0, 0.0, 0.5]
+        # The full description, so get_object_spec round-trips what was added
+        # rather than defaulting every field.
+        orient = _quat(spec.pose) if spec.pose is not None else [0.0, 0.0, 0.0, 1.0]
+        dims = list(spec.dimensions or [0.0, 0.0, 0.0])
+        self.records[spec.name] = {
+            "shape": spec.shape or "cuboid",
+            "position": list(self.world[spec.name]),
+            "orientation": orient,
+            "dimensions": (dims + [0.0, 0.0, 0.0])[:3],
+            "mesh_path": spec.mesh_path or "",
+        }
         self.world_ops.append(("add", spec.name))
         return True
 
     def remove_object(self, name: str) -> bool:
         self.world.pop(name, None)
+        self.records.pop(name, None)
         self.world_ops.append(("remove", name))
         return True
 
     def remove_all_objects(self) -> None:
         self.world.clear()
+        self.records.clear()
         self.attached.clear()
         self.world_ops.append(("remove_all", None))
 

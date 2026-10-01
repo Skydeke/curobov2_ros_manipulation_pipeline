@@ -125,17 +125,33 @@ class TaskExecutor:
 
     def build_base_scene(self) -> SceneDiff:
         """Derive the task's base scene from the server's live world (empty
-        diff when the robot interface has nothing to report)."""
+        diff when the robot interface has nothing to report).
+
+        Each object is rebuilt from what the SERVER reports, not from a local
+        mirror of this task's own add calls: ``get_scene_objects`` carries the
+        type, pose, size and mesh path, so the base scene describes the world as
+        it actually is — including objects another client put there. It used to
+        label every entry ``shape="mesh"`` regardless of what it was, which made
+        this reverse sync describe the world wrong for every non-mesh object.
+        """
         obj_names = getattr(self.robot, "get_object_names", None)
-        if obj_names is not None:
-            scene = SceneDiff()
-            for name in obj_names() or []:
-                pose = self.robot.get_object_pose(name)
-                if pose is not None:
-                    scene.objects_added[name] = ObjectSpec(
-                        name=name, shape="mesh", pose=pose)
-            return scene
-        return SceneDiff()
+        if obj_names is None:
+            return SceneDiff()
+        # Preferred: one call per object that returns the whole description.
+        get_spec = getattr(self.robot, "get_object_spec", None)
+        scene = SceneDiff()
+        for name in obj_names() or []:
+            if get_spec is not None:
+                spec = get_spec(name)
+                if spec is not None:
+                    scene.objects_added[name] = spec
+                continue
+            # Fallback for an interface that only answers the older two questions.
+            # The shape is left at ObjectSpec's default rather than guessed.
+            pose = self.robot.get_object_pose(name)
+            if pose is not None:
+                scene.objects_added[name] = ObjectSpec(name=name, pose=pose)
+        return scene
 
     # ------------------------------------------------------------------
     # Plan
