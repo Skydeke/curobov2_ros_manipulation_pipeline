@@ -1,7 +1,7 @@
-"""RobotInterface adapter for the real isaac_ros_cumotion curobo_server (ROS 2).
+"""RobotInterface adapter for the real curobov2_ros curobo_server (ROS 2).
 
 Converts the core's ROS-free ``PlanRequest``/``PlanResult``/``ObjectSpec``
-types to/from ``isaac_ros_cumotion_interfaces`` messages and drives the
+types to/from ``curobov2_ros_interfaces`` messages and drives the
 curobo_server services synchronously. ``joint_state_cls``/``pose_cls`` are
 overridden so the stages emit real message types on the wire.
 
@@ -33,9 +33,9 @@ from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
-from isaac_ros_cumotion_interfaces.action import SendTrajectory
-from isaac_ros_cumotion_interfaces.msg import Goalset, TrajectoryGoal
-from isaac_ros_cumotion_interfaces.srv import (
+from curobov2_ros_interfaces.action import SendTrajectory
+from curobov2_ros_interfaces.msg import Goalset, TrajectoryGoal
+from curobov2_ros_interfaces.srv import (
     AddObject,
     AttachObject,
     Fk,

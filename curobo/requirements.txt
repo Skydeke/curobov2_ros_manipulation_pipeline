@@ -64,7 +64,7 @@ setuptools_scm>=6.2
 setuptools<70
 
 # --- benchmark only (pyproject [benchmark] extra) -----------------------------
-# Used by isaac_ros_cumotion_extra's parity benchmark, which loads the vendored
+# Used by curobov2_ros_extra's parity benchmark, which loads the vendored
 # curobo/benchmark/motion_plan_benchmark.py by file path. Kept in this file
 # rather than split into a second requirements file because one image serves
 # both the sim and the benchmark compose; split it if that ever changes.

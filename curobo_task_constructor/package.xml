@@ -26,7 +26,7 @@
   <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
   <depend>curobo_task_constructor_interfaces</depend>
-  <depend>isaac_ros_cumotion_interfaces</depend>
+  <depend>curobov2_ros_interfaces</depend>
 
   <export>
     <build_type>ament_python</build_type>

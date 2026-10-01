@@ -1,7 +1,7 @@
 # curobo_task_constructor
 
 A MoveIt Task Constructor–shaped stage/container framework over the
-`isaac_ros_cumotion` cuRobo server. A task is a tree of stages; the executor
+`curobov2_ros` cuRobo server. A task is a tree of stages; the executor
 plans it, ranks the solutions, and executes one. Nothing here calls IK on the
 client's behalf — **the planner resolves the goals**, which is what lets one
 task offer many candidates per leg and let cuRobo pick the winner.

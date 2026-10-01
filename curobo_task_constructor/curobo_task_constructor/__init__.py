@@ -26,7 +26,7 @@ Package layout
 
 ``curobo_task_constructor.robot``
     Deployment adapter (rclpy): ``CuroboServerInterface`` converts the core's
-    ROS-free request/result types to/from ``isaac_ros_cumotion_interfaces``
+    ROS-free request/result types to/from ``curobov2_ros_interfaces``
     messages. The core never imports this module — that is what keeps it
     unit-testable against a mocked ``curobo_server``.
 """

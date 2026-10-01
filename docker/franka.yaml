@@ -4,7 +4,7 @@
 # unified_planner (cuRobo solvers run on the GPU), the emulator strategy as the
 # joint-state source, robot_state_publisher / joint_state_publisher, and RViz
 # (gui:=true). The robot model resolves in-package (robots/franka.yaml ->
-# package://isaac_ros_cumotion/config/franka.curobo.yml).
+# package://curobov2_ros/config/franka.curobo.yml).
 #
 # The image is pulled from the pipeline-built fork image on GHCR (the CI
 # workflow docker-build.yml rebuilds it on every curobo_v2 push and tags it
@@ -26,7 +26,7 @@
 services:
   curobo:
     container_name: isaac_cumotion_franka
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros/isaac-ros-cumotion:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -53,6 +53,6 @@ services:
         set -e
         source /opt/ros/jazzy/setup.bash
         source /root/ros2_ws/install/setup.bash
-        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py robot:=franka gui:=true \
+        exec ros2 launch curobov2_ros gen_traj.launch.py robot:=franka gui:=true \
           publish_plan_debug_image:=true \
-          rviz_config:=/root/ros2_ws/src/isaac_ros_cumotion/rviz/franka_curobo.rviz
+          rviz_config:=/root/ros2_ws/src/curobov2_ros/rviz/franka_curobo.rviz

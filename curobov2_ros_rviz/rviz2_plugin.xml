@@ -1,0 +1,50 @@
+<library path="curobov2_ros_rviz">
+
+  <class name="curobov2_ros_rviz/CuroboPanel"
+        type="curobov2_ros_rviz::CuroboPanel"
+        base_class_type="rviz_common::Panel">
+    <description>
+      Unified curobo panel: ONE dock, laid out like MoveIt's Motion Planning
+      panel, with five tabs. Context (planning group / planner node, trajectory
+      type, control strategy, world representation), Planning (goal state,
+      planning request, and a Clear / Compute / Execute / Cancel button row),
+      Joints (live joint-state monitor plus joint-space planning, its target cell
+      a draggable progress bar exactly as in MoveIt), Manipulation (MoveIt's own
+      object-perception grid, with its controls absent because curobo has no
+      perception services) and Scene Objects (MoveIt's two columns: the
+      server-side object list from get_scene_objects, the add / remove form, and the
+      object status line). This is the only curobo planner panel: the
+      planner-args panel it reuses as its Planning tab is deliberately not
+      registered separately, so it cannot be added as a dock of its own. The task
+      constructor stays a separate panel: it is a different workflow, not part of
+      this planner's UI.
+    </description>
+  </class>
+
+  <class name="curobov2_ros_rviz/TargetDisplay"
+        type="curobov2_ros_rviz::TargetDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Generic 6-DOF target marker; all planner/MPC logic lives in the Curobo panel, on its Planning tab.</description>
+  </class>
+
+  <class name="curobov2_ros_rviz/SparseVoxelGridDisplay"
+        type="curobov2_ros_rviz::SparseVoxelGridDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Display the cuRobo mapper's occupied voxels from the SparseVoxelGrid topic.</description>
+    <message_type>curobov2_ros_interfaces/msg/SparseVoxelGrid</message_type>
+  </class>
+
+  <class name="curobov2_ros_rviz/CuroboTrajectoryDisplay"
+        type="curobov2_ros_rviz::CuroboTrajectoryDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Visualise a cuRobo JointTrajectory as an animated full-robot model with optional ghost trail.</description>
+    <message_type>trajectory_msgs/msg/JointTrajectory</message_type>
+  </class>
+
+  <class name="curobov2_ros_rviz/ReachabilityMapDisplay"
+        type="curobov2_ros_rviz::ReachabilityMapDisplay"
+        base_class_type="rviz_common::Display">
+    <description>Solve and visualise a reachability map on a configurable plane using the curobo_server GenerateRM service.</description>
+  </class>
+
+</library>

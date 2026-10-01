@@ -1,7 +1,7 @@
 # Example rviz2 config for the curobo_task_constructor panel.
 # Load the panel via: rviz2 -d share/curobo_task_constructor_rviz/rviz/task_constructor.rviz
 # The panel + a MarkerArray display can be used side-by-side with any existing
-# curobo/isaac_ros_cumotion marker publishers — these two only consume
+# curobo/curobov2_ros marker publishers — these two only consume
 # curobo_task_constructor_interfaces topics.
 Panels:
   - Class: rviz_common/Displays

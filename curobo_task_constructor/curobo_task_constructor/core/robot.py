@@ -2,7 +2,7 @@
 
 The core is ROS-free: stages talk to a ``RobotInterface`` (the cuRobo server
 surface) through these lightweight dataclasses. The ROS deployment adapter
-(``robot/curobo.py``) converts them to/from isaac_ros_cumotion_interfaces
+(``robot/curobo.py``) converts them to/from curobov2_ros_interfaces
 message types. Unit tests inject a ``MockCuroboServer`` implementing the
 same interface — this is what makes the framework testable without a GPU or
 a running curobo_server.

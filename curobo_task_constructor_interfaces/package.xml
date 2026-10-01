@@ -7,7 +7,7 @@
     Declarative task description for the curobo_task_constructor executor.
     Owns the open wire format (StageSpec tree, Task action, introspection
     messages) and deliberately depends only on std_msgs/geometry_msgs/
-    visualization_msgs — never on isaac_ros_cumotion_interfaces. New stage
+    visualization_msgs — never on curobov2_ros_interfaces. New stage
     types extend the schema through the opaque stage_params string without
     touching any message definition.
   </description>

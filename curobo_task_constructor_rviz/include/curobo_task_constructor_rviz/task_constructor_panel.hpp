@@ -37,7 +37,7 @@
  * Structurally mirrors moveit_task_constructor_visualization's TaskPanel
  * (pluginlib-registered rviz_common::Panel) but only knows the
  * curobo_task_constructor_interfaces wire format — it never touches
- * isaac_ros_cumotion_interfaces or the existing marker publishers.
+ * curobov2_ros_interfaces or the existing marker publishers.
  */
 
 #pragma once
