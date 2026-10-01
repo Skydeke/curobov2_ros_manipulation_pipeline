@@ -2,21 +2,21 @@ name: Build and publish Docker image
 
 on:
   push:
-    branches: [curobo_v2]
+    branches: [main]
     paths:
       - docker/Dockerfile.cumotion
-      - isaac_ros_cumotion/**
-      - isaac_ros_cumotion_interfaces/**
-      - isaac_ros_cumotion_moveit/**
-      - isaac_ros_cumotion_rviz/**
-      - isaac_ros_cumotion_extra/**
+      - curobov2_ros/**
+      - curobov2_ros_interfaces/**
+      - curobov2_ros_moveit/**
+      - curobov2_ros_rviz/**
+      - curobov2_ros_extra/**
       - curobo/**
       - .github/workflows/**
   workflow_dispatch:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: isaac-ros-cumotion
+  IMAGE_NAME: curobov2_ros
 
 jobs:
   build-and-push:

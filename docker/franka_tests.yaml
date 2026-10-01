@@ -18,7 +18,7 @@
 services:
   server:
     container_name: isaac_cumotion_franka_server
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -42,14 +42,14 @@ services:
         set -e
         source /opt/ros/jazzy/setup.bash
         source /root/ros2_ws/install/setup.bash
-        exec ros2 launch isaac_ros_cumotion gen_traj.launch.py \
+        exec ros2 launch curobov2_ros gen_traj.launch.py \
           robot:=franka gui:=false \
           voxel_size:=0.05 \
           mapper_extent_xyz:="[2.0, 2.0, 2.0]"
 
   tests:
     container_name: isaac_cumotion_franka_tests
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     depends_on:
       - server
     restart: "no"
@@ -73,7 +73,7 @@ services:
         source /opt/ros/jazzy/setup.bash
         source /root/ros2_ws/install/setup.bash
         ROBOT=franka
-        cd /root/ros2_ws/src/isaac_ros_cumotion/test
+        cd /root/ros2_ws/src/curobov2_ros/test
         shopt -s nullglob
         COUNTER=0
         for SPEC in test_test_*_$${ROBOT}.py; do

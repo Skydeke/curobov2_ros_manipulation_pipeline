@@ -2,7 +2,7 @@
 
 ``CuroboServerInterface`` converts the core's ROS-free
 ``PlanRequest``/``PlanResult``/``ObjectSpec`` types to/from
-``isaac_ros_cumotion_interfaces`` messages and drives the curobo_server
+``curobov2_ros_interfaces`` messages and drives the curobo_server
 services synchronously. It is imported by the action server
 (``curobo_task_constructor.node``) — the pure-Python core in
 ``curobo_task_constructor.core`` never imports it, which is what keeps the

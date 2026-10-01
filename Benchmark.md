@@ -119,7 +119,7 @@ The "Published RTX 6000 Ada" figures in the two tables below are transcribed fro
 <https://nvlabs.github.io/curobo/latest/reference/benchmarks.html>
 
 All 18 published means and the 4 published medians quoted here were checked against that page. The same values are
-hardcoded in `isaac_ros_cumotion_extra/benchmark/compare.py` (`PUBLISHED_REFERENCE_PAGE`) and printed with their source
+hardcoded in `curobov2_ros_extra/benchmark/compare.py` (`PUBLISHED_REFERENCE_PAGE`) and printed with their source
 URL, so a reader of the raw log can check them without trusting this report.
 
 ### Without torque limits

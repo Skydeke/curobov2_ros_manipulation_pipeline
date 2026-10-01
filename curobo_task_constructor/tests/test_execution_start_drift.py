@@ -38,8 +38,8 @@ import pytest
 #: parents[0] = tests/, [1] = curobo_task_constructor/, [2] = the submodule
 #: root. One level too shallow reads a path that does not exist, which fails
 #: every test with a FileNotFoundError that looks like a code problem.
-NODE = (Path(__file__).resolve().parents[2] / "isaac_ros_cumotion"
-        / "isaac_ros_cumotion" / "core" / "unified_planner_node.py")
+NODE = (Path(__file__).resolve().parents[2] / "curobov2_ros"
+        / "curobov2_ros" / "core" / "unified_planner_node.py")
 
 assert NODE.is_file(), f"guard points at a missing file: {NODE}"
 

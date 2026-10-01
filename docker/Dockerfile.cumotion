@@ -80,12 +80,12 @@ RUN apt-get update && apt-get install -y --reinstall \
 COPY curobo/requirements.txt /tmp/curobo_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/curobo_requirements.txt
 
-# --- isaac_ros_cumotion packages ---
-COPY isaac_ros_cumotion ${ROS_WS}/src/isaac_ros_cumotion
-COPY isaac_ros_cumotion_interfaces ${ROS_WS}/src/isaac_ros_cumotion_interfaces
-COPY isaac_ros_cumotion_moveit ${ROS_WS}/src/isaac_ros_cumotion_moveit
-COPY isaac_ros_cumotion_rviz ${ROS_WS}/src/isaac_ros_cumotion_rviz
-COPY isaac_ros_cumotion_extra ${ROS_WS}/src/isaac_ros_cumotion_extra
+# --- curobov2_ros packages ---
+COPY curobov2_ros ${ROS_WS}/src/curobov2_ros
+COPY curobov2_ros_interfaces ${ROS_WS}/src/curobov2_ros_interfaces
+COPY curobov2_ros_moveit ${ROS_WS}/src/curobov2_ros_moveit
+COPY curobov2_ros_rviz ${ROS_WS}/src/curobov2_ros_rviz
+COPY curobov2_ros_extra ${ROS_WS}/src/curobov2_ros_extra
 
 # --- task-constructor packages
 COPY curobo_task_constructor_interfaces ${ROS_WS}/src/curobo_task_constructor_interfaces
@@ -105,8 +105,8 @@ RUN source /opt/ros/jazzy/setup.bash && \
 RUN source /opt/ros/jazzy/setup.bash && \
   colcon build --symlink-install \
   --packages-select \
-  curobo isaac_ros_cumotion_interfaces \
-  isaac_ros_cumotion isaac_ros_cumotion_moveit \
-  isaac_ros_cumotion_rviz isaac_ros_cumotion_extra \
+  curobo curobov2_ros_interfaces \
+  curobov2_ros curobov2_ros_moveit \
+  curobov2_ros_rviz curobov2_ros_extra \
   curobo_task_constructor_interfaces \
   curobo_task_constructor curobo_task_constructor_rviz

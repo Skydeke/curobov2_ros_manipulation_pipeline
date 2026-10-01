@@ -19,7 +19,7 @@
 services:
   curobo_test:
     container_name: curobo_test
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     runtime: nvidia
     network_mode: host
     ipc: host
@@ -41,10 +41,10 @@ services:
       - |
         set -o pipefail &&
         source /opt/ros/jazzy/setup.bash &&
-        export PYTHONPATH=/root/ros2_ws/src/isaac_ros_cumotion_extra:$${PYTHONPATH} &&
+        export PYTHONPATH=/root/ros2_ws/src/curobov2_ros_extra:$${PYTHONPATH} &&
         echo "Running benchmark package tests..." &&
         python3 -m pytest \
-          /root/ros2_ws/src/isaac_ros_cumotion_extra/isaac_ros_cumotion_extra/benchmark/tests/ \
+          /root/ros2_ws/src/curobov2_ros_extra/curobov2_ros_extra/benchmark/tests/ \
           -v --tb=short -x -p no:cacheprovider \
           -p no:launch_testing -p no:launch_ros \
           -W ignore::pytest.PytestUnknownMarkWarning --no-header 2>&1 |
@@ -54,7 +54,7 @@ services:
 
   curobo_task_constructor_test:
     container_name: curobo_task_constructor_test
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     runtime: nvidia
     network_mode: host
     ipc: host

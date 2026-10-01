@@ -5,10 +5,11 @@
 > of cuRobo v2.
 >
 > Licensing:
-> - `isaac_ros_cumotion`, `isaac_ros_cumotion_interfaces`,
->   `isaac_ros_cumotion_extra`, and `isaac_ros_cumotion_rviz` are
+> - `curobov2_ros`, `curobov2_ros_interfaces`,
+>   `curobov2_ros_extra`, and `curobov2_ros_rviz` are
 >   **Apache License 2.0** (see `LICENSE` in each package).
-> - `isaac_ros_cumotion_moveit` is from NVIDIA and retains the
+>   The code from `curobov2_ros` wasa forked from curobo_ros (see Acknowledgements section).
+> - `curobov2_ros_moveit` is from NVIDIA and retains the
 >   **NVIDIA Isaac ROS Software License**.
 > - `curobo` vendors NVIDIA's cuRobo library, which carries its own
 >   license terms.
@@ -23,43 +24,17 @@ depth-to-ESDF mapping, robot segmentation, and trajectory optimization.
 |---|---|
 | `curobo` | cuRobo v2 library (vendored) |
 | `curobo_task_constructor` | Task-constructor stages and containers over the cuRobo server — see its [README](curobo_task_constructor/README.md) |
-| `isaac_ros_cumotion_interfaces` | ROS actions/services/messages |
-| `isaac_ros_cumotion` | The unified node `curobo_trajectory_planner` and supporting services |
-| `isaac_ros_cumotion_extra` | Viser/visualization nodes, the `build_curobo_config` robot-config generator, and the cuRobo benchmarks reproduction (`curobo_benchmark`) |
-| `isaac_ros_cumotion_moveit` | MoveIt 2 planning plugin |
-| `isaac_ros_cumotion_rviz` | RViz plugin and visualizations |
-
-## Build
-
-```bash
-colcon build --symlink-install \
-  --packages-select curobo isaac_ros_cumotion_interfaces \
-  isaac_ros_cumotion isaac_ros_cumotion_moveit isaac_ros_cumotion_rviz \
-  isaac_ros_cumotion_extra
-```
-
-## Run
-
-```bash
-# Terminal 1: the unified node
-ros2 run isaac_ros_cumotion curobo_trajectory_planner
-
-# Or launch with a pre-built trajectory scene
-ros2 launch isaac_ros_cumotion gen_traj.launch.py
-```
-
-Callers send trajectory requests to the `TrajectoryGeneration` service
-(`/<name>/generate_trajectory`) and stream resulting joint trajectories through
-the `SendTrajectory` action (`/<name>/execute_trajectory`). IK/FK and world
-management are exposed via the `Ik`/`IkBatch`, `Fk`/`FkBatch`,
-`AddObject`/`AttachObject`/`RemoveObject`, `GetVoxelGrid`, and
-`GetCollisionDistance` services.
+| `curobov2_ros_interfaces` | ROS actions/services/messages |
+| `curobov2_ros` | The unified node `curobo_trajectory_planner` and supporting services |
+| `curobov2_ros_extra` | Viser/visualization nodes, the `build_curobo_config` robot-config generator, and the cuRobo benchmarks reproduction (`curobo_benchmark`) |
+| `curobov2_ros_moveit` | MoveIt 2 planning plugin |
+| `curobov2_ros_rviz` | RViz plugin and visualizations |
 
 ## Quickstart (Docker)
 
 The fastest way to try the fork is the interactive compose sessions: RViz +
 cuRobo planner, with an emulated robot and no physical driver. Both robots use
-the same pipeline-built image (`ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest`),
+the same pipeline-built image (`ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest`),
 selected by `robot:=...` at launch; `--build` instead rebuilds locally from
 `docker/Dockerfile.cumotion`.
 
@@ -87,13 +62,12 @@ page](https://nvlabs.github.io/curobo/latest/reference/benchmarks.html) —
 motion generation (with and without torque limits), inverse kinematics, and
 kinematics & collision — running every problem **twice**: through curobo
 natively and through the ROS-wrapped planner (`/unified_planner/...`), then
-printing all metrics and a parity verdict. Neither leg is ever skipped.
+printing all metrics and a parity verdict.
 
 ```bash
 # One command: server + full reproduction (details in
-# isaac_ros_cumotion_extra/README.md, "cuRobo benchmarks reproduction").
+# curobov2_ros_extra/README.md, "cuRobo benchmarks reproduction").
 docker compose -f docker/compose_benchmark.yaml up
-# CUROBO_RUN_PARITY=1 additionally runs the compare-verdict suite (all/ik/cost).
 ```
 
 - Runs the page's ~2600-problem `full` dataset (motion_benchmaker + mpinets)
@@ -102,19 +76,12 @@ docker compose -f docker/compose_benchmark.yaml up
   to the run's budget before each motion leg).
 - Prints all results in the page's order under a final `ALL RESULTS` banner;
   JSONs land in `/tmp/benchmark_webpage.*.json`.
-- Envelope knobs: `CUROBO_MAX_ATTEMPTS`, `CUROBO_LOAD_DYNAMICS` /
-  `CUROBO_PAYLOAD_MASS` (torque limits), `CUROBO_DATASET`,
-  `CUROBO_NUM_TRAJOPT_SEEDS`, `CUROBO_USE_CUDA_GRAPH`,
-  `CUROBO_COLLISION_MODE`.
-- Pure-Python benchmark tests: `docker compose -f docker/compose_tests.yaml up`.
 
 ## Documentation
 
-- `isaac_ros_cumotion/docs/` — user guide (concepts, getting started,
-  tutorials) and `MIGRATION_V2.md` for the v1 → v2 transition; the tunable
-  node parameters (including the plan-time `max_attempts` the benchmark
-  re-pins) are in `docs/concepts/parameters.md`.
-- `isaac_ros_cumotion_extra/README.md` — the cuRobo benchmarks reproduction in
+- `curobov2_ros/docs/` — user guide (concepts, getting started, tutorials); the tunable node parameters
+  (including the plan-time `max_attempts` the benchmark re-pins) are in `docs/concepts/parameters.md`.
+- `curobov2_ros_extra/README.md` — the cuRobo benchmarks reproduction in
   depth: one-shot compose run, the full `curobo_benchmark` CLI, solver
   envelope, timing attribution, and the honest receipt.
 
@@ -134,8 +101,7 @@ This project builds on the work of:
   validation, and the plan/rank/execute lifecycle all reimplement that design for the cuRobo planning stack.
 - **[moveit_task_constructor_visualization](https://github.com/moveit/moveit_task_constructor_visualization)**
   —
-  specifically the pluginlib-registered `rviz_common::Panel` structure of
-  `curobo_task_constructor_rviz` mirrors the panel/plugin-registration shape
-  of this visualization package. The panel only uses
-  `curobo_task_constructor_interfaces` topics and does not reuse MoveIt's
-  introspection messages or code.
+  inspiration for UIs
+- **[Moveit2](https://github.com/moveit/moveit2/tree/main)**
+  —
+  inspiration for UIs and ideas on how to tackle some of the problems I encountered while working on this

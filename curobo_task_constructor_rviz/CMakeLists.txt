@@ -14,7 +14,7 @@ find_package(rviz_common REQUIRED)
 find_package(visualization_msgs REQUIRED)
 
 # Qt: this rviz stack is Qt5-based — link Qt5::Widgets explicitly, the same
-# way isaac_ros_cumotion_rviz (sibling in this workspace) and upstream
+# way curobov2_ros_rviz (sibling in this workspace) and upstream
 # moveit_task_constructor_visualization do. There is no rviz_qt package.
 find_package(Qt5 REQUIRED COMPONENTS Widgets)
 
@@ -29,7 +29,7 @@ set(CMAKE_AUTOMOC ON)
 # not in the .cpp. AUTOMOC alone only mocs a header that is listed in the
 # target sources or sits beside a same-named source; this header lives at
 # include/curobo_task_constructor_rviz/ (different path from src/), so moc it
-# explicitly — exactly like the sibling isaac_ros_cumotion_rviz does for every
+# explicitly — exactly like the sibling curobov2_ros_rviz does for every
 # one of its headers. WITHOUT this the library links (or build-links) without
 # a vtable / staticMetaObject and rviz dlopen fails on
 # "undefined symbol: vtable for ...::TaskConstructorPanel".
@@ -82,7 +82,7 @@ target_link_options(${PROJECT_NAME} PRIVATE "-Wl,--no-undefined")
 # load with "Could not find library corresponding to plugin ...".
 
 # EXPORT + ament_export_targets (below) is what lets a DOWNSTREAM package link
-# this library. isaac_ros_cumotion_rviz builds its composite "curobo" panel by
+# this library. curobov2_ros_rviz builds its composite "curobo" panel by
 # instantiating TaskConstructorPanel directly as a tab's widget, so it needs the
 # target — and without the export it could only do so by re-implementing the
 # panel or by dlopen'ing it back through pluginlib, both of which lose the C++
@@ -100,7 +100,7 @@ install(DIRECTORY rviz
 )
 
 # Install the header next to the library, because this package is now linked by
-# a downstream one (isaac_ros_cumotion_rviz builds its composite "curobo" panel
+# a downstream one (curobov2_ros_rviz builds its composite "curobo" panel
 # by instantiating TaskConstructorPanel as a tab widget, so it needs both the C++
 # type AND its declaration).
 #

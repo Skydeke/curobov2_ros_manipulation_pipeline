@@ -107,7 +107,7 @@
 #
 # The benchmark module is executed with `python3 -m` + an explicit PYTHONPATH
 # to the mounted src package, so a container rebuild is NOT required to pick
-# up new isaac_ros_cumotion_extra sources (only the docker image itself must
+# up new curobov2_ros_extra sources (only the docker image itself must
 # have curobo[benchmark] + robometrics, which Dockerfile.cumotion installs).
 #
 # Run:  docker compose -f docker/compose_benchmark.yaml up
@@ -116,7 +116,7 @@
 services:
   curobo_server:
     container_name: curobo_benchmark_server
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
       dockerfile: docker/Dockerfile.cumotion
@@ -141,11 +141,11 @@ services:
       - |
         source /opt/ros/jazzy/setup.bash &&
         source /root/ros2_ws/install/setup.bash &&
-        ros2 launch isaac_ros_cumotion gen_traj.launch.py \
+        ros2 launch curobov2_ros gen_traj.launch.py \
           robot:=franka gui:=false \
           voxel_size:=0.05 mapper_extent_xyz:="[2.0, 2.0, 2.0]" \
-          robot_config_file:=/root/ros2_ws/src/isaac_ros_cumotion/config/franka.curobo.reference.yml \
-          urdf_path:=/root/ros2_ws/src/isaac_ros_cumotion/config/urdf/franka/franka_panda.urdf \
+          robot_config_file:=/root/ros2_ws/src/curobov2_ros/config/franka.curobo.reference.yml \
+          urdf_path:=/root/ros2_ws/src/curobov2_ros/config/urdf/franka/franka_panda.urdf \
           max_attempts:=${CUROBO_MAX_ATTEMPTS:-100} collision_activation_distance:=0.0025 \
           num_trajopt_seeds:=${CUROBO_NUM_TRAJOPT_SEEDS:-4} \
           obstacle_collision_mode:=${CUROBO_COLLISION_MODE:-cuboid} \
@@ -165,7 +165,7 @@ services:
 
   curobo_benchmark:
     container_name: curobo_benchmark
-    image: ghcr.io/skydeke/isaac_ros_cumotion/isaac-ros-cumotion:latest
+    image: ghcr.io/skydeke/curobov2_ros/isaac-ros-cumotion:latest
     depends_on:
       curobo_server:
         condition: service_started
@@ -190,7 +190,7 @@ services:
       - |
         source /opt/ros/jazzy/setup.bash &&
         source /root/ros2_ws/install/setup.bash &&
-        export PYTHONPATH=/root/ros2_ws/src/isaac_ros_cumotion_extra:$${PYTHONPATH} &&
+        export PYTHONPATH=/root/ros2_ws/src/curobov2_ros_extra:$${PYTHONPATH} &&
         echo "Waiting for /unified_planner/generate_trajectory..." &&
         for attempt in 1 2 3 4 5 6 7 8 9 10; do
           if ros2 service list --no-daemon 2>/dev/null | grep -q unified_planner/generate_trajectory; then
@@ -201,20 +201,20 @@ services:
         done;
         echo "Server ready, running the cuRobo benchmarks page's suites in order (motion generation -> IK -> kinematics & collision), once native / once ROS..." &&
         echo "The runner switches the server's torque mode itself (set_parameters + update_motion_gen_config), so one server life fills BOTH motion ROS rows - nothing is skipped." &&
-        python3 -m isaac_ros_cumotion_extra.benchmark.run webpage --run-ros \
+        python3 -m curobov2_ros_extra.benchmark.run webpage --run-ros \
           --dataset ${CUROBO_DATASET:-full} --max-attempts ${CUROBO_MAX_ATTEMPTS:-100} \
           -o /tmp/benchmark_webpage.json;
         webpage_exit=$?;
         if [ "${CUROBO_RUN_PARITY:-0}" = "1" ]; then
           echo "CUROBO_RUN_PARITY=1: additionally running the compare-verdict suite (all/ik/cost)..." &&
-          python3 -m isaac_ros_cumotion_extra.benchmark.run all \
+          python3 -m curobov2_ros_extra.benchmark.run all \
             --dataset ${CUROBO_PARITY_DATASET:-demo} --show-all -o /tmp/benchmark_report.json \
             ${CUROBO_DYN_FLAGS:-};
           planning_exit=$?;
-          python3 -m isaac_ros_cumotion_extra.benchmark.run ik \
+          python3 -m curobov2_ros_extra.benchmark.run ik \
             --show-all -o /tmp/benchmark_ik_report.json;
           ik_exit=$?;
-          python3 -m isaac_ros_cumotion_extra.benchmark.run cost \
+          python3 -m curobov2_ros_extra.benchmark.run cost \
             --show-all -o /tmp/benchmark_cost_report.json;
           cost_exit=$?;
           echo "Parity exit codes: planning=$$planning_exit ik=$$ik_exit cost=$$cost_exit (any PARITY-DELTA verdict is expected as exit 1)";
