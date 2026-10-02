@@ -34,8 +34,8 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Isaac ROS Maintainers',
-    maintainer_email='isaac-ros-maintainers@nvidia.com',
+    maintainer='me',
+    maintainer_email='me@todo.com',
     description='Extra tools for curobov2_ros: ESDF/Viser visualizer and cuRobo config generator.',
     license='Apache-2.0',
     extras_require={

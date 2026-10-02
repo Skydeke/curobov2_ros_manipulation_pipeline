@@ -4,7 +4,7 @@
   <name>curobov2_ros_moveit</name>
   <version>4.3.0</version>
   <description>Package adds a cuMotion planner plugin to MoveIt</description>
-  <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2.0</license>
   <url type="website">https://developer.nvidia.com/isaac-ros-gems/</url>
   <author>Balakumar Sundaralingam</author>

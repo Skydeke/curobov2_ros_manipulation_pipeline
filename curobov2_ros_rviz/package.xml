@@ -6,7 +6,7 @@
   <description>
     Curobo rviz panels to modify parameters or add objects to the environment.
   </description>
-  <maintainer email="will@todo.todo">will</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

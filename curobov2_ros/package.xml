@@ -4,7 +4,7 @@
   <name>curobov2_ros</name>
   <version>1.0.0</version>
   <description>GPU-accelerated motion planning for ROS 2, powered by cuRobo.</description>
-  <maintainer email="guillaume.dupoiron@protonmail.com">Guillaume Dupoiron</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2.0</license>
 
   <test_depend>ament_copyright</test_depend>

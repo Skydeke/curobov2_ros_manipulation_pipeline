@@ -4,7 +4,7 @@
   <name>curobov2_ros_extra</name>
   <version>4.3.0</version>
   <description>Extra tools for curobov2_ros: ESDF/Viser visualizer and cuRobo config generator.</description>
-  <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2.0</license>
   <exec_depend>curobo</exec_depend>
   <exec_depend>iki_kortex_description</exec_depend>
