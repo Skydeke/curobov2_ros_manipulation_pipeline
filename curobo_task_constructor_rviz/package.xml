@@ -11,8 +11,9 @@
 
   <license>BSD-3-Clause</license>
 
-  <maintainer email="dev@example.com">curobo_task_constructor</maintainer>
-  <author email="dev@example.com">curobo_task_constructor</author>
+  <maintainer email="me@todo.com">me</maintainer>
+  <author email="me@todo.com">me</author>
+  <url type="repository">https://github.com/Skydeke/curobov2_ros_manipulation_pipeline</url>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
 

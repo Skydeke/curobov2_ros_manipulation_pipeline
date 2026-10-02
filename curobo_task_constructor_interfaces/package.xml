@@ -11,7 +11,8 @@
     types extend the schema through the opaque stage_params string without
     touching any message definition.
   </description>
-  <maintainer email="dev@example.com">curobo_task_constructor maintainers</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
+  <url type="repository">https://github.com/Skydeke/curobov2_ros_manipulation_pipeline</url>
   <license>Apache-2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

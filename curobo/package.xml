@@ -4,7 +4,7 @@
   <name>curobo</name>
   <version>4.3.0</version>
   <description>This package wraps the cuRobo library as a ROS 2 package.</description>
-  <maintainer email="isaac-ros-maintainers@nvidia.com">Isaac ROS Maintainers</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
   <license>NVIDIA Isaac ROS Software License</license>
 
   <!-- PYTHON DEPENDENCIES ARE NOT DECLARED HERE, ON PURPOSE.

@@ -49,8 +49,8 @@ setup(
     ],
     install_requires=["setuptools"],
     zip_safe=True,
-    maintainer="Guillaume Dupoiron",
-    maintainer_email="guillaume.dupoiron@protonmail.com",
+    maintainer="me",
+    maintainer_email="me@todo.com",
     description="GPU-accelerated motion planning for ROS 2, powered by cuRobo.",
     license="Apache-2.0",
     # setuptools 81 dropped `tests_require`; it now warns "Unknown distribution

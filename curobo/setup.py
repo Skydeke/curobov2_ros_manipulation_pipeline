@@ -54,8 +54,8 @@ setup(
     ],
     install_requires=["setuptools"],
     zip_safe=True,
-    maintainer="Isaac ROS Maintainers",
-    maintainer_email="isaac-ros-maintainers@nvidia.com",
+    maintainer="me",
+    maintainer_email="me@todo.com",
     description="This package wraps the cuRobo library as a ROS 2 package. ",
     license="NVIDIA Isaac ROS Software License",
     entry_points={

@@ -4,7 +4,7 @@
   <name>curobov2_ros_interfaces</name>
   <version>0.0.0</version>
   <description>msg, srv and action interfaces for curobov2_ros</description>
-  <maintainer email="guilaume.dupoiron@gmail.com">will</maintainer>
+  <maintainer email="me@todo.com">me</maintainer>
   <license>Apache 2.0</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
