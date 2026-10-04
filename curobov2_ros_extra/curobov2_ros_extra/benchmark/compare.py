@@ -891,21 +891,41 @@ def curobo_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     return rows
 
 
+def _amortized_ik_ms(entry: Dict[str, Any]) -> Optional[float]:
+    """Per-goal IK cost: batch wall divided by the entry's batch size.
+
+    Entries carry the whole batch's solve wall in ``time_ms`` (one parallel
+    GPU/batch call per batch); ``n_goals`` is that batch's size (1 for
+    per-goal callers, who are unaffected). Missing/empty values stay None
+    so ``_stat_str`` skips them like any other absent field.
+    """
+    wall = entry.get("time_ms")
+    if wall is None:
+        return None
+    n = entry.get("n_goals") or 1
+    if not n:
+        return None
+    return float(wall) / float(n)
+
+
 def ik_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     """Build the ``Metric``/``Value`` rows for one IK leg (curobo-layout).
 
     Follows the reference ``ik_benchmark`` table: Success % over all goals;
-    IK Time over successful goals (``time_ms`` is the per-batch solve wall the
-    goals belong to — the upstream table also aggregates per-inference times);
-    then the FK-verified pose errors, which are the parity fields both legs
-    report identically. Statistics rows cover successful goals only.
+    IK Time over successful goals, amortized per goal (each entry's
+    ``time_ms`` is the per-batch solve wall it belongs to, divided by the
+    entry's ``n_goals`` batch size — the upstream table likewise reports
+    per-inference times); then the FK-verified pose errors, which are the
+    parity fields both legs report identically. Statistics rows cover
+    successful goals only. Raw batch walls stay untouched in the JSONs.
     """
     cfree = _rows_for(results, "ik")
     ok = [r for r in cfree if bool(r.get("success"))]
     success_pct = 100.0 * len(ok) / len(cfree) if cfree else 0.0
     rows: List[List[str]] = [
         ["Success %", f"{success_pct:2.2f}"],
-        ["IK Time (ms)", _stat_str([r.get("time_ms") for r in ok])],
+        ["IK Time (ms)", _stat_str(
+            [_amortized_ik_ms(r) for r in ok])],
     ]
     pos_err = [r.get("position_error_mm") for r in ok]
     if any(v is not None for v in pos_err):
