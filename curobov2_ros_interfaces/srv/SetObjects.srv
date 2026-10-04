@@ -1,0 +1,16 @@
+# Bulk scene replacement in a single round trip: optionally clear the
+# current object set, then add every listed object, then refresh the solver
+# worlds ONCE (instead of once per add_object, which re-runs scene
+# normalization plus the motion/IK/FK checker refreshes under the GPU lock
+# for every single obstacle — the dominant cost of replaying benchmark
+# problems through the server).
+#
+# Fails fast with success=false WITHOUT mutating the scene when any entry
+# is invalid (bad dimensions, duplicate name, unusable mesh spec); the
+# already-registered scene is left exactly as it was.
+SceneObject[] objects
+bool clear_first true
+---
+# Response fields
+bool success
+string message

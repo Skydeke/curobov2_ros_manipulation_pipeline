@@ -3,7 +3,7 @@ from std_srvs.srv import Trigger, SetBool
 from curobov2_ros_interfaces.srv import (
     AddObject, GetCollisionDistance, GetJointInfo, GetRobotStrategies,
     GetSceneObjects, GetVoxelGrid, RemoveObject, SetCollisionCache, SetJointLocks,
-    SetLinkCollision, SetMask,
+    SetLinkCollision, SetMask, SetObjects,
 )
 from curobov2_ros_interfaces.msg import SparseVoxelGrid
 from visualization_msgs.msg import MarkerArray, Marker
@@ -54,6 +54,7 @@ class RosServiceManager:
         self.get_obstacles_srv = None
         self.get_scene_objects_srv = None
         self.remove_all_objects_srv = None
+        self.set_objects_srv = None
         self.get_voxel_map_srv = None
         self.get_collision_distance_srv = None
         self.set_collision_cache_srv = None
@@ -128,6 +129,14 @@ class RosServiceManager:
             Trigger,
             self.node.get_name() + '/remove_all_objects',
             partial(self._callback_remove_all_objects, self.node)
+        )
+
+        # Bulk scene replacement (clear + N adds, ONE solver-world refresh).
+        # Same observer propagation as the single-object services.
+        self.set_objects_srv = self.node.create_service(
+            SetObjects,
+            self.node.get_name() + '/set_objects',
+            partial(self._callback_set_objects, self.node)
         )
 
         self.get_voxel_map_srv = self.node.create_service(
@@ -450,6 +459,10 @@ class RosServiceManager:
     def _callback_remove_all_objects(self, node, request: Trigger, response):
         """Delegate remove_all_objects to ObstacleManager (observer propagates)."""
         return self.obstacle_manager.remove_all_objects(node, request, response)
+
+    def _callback_set_objects(self, node, request: SetObjects, response):
+        """Delegate set_objects to ObstacleManager (single refresh)."""
+        return self.obstacle_manager.set_objects(node, request, response)
 
     def _callback_get_voxel_grid(self, node, request: GetVoxelGrid, response):
         """Delegate get_voxel_grid service to ObstacleManager.

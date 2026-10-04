@@ -44,6 +44,8 @@ README "timing attribution" section for the accepted divergence.
 """
 
 # Standard Library
+import hashlib
+import json
 import time
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -55,11 +57,12 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import JointState as RosJointState
 
-from curobov2_ros_interfaces.msg import Goalset, TrajectoryGoal
+from curobov2_ros_interfaces.msg import Goalset, SceneObject, TrajectoryGoal
 from curobov2_ros_interfaces.srv import (
     AddObject,
     SetCollisionCache,
     SetJointLocks,
+    SetObjects,
     TrajectoryGeneration,
 )
 from std_srvs.srv import Trigger
@@ -109,6 +112,16 @@ UPDATE_MOTION_GEN_CONFIG_SRV = f"{SERVER_NODE}/update_motion_gen_config"
 # every solver. Per-joint: we name the joints to re-pin and leave the rest of
 # the model's locks alone.
 SET_JOINT_LOCKS_SRV = f"{SERVER_NODE}/set_joint_locks"
+# Bulk scene replacement: clear + N adds, ONE solver-world refresh (see
+# set_objects / SetObjects.srv). Optional: servers predating the service
+# only offer clear/add_object, which the runner falls back to.
+SET_OBJECTS_SRV = f"{SERVER_NODE}/set_objects"
+
+
+def obstacle_hash(obstacles: Dict[str, Any]) -> str:
+    """Stable hash of a problem's obstacle dict (scene-change detection)."""
+    canonical = json.dumps(obstacles, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 class RosBenchmarkRunner(Node):
@@ -457,6 +470,68 @@ class RosBenchmarkRunner(Node):
             raise RuntimeError(
                 f"remove_all_objects failed: {getattr(response, 'message', '')}"
             )
+
+    def bulk_client_or_none(self, service_timeout: float = 30.0):
+        """A ``set_objects`` client, or None when the server lacks the service.
+
+        Older servers only offer clear/add_object, which callers fall back
+        to — hence optional here instead of a hard constructor requirement.
+        """
+        client = self.create_client(SetObjects, SET_OBJECTS_SRV)
+        if client.wait_for_service(timeout_sec=min(float(service_timeout), 5.0)):
+            return client
+        self.destroy_client(client)
+        return None
+
+    def set_world_bulk(
+        self, client, obstacles: Dict[str, Any], timeout: float = 120.0
+    ) -> bool:
+        """Replace the scene via one ``set_objects`` call.
+
+        Returns False (never raises) on any failure — transport error,
+        timeout or server rejection — so the caller can fall back to the
+        clear + per-object loop, which surfaces the real error.
+        """
+        try:
+            request = SetObjects.Request()
+            request.clear_first = True
+            for payload in obstacles_dict_to_add_requests(obstacles):
+                obj = SceneObject()
+                obj.type = int(payload["type"])
+                obj.name = payload["name"]
+                px, py, pz, qw, qx, qy, qz = payload["pose"]
+                obj.pose.position.x = px
+                obj.pose.position.y = py
+                obj.pose.position.z = pz
+                obj.pose.orientation.w = qw
+                obj.pose.orientation.x = qx
+                obj.pose.orientation.y = qy
+                obj.pose.orientation.z = qz
+                dx, dy, dz = payload["dims"]
+                obj.dimensions.x = dx
+                obj.dimensions.y = dy
+                obj.dimensions.z = dz
+                cr, cg, cb, ca = payload["color"]
+                obj.color.r = cr
+                obj.color.g = cg
+                obj.color.b = cb
+                obj.color.a = ca
+                obj.mesh_file_path = payload.get("mesh_file_path") or ""
+                for v in payload.get("vertices", []):
+                    obj.vertices.append(RosPoint(x=v[0], y=v[1], z=v[2]))
+                obj.triangles.extend(payload.get("triangles", []))
+                request.objects.append(obj)
+            response = self._call(client, request, timeout)
+            if response is None or not bool(response.success):
+                self.get_logger().warn(
+                    "set_objects failed "
+                    f"({getattr(response, 'message', 'no response')}) — "
+                    "falling back to clear + per-object adds")
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001 - fallback covers it
+            self.get_logger().warn(f"set_objects failed ({exc}) — falling back")
+            return False
 
     def add_world(self, obstacles: Dict[str, Any], timeout: float = 60.0) -> None:
         for payload in obstacles_dict_to_add_requests(obstacles):
@@ -828,6 +903,35 @@ def run_ros(
         if not ready_problems:
             return []
 
+        current_hash: Optional[str] = None
+        world_sets = 0
+        bulk_client = node.bulk_client_or_none(service_timeout)
+        if bulk_client is not None:
+            node.get_logger().info(
+                "Using set_objects bulk scene API "
+                "(one solver refresh per scene)")
+
+        def ensure_world(obstacles: Dict[str, Any]) -> None:
+            """Push the world only when it differs from the registered scene.
+
+            Prefers one ``set_objects`` call (single solver-world refresh);
+            falls back to the clear + per-object loop on servers without the
+            service.
+            """
+            nonlocal current_hash, world_sets
+            digest = obstacle_hash(obstacles)
+            if digest == current_hash:
+                return
+            if bulk_client is not None and node.set_world_bulk(
+                    bulk_client, obstacles, timeout=call_timeout):
+                current_hash = digest
+                world_sets += 1
+                return
+            node.clear_world(timeout=call_timeout)
+            node.add_world(obstacles, timeout=call_timeout)
+            current_hash = digest
+            world_sets += 1
+
         if warmup_probe:
             scene_key, i, first_problem = ready_problems[0]
             # Switch to the first scene's lock BEFORE warming up, so the probe
@@ -837,8 +941,7 @@ def run_ros(
             node.get_logger().info(
                 f"Warmup probe: {scene_key}_{i} (world clear + add + plan)"
             )
-            node.clear_world(timeout=call_timeout)
-            node.add_world(first_problem["obstacles"], timeout=call_timeout)
+            ensure_world(first_problem["obstacles"])
             try:
                 node.plan_one(
                     first_problem,
@@ -856,8 +959,7 @@ def run_ros(
             if verbose:
                 node.get_logger().info(f"Solving {problem_name} ...")
             apply_lock(scene_key)
-            node.clear_world(timeout=call_timeout)
-            node.add_world(problem["obstacles"], timeout=call_timeout)
+            ensure_world(problem["obstacles"])
             results.append(
                 node.plan_one(
                     problem,
@@ -870,7 +972,8 @@ def run_ros(
 
         node.get_logger().info(
             f"ROS leg done: {len(results)} problems, "
-            f"{sum(1 for r in results if r['success'])} succeeded"
+            f"{sum(1 for r in results if r['success'])} succeeded "
+            f"({world_sets} world sets)"
         )
         return results
     finally:
