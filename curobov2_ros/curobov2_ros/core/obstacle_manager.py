@@ -753,8 +753,7 @@ class ObstacleManager:
     # ---- Services ----
 
     def add_object(self, node, request: AddObject, response):
-        """
-        Add a primitive or mesh obstacle to the scene.
+        """Add a primitive or mesh obstacle to the scene.
 
         Dimensions interpretation by type:
           CUBOID  -> [dx, dy, dz]
@@ -763,98 +762,13 @@ class ObstacleManager:
           SPHERE  -> [radius, _, _]
           MESH    -> [scale_x, scale_y, scale_z]
         """
-        if request.name in self.obstacle_names:
+        err = self._validate_spec(request, set(self.obstacle_names))
+        if err is not None:
             response.success = False
-            response.message = f'Object with name "{request.name}" already exists'
+            response.message = err
             return response
-
-        if request.dimensions.x <= 0 or request.dimensions.y <= 0 or request.dimensions.z <= 0:
-            response.success = False
-            response.message = 'Object dimensions must be positive'
-            return response
-
-        pose = [
-            request.pose.position.x, request.pose.position.y, request.pose.position.z,
-            request.pose.orientation.w, request.pose.orientation.x,
-            request.pose.orientation.y, request.pose.orientation.z,
-        ]
-        dims = [request.dimensions.x, request.dimensions.y, request.dimensions.z]
-        color = [request.color.r, request.color.g, request.color.b, request.color.a]
-
         try:
-            match request.type:
-                case request.CUBOID:
-                    self._append('cuboid', Cuboid(name=request.name, pose=pose, dims=dims, color=color))
-
-                case request.CAPSULE:
-                    self._append('capsule', Capsule(
-                        name=request.name, pose=pose,
-                        base=[0, 0, 0], tip=[0, 0, dims[1]],
-                        radius=dims[0], color=color,
-                    ))
-
-                case request.CYLINDER:
-                    self._append('cylinder', Cylinder(
-                        name=request.name, pose=pose,
-                        radius=dims[0], height=dims[1], color=color,
-                    ))
-
-                case request.SPHERE:
-                    self._append('sphere', Sphere(
-                        name=request.name, pose=pose, radius=dims[0], color=color,
-                    ))
-
-                case request.MESH:
-                    # Inline vertex/triangle data takes precedence over a file
-                    # path (Sec 6b of the task-constructor plan): MoveIt
-                    # CollisionObject meshes are in-memory arrays, not files on
-                    # disk, and the planning plugin forwards them inline to
-                    # avoid a per-sync temp-file write. cuRobo's Mesh consumes
-                    # `faces` as a flat triangle index buffer.
-                    if len(request.vertices) > 0 or len(request.triangles) > 0:
-                        if len(request.vertices) == 0 or len(request.triangles) == 0:
-                            response.success = False
-                            response.message = (
-                                'Inline MESH requires both vertices and triangles')
-                            return response
-                        if len(request.triangles) % 3 != 0:
-                            response.success = False
-                            response.message = (
-                                'Inline MESH triangles must be a flat index '
-                                'buffer with a multiple-of-3 length')
-                            return response
-                        self._append('mesh', Mesh(
-                            name=request.name, pose=pose,
-                            vertices=[[v.x, v.y, v.z] for v in request.vertices],
-                            faces=list(request.triangles),
-                            scale=dims, color=color,
-                        ))
-                        node.get_logger().info(
-                            f"Added MESH obstacle '{request.name}' from inline "
-                            f"geometry ({len(request.vertices)} vertices, "
-                            f"{len(request.triangles) // 3} triangles; handled "
-                            f"natively by Mapper TSDF in v2)"
-                        )
-                    else:
-                        if not os.path.exists(request.mesh_file_path):
-                            response.success = False
-                            response.message = f'Mesh file not found: {request.mesh_file_path}'
-                            return response
-                        self._append('mesh', Mesh(
-                            name=request.name, pose=pose,
-                            file_path=request.mesh_file_path,
-                            scale=dims, color=color,
-                        ))
-                        node.get_logger().info(
-                            f"Added MESH obstacle '{request.name}' "
-                            f"(handled natively by Mapper TSDF in v2)"
-                        )
-
-                case _:
-                    response.success = False
-                    response.message = f'Object type "{request.type}" not recognized'
-                    return response
-
+            self._append_spec(request, node)
         except Exception as e:
             response.success = False
             response.message = f'Failed to add obstacle: {e}'
@@ -868,6 +782,144 @@ class ObstacleManager:
         )
         self._notify_world_changed()
         return response
+
+    def set_objects(self, node, request, response):
+        """Replace the object set in bulk: optional clear, add all, ONE refresh.
+
+        Validates every entry first and fails WITHOUT mutating the scene when
+        any entry is invalid — unlike N add_object calls, which also pay one
+        full solver-world refresh per obstacle. See SetObjects.srv.
+        """
+        taken = set()
+        if not request.clear_first:
+            taken = set(self.obstacle_names)
+        for spec in request.objects:
+            err = self._validate_spec(spec, taken)
+            if err is not None:
+                response.success = False
+                response.message = (
+                    f"Invalid object '{getattr(spec, 'name', '?')}': {err}"
+                )
+                return response
+            taken.add(spec.name)
+        try:
+            if request.clear_first:
+                self._clear_all()
+            for spec in request.objects:
+                self._append_spec(spec, node)
+        except Exception as e:
+            response.success = False
+            response.message = f'Failed to set objects: {e}'
+            node.get_logger().error(response.message)
+            return response
+
+        response.success = True
+        response.message = (
+            f"Scene set to {len(request.objects)} objects "
+            f"({len(self.scene.cuboid)} cuboids, {len(self.scene.mesh)} meshes)"
+        )
+        self._notify_world_changed()
+        return response
+
+    def _clear_all(self):
+        """Empty every scene bucket + the name registry WITHOUT notifying."""
+        for bucket in ('cuboid', 'capsule', 'cylinder', 'sphere', 'mesh'):
+            setattr(self.scene, bucket, [])
+        self.obstacle_names = []
+
+    def _validate_spec(self, spec, taken: set) -> str | None:
+        """Validate one object spec (AddObject request or SceneObject msg).
+
+        Pure check, no mutation. ``taken`` holds the names already claimed
+        (existing scene plus earlier entries of the same bulk request).
+        Returns an error message, or None when valid. Message strings match
+        add_object's historical responses.
+        """
+        if spec.name in taken:
+            return f'Object with name "{spec.name}" already exists'
+        dims = [spec.dimensions.x, spec.dimensions.y, spec.dimensions.z]
+        if dims[0] <= 0 or dims[1] <= 0 or dims[2] <= 0:
+            return 'Object dimensions must be positive'
+        if spec.type == spec.MESH:
+            n_v = len(spec.vertices or [])
+            n_t = len(spec.triangles or [])
+            if n_v > 0 or n_t > 0:
+                if n_v == 0 or n_t == 0:
+                    return 'Inline MESH requires both vertices and triangles'
+                if len(spec.triangles) % 3 != 0:
+                    return ('Inline MESH triangles must be a flat index '
+                            'buffer with a multiple-of-3 length')
+            elif not os.path.exists(spec.mesh_file_path or ""):
+                return f'Mesh file not found: {spec.mesh_file_path}'
+        elif spec.type not in (spec.CUBOID, spec.SPHERE,
+                               spec.CAPSULE, spec.CYLINDER):
+            return f'Object type "{spec.type}" not recognized'
+        return None
+
+    def _append_spec(self, spec, node=None):
+        """Append one validated spec (no notify). Shared by add/set paths."""
+        pose = [
+            spec.pose.position.x, spec.pose.position.y, spec.pose.position.z,
+            spec.pose.orientation.w, spec.pose.orientation.x,
+            spec.pose.orientation.y, spec.pose.orientation.z,
+        ]
+        dims = [spec.dimensions.x, spec.dimensions.y, spec.dimensions.z]
+        color = [spec.color.r, spec.color.g, spec.color.b, spec.color.a]
+        match spec.type:
+            case spec.CUBOID:
+                self._append('cuboid', Cuboid(name=spec.name, pose=pose, dims=dims, color=color))
+
+            case spec.CAPSULE:
+                self._append('capsule', Capsule(
+                    name=spec.name, pose=pose,
+                    base=[0, 0, 0], tip=[0, 0, dims[1]],
+                    radius=dims[0], color=color,
+                ))
+
+            case spec.CYLINDER:
+                self._append('cylinder', Cylinder(
+                    name=spec.name, pose=pose,
+                    radius=dims[0], height=dims[1], color=color,
+                ))
+
+            case spec.SPHERE:
+                self._append('sphere', Sphere(
+                    name=spec.name, pose=pose, radius=dims[0], color=color,
+                ))
+
+            case spec.MESH:
+                # Inline vertex/triangle data takes precedence over a file
+                # path (Sec 6b of the task-constructor plan): MoveIt
+                # CollisionObject meshes are in-memory arrays, not files on
+                # disk, and the planning plugin forwards them inline to
+                # avoid a per-sync temp-file write. cuRobo's Mesh consumes
+                # `faces` as a flat triangle index buffer.
+                if len(spec.vertices) > 0 or len(spec.triangles) > 0:
+                    self._append('mesh', Mesh(
+                        name=spec.name, pose=pose,
+                        vertices=[[v.x, v.y, v.z] for v in spec.vertices],
+                        faces=list(spec.triangles),
+                        scale=dims, color=color,
+                    ))
+                    node.get_logger().info(
+                        f"Added MESH obstacle '{spec.name}' from inline "
+                        f"geometry ({len(spec.vertices)} vertices, "
+                        f"{len(spec.triangles) // 3} triangles; handled "
+                        f"natively by Mapper TSDF in v2)"
+                    )
+                else:
+                    self._append('mesh', Mesh(
+                        name=spec.name, pose=pose,
+                        file_path=spec.mesh_file_path,
+                        scale=dims, color=color,
+                    ))
+                    node.get_logger().info(
+                        f"Added MESH obstacle '{spec.name}' "
+                        f"(handled natively by Mapper TSDF in v2)"
+                    )
+
+            case _:
+                raise ValueError(f'Object type "{spec.type}" not recognized')
 
     def remove_object(self, node, request: RemoveObject, response):
         if request.name not in self.obstacle_names:
@@ -895,9 +947,7 @@ class ObstacleManager:
 
     def remove_all_objects(self, node, request: Trigger, response):
         total = sum(len(getattr(self.scene, b)) for b in ('cuboid', 'capsule', 'cylinder', 'sphere', 'mesh'))
-        for bucket in ('cuboid', 'capsule', 'cylinder', 'sphere', 'mesh'):
-            setattr(self.scene, bucket, [])
-        self.obstacle_names = []
+        self._clear_all()
 
         response.success = True
         response.message = f'All {total} obstacles removed'

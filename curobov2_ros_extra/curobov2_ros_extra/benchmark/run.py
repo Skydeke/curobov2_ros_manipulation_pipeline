@@ -62,6 +62,25 @@ def _dump(results: List[Dict[str, Any]], path: str) -> None:
     print(f"Wrote {len(results)} results to {path}", flush=True)
 
 
+def _fmt_dur(seconds: float) -> str:
+    """Human duration: 45s, 12m34s, 2h05m."""
+    seconds = max(0.0, float(seconds))
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    mins = int(seconds // 60)
+    if mins < 60:
+        return f"{mins}m{int(seconds % 60):02d}s"
+    return f"{mins // 60}h{(mins % 60):02d}m"
+
+
+def _print_wall_time(wall: Dict[str, float], total: float) -> None:
+    """Print real (wall-clock) time per leg plus the run total."""
+    print("\nWALL TIME (real time per leg):", flush=True)
+    for label, seconds in wall.items():
+        print(f"  {label}: {_fmt_dur(seconds)}", flush=True)
+    print(f"  total: {_fmt_dur(total)}", flush=True)
+
+
 def _sidecar(output: Optional[str], label: str) -> Optional[str]:
     """``report.json`` + ``core`` -> ``report.core.json`` ('' output -> None)."""
     if not output:
@@ -260,16 +279,30 @@ def cmd_webpage(args) -> int:
         robot_config=args.robot_config,
     )
 
+    import time as _time
+
+    run_t0 = _time.perf_counter()
+    wall: Dict[str, float] = {}
+
+    def _timed(label: str, func, *f_args, **f_kwargs):
+        t0 = _time.perf_counter()
+        try:
+            return func(*f_args, **f_kwargs)
+        finally:
+            wall[label] = _time.perf_counter() - t0
+
     print("== [1/3] motion generation: pass 1/2 (without torque limits) ==",
           flush=True)
-    motion_plain_native = run_core(**common, use_dynamics=False)
+    motion_plain_native = _timed(
+        "motion plain — native", run_core, **common, use_dynamics=False)
     motion_plain_ros = None
     if args.run_ros:
         # Neither ROS leg is ever skipped: the runner ensures the server's
         # torque mode itself (set_server_torque_mode) — plain for this leg,
         # torque-limited at --mass for the pass below. No --server-torque gate.
         print("   ROS leg (server torque mode off)", flush=True)
-        motion_plain_ros = run_ros(
+        motion_plain_ros = _timed(
+            "motion plain — ROS", run_ros,
             dataset=args.dataset, scene=args.scene,
             use_dynamics=False, mass=args.mass, verbose=False,
             server_dynamics=False, server_payload_mass=0.0,
@@ -280,12 +313,14 @@ def cmd_webpage(args) -> int:
 
     print("== [1/3] motion generation: pass 2/2 (with torque limits) ==",
           flush=True)
-    motion_torque_native = run_core(**common, use_dynamics=True)
+    motion_torque_native = _timed(
+        "motion torque — native", run_core, **common, use_dynamics=True)
     motion_torque_ros = None
     if args.run_ros:
         print("   ROS leg (server torque mode on, payload from --mass)",
               flush=True)
-        motion_torque_ros = run_ros(
+        motion_torque_ros = _timed(
+            "motion torque — ROS", run_ros,
             dataset=args.dataset, scene=args.scene,
             use_dynamics=True, mass=args.mass, verbose=False,
             server_dynamics=True, server_payload_mass=args.mass,
@@ -295,12 +330,15 @@ def cmd_webpage(args) -> int:
         )
 
     print("== [2/3] inverse kinematics ==", flush=True)
-    ik_native = run_ik_core(num_seeds=args.num_seeds, **synthetic)
-    ik_ros = run_ik_ros(**synthetic, **service) if args.run_ros else None
+    ik_native = _timed("ik — native", run_ik_core,
+                         num_seeds=args.num_seeds, **synthetic)
+    ik_ros = _timed("ik — ROS", run_ik_ros,
+                    **synthetic, **service) if args.run_ros else None
 
     print("== [3/3] kinematics & collision ==", flush=True)
-    cost_native = run_cost_core(**synthetic)
-    cost_ros = run_cost_ros(**synthetic, **service) if args.run_ros else None
+    cost_native = _timed("cost — native", run_cost_core, **synthetic)
+    cost_ros = _timed("cost — ROS", run_cost_ros,
+                      **synthetic, **service) if args.run_ros else None
 
     written: List[str] = []
     if args.output:
@@ -341,6 +379,7 @@ def cmd_webpage(args) -> int:
         print("Result JSONs:", flush=True)
         for path in written:
             print(f"  {path}", flush=True)
+    _print_wall_time(wall, _time.perf_counter() - run_t0)
     return 0
 
 

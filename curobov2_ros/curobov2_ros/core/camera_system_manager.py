@@ -84,8 +84,7 @@ class CameraSystemManager:
         if esdf_cfg is None:
             self.node.get_logger().warn(
                 "No camera feeds the Mapper: set 'camera_topic' (with a "
-                "camera_purpose of 'all' or 'esdf') at launch. The legacy "
-                "cameras_config_file YAML has been removed.")
+                "camera_purpose of 'all' or 'esdf') at launch.")
 
     def get_camera_context(self):
         """
