@@ -70,6 +70,7 @@ On failure: ``success=False`` with ``n_waypoints=0`` and
 # Standard Library
 import json
 import math
+from collections import Counter
 from typing import Any, Dict, List, Optional, Sequence
 
 
@@ -926,25 +927,46 @@ def _batch_ik_ms(entry: Dict[str, Any]) -> Optional[float]:
     return float(wall)
 
 
+def _per_ik_ms(entry: Dict[str, Any], batch_sizes: Dict[Any, int]) -> Optional[float]:
+    """Amortized per-goal IK cost (batch wall / batch size).
+
+    Prefers the entry's ``batch_time_ms`` batch wall divided by the number
+    of entries sharing its ``batch``: per-goal callers stamp the batch wall
+    separately while ``time_ms`` holds only the pure per-call servo wall,
+    which excludes queueing/transport overhead (dividing that by
+    ``n_goals=1`` reads ~100x too fast next to the batch row). Batch
+    callers stamp the batch wall in ``time_ms`` and divide by ``n_goals``
+    via ``_amortized_ik_ms``. Missing/empty values stay None.
+    """
+    wall = entry.get("batch_time_ms")
+    if wall is not None and entry.get("batch") is not None:
+        n = batch_sizes.get(entry.get("batch")) or entry.get("n_goals") or 1
+        if not n:
+            return None
+        return float(wall) / float(n)
+    return _amortized_ik_ms(entry)
+
+
 def ik_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     """Build the ``Metric``/``Value`` rows for one IK leg (curobo-layout).
 
     Follows the reference ``ik_benchmark`` table: Success % over all goals;
     IK Time is the per-batch solve wall (batch duration), plus the amortized
-    per-goal companion (each entry's ``time_ms`` batch wall divided by the
-    entry's ``n_goals`` batch size — the upstream table likewise reports
-    per-inference times); then the FK-verified pose errors, which are the
-    parity fields both legs report identically. Statistics rows cover
-    successful goals only. Raw batch walls stay untouched in the JSONs.
+    per-goal companion (batch wall / batch size — the upstream table
+    likewise reports per-inference times); then the FK-verified pose errors,
+    which are the parity fields both legs report identically. Statistics
+    rows cover successful goals only. Raw batch walls stay untouched in the
+    JSONs.
     """
     cfree = _rows_for(results, "ik")
     ok = [r for r in cfree if bool(r.get("success"))]
     success_pct = 100.0 * len(ok) / len(cfree) if cfree else 0.0
+    batch_sizes = Counter(r.get("batch") for r in cfree)
     rows: List[List[str]] = [
         ["Success %", f"{success_pct:2.2f}"],
         ["IK Time (ms)", _stat_str([_batch_ik_ms(r) for r in ok])],
         ["IK Time (ms) per IK", _stat_str(
-            [_amortized_ik_ms(r) for r in ok])],
+            [_per_ik_ms(r, batch_sizes) for r in ok])],
     ]
     pos_err = [r.get("position_error_mm") for r in ok]
     if any(v is not None for v in pos_err):

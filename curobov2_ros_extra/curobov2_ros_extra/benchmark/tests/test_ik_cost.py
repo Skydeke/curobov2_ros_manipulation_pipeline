@@ -218,13 +218,21 @@ class TestStyleRows:
     def test_ik_style_rows_prefers_batch_time_ms(self):
         rows = ik_style_rows(
             [
-                _ik_goal("ik_cfree_b01_g001", time_ms=8.0, batch_time_ms=800.0),
-                _ik_goal("ik_cfree_b01_g002", time_ms=9.0, batch_time_ms=800.0),
+                _ik_goal("ik_cfree_b01_g001", batch=1, time_ms=8.0,
+                         batch_time_ms=800.0),
+                _ik_goal("ik_cfree_b01_g002", batch=1, time_ms=9.0,
+                         batch_time_ms=800.0),
+                _ik_goal("ik_cfree_b02_g001", batch=2, time_ms=7.0,
+                         batch_time_ms=1000.0),
+                _ik_goal("ik_cfree_b02_g002", batch=2, time_ms=7.0,
+                         batch_time_ms=1000.0),
             ]
         )
         by_metric = dict(rows)
-        assert "mean: 800.000" in by_metric["IK Time (ms)"]
-        assert "mean: 8.500" in by_metric["IK Time (ms) per IK"]
+        assert "mean: 900.000" in by_metric["IK Time (ms)"]
+        # batch walls amortized over the actual batch sizes (2 each),
+        # not over n_goals=1 (which would read 100x too fast).
+        assert "mean: 450.000" in by_metric["IK Time (ms) per IK"]
 
     def test_cost_style_rows(self):
         rows = cost_style_rows(
