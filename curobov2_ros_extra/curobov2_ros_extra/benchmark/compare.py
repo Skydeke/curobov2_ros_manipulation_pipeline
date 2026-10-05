@@ -908,12 +908,30 @@ def _amortized_ik_ms(entry: Dict[str, Any]) -> Optional[float]:
     return float(wall) / float(n)
 
 
+def _batch_ik_ms(entry: Dict[str, Any]) -> Optional[float]:
+    """Batch IK wall for one entry (batch duration, not per-goal).
+
+    Batch callers (native/core and ROS ``ik_batch``) stamp the whole
+    batch's solve wall in ``time_ms``; per-goal callers (one ``compute_ik``
+    per goal) stamp the true per-goal call wall in ``time_ms`` and keep
+    the batch wall separately in ``batch_time_ms``. Preferring
+    ``batch_time_ms`` when present therefore reads as batch duration on
+    both schemas. Missing values stay None so ``_stat_str`` skips them.
+    """
+    wall = entry.get("batch_time_ms")
+    if wall is None:
+        wall = entry.get("time_ms")
+    if wall is None:
+        return None
+    return float(wall)
+
+
 def ik_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     """Build the ``Metric``/``Value`` rows for one IK leg (curobo-layout).
 
     Follows the reference ``ik_benchmark`` table: Success % over all goals;
-    IK Time over successful goals, amortized per goal (each entry's
-    ``time_ms`` is the per-batch solve wall it belongs to, divided by the
+    IK Time is the per-batch solve wall (batch duration), plus the amortized
+    per-goal companion (each entry's ``time_ms`` batch wall divided by the
     entry's ``n_goals`` batch size — the upstream table likewise reports
     per-inference times); then the FK-verified pose errors, which are the
     parity fields both legs report identically. Statistics rows cover
@@ -924,7 +942,8 @@ def ik_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     success_pct = 100.0 * len(ok) / len(cfree) if cfree else 0.0
     rows: List[List[str]] = [
         ["Success %", f"{success_pct:2.2f}"],
-        ["IK Time (ms)", _stat_str(
+        ["IK Time (ms)", _stat_str([_batch_ik_ms(r) for r in ok])],
+        ["IK Time (ms) per IK", _stat_str(
             [_amortized_ik_ms(r) for r in ok])],
     ]
     pos_err = [r.get("position_error_mm") for r in ok]
@@ -940,7 +959,8 @@ def cost_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
     """Build the ``Metric``/``Value`` rows for one kinematics & collision leg.
 
     Valid % over all configs (the parity field); per-batch FK+validate wall
-    and the per-sample marginal (``time_ms`` is per batch of ``n_configs``).
+    (batch duration) and the per-FK marginal (``time_ms`` is per batch of
+    ``n_configs``).
     """
     cost = _rows_for(results, "cost")
     valid = [r for r in cost if bool(r.get("valid"))]
@@ -949,7 +969,7 @@ def cost_style_rows(results: List[Dict[str, Any]]) -> List[List[str]]:
         ["Valid %", f"{valid_pct:2.2f}"],
         ["FK Time (ms)", _stat_str([r.get("time_ms") for r in cost])],
         [
-            "FK Time / Sample (ms)",
+            "FK Time (ms) per FK",
             _stat_str(
                 [
                     r.get("time_ms", 0.0) / r.get("n_configs", 1)
