@@ -200,8 +200,31 @@ class TestStyleRows:
         by_metric = dict(rows)
         assert by_metric["Success %"] == "66.67"
         assert by_metric["IK Time (ms)"] != "-"
+        assert by_metric["IK Time (ms) per IK"] != "-"
         assert by_metric["Position Error (mm)"].startswith("mean:")
         assert by_metric["Orientation Error (deg)"].startswith("mean:")
+
+    def test_ik_style_rows_batch_vs_per_ik(self):
+        rows = ik_style_rows(
+            [
+                _ik_goal("ik_cfree_b01_g001", time_ms=10.0, n_goals=10),
+                _ik_goal("ik_cfree_b01_g002", time_ms=10.0, n_goals=10),
+            ]
+        )
+        by_metric = dict(rows)
+        assert "mean: 10.000" in by_metric["IK Time (ms)"]
+        assert "mean: 1.000" in by_metric["IK Time (ms) per IK"]
+
+    def test_ik_style_rows_prefers_batch_time_ms(self):
+        rows = ik_style_rows(
+            [
+                _ik_goal("ik_cfree_b01_g001", time_ms=8.0, batch_time_ms=800.0),
+                _ik_goal("ik_cfree_b01_g002", time_ms=9.0, batch_time_ms=800.0),
+            ]
+        )
+        by_metric = dict(rows)
+        assert "mean: 800.000" in by_metric["IK Time (ms)"]
+        assert "mean: 8.500" in by_metric["IK Time (ms) per IK"]
 
     def test_cost_style_rows(self):
         rows = cost_style_rows(
@@ -213,7 +236,7 @@ class TestStyleRows:
         by_metric = dict(rows)
         assert by_metric["Valid %"] == "50.00"
         assert "mean: 4.000" in by_metric["FK Time (ms)"]
-        assert "mean: 4.000" in by_metric["FK Time / Sample (ms)"]
+        assert "mean: 4.000" in by_metric["FK Time (ms) per FK"]
 
 
 class TestCli:
