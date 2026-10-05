@@ -85,8 +85,8 @@
  *     worth reproducing the failure mode of.
  */
 
-#ifndef ISAAC_ROS_CUMOTION_RVIZ__PROGRESS_BAR_DELEGATE_HPP_
-#define ISAAC_ROS_CUMOTION_RVIZ__PROGRESS_BAR_DELEGATE_HPP_
+#ifndef CUROBOV2_ROS_RVIZ__PROGRESS_BAR_DELEGATE_HPP_
+#define CUROBOV2_ROS_RVIZ__PROGRESS_BAR_DELEGATE_HPP_
 
 #include <QStyledItemDelegate>
 #include <QWidget>
@@ -183,4 +183,4 @@ private:
 
 }  // namespace curobov2_ros_rviz
 
-#endif  // ISAAC_ROS_CUMOTION_RVIZ__PROGRESS_BAR_DELEGATE_HPP_
+#endif  // CUROBOV2_ROS_RVIZ__PROGRESS_BAR_DELEGATE_HPP_

@@ -34,9 +34,7 @@
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -163,5 +161,4 @@ void CumotionInterface::solve(
 }
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2

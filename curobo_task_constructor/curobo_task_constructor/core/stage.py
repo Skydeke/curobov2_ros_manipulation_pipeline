@@ -545,20 +545,39 @@ class TrajectoryStage(PropagatingStage):
                 self._batch.defer(self, start, req)
             return
         for start, req in self._pending:
-            try:
-                result = self.robot.plan(req)
-            except Exception as exc:  # ServiceError etc.
-                self._fail(start, None, f"plan call failed: {exc}")
+            # Multi-attempt planning: plan up to N times, keep the cheapest
+            # successful result (the old task constructor's
+            # num_planning_attempts). cuRobo's trajopt is stochastic, so N
+            # seeds through the same request can produce different
+            # trajectories; the lowest-cost one is the one to keep.
+            attempts = max(1, int(self.params.get("planning_attempts", 3)))
+            best_result = None
+            best_cost = float("inf")
+            last_error = ""
+            for _ in range(attempts):
+                try:
+                    result = self.robot.plan(req)
+                except Exception as exc:  # ServiceError etc.
+                    last_error = f"plan call failed: {exc}"
+                    continue
+                if not result.success:
+                    last_error = result.message or "plan failed"
+                    continue
+                cost = self._cost_of(result)
+                if cost < best_cost:
+                    best_cost = cost
+                    best_result = result
+            # attempt_count: +1 from the _emit/_fail below, +(N-1) here
+            self.attempt_count += attempts - 1
+            if best_result is None:
+                self._fail(start, None, last_error or "plan failed")
                 continue
-            if not result.success:
-                self._fail(start, None, result.message or "plan failed")
-                continue
-            end = self.make_end_state(start, result, raw=result)
+            end = self.make_end_state(start, best_result, raw=best_result)
             if end is not None:
-                self.send_forward(start, end, trajectory=result.trajectory,
-                                  cost=self._cost_of(result),
-                                  comment=self._comment(req, result),
-                                  response=result.raw, plan_request=req)
+                self.send_forward(start, end, trajectory=best_result.trajectory,
+                                  cost=self._cost_of(best_result),
+                                  comment=self._comment(req, best_result),
+                                  response=best_result.raw, plan_request=req)
 
     def commit_result(self, start: InterfaceState, req: PlanRequest,
                       result: PlanResult) -> None:

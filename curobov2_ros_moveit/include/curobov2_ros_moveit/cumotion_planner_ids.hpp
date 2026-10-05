@@ -15,16 +15,14 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef ISAAC_ROS_CUMOTION_PLANNER_IDS_H
-#define ISAAC_ROS_CUMOTION_PLANNER_IDS_H
+#ifndef CUROBOV2_ROS_CUMOTION_PLANNER_IDS_H
+#define CUROBOV2_ROS_CUMOTION_PLANNER_IDS_H
 
 #include <cstdint>
 #include <string>
 #include <vector>
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -81,7 +79,6 @@ inline bool plannerIdToType(const std::string & planner_id, uint8_t & out_type)
 }
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2
 
-#endif  // ISAAC_ROS_CUMOTION_PLANNER_IDS_H
+#endif  // CUROBOV2_ROS_CUMOTION_PLANNER_IDS_H

@@ -15,8 +15,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef ISAAC_ROS_CUMOTION_PLANNING_CONTEXT_H
-#define ISAAC_ROS_CUMOTION_PLANNING_CONTEXT_H
+#ifndef CUROBOV2_ROS_CUMOTION_PLANNING_CONTEXT_H
+#define CUROBOV2_ROS_CUMOTION_PLANNING_CONTEXT_H
 
 #include <memory>
 #include <string>
@@ -25,9 +25,7 @@
 
 #include "curobov2_ros_moveit/cumotion_interface.hpp"
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -66,7 +64,6 @@ private:
 };
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2
 
-#endif  // ISAAC_ROS_CUMOTION_PLANNING_CONTEXT_H
+#endif  // CUROBOV2_ROS_CUMOTION_PLANNING_CONTEXT_H

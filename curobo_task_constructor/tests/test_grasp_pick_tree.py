@@ -172,8 +172,9 @@ def test_pick_tree_fans_each_candidate_set_out_in_one_round_trip():
     assert ex.plan()
     # 3 candidates x 3 strategies, but only the first strategy is planned
     # (fallbacks stop at the first child that solves):
-    #   pre_grasp, descend, close, retreat, return, open  = 6 solves
-    assert robot.plan_calls == 6
+    #   pre_grasp, descend, close, retreat, return, open  = 6 stages
+    # Each stage plans 3 times (planning_attempts=3, multi-attempt):
+    assert robot.plan_calls == 18
     assert robot.batch_calls == 0  # no Alternatives: the fan-out is in-band
 
 

@@ -174,17 +174,18 @@ void ContextTab::initialize(rclcpp::Node::SharedPtr node)
   refreshStrategies();
   refreshPlannerNodeList();
 
-  // Read-only and cheap (parsed config, no solver touched), so polling is
-  // insurance against missing the first response while the planner warms up.
-  auto * timer = new QTimer(this);
-  connect(timer, &QTimer::timeout, this, &ContextTab::refreshStrategies);
-  timer->start(2000);
-
   // The same graph poll that used to live in the Planning tab, so a planner
   // (re)started later drops into the dropdown without a restart.
   auto * node_timer = new QTimer(this);
   connect(node_timer, &QTimer::timeout, this, &ContextTab::refreshPlannerNodeList);
   node_timer->start(2000);
+
+  // Periodically refresh the control-strategy list. The service may not be
+  // ready at initialize() time (the curobo server can take a while to come
+  // up), and without a timer the dropdown would stay empty forever.
+  auto * strategy_timer = new QTimer(this);
+  connect(strategy_timer, &QTimer::timeout, this, &ContextTab::refreshStrategies);
+  strategy_timer->start(2000);
 }
 
 void ContextTab::setPlannerReady(bool ready)
@@ -309,16 +310,13 @@ void ContextTab::refreshStrategies()
   // and the widget would be left showing a state the server never adopted.
   // Retried here until the service is up rather than sent once into the void,
   // because service_is_ready() is false for a while after the planner starts.
-  if (collision_spheres_pending_ && collision_spheres_client_ != nullptr &&
-      collision_spheres_client_->service_is_ready()) {
-    collision_spheres_pending_ = false;
-    applyCollisionSpheres(collision_spheres_check_->isChecked());
-  }
-  if (trajectory_type_pending_ && set_planner_client_ != nullptr &&
-      set_planner_client_->service_is_ready()) {
-    trajectory_type_pending_ = false;
-    applyTrajectoryType();
-  }
+  // NOTE: trajectory_type_pending_ and collision_spheres_pending_ are
+  // intentionally NOT applied here. Sending set_planner or set_collisions_enabled
+  // on startup (before the user has interacted with the panel) changes server
+  // state without being asked, and can override the planner that another client
+  // (e.g. the task constructor) has already selected. The combo/checkbox are
+  // restored from the config for display only; the user must explicitly change
+  // them to send anything to the server.
 
   if (get_strategies_client_ == nullptr || !get_strategies_client_->service_is_ready()) {
     return;

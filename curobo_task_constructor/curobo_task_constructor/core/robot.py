@@ -23,7 +23,7 @@ class ServiceError(RuntimeError):
 
 @dataclass
 class GoalsetSpec:
-    """One segment of a goal path (mirror of isaac_ros Goalset.msg)."""
+    """One segment of a goal path (mirror of curobov2_ros_interfaces Goalset.msg)."""
 
     poses: list = field(default_factory=list)  # Pose-like candidate(s)
     target_joint_positions: list = field(default_factory=list)  # joint-space

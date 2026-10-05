@@ -5,8 +5,8 @@
 # the `tests` service runs only the launch_test drivers, so each container's
 # logs are attributable via `docker logs`:
 #
-#   docker logs isaac_cumotion_franka_server
-#   docker logs isaac_cumotion_franka_tests
+#   docker logs curobov2_franka_server
+#   docker logs curobov2_franka_tests
 #
 # Usage:
 #   docker compose -f docker/franka_tests.yaml up --build --abort-on-container-exit
@@ -17,7 +17,7 @@
 #     launch_test test/test_test_trajectory_franka.py
 services:
   server:
-    container_name: isaac_cumotion_franka_server
+    container_name: curobov2_franka_server
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
@@ -48,7 +48,7 @@ services:
           mapper_extent_xyz:="[2.0, 2.0, 2.0]"
 
   tests:
-    container_name: isaac_cumotion_franka_tests
+    container_name: curobov2_franka_tests
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     depends_on:
       - server

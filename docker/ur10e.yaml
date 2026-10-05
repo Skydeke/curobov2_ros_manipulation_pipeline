@@ -23,7 +23,7 @@
 #   docker compose -f docker/ur10e.yaml up --force-recreate
 services:
   curobo:
-    container_name: isaac_cumotion_ur10e
+    container_name: curobov2_ur10e
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..

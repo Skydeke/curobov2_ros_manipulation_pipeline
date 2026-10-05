@@ -1,7 +1,7 @@
 #pragma once
 
-#ifndef ISAAC_ROS_CUMOTION_RVIZ__CUROBO_FK_HPP_
-#define ISAAC_ROS_CUMOTION_RVIZ__CUROBO_FK_HPP_
+#ifndef CUROBOV2_ROS_RVIZ__CUROBO_FK_HPP_
+#define CUROBOV2_ROS_RVIZ__CUROBO_FK_HPP_
 
 #include <map>
 #include <string>
@@ -82,4 +82,4 @@ private:
 
 }  // namespace curobov2_ros_rviz
 
-#endif  // ISAAC_ROS_CUMOTION_RVIZ__CUROBO_FK_HPP_
+#endif  // CUROBOV2_ROS_RVIZ__CUROBO_FK_HPP_

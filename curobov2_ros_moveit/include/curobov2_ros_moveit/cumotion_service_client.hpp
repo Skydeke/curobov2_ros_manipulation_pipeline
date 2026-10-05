@@ -15,8 +15,8 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef ISAAC_ROS_CUMOTION_SERVICE_CLIENT_H
-#define ISAAC_ROS_CUMOTION_SERVICE_CLIENT_H
+#ifndef CUROBOV2_ROS_CUMOTION_SERVICE_CLIENT_H
+#define CUROBOV2_ROS_CUMOTION_SERVICE_CLIENT_H
 
 #include <cstdint>
 #include <map>
@@ -44,9 +44,7 @@ class PlanningSceneInterface;
 }
 }  // namespace moveit
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -150,7 +148,6 @@ private:
 };
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2
 
-#endif  // ISAAC_ROS_CUMOTION_SERVICE_CLIENT_H
+#endif  // CUROBOV2_ROS_CUMOTION_SERVICE_CLIENT_H

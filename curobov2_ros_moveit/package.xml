@@ -6,7 +6,7 @@
   <description>Package adds a cuMotion planner plugin to MoveIt</description>
   <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2.0</license>
-  <url type="website">https://developer.nvidia.com/isaac-ros-gems/</url>
+  <url type="website">https://github.com/Skydeke/curobov2_ros_manipulation_pipeline</url>
   <author>Balakumar Sundaralingam</author>
 
   <buildtool_depend>ament_cmake</buildtool_depend>

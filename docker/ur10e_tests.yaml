@@ -5,8 +5,8 @@
 # service talks to the SAME persistent planner instead of launching (and
 # warming up) a new one per suite. This separates `docker logs` cleanly:
 #
-#   docker logs isaac_cumotion_ur10e_server   # planner, CUDA graph, voxels
-#   docker logs isaac_cumotion_ur10e_tests    # pass/fail per suite
+#   docker logs curobov2_ur10e_server   # planner, CUDA graph, voxels
+#   docker logs curobov2_ur10e_tests    # pass/fail per suite
 #
 # The test files (test/test_test_*_ur10e.py) still include the same launch
 # file, but CUROMOTION_EXTERNAL_PLANNER=1 disables the in-process planner
@@ -20,8 +20,8 @@
 # Usage:
 #   docker compose -f docker/ur10e_tests.yaml up --build --abort-on-container-exit
 #   # after the run:
-#   docker logs isaac_cumotion_ur10e_server   # (stays up if tests exited early)
-#   docker logs isaac_cumotion_ur10e_tests
+#   docker logs curobov2_ur10e_server   # (stays up if tests exited early)
+#   docker logs curobov2_ur10e_tests
 #   docker compose -f docker/ur10e_tests.yaml down
 #
 #   # rerun tests against a still-running server:
@@ -32,7 +32,7 @@
 #     launch_test test/test_test_trajectory_ur10e.py
 services:
   server:
-    container_name: isaac_cumotion_ur10e_server
+    container_name: curobov2_ur10e_server
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
@@ -64,7 +64,7 @@ services:
           mapper_extent_xyz:="[2.0, 2.0, 2.0]" enable_curobo_debug_mode:=true
 
   tests:
-    container_name: isaac_cumotion_ur10e_tests
+    container_name: curobov2_ur10e_tests
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     depends_on:
       - server

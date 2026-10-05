@@ -102,6 +102,41 @@ class MoveTo(PropagatingEitherWay):
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
+    def _plan_best(self, req, state, fail_msg):
+        """Plan ``req`` up to ``planning_attempts`` times, return the successful
+        result with the lowest cost (or None if every attempt failed).
+
+        This is the direct equivalent of the old task constructor's
+        ``num_planning_attempts`` on the MoveIt pipeline planner: cuRobo's
+        trajopt is stochastic, so N seeds through the same request can produce
+        different trajectories, and the cheapest one is the one to keep. The
+        attempt count is recorded on the stage so the statistics reflect the
+        real number of planning calls made.
+        """
+        attempts = max(1, int(self.params.get("planning_attempts", 3)))
+        best_result = None
+        best_cost = float("inf")
+        last_error = ""
+        for _ in range(attempts):
+            try:
+                result = self.robot.plan(req)
+            except Exception as exc:  # ServiceError etc.
+                # repr, not str: rclpy futures can fail with an empty-str
+                # exception (CancelledError/StopIteration), which str() would
+                # silently swallow into "plan call failed: ".
+                last_error = f"plan call failed: {exc!r}"
+                continue
+            if not result.success:
+                last_error = result.message or fail_msg
+                continue
+            cost = self._cost_of(result)
+            if cost < best_cost:
+                best_cost = cost
+                best_result = result
+        # attempt_count: +1 from the _emit/_fail the caller makes, +(N-1) here
+        self.attempt_count += attempts - 1
+        return best_result, last_error
+
     def compute_forward(self, state: InterfaceState) -> None:
         joint_goal = self._goal_positions(state)
         pose_goals = [] if joint_goal is not None else self._goal_poses()
@@ -114,16 +149,9 @@ class MoveTo(PropagatingEitherWay):
         else:
             goalset = goalset_for_scene(state.scene, joint_positions=joint_goal)
         req = full_request(self.robot, state.joint_state, [goalset], self.params)
-        try:
-            result = self.robot.plan(req)
-        except Exception as exc:  # ServiceError etc.
-            # repr, not str: rclpy futures can fail with an empty-str
-            # exception (CancelledError/StopIteration), which str() would
-            # silently swallow into "plan call failed: ".
-            self._fail(state, None, f"plan call failed: {exc!r}")
-            return
-        if not result.success:
-            self._fail(state, None, result.message or "move_to plan failed")
+        result, err = self._plan_best(req, state, "move_to plan failed")
+        if result is None:
+            self._fail(state, None, err or "move_to plan failed")
             return
         end = state.clone(joint_state=result.last_state)
         self.send_forward(state, end, trajectory=result.trajectory,
@@ -146,13 +174,9 @@ class MoveTo(PropagatingEitherWay):
                 joint_positions=list(getattr(state.joint_state, "position", [])
                                      or []))],
             self.params)
-        try:
-            result = self.robot.plan(req)
-        except Exception as exc:
-            self._fail(state, None, f"plan call failed: {exc!r}")
-            return
-        if not result.success or not result.trajectory:
-            self._fail(state, None, result.message or "move_to backward failed")
+        result, err = self._plan_best(req, state, "move_to backward failed")
+        if result is None or not result.trajectory:
+            self._fail(state, None, err or "move_to backward failed")
             return
         start = state.clone(joint_state=result.trajectory[0])
         self.send_backward(start, state, trajectory=result.trajectory,
