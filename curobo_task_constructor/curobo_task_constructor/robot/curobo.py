@@ -654,7 +654,7 @@ class CuroboServerInterface(RobotInterface):
         goal = SendTrajectory.Goal()
         goal.goal = self._to_goal(request)
         goal.allow_cached = True
-        goal.force_cached = False  # replay-or-fail knob for explicit callers
+        goal.force_cached = True  # never re-solve during execution; cache miss = failure
         self._set_links_collision([request], False)
         try:
             gh = self._await(

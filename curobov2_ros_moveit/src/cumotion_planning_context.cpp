@@ -17,9 +17,7 @@
 
 #include "curobov2_ros_moveit/cumotion_planning_context.hpp"
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -43,5 +41,4 @@ void CumotionPlanningContext::solve(planning_interface::MotionPlanResponse & res
 }
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2

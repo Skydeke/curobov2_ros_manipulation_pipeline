@@ -1,4 +1,4 @@
 [submodule "curobo/curobo"]
 	path = curobo/curobo
 	url = https://github.com/NVlabs/curobo
-	branch = isaac-4.0
+	branch = main

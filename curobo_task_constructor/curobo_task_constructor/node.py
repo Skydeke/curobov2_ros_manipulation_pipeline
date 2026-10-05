@@ -63,6 +63,16 @@ from curobo_task_constructor.robot.curobo import _SERVICE_TIMEOUT
 #: solution_id carried by failed attempts (uint32 field; 0xFFFFFFFF = none).
 NO_SOLUTION_ID = 0xFFFFFFFF
 
+#: Depth of the introspection publishers/subscribers. The node publishes one
+#: StageStatistics per stage and one SolutionInfo per emit/failure in a tight
+#: burst at the end of a solve; the pick task alone has 27 stages. A depth of
+#: 10 (the rviz default) silently DROPPED the messages for the first ~17 stages,
+#: so the panel showed compute time / attempts only for the last 10 — which are
+#: mostly never-run fallback stages. The multi-attempt planning happened, but
+#: its statistics were invisible for exactly the stages that matter. Sized to
+#: comfortably exceed the largest task (the pick) with margin.
+INTROSPECTION_QOS_DEPTH = 100
+
 _ACTION_TOPIC = "/curobo_task_constructor/task"
 _INTROSPECT_QOS_TOPICS = {
     "task_description": "/curobo_task_constructor/task_description",
@@ -104,7 +114,7 @@ class TaskConstructorNode(rclpy.node.Node):
         # Introspection publishers (transient_local: a panel may join after
         # the task started and still see the structure / last attempts).
         qos = QoSProfile(
-            depth=10, history=HistoryPolicy.KEEP_LAST,
+            depth=INTROSPECTION_QOS_DEPTH, history=HistoryPolicy.KEEP_LAST,
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL)
         self._pub_desc = self.create_publisher(
@@ -402,9 +412,9 @@ class TaskConstructorNode(rclpy.node.Node):
             msg.stage_type = stg.stage_type()
             msg.attempt_count = stg.attempt_count
             msg.success_count = len(stg.solutions)
-            msg.last_cost = (stg.solutions[-1].cost
-                             if stg.solutions else float("inf"))
-            msg.total_compute_time = stg.compute_time
+            msg.last_cost = min((s.cost for s in stg.solutions),
+                                default=float("inf"))
+            msg.total_compute_time = stg.compute_time  # seconds
             self._pub_stat.publish(msg)
 
     def _publish_feedback(self, state: str, current_stage: str,

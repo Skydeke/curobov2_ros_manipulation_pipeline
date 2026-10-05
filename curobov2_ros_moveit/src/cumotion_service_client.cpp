@@ -42,9 +42,7 @@
 #include "shape_msgs/msg/mesh_triangle.hpp"
 #include "shape_msgs/msg/solid_primitive.hpp"
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -767,5 +765,4 @@ bool CumotionServiceClient::syncObstaclesFromServer(
 }
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2

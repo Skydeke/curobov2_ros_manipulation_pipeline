@@ -74,9 +74,14 @@ const char * kActionTask = "/curobo_task_constructor/task";
 
 //: same QoS as the node's introspection publishers: RELIABLE + TRANSIENT_LOCAL
 // so a panel that joins mid-task still sees structure and last attempts.
+// The depth MUST match the node's INTROSPECTION_QOS_DEPTH: the node publishes
+// one StageStatistics per stage and one SolutionInfo per emit/failure in a
+// burst, and the pick task has 27 stages — a depth of 10 dropped the messages
+// for the first ~17 stages, so compute time/attempts showed only for the last
+// 10 (mostly never-run fallback stages).
 rclcpp::QoS introspectionQoS()
 {
-  rclcpp::QoS qos(rclcpp::KeepLast(10));
+  rclcpp::QoS qos(rclcpp::KeepLast(100));
   qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
   qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
   return qos;
@@ -315,6 +320,15 @@ void TaskConstructorPanel::refreshTaskDescription()
     return;
   }
 
+  // A NEW non-empty task description means a different task is starting.
+  // Clear the cached per-stage data from the previous task so that
+  // applyStoredData() below does NOT re-apply stale costs/attempts/times to
+  // the new task's items (stage_ids are assigned in pre-order, so they match
+  // across tasks and the old data would silently show through).
+  last_solution_.clear();
+  stage_stats_.clear();
+  stage_markers_.clear();
+
   // Relink the flat StageSpec[] list into a tree (MTC-style wire format:
   // parent_id == id marks the root; every other stage points at its parent).
   // Task graphs are small, so two assoc maps are plenty.
@@ -366,6 +380,8 @@ void TaskConstructorPanel::applyStoredData()
                           QString::number(stat_it.value()->attempt_count));
       it.value()->setText(COL_TIME,
                           QString::number(stat_it.value()->total_compute_time, 'g', 4));
+      it.value()->setText(COL_COST,
+                          QString::number(stat_it.value()->last_cost, 'g', 6));
       it.value()->setToolTip(
           COL_TYPE, QStringLiteral("successful attempts: %1").arg(stat_it.value()->success_count));
     }
@@ -414,6 +430,8 @@ void TaskConstructorPanel::refreshStageStatistics()
                              QString::number(it.value()->attempt_count));
     item_it.value()->setText(COL_TIME,
                              QString::number(it.value()->total_compute_time, 'g', 4));
+    item_it.value()->setText(COL_COST,
+                             QString::number(it.value()->last_cost, 'g', 6));
     item_it.value()->setToolTip(
         COL_TYPE, QStringLiteral("successful attempts: %1").arg(it.value()->success_count));
   }

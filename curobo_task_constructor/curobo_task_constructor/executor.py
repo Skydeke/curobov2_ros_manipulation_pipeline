@@ -356,19 +356,27 @@ class TaskExecutor:
                   success_count, last_cost, total_compute_time}]
         attempts: [{stage_id, stage_name, solution_id, cost, success,
                     comment, planner_id}]
+
+        ``last_cost`` is the lowest cost among the stage's solutions (not the
+        last emitted — a multi-candidate goalset emits one solution per
+        candidate, and the last one is not necessarily the cheapest).
+        ``total_compute_time`` is in seconds (wall-clock, accumulated across
+        every ``run_compute`` call on the stage).
+        ``attempt_count`` is the number of planning attempts the stage made
+        (solutions emitted + failures recorded + extra multi-attempt solves).
         """
         stages = []
         attempts = []
         for stg in self.root.subtree_stages():
+            best_cost = min((s.cost for s in stg.solutions), default=float("inf"))
             stages.append({
                 "stage_id": stg.stage_id,
                 "stage_name": stg.name,
                 "stage_type": stg.stage_type(),
                 "attempt_count": stg.attempt_count,
                 "success_count": len(stg.solutions),
-                "last_cost": (stg.solutions[-1].cost
-                              if stg.solutions else float("inf")),
-                "total_compute_time": stg.compute_time,
+                "last_cost": best_cost,
+                "total_compute_time": stg.compute_time,  # seconds
             })
             for sol in stg.solutions:
                 attempts.append({

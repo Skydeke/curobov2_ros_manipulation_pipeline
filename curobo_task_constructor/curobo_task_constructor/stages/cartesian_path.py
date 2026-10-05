@@ -34,20 +34,17 @@ The hold vector is derived from the start pose, which is not known until the
 plan runs, so a backward (end-seeded) cartesian move would need a two-pass
 plan. Place this stage after a stage that writes a joint state.
 
-Rounding out the MoveIt contract
---------------------------------
-cuRobo's hold is a soft cost and the wire has no ``fraction`` / ``jump`` knob,
-so the reference's partial-path guarantee is reproduced client-side by
-``check_straightness``: FK the whole trajectory in one call and fail the stage
-when the tool strays further than ``straightness_tol`` from the segment. A
-failure is not fatal — it propagates to the enclosing ``Fallbacks``, which is
-exactly how the reference pipeline reached the next grasp candidate after
-rejecting a Cartesian solve.
+Straightness is the optimizer's job
+-----------------------------------
+The hold is a soft cost: cuRobo is free to leave the line when staying on it is
+more expensive (an obstacle on the segment, a better IK branch). That is the
+desired behaviour — the reference's ``min_fraction`` / ``jump_threshold``
+rejection is deliberately NOT reproduced client-side. A bowed solve is the
+optimizer's answer, not a failure to fall through on.
 """
 
 from __future__ import annotations
 
-import math
 from typing import Optional
 
 from curobo_task_constructor.core.geom import (
@@ -66,30 +63,6 @@ from curobo_task_constructor.stages._util import (
     pose_from_params,
 )
 
-#: Default lateral tolerance for the straightness gate. The reference solver
-#: used a 5 mm jump threshold on a 1 cm interpolation step, i.e. "do not cut a
-#: corner"; 10 mm of bow over the whole segment is the same order of magnitude.
-DEFAULT_STRAIGHTNESS_TOL = 0.01
-
-
-def _segment_deviation(pose: Pose3, a: Pose3, b: Pose3) -> float:
-    """Distance from ``pose.position`` to the segment a->b.
-
-    Zero when the segment is degenerate (start and goal coincide) — nothing to
-    bow out of the way of.
-    """
-    ax, ay, az = a.position
-    dx, dy, dz = (b.position[i] - a.position[i] for i in range(3))
-    denom = dx * dx + dy * dy + dz * dz
-    if denom < 1e-18:
-        return 0.0
-    t = ((pose.position[0] - ax) * dx + (pose.position[1] - ay) * dy
-         + (pose.position[2] - az) * dz) / denom
-    t = max(0.0, min(1.0, t))
-    px, py, pz = ax + t * dx, ay + t * dy, az + t * dz
-    return math.sqrt((pose.position[0] - px) ** 2 + (pose.position[1] - py) ** 2
-                     + (pose.position[2] - pz) ** 2)
-
 
 @register_stage("cartesian_path")
 class CartesianPath(TrajectoryStage):
@@ -97,16 +70,6 @@ class CartesianPath(TrajectoryStage):
 
     def __init__(self, name=None, params=None):
         super().__init__(name, params)
-        # id(InterfaceState) -> (FK'd start pose, candidate target poses).
-        # Lets the post-solve straightness gate measure deviation from the
-        # REQUESTED line (not the achieved one) even when a container has
-        # deferred the solve into a batch. Keyed on the start state, which
-        # ``make_end_state`` does receive.
-        self._pending_goals: dict = {}
-
-    def reset(self) -> None:
-        super().reset()
-        self._pending_goals = {}
 
     # ------------------------------------------------------------------
     # Goal resolution
@@ -171,15 +134,10 @@ class CartesianPath(TrajectoryStage):
             allowed_collisions=(start.scene.all_allowed_links()
                                 if start.scene is not None else []),
             trajectory_constraints=self._hold(start_pose, targets))
-        req = full_request(self.robot, start.joint_state, [goalset], self.params)
-        self._pending_goals[id(start)] = (start_pose, targets)
-        return req
+        return full_request(self.robot, start.joint_state, [goalset], self.params)
 
     def make_end_state(self, start: InterfaceState, result, raw=None):
-        end = start.clone(joint_state=result.last_state)
-        straight = self._straight_enough(start, end, result)
-        self._pending_goals.pop(id(start), None)
-        return end if straight else None
+        return start.clone(joint_state=result.last_state)
 
     def _comment(self, req: PlanRequest, result) -> str:
         # The resolved holds and the winning candidate index, so a
@@ -193,63 +151,6 @@ class CartesianPath(TrajectoryStage):
         if picked:
             parts.append(f"winner={picked}")
         return "cartesian_path " + " ".join(parts)
-
-    # ------------------------------------------------------------------
-    # Straightness gate (MoveIt min_fraction / jump_threshold analogue)
-    # ------------------------------------------------------------------
-    def _straight_enough(self, start: InterfaceState, end: InterfaceState,
-                         result) -> bool:
-        """Reject a solve that bowed off the straight segment.
-
-        cuRobo's hold is a soft cost: the solver will leave the line when that
-        is cheaper than staying on it. FK the whole trajectory in ONE call and
-        fail the stage when the worst waypoint is further than
-        ``straightness_tol`` from the requested start->goal segment, so a bowed
-        path is rejected and the enclosing Fallbacks gets to try the next
-        variant — which is what the reference pipeline's rejected Cartesian
-        solve did.
-        """
-        if not self.params.get("check_straightness", True):
-            return True
-        tol = float(self.params.get("straightness_tol",
-                                    DEFAULT_STRAIGHTNESS_TOL))
-        traj = result.trajectory or []
-        if len(traj) < 2:
-            return True
-        start_pose, targets = self._pending_goals.get(id(start), (None, []))
-        if start_pose is None or not targets:
-            return True
-        try:
-            poses = self.robot.fk_batch(traj, self._link())
-        except Exception as exc:  # noqa: BLE001
-            # The trajectory itself solved; do not discard a good plan over a
-            # failed measurement round-trip.
-            self._log_debug(f"straightness check skipped: {exc!r}")
-            return True
-        if len(poses) != len(traj):
-            return True
-        # Deviation is measured against the *requested* goal of the candidate
-        # the server reports as the winner, not against the achieved end pose:
-        # a path that consistently undershoots is still straight.
-        b = Pose3.from_any(targets[self._winner(result)])
-        worst = max(_segment_deviation(Pose3.from_any(p), start_pose, b)
-                    for p in poses)
-        if worst > tol:
-            self._fail(start, end,
-                       f"cartesian_path bowed {worst:.4f} m off the straight "
-                       f"segment (tolerance {tol:.4f} m)")
-            return False
-        return True
-
-    @staticmethod
-    def _winner(result) -> int:
-        picked = list(getattr(result, "selected_goal_index", None) or [])
-        return int(picked[0]) if picked else 0
-
-    def _log_debug(self, msg: str) -> None:  # pragma: no cover - logging
-        node = getattr(self.robot, "_node", None)
-        if node is not None:
-            node.get_logger().debug(msg)
 
     def _cost_of(self, result) -> float:
         return cost_of(result, self.params)

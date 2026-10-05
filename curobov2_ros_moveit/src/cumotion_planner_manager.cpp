@@ -23,9 +23,7 @@
 
 #include "curobov2_ros_moveit/cumotion_planning_context.hpp"
 
-namespace nvidia
-{
-namespace isaac
+namespace curobov2
 {
 namespace manipulation
 {
@@ -47,7 +45,7 @@ bool CumotionPlannerManager::initialize(
 
 std::string CumotionPlannerManager::getDescription() const
 {
-  return "Generate minimum-jerk trajectories using NVIDIA Isaac ROS cuMotion";
+  return "Generate minimum-jerk trajectories using curobov2 cuMotion";
 }
 
 void CumotionPlannerManager::getPlanningAlgorithms(std::vector<std::string> & algs) const
@@ -109,10 +107,9 @@ void CumotionPlannerManager::setPlannerConfigurations(
 }
 
 }  // namespace manipulation
-}  // namespace isaac
-}  // namespace nvidia
+}  // namespace curobov2
 
 // Register the `CumotionPlannerManager` class as a plugin.
 PLUGINLIB_EXPORT_CLASS(
-  nvidia::isaac::manipulation::CumotionPlannerManager,
+  curobov2::manipulation::CumotionPlannerManager,
   planning_interface::PlannerManager)

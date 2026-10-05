@@ -25,7 +25,7 @@
 #   docker compose -f docker/franka.yaml up --force-recreate
 services:
   curobo:
-    container_name: isaac_cumotion_franka
+    container_name: curobov2_franka
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..

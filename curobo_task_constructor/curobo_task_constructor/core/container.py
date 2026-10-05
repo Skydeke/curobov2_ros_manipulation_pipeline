@@ -31,6 +31,7 @@ the container to *write* its start.
 
 from __future__ import annotations
 
+import time
 from abc import ABC, abstractmethod
 
 from curobo_task_constructor.core.stage import (
@@ -217,6 +218,22 @@ class ContainerStage(Stage, ABC):
 
     def _on_child_solution(self, child: Stage, solution: Solution) -> None:
         raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # Timing
+    # ------------------------------------------------------------------
+    def run_compute(self) -> None:
+        """A container's compute time is the SUM of its children's.
+
+        The container's own work (feeding, propagation, lifting) is
+        microseconds next to the children's planning, so it is not measured
+        separately: the subtree total is what an operator reads off the panel
+        ("how long did strategy_0 take"), and the leaves carry the per-stage
+        detail. Summing the tree would double-count, but each row is the total
+        for its own subtree — the root is the whole solve.
+        """
+        self.compute()
+        self.compute_time = sum(c.compute_time for c in self.children)
 
     # ------------------------------------------------------------------
     # Input feeding / output propagation

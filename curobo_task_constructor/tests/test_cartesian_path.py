@@ -277,26 +277,16 @@ def test_cartesian_path_relative_goal_can_ride_the_hand_frame():
     assert end_xyz[2] - start_xyz[2] == pytest.approx(0.10, abs=1e-6)
 
 
-def test_cartesian_path_straightness_gate_accepts_a_straight_path():
-    robot = _robot(bow=0.0)
+def test_cartesian_path_accepts_a_bowed_path():
+    """The hold is a soft cost: cuRobo may leave the line when that is cheaper,
+    and the client no longer rejects a bowed solve. A bowed descent is the
+    optimizer's answer, not a failure to fall through on."""
+    robot = _robot(bow=0.03)  # 3 cm of bow
     goal = _vertical_goal(robot, 0.05)
     _, ex = _plan([_stage("cartesian_path", "descend",
                           {"goal": {"pose": goal}})], robot)
     assert ex.plan()
     assert ex.best() is not None
-    # the whole trajectory was measured in ONE batched FK round trip
-    assert robot.fk_batch_calls == 1
-
-
-def test_cartesian_path_straightness_gate_rejects_a_bowed_path():
-    """cuRobo's hold is soft; a bowed solve must be rejected so Fallbacks runs."""
-    robot = _robot(bow=0.03)  # 3 cm of bow, tolerance is 1 cm
-    goal = _vertical_goal(robot, 0.05)
-    _, ex = _plan([_stage("cartesian_path", "descend",
-                          {"goal": {"pose": goal}})], robot)
-    assert not ex.plan()
-    stage = ex.root.subtree_stages()[-1]
-    assert any("off the straight segment" in f.message for f in stage.failures)
 
 
 def test_cartesian_path_straightness_gate_feeds_the_fallbacks():
@@ -352,7 +342,8 @@ def test_cartesian_path_candidate_fan_out_is_one_solve():
     _, ex = _plan([_stage("cartesian_path", "descend", {
         "goal": {"poses": poses}, "planner": "classic"})], robot)
     assert ex.plan()
-    assert robot.plan_calls == 1
+    # 3 candidates in ONE goalset, but 3 planning_attempts (multi-attempt)
+    assert robot.plan_calls == 3
 
 
 def test_move_to_accepts_a_multi_candidate_pose_goal():
@@ -367,7 +358,8 @@ def test_move_to_accepts_a_multi_candidate_pose_goal():
     assert ex.plan()
     stage = ex.root.subtree_stages()[-1]
     assert "candidate [2]" in stage.solutions[0].comment
-    assert robot.plan_calls == 1  # all three attempted inside ONE solve
+    # 3 candidates in ONE goalset, 3 planning_attempts (multi-attempt)
+    assert robot.plan_calls == 3
 
 
 def test_move_relative_derives_a_hold_for_its_sampled_segment():
