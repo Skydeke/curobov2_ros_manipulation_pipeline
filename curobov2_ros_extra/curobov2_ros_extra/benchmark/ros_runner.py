@@ -685,6 +685,11 @@ class RosBenchmarkRunner(Node):
         entry["solve_time_s"] = self._winner_solve_time(result)
         entry["jerk"] = trajectory_jerk(waypoints, float(result.dt))
         entry["position_error_mm"] = self._winner_position_error_mm(result)
+        # Retain the winning endpoint for client-side FK verification
+        # (position + orientation vs the goal pose). Server joint order
+        # matches the requesting robot config, so callers FK with the
+        # kinematics built from that same config.
+        entry["final_joints"] = list(waypoints[-1]) if waypoints else None
         if robot_model_data is not None:
             try:
                 velocities = None
