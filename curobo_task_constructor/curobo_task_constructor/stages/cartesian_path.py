@@ -38,13 +38,19 @@ Straightness is the optimizer's job
 -----------------------------------
 The hold is a soft cost: cuRobo is free to leave the line when staying on it is
 more expensive (an obstacle on the segment, a better IK branch). That is the
-desired behaviour — the reference's ``min_fraction`` / ``jump_threshold``
-rejection is deliberately NOT reproduced client-side. A bowed solve is the
-optimizer's answer, not a failure to fall through on.
+desired behaviour for a free solve — but a task that asked for a line needs
+the partial-path guarantee back. ``check_straightness`` (opt-in; the pick's
+line-constrained legs set it, the free-space strategy opts out) reproduces
+the reference's rejection client-side: one ``Fk.srv`` batch over the whole
+trajectory, fail the stage when the tool strays more than
+``straightness_tol`` (default 0.01 m) from the segment. A failure is not
+fatal — it propagates to the enclosing ``Fallbacks``, which is how the
+pipeline reaches the next strategy after rejecting a bowed solve.
 """
 
 from __future__ import annotations
 
+import math
 from typing import Optional
 
 from curobo_task_constructor.core.geom import (
@@ -62,6 +68,17 @@ from curobo_task_constructor.stages._util import (
     full_request,
     pose_from_params,
 )
+
+
+def _segment_deviation(a: Pose3, b: Pose3, p: Pose3) -> float:
+    """Perpendicular distance (m) from tool point ``p`` to segment ``a→b``."""
+    ab = [b.position[i] - a.position[i] for i in range(3)]
+    ap = [p.position[i] - a.position[i] for i in range(3)]
+    denom = sum(v * v for v in ab)
+    if denom < 1e-18:
+        return math.sqrt(sum(v * v for v in ap))
+    t = max(0.0, min(1.0, sum(x * y for x, y in zip(ap, ab)) / denom))
+    return math.sqrt(sum((ap[i] - t * ab[i]) ** 2 for i in range(3)))
 
 
 @register_stage("cartesian_path")
@@ -137,11 +154,59 @@ class CartesianPath(TrajectoryStage):
         return full_request(self.robot, start.joint_state, [goalset], self.params)
 
     def make_end_state(self, start: InterfaceState, result, raw=None):
+        if not self._straight_enough(start, result):
+            return None
         return start.clone(joint_state=result.last_state)
 
+    def _straight_enough(self, start: InterfaceState, result) -> bool:
+        """Whole-path straightness gate (MTC ``computeCartesianPath`` parity).
+
+        The hold is a soft cost, so cuRobo may leave the line when that is
+        cheaper. When ``check_straightness`` is set (the pick's
+        line-constrained legs set it; the free-space strategy opts out), one
+        ``Fk`` batch over the whole trajectory rejects the solve when the
+        tool strays more than ``straightness_tol`` (default 0.01 m) from the
+        straight segment. A rejection propagates to the enclosing Fallbacks,
+        which is how the pipeline reaches the next strategy. The raw stage
+        defaults the gate off: a bowed solve is the optimizer's answer, not
+        a failure — unless the task asked for a line.
+        """
+        if not bool(self.params.get("check_straightness", False)):
+            return True
+        tol = float(self.params.get("straightness_tol", 0.01))
+        waypoints = list(getattr(result, "trajectory", None) or [])
+        if len(waypoints) < 2:
+            return True
+        try:
+            start_pose = Pose3.from_any(
+                self.robot.fk(start.joint_state, self._link()))
+        except Exception as exc:
+            self._fail(start, None,
+                       f"cartesian_path FK of the start failed: {exc!r}")
+            return False
+        targets = self._targets(start_pose)
+        if not targets:
+            return True  # goal form already reported by build_plan_request
+        picked = list(getattr(result, "selected_goal_index", None) or [])
+        goal_pose = Pose3.from_any(
+            targets[picked[0]] if picked and 0 <= picked[0] < len(targets)
+            else targets[0])
+        try:
+            tool = [Pose3.from_any(p) for p in
+                    self.robot.fk_batch(waypoints, self._link())]
+        except Exception as exc:
+            self._fail(start, None,
+                       f"cartesian_path straightness FK failed: {exc!r}")
+            return False
+        worst = max(_segment_deviation(start_pose, goal_pose, p) for p in tool)
+        if worst > tol:
+            self._fail(start, None,
+                       f"cartesian_path deviated {worst:.3f} m from the line "
+                       f"(tol {tol:.3f} m)")
+            return False
+        return True
+
     def _comment(self, req: PlanRequest, result) -> str:
-        # The resolved holds and the winning candidate index, so a
-        # multi-candidate descent is legible in the task statistics.
         gs = req.goalsets[0] if req.goalsets else None
         parts = []
         if gs is not None:

@@ -9,6 +9,7 @@ find_package(ament_cmake REQUIRED)
 find_package(rosidl_default_generators REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 
@@ -17,16 +18,18 @@ set(msg_files
   "msg/StageStatistics.msg"
   "msg/SolutionInfo.msg"
   "msg/TaskDescription.msg"
+  "msg/TaskSolution.msg"
 )
 
 set(action_files
   "action/Task.action"
+  "action/ExecuteSolution.action"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}
   ${msg_files}
   ${action_files}
-  DEPENDENCIES std_msgs geometry_msgs visualization_msgs builtin_interfaces
+  DEPENDENCIES std_msgs geometry_msgs sensor_msgs visualization_msgs builtin_interfaces
 )
 
 ament_export_dependencies(rosidl_default_runtime)

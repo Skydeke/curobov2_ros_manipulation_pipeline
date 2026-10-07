@@ -3,10 +3,11 @@
   <name>curobo_task_constructor_rviz</name>
   <version>0.1.0</version>
   <description>
-    rviz2 panel for curobo_task_constructor tasks: renders the StageSpec
-    tree, colors stages by their last attempted solution, publishes the
-    selected stage's debug markers and re-requests task execution via the
-    Task.action client.
+    rviz2 panel for curobo_task_constructor tasks: renders the stage tree,
+    browses every attempted solution per stage, scrubs/plays trajectories
+    with tool-path markers, publishes the selected solution as a
+    trajectory_msgs/JointTrajectory for the trajectory display, and
+    re-requests task execution via the Task.action client.
   </description>
 
   <license>BSD-3-Clause</license>
@@ -26,6 +27,7 @@
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
   <depend>rviz_common</depend>
+  <depend>trajectory_msgs</depend>
   <depend>visualization_msgs</depend>
 
   <exec_depend>libqt5-core</exec_depend>

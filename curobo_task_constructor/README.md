@@ -15,8 +15,10 @@ opaque `params_yaml` field, which that stage class parses itself. The format
 is unchanged by anything described below — new capabilities are new params
 inside `params_yaml`, and new stages, never new messages.
 
-The in-memory tree is plain dicts (`pick_tree.leaf` / `container`) so it can be
-built and unit-tested without ROS.
+The in-memory tree is `StageSpec` dataclasses, authored with the
+`curobo_task_constructor.mtc` task API (`core` containers/planners plus
+`stages` wrappers with MTC setters, cartesian.py style) and converted once
+via `to_spec()` — so it can be built and unit-tested without ROS.
 
 ## Stages
 
@@ -88,12 +90,13 @@ deliberate — orientation is **all-or-nothing** (a partial orientation hold is
 not expressible in six slots), and with several candidates the hold is the
 **intersection** over all of them, so it stays correct whichever one wins.
 
-The hold is a soft cost, so `check_straightness` (default on) reproduces the
-reference's partial-path guarantee client-side: one `Fk.srv` batch over the
-whole trajectory, fail the stage when the tool strays more than
-`straightness_tol` (default 0.01 m) from the segment. A failure is not fatal —
-it propagates to the enclosing `Fallbacks`, which is how the reference
-pipeline reached the next candidate after rejecting a Cartesian solve.
+The hold is a soft cost, so `check_straightness` reproduces the
+reference's partial-path guarantee client-side for the legs that ask for it
+(the pick's line-constrained legs set it; the free-space strategy opts out):
+one `Fk.srv` batch over the whole trajectory, fail the stage when the tool
+strays more than `straightness_tol` (default 0.01 m) from the segment. A failure
+is not fatal — it propagates to the enclosing `Fallbacks`, which is how the
+reference pipeline reached the next candidate after rejecting a Cartesian solve.
 
 This stage is **forward-only**: the hold comes from the start pose, so a
 backward (end-seeded) move would need a two-pass plan.

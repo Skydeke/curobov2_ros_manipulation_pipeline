@@ -1,43 +1,13 @@
-/*********************************************************************
- * Software License Agreement (BSD License)
- *
- *  Copyright (c) 2026
- *  All rights reserved.
- *
- *  Redistribution and use in source and binary forms, with or without
- *  modification, are permitted provided that the following conditions
- *  are met:
- *
- *   * Redistributions of source code must retain the above copyright
- *     notice, this list of conditions and the following disclaimer.
- *   * Redistributions in binary form must reproduce the above
- *     copyright notice, this list of conditions and the following
- *     disclaimer in the documentation and/or other materials provided
- *     with the distribution.
- *   * Neither the name of the copyright holder nor the names of its
- *     contributors may be used to endorse or promote products derived
- *     from this software without specific prior written permission.
- *
- *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
- *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
- *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
- *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
- *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
- *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
- *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
- *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
- *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- *  POSSIBILITY OF SUCH DAMAGE.
- *********************************************************************/
-
 /* Desc: rviz panel for curobo_task_constructor tasks.
  *
- * Structurally mirrors moveit_task_constructor_visualization's TaskPanel
- * (pluginlib-registered rviz_common::Panel) but only knows the
- * curobo_task_constructor_interfaces wire format — it never touches
- * curobov2_ros_interfaces or the existing marker publishers.
+ * MTC TaskPanel/TaskView equivalent on the
+ * curobo_task_constructor_interfaces wire format: a toolbar with an Exec
+ * tool button, a Task Tree beside a (multi-select, sortable) solutions
+ * tree, and a Properties pane. The selected solution is published as
+ * trajectory_msgs/JointTrajectory for the CuroboTrajectoryDisplay, which
+ * animates the full robot through it — the same topic Task.publish uses.
+ * Exec drives the selected solution (complete chain or single attempt)
+ * with no replanning, like MTC's Execute solution button.
  */
 
 #pragma once
@@ -47,14 +17,19 @@
 #include <rviz_common/config.hpp>
 #include <rviz_common/panel.hpp>
 
-#include <curobo_task_constructor_interfaces/action/task.hpp>
+#include <curobo_task_constructor_interfaces/action/execute_solution.hpp>
 #include <curobo_task_constructor_interfaces/msg/solution_info.hpp>
 #include <curobo_task_constructor_interfaces/msg/stage_spec.hpp>
 #include <curobo_task_constructor_interfaces/msg/stage_statistics.hpp>
 #include <curobo_task_constructor_interfaces/msg/task_description.hpp>
+#include <curobo_task_constructor_interfaces/msg/task_solution.hpp>
 
+#include <geometry_msgs/msg/pose.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <visualization_msgs/msg/marker_array.hpp>
 
+#include <QList>
 #include <QMap>
 #include <QString>
 #include <cstdint>
@@ -62,20 +37,20 @@
 #include <memory>
 #include <vector>
 
-class QCheckBox;
+class QAction;
 class QLabel;
-class QPushButton;
+class QSplitter;
+class QToolButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
 namespace curobo_task_constructor_rviz
 {
 
-using TaskAction = curobo_task_constructor_interfaces::action::Task;
+using ExecuteAction = curobo_task_constructor_interfaces::action::ExecuteSolution;
+using SolutionInfoMsg = curobo_task_constructor_interfaces::msg::SolutionInfo;
 
-/// Browse curobo_task_constructor tasks: render the StageSpec tree, color
-/// stages by their last attempted solution (success/failure), show the
-/// selected stage's debug markers and re-request task execution.
+/// Task tree + solutions tree + properties, like MTC's TaskView.
 class TaskConstructorPanel : public rviz_common::Panel
 {
   Q_OBJECT
@@ -89,61 +64,77 @@ public:
   void save(rviz_common::Config config) const override;
 
 private Q_SLOTS:
-  /// GUI-thread refresh points (ROS callbacks marshal data here via
-  /// QMetaObject::invokeMethod with a QueuedConnection; rviz's ROS callbacks
-  /// may run on a different thread than the widgets).
   void refreshTaskDescription();
   void refreshSolutionInfo();
   void refreshStageStatistics();
+  void refreshChains();
   void setStatus(const QString & text);
 
   void onSelectedItemChanged();
-  void onReexecuteClicked();
+  void onSolutionSelectionChanged();
+  void onExecSolution();
+  void onShowTimeChanged();
 
 private:
-  /// Build the widget tree (labels, tree widget, re-execute controls).
-  void setupUi();
+  using SolutionInfoShared =
+      curobo_task_constructor_interfaces::msg::SolutionInfo::ConstSharedPtr;
 
-  /// Re-link one node of the flat StageSpec[] from TaskDescription and
-  /// recursively append its rows, keyed by the wire stage ids (the executor
-  /// assigns those ids in pre-order, so SolutionInfo/StageStatistics line up).
+  void setupUi();
   QTreeWidgetItem * buildSpecItem(
       const std::map<uint32_t, const curobo_task_constructor_interfaces::msg::StageSpec *> & by_id,
       const std::map<uint32_t, std::vector<uint32_t>> & children_of,
       uint32_t id, QTreeWidgetItem * parent);
-
   void applyStoredData();
-  void applySolutionToItem(QTreeWidgetItem * item,
-                           const curobo_task_constructor_interfaces::msg::SolutionInfo & sol);
-  void publishSelectedMarkers();
-  void reexecute(bool execute);
+  void updateStageCounts(uint32_t id);
+  int stageOkCount(uint32_t id) const;
+  int stageFailCount(uint32_t id) const;
+  void applySolutionToItem(QTreeWidgetItem * item, const SolutionInfoMsg & sol);
+  void highlightStage(const QString & name);
+  void clearHighlight();
+  bool showingChains() const;
+  void rebuildSolutionList();
+  void showSelectedSolution();
+  void showStageProperties(QTreeWidgetItem * item);
+  void showSolutionProperties(const QString & rank, const QString & cost,
+                              const QString & comment, const QString & extra);
+  void showSolutionPropertiesFor(QTreeWidgetItem * row);
+
+  /// Waypoints behind the current solutions-view selection.
+  SolutionInfoShared currentAttempt(QTreeWidgetItem * row) const;
+  SolutionInfoShared findAttempt(uint32_t stage_id, uint32_t solution_id) const;
+  std::vector<SolutionInfoShared> selectedAttempts(
+      const QList<QTreeWidgetItem *> & selected) const;
+  std::vector<sensor_msgs::msg::JointState> currentWaypoints() const;
+
+  void publishSolutionTrajectory(const QList<QTreeWidgetItem *> & selected);
+  void publishToolPath(const QList<QTreeWidgetItem *> & selected);
 
   rclcpp::Node::SharedPtr node_;
   rclcpp::CallbackGroup::SharedPtr cb_group_;
   rclcpp::Subscription<curobo_task_constructor_interfaces::msg::TaskDescription>::SharedPtr sub_task_description_;
   rclcpp::Subscription<curobo_task_constructor_interfaces::msg::SolutionInfo>::SharedPtr sub_solution_info_;
   rclcpp::Subscription<curobo_task_constructor_interfaces::msg::StageStatistics>::SharedPtr sub_stage_statistics_;
+  rclcpp::Subscription<curobo_task_constructor_interfaces::msg::TaskSolution>::SharedPtr sub_task_solutions_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pub_selected_markers_;
-  rclcpp_action::Client<TaskAction>::SharedPtr action_client_;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr pub_solution_trajectory_;
+  rclcpp_action::Client<ExecuteAction>::SharedPtr exec_client_;
 
+  // The one task on display (a new description replaces it).
+  curobo_task_constructor_interfaces::msg::TaskDescription::ConstSharedPtr task_;
+  QMap<uint32_t, std::vector<SolutionInfoShared>> attempts_;
+  QMap<uint32_t, curobo_task_constructor_interfaces::msg::StageStatistics::ConstSharedPtr> stats_;
+  // Complete ranked solutions (MTC root-container solutions).
+  std::vector<curobo_task_constructor_interfaces::msg::TaskSolution::ConstSharedPtr> chains_;
+
+  QToolButton * exec_button_;
   QTreeWidget * tree_;
+  QTreeWidget * solutions_;
+  QTreeWidget * properties_;
+  QAction * show_time_action_;
   QLabel * status_label_;
-  QPushButton * reexecute_button_;
-  QCheckBox * execute_checkbox_;
 
-  /// Latest TaskDescription: the built graph as a flat StageSpec[] list
-  /// (root = the stage with parent_id == id) used for both rendering and
-  /// re-execution goals.
-  curobo_task_constructor_interfaces::msg::TaskDescription::ConstSharedPtr last_task_;
-
-  /// stage_id -> QTreeWidgetItem (stage ids mirror executor.init() ordering).
   QMap<uint32_t, QTreeWidgetItem *> stage_item_;
-  /// stage_id -> last attempted solution (success AND failure), for coloring.
-  QMap<uint32_t, curobo_task_constructor_interfaces::msg::SolutionInfo::ConstSharedPtr> last_solution_;
-  /// stage_id -> rollup statistics, for the numeric columns.
-  QMap<uint32_t, curobo_task_constructor_interfaces::msg::StageStatistics::ConstSharedPtr> stage_stats_;
-  /// stage_id -> debug markers from the last successful attempt.
-  QMap<uint32_t, visualization_msgs::msg::MarkerArray::ConstSharedPtr> stage_markers_;
+  QTreeWidgetItem * task_root_item_ = nullptr;
 };
 
 }  // namespace curobo_task_constructor_rviz

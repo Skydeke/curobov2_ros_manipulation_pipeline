@@ -6,17 +6,19 @@
 
 #include <rviz_common/display_context.hpp>
 
+#include <QAction>
 #include <QBrush>
-#include <QCheckBox>
 #include <QColor>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMetaObject>
-#include <QPushButton>
+#include <QSplitter>
+#include <QToolButton>
 #include <QTreeWidget>
 #include <QVariant>
 #include <QVBoxLayout>
+#include <visualization_msgs/msg/marker.hpp>
 
 #include <functional>
 #include <string>
@@ -26,62 +28,40 @@ namespace curobo_task_constructor_rviz
 
 namespace
 {
-// column layout of the stage tree
 enum Column
 {
   COL_STAGE = 0,
   COL_TYPE,
-  COL_ATTEMPTS,
-  COL_LAST,
+  COL_OK,
+  COL_FAIL,
   COL_COST,
   COL_TIME,
   COL_COUNT
 };
 
-// Soft success/failure tints, DERIVED FROM THE ACTIVE PALETTE rather than
-// hardcoded. The rows are painted with the palette's Text/TextHighlight
-// colours, so a fixed light wash (the old 0xE8F5E9 / 0xFDEBEC) put a light
-// background under the dark theme's light text and every row turned
-// unreadable — that is the "some parts aren't really nicely visible" case.
-// Blending a low-saturation hue into Base keeps the wash inside whatever
-// light/dark scheme the stylesheet established, so it works in both.
-QColor blend(const QColor & base, const QColor & tint, qreal amount)
+enum SolutionColumn
 {
-  return QColor::fromRgbF(
-    base.redF() * (1.0 - amount) + tint.redF() * amount,
-    base.greenF() * (1.0 - amount) + tint.greenF() * amount,
-    base.blueF() * (1.0 - amount) + tint.blueF() * amount);
-}
+  SOL_RANK = 0,
+  SOL_COST,
+  SOL_COMMENT,
+  SOL_COUNT
+};
 
-QColor stateTint(const QWidget * widget, bool success)
-{
-  const QColor base = widget->palette().color(QPalette::Base);
-  const bool dark = base.lightness() < 128;
-  const QColor hue = success ? QColor(0x35, 0x9E, 0x63)   // green
-                             : QColor(0xD1, 0x48, 0x48); // red
-  // A dark scheme needs a slightly stronger wash to read as a state at all;
-  // both are kept far below the point where they start fighting the text.
-  return blend(base, hue, dark ? 0.24 : 0.30);
-}
-
-// introspection topics (must match node.py's _INTROSPECT_QOS_TOPICS and the
-// action server name)
 const char * kTopicTaskDescription = "/curobo_task_constructor/task_description";
 const char * kTopicSolutionInfo = "/curobo_task_constructor/solution_info";
 const char * kTopicStageStatistics = "/curobo_task_constructor/stage_statistics";
+const char * kTopicTaskSolutions = "/curobo_task_constructor/task_solutions";
 const char * kTopicSelectedMarkers = "/curobo_task_constructor/selected_solution_markers";
-const char * kActionTask = "/curobo_task_constructor/task";
+const char * kTopicSolutionTrajectory = "/curobo_task_constructor/solution_trajectory";
+const char * kActionExecute = "/curobo_task_constructor/execute_solution";
 
-//: same QoS as the node's introspection publishers: RELIABLE + TRANSIENT_LOCAL
-// so a panel that joins mid-task still sees structure and last attempts.
-// The depth MUST match the node's INTROSPECTION_QOS_DEPTH: the node publishes
-// one StageStatistics per stage and one SolutionInfo per emit/failure in a
-// burst, and the pick task has 27 stages — a depth of 10 dropped the messages
-// for the first ~17 stages, so compute time/attempts showed only for the last
-// 10 (mostly never-run fallback stages).
 rclcpp::QoS introspectionQoS()
 {
-  rclcpp::QoS qos(rclcpp::KeepLast(100));
+  // Depth MUST match the node's INTROSPECTION_QOS_DEPTH: per-try progress
+  // snapshots plus per-attempt SolutionInfo multiply the burst size well
+  // past the stage count, and a shallow history silently drops the early
+  // attempts a panel joining mid-plan needs to render the full picture.
+  rclcpp::QoS qos(rclcpp::KeepLast(500));
   qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
   qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
   return qos;
@@ -100,7 +80,10 @@ QString typeOf(const curobo_task_constructor_interfaces::msg::StageSpec & spec)
   return QString::fromStdString(spec.stage_type);
 }
 
-using GoalHandleTask = rclcpp_action::ClientGoalHandle<TaskAction>;
+using GoalHandleExecute = rclcpp_action::ClientGoalHandle<ExecuteAction>;
+
+/// stage_id value addressing a whole chain rather than one segment.
+constexpr uint32_t NO_STAGE = 0xFFFFFFFF;
 }  // namespace
 
 TaskConstructorPanel::TaskConstructorPanel(QWidget * parent) : rviz_common::Panel(parent)
@@ -110,185 +93,220 @@ TaskConstructorPanel::TaskConstructorPanel(QWidget * parent) : rviz_common::Pane
 }
 
 TaskConstructorPanel::~TaskConstructorPanel() {}
-// Out-of-line destructor: the class's key function (first non-inline virtual
-// per the Itanium ABI) anchors the vtable to THIS translation unit. A plain
-// body mirrors the sibling add_objects_panel layout exactly ({}= default here
-// previously). If the dtor ever moved inline, the vtable would move with it
-// and a partial build could dlopen-bomb with "undefined symbol: vtable".
+
 void TaskConstructorPanel::setupUi()
 {
   auto * layout = new QVBoxLayout(this);
+  layout->setContentsMargins(0, 0, 0, 0);
 
+  // Toolbar (MTC task_panel.ui): spacer + Exec tool button.
+  auto * tools = new QHBoxLayout();
+  tools->setContentsMargins(0, 2, 0, 0);
+  tools->addStretch(1);
+  exec_button_ = new QToolButton(this);
+  exec_button_->setText(tr("Exec"));
+  exec_button_->setToolTip(tr("Execute solution"));
+  exec_button_->setEnabled(false);
+  layout->addLayout(tools);
+  tools->addWidget(exec_button_);
+
+  layout->addWidget(new QLabel(tr("Task Tree"), this));
+
+  // Horizontal splitter (MTC task_view.ui): task tree | solutions, 2:1.
+  auto * splitter = new QSplitter(Qt::Horizontal, this);
   tree_ = new QTreeWidget(this);
   tree_->setColumnCount(COL_COUNT);
-  tree_->setHeaderLabels({ tr("Stage"), tr("Type"), tr("Attempts"), tr("Last"),
-                           tr("Cost"), tr("Compute time") });
+  tree_->setHeaderLabels({tr("Stage"), tr("Type"), QString::fromUtf8("✓"),
+                          QString::fromUtf8("✗"), tr("Cost"), tr("Compute time")});
   tree_->setRootIsDecorated(true);
+  tree_->setIndentation(15);
+  tree_->setUniformRowHeights(true);
+  tree_->setAllColumnsShowFocus(true);
   tree_->setAlternatingRowColors(true);
+  tree_->setContextMenuPolicy(Qt::ActionsContextMenu);
   tree_->header()->setStretchLastSection(true);
-  layout->addWidget(tree_, /*stretch=*/1);
+  tree_->headerItem()->setForeground(COL_OK, QColor(Qt::darkGreen));
+  tree_->headerItem()->setToolTip(COL_OK, tr("successful solutions"));
+  tree_->headerItem()->setForeground(COL_FAIL, QColor(Qt::red));
+  tree_->headerItem()->setToolTip(COL_FAIL, tr("failed solution attempts"));
+  show_time_action_ = new QAction(tr("ShowTimeColumn"), this);
+  show_time_action_->setCheckable(true);
+  show_time_action_->setChecked(true);
+  show_time_action_->setToolTip(tr("show time column"));
+  tree_->addAction(show_time_action_);
+  splitter->addWidget(tree_);
+  splitter->setStretchFactor(0, 2);
 
-  auto * controls = new QHBoxLayout();
-  reexecute_button_ = new QPushButton(tr("Re-run task"), this);
-  reexecute_button_->setEnabled(false);
-  reexecute_button_->setToolTip(
-      tr("Send the last received task back to the executor "
-         "(via /curobo_task_constructor/task Task.action)"));
-  execute_checkbox_ = new QCheckBox(tr("execute on server"), this);
-  execute_checkbox_->setChecked(true);
-  execute_checkbox_->setToolTip(
-      tr("When set, the server also executes the winning solution; "
-         "otherwise it only plans."));
-  controls->addWidget(reexecute_button_);
-  controls->addWidget(execute_checkbox_);
-  controls->addStretch(1);
-  layout->addLayout(controls);
+  solutions_ = new QTreeWidget(this);
+  solutions_->setColumnCount(SOL_COUNT);
+  solutions_->setHeaderLabels({tr("#"), tr("cost"), tr("comment")});
+  solutions_->setRootIsDecorated(false);
+  solutions_->setUniformRowHeights(true);
+  solutions_->setAllColumnsShowFocus(true);
+  solutions_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+  solutions_->setSelectionBehavior(QAbstractItemView::SelectRows);
+  solutions_->setSortingEnabled(true);
+  splitter->addWidget(solutions_);
+  splitter->setStretchFactor(1, 1);
+  layout->addWidget(splitter, /*stretch=*/3);
+
+  layout->addWidget(new QLabel(tr("Properties"), this));
+  properties_ = new QTreeWidget(this);
+  properties_->setColumnCount(2);
+  properties_->setHeaderLabels({tr("property"), tr("value")});
+  properties_->setRootIsDecorated(true);
+  layout->addWidget(properties_, /*stretch=*/1);
 
   status_label_ = new QLabel(tr("waiting for task_description..."), this);
   status_label_->setWordWrap(true);
   layout->addWidget(status_label_);
 
   connect(tree_, &QTreeWidget::currentItemChanged, this,
-          [this](QTreeWidgetItem * /*current*/, QTreeWidgetItem * /*previous*/)
-          { onSelectedItemChanged(); });
-  connect(reexecute_button_, &QPushButton::clicked, this,
-          &TaskConstructorPanel::onReexecuteClicked);
+          [this](QTreeWidgetItem *, QTreeWidgetItem *) { onSelectedItemChanged(); });
+  connect(solutions_, &QTreeWidget::itemSelectionChanged, this,
+          &TaskConstructorPanel::onSolutionSelectionChanged);
+  connect(exec_button_, &QToolButton::clicked, this, &TaskConstructorPanel::onExecSolution);
+  connect(show_time_action_, &QAction::toggled, this,
+          [this](bool) { onShowTimeChanged(); });
 }
 
 void TaskConstructorPanel::onInitialize()
 {
-  // The base class must see an initialized display context first.
   rviz_common::Panel::onInitialize();
-
-  // Non-null in the normal case by construction (rviz installed it before calling
-  // onInitialize()); guarded because a panel whose base onInitialize() failed
-  // leaves it null, and dereferencing it took the whole panel down with it.
   rviz_common::DisplayContext * display_context = getDisplayContext();
   if (display_context == nullptr) {
     setStatus(QStringLiteral("internal error: no display context from rviz"));
     return;
   }
-
   auto ros_node_abstraction = display_context->getRosNodeAbstraction().lock();
   if (!ros_node_abstraction) {
     setStatus(QStringLiteral("internal error: no ROS node from rviz"));
     return;
   }
   node_ = ros_node_abstraction->get_raw_node();
-
-  // Reentrant group: rviz spins a single-threaded executor, so subscriptions,
-  // the action client and Qt refresh points must be allowed to interleave.
   cb_group_ = node_->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
-
   const auto qos = introspectionQoS();
-
-  // Jazzy's rclcpp only accepts the callback group inside SubscriptionOptions.
   rclcpp::SubscriptionOptions sub_options;
   sub_options.callback_group = cb_group_;
 
   sub_task_description_ = node_->create_subscription<
       curobo_task_constructor_interfaces::msg::TaskDescription>(
       kTopicTaskDescription, qos,
-      [this](curobo_task_constructor_interfaces::msg::TaskDescription::ConstSharedPtr msg)
-      {
-        last_task_ = msg;
-        QMetaObject::invokeMethod(this, "refreshTaskDescription", Qt::QueuedConnection);
+      [this](curobo_task_constructor_interfaces::msg::TaskDescription::ConstSharedPtr msg) {
+        QMetaObject::invokeMethod(
+            this, [this, msg]() {
+              // An empty description is the "task finished" signal: keep
+              // showing the last task, like MTC keeps old tasks visible.
+              if (msg->stages.empty() || msg->stage_count == 0) {
+                setStatus(msg->task_id.empty()
+                              ? tr("no task — waiting for task_description...")
+                              : tr("task '%1' finished")
+                                    .arg(QString::fromStdString(msg->task_id)));
+                return;
+              }
+              // One task on display; a new description replaces it.
+              task_ = msg;
+              attempts_.clear();
+              stats_.clear();
+              chains_.clear();
+              refreshTaskDescription();
+            },
+            Qt::QueuedConnection);
       },
       sub_options);
   sub_solution_info_ = node_->create_subscription<
       curobo_task_constructor_interfaces::msg::SolutionInfo>(
       kTopicSolutionInfo, qos,
-      [this](curobo_task_constructor_interfaces::msg::SolutionInfo::ConstSharedPtr msg)
-      {
-        last_solution_[msg->stage_id] = msg;
-        if (msg->success && !msg->markers.markers.empty()) {
-          stage_markers_[msg->stage_id] =
-              std::make_shared<visualization_msgs::msg::MarkerArray>(msg->markers);
-        }
-        QMetaObject::invokeMethod(this, "refreshSolutionInfo", Qt::QueuedConnection);
+      [this](curobo_task_constructor_interfaces::msg::SolutionInfo::ConstSharedPtr msg) {
+        if (!task_ || task_->task_id != msg->task_id) return;
+        const uint32_t id = msg->stage_id;
+        attempts_[id].push_back(msg);
+        QMetaObject::invokeMethod(
+            this, [this, id]() {
+              // Follow the plan: with nothing selected, select the stage
+              // that just reported, so the solutions list tracks the live
+              // plan instead of sitting empty. A manual selection sticks.
+              if (!tree_->currentItem()) {
+                auto item_it = stage_item_.find(id);
+                if (item_it != stage_item_.end()) tree_->setCurrentItem(item_it.value());
+              }
+              refreshSolutionInfo();
+            },
+            Qt::QueuedConnection);
       },
       sub_options);
   sub_stage_statistics_ = node_->create_subscription<
       curobo_task_constructor_interfaces::msg::StageStatistics>(
       kTopicStageStatistics, qos,
-      [this](curobo_task_constructor_interfaces::msg::StageStatistics::ConstSharedPtr msg)
-      {
-        stage_stats_[msg->stage_id] = msg;
+      [this](curobo_task_constructor_interfaces::msg::StageStatistics::ConstSharedPtr msg) {
+        if (!task_ || task_->task_id != msg->task_id) return;
+        stats_[msg->stage_id] = msg;
         QMetaObject::invokeMethod(this, "refreshStageStatistics", Qt::QueuedConnection);
       },
       sub_options);
+  sub_task_solutions_ = node_->create_subscription<
+      curobo_task_constructor_interfaces::msg::TaskSolution>(
+      kTopicTaskSolutions, qos,
+      [this](curobo_task_constructor_interfaces::msg::TaskSolution::ConstSharedPtr msg) {
+        if (!task_ || task_->task_id != msg->task_id) return;
+        while (chains_.size() <= msg->solution_index) chains_.push_back(nullptr);
+        chains_[msg->solution_index] = msg;
+        QMetaObject::invokeMethod(this, "refreshChains", Qt::QueuedConnection);
+      },
+      sub_options);
 
-  pub_selected_markers_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-      kTopicSelectedMarkers, qos);
-  action_client_ = rclcpp_action::create_client<TaskAction>(node_, kActionTask, cb_group_);
-
+  pub_selected_markers_ =
+      node_->create_publisher<visualization_msgs::msg::MarkerArray>(kTopicSelectedMarkers, qos);
+  // Transient-local like Task.publish: a trajectory display that subscribes
+  // later still picks up the selected solution.
+  rclcpp::QoS traj_qos(rclcpp::KeepLast(1));
+  traj_qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
+  traj_qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
+  pub_solution_trajectory_ = node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+      kTopicSolutionTrajectory, traj_qos);
+  exec_client_ = rclcpp_action::create_client<ExecuteAction>(node_, kActionExecute, cb_group_);
   setStatus(tr("listening on %1").arg(kTopicTaskDescription));
 }
 
 void TaskConstructorPanel::load(const rviz_common::Config & config)
 {
-  // The base class is what restores this panel's own "Class" + "Name" keys.
-  // VisualizationFrame::loadPanels() can only match a panel entry it finds
-  // both keys on, so skipping this makes the panel unrecoverable from a .rviz
-  // file. It is harmless (and required) even when nested as a tab widget of
-  // another panel — that parent never calls this overload for us.
   rviz_common::Panel::load(config);
-
-  QVariant execute;
-  if (config.mapGetValue("ExecuteOnServer", &execute) && execute.canConvert<bool>()) {
-    execute_checkbox_->setChecked(execute.toBool());
-  }
+  QVariant show_time;
+  if (config.mapGetValue("ShowTime", &show_time) && show_time.canConvert<bool>())
+    show_time_action_->setChecked(show_time.toBool());
+  onShowTimeChanged();
 }
 
 void TaskConstructorPanel::save(rviz_common::Config config) const
 {
-  // Panel::save() is the ONLY writer of "Class" and "Name" (see
-  // rviz_common/src/rviz_common/visualization_frame.cpp: savePanels() hands
-  // each panel a fresh list entry and writes nothing itself). Omitting the
-  // base call is what used to make this panel un-saveable: rviz wrote a
-  // nameless orphan entry into the config and then dropped the panel on the
-  // next load, because loadPanels() requires both keys to resolve a class.
   rviz_common::Panel::save(config);
-  config.mapSetValue("ExecuteOnServer", execute_checkbox_->isChecked());
+  config.mapSetValue("ShowTime", show_time_action_->isChecked());
 }
-
-// ----------------------------------------------------------------------------
-// tree building
-// ----------------------------------------------------------------------------
 
 QTreeWidgetItem * TaskConstructorPanel::buildSpecItem(
     const std::map<uint32_t, const curobo_task_constructor_interfaces::msg::StageSpec *> & by_id,
-    const std::map<uint32_t, std::vector<uint32_t>> & children_of,
-    uint32_t id, QTreeWidgetItem * parent)
+    const std::map<uint32_t, std::vector<uint32_t>> & children_of, uint32_t id,
+    QTreeWidgetItem * parent)
 {
-  // Rows are keyed by the wire stage id — the executor assigns those ids in
-  // pre-order (executor.init(): for idx, stage in enumerate(subtree_stages())),
-  // so SolutionInfo/StageStatistics find their node directly.
   const auto spec_it = by_id.find(id);
-  if (spec_it == by_id.end()) {
-    return nullptr;
-  }
+  if (spec_it == by_id.end()) return nullptr;
   const auto & spec = *spec_it->second;
   auto * item = new QTreeWidgetItem();
   item->setText(COL_STAGE, nameOf(spec));
   item->setText(COL_TYPE, typeOf(spec));
-  item->setText(COL_ATTEMPTS, "-");
-  item->setText(COL_LAST, "");
+  item->setText(COL_OK, "-");
+  item->setText(COL_FAIL, "-");
   item->setText(COL_COST, "");
   item->setText(COL_TIME, "");
   item->setData(0, Qt::UserRole, id);
-  if (parent != nullptr) {
+  if (parent != nullptr)
     parent->addChild(item);
-  } else {
+  else
     tree_->addTopLevelItem(item);
-  }
   stage_item_[id] = item;
   const auto children_it = children_of.find(id);
-  if (children_it != children_of.end()) {
-    for (uint32_t child_id : children_it->second) {
-      buildSpecItem(by_id, children_of, child_id, item);
-    }
-  }
+  if (children_it != children_of.end())
+    for (uint32_t child_id : children_it->second) buildSpecItem(by_id, children_of, child_id, item);
   return item;
 }
 
@@ -296,53 +314,23 @@ void TaskConstructorPanel::refreshTaskDescription()
 {
   tree_->clear();
   stage_item_.clear();
-  reexecute_button_->setEnabled(false);
-
-  if (!last_task_) {
-    setStatus(tr("waiting for task_description..."));
+  task_root_item_ = nullptr;
+  solutions_->clear();
+  properties_->clear();
+  exec_button_->setEnabled(false);
+  if (!task_ || task_->stages.empty()) {
+    setStatus(tr("no task — waiting for task_description..."));
     return;
   }
-
-  // An EMPTY task description is the "cleared" signal the executor publishes
-  // when a task finishes (see curobo_task_constructor/node.py) — the pick
-  // pipeline drives many tasks through this one panel, and without this the
-  // tree (and its Re-run button) would keep showing the previous task, which
-  // looks like a stale/live plan. Drop every cached per-stage result too, not
-  // just the rows, so a later task never inherits the previous one's colours.
-  if (last_task_->stages.empty() || last_task_->stage_count == 0) {
-    last_solution_.clear();
-    stage_stats_.clear();
-    stage_markers_.clear();
-    setStatus(last_task_->task_id.empty()
-                  ? tr("no task — waiting for task_description...")
-                  : tr("task '%1' finished — panel cleared")
-                        .arg(QString::fromStdString(last_task_->task_id)));
-    return;
-  }
-
-  // A NEW non-empty task description means a different task is starting.
-  // Clear the cached per-stage data from the previous task so that
-  // applyStoredData() below does NOT re-apply stale costs/attempts/times to
-  // the new task's items (stage_ids are assigned in pre-order, so they match
-  // across tasks and the old data would silently show through).
-  last_solution_.clear();
-  stage_stats_.clear();
-  stage_markers_.clear();
-
-  // Relink the flat StageSpec[] list into a tree (MTC-style wire format:
-  // parent_id == id marks the root; every other stage points at its parent).
-  // Task graphs are small, so two assoc maps are plenty.
   std::map<uint32_t, const curobo_task_constructor_interfaces::msg::StageSpec *> by_id;
   std::map<uint32_t, std::vector<uint32_t>> children_of;
   uint32_t root_id = 0;
   bool have_root = false;
-  for (const auto & stage : last_task_->stages) {
+  for (const auto & stage : task_->stages) {
     by_id[stage.id] = &stage;
-    if (stage.parent_id != stage.id) {
-      // The root's self-marker (parent_id == id) is only a marker — it must
-      // not become a child edge or the tree walk would loop into the root.
+    if (stage.parent_id != stage.id)
       children_of[stage.parent_id].push_back(stage.id);
-    } else {
+    else {
       root_id = stage.id;
       have_root = true;
     }
@@ -351,197 +339,593 @@ void TaskConstructorPanel::refreshTaskDescription()
     setStatus(tr("task_description has no root stage (parent_id == id)"));
     return;
   }
-  buildSpecItem(by_id, children_of, root_id, nullptr);
+  // Task row on top (MTC lists tasks above their stages); the spec root
+  // hangs beneath it.
+  task_root_item_ = new QTreeWidgetItem();
+  task_root_item_->setText(COL_STAGE, QString::fromStdString(task_->task_id));
+  task_root_item_->setText(COL_TYPE, tr("task"));
+  task_root_item_->setText(COL_OK, "-");
+  task_root_item_->setText(COL_FAIL, "-");
+  tree_->addTopLevelItem(task_root_item_);
+  buildSpecItem(by_id, children_of, root_id, task_root_item_);
   applyStoredData();
   tree_->expandAll();
-
   QString status = tr("task '%1' (%2 stages)").arg(
-      QString::fromStdString(last_task_->task_id)).arg(last_task_->stage_count);
-  if (!last_task_->valid) {
-    status += tr(" — INVALID: %1").arg(QString::fromStdString(last_task_->comment));
-  }
+      QString::fromStdString(task_->task_id)).arg(task_->stage_count);
+  if (!task_->valid) status += tr(" — INVALID: %1").arg(QString::fromStdString(task_->comment));
   setStatus(status);
-
-  // a spec that came back valid can be re-sent; invalid specs would just be
-  // re-rejected by the server, so keep the button disabled for those
-  reexecute_button_->setEnabled(last_task_->valid);
+  exec_button_->setEnabled(task_->valid);
 }
 
 void TaskConstructorPanel::applyStoredData()
 {
+  if (!task_) return;
+  int ok_total = 0, fail_total = 0;
   for (auto it = stage_item_.begin(); it != stage_item_.end(); ++it) {
-    auto sol_it = last_solution_.find(it.key());
-    if (sol_it != last_solution_.end() && sol_it.value()) {
-      applySolutionToItem(it.value(), *sol_it.value());
+    updateStageCounts(it.key());
+    auto stat = stats_.find(it.key());
+    if (stat != stats_.end() && stat.value()) {
+      it.value()->setText(COL_TIME, QString::number(stat.value()->total_compute_time, 'g', 4));
+      it.value()->setToolTip(COL_TYPE,
+                             QStringLiteral("successful attempts: %1")
+                                 .arg(stat.value()->success_count));
     }
-    auto stat_it = stage_stats_.find(it.key());
-    if (stat_it != stage_stats_.end() && stat_it.value()) {
-      it.value()->setText(COL_ATTEMPTS,
-                          QString::number(stat_it.value()->attempt_count));
-      it.value()->setText(COL_TIME,
-                          QString::number(stat_it.value()->total_compute_time, 'g', 4));
-      it.value()->setText(COL_COST,
-                          QString::number(stat_it.value()->last_cost, 'g', 6));
-      it.value()->setToolTip(
-          COL_TYPE, QStringLiteral("successful attempts: %1").arg(stat_it.value()->success_count));
+    ok_total += stageOkCount(it.key());
+    fail_total += stageFailCount(it.key());
+  }
+  if (task_root_item_) {
+    task_root_item_->setText(COL_OK, QString::number(ok_total));
+    task_root_item_->setText(COL_FAIL, QString::number(fail_total));
+  }
+}
+
+int TaskConstructorPanel::stageOkCount(uint32_t id) const
+{
+  int ok = 0;
+  auto att = attempts_.find(id);
+  if (att != attempts_.end()) {
+    for (const auto &sol : att.value()) {
+      if (sol && sol->success) ++ok;
     }
   }
+  return ok;
+}
+
+int TaskConstructorPanel::stageFailCount(uint32_t id) const
+{
+  int fail = 0;
+  auto att = attempts_.find(id);
+  if (att != attempts_.end()) {
+    for (const auto &sol : att.value()) {
+      if (sol && !sol->success) ++fail;
+    }
+  }
+  return fail;
+}
+
+void TaskConstructorPanel::updateStageCounts(uint32_t id)
+{
+  // MTC ✓/✗ columns: successful vs failed attempts streamed so far. Kept
+  // purely stream-driven (never derived from the statistics rollup, whose
+  // attempt_count also folds in multi-attempt extra solves that never
+  // produced a row).
+  auto item_it = stage_item_.find(id);
+  if (item_it == stage_item_.end()) return;
+  item_it.value()->setText(COL_OK, QString::number(stageOkCount(id)));
+  item_it.value()->setText(COL_FAIL, QString::number(stageFailCount(id)));
 }
 
 void TaskConstructorPanel::refreshSolutionInfo()
 {
-  for (auto it = last_solution_.begin(); it != last_solution_.end(); ++it) {
+  if (!task_) return;
+  int ok_total = 0, fail_total = 0;
+  for (auto it = attempts_.begin(); it != attempts_.end(); ++it) {
     auto item_it = stage_item_.find(it.key());
-    if (item_it == stage_item_.end() || !it.value()) {
-      continue;
-    }
-    applySolutionToItem(item_it.value(), *it.value());
+    if (item_it == stage_item_.end() || it.value().empty() || !it.value().back()) continue;
+    applySolutionToItem(item_it.value(), *it.value().back());
+    updateStageCounts(it.key());
+    ok_total += stageOkCount(it.key());
+    fail_total += stageFailCount(it.key());
   }
+  if (task_root_item_) {
+    task_root_item_->setText(COL_OK, QString::number(ok_total));
+    task_root_item_->setText(COL_FAIL, QString::number(fail_total));
+  }
+  rebuildSolutionList();
 }
 
 void TaskConstructorPanel::applySolutionToItem(
     QTreeWidgetItem * item, const curobo_task_constructor_interfaces::msg::SolutionInfo & sol)
 {
-  item->setText(COL_LAST, sol.success ? QStringLiteral("OK") : QStringLiteral("FAIL"));
+  // No success/failure background (MTC rows stay palette-default).
   if (sol.success) {
     item->setText(COL_COST, QString::number(sol.cost, 'g', 6));
   } else {
     item->setText(COL_COST, QStringLiteral("—"));
   }
-  const QBrush bg(stateTint(tree_, sol.success));
-  for (int col = 0; col < COL_COUNT; ++col) {
-    item->setBackground(col, bg);
+  item->setToolTip(COL_STAGE, QString::fromStdString(sol.comment));
+}
+
+void TaskConstructorPanel::highlightStage(const QString & name)
+{
+  // MTC highlightStage: yellow background on the row whose (sub-)trajectory
+  // is currently playing or executing.
+  clearHighlight();
+  for (auto it = stage_item_.begin(); it != stage_item_.end(); ++it) {
+    if (it.value()->text(COL_STAGE) == name) {
+      for (int col = 0; col < COL_COUNT; ++col)
+        it.value()->setBackground(col, QBrush(QColor(Qt::yellow)));
+      return;
+    }
   }
-  if (!sol.comment.empty()) {
-    item->setToolTip(COL_STAGE, QString::fromStdString(sol.comment));
-  } else {
-    item->setToolTip(COL_STAGE, QString());
+  if (task_root_item_ && task_root_item_->text(COL_STAGE) == name) {
+    for (int col = 0; col < COL_COUNT; ++col)
+      task_root_item_->setBackground(col, QBrush(QColor(Qt::yellow)));
   }
+}
+
+void TaskConstructorPanel::clearHighlight()
+{
+  const QBrush none;
+  if (task_root_item_) {
+    for (int col = 0; col < COL_COUNT; ++col) task_root_item_->setBackground(col, none);
+  }
+  for (auto it = stage_item_.begin(); it != stage_item_.end(); ++it) {
+    for (int col = 0; col < COL_COUNT; ++col) it.value()->setBackground(col, none);
+  }
+}
+
+void TaskConstructorPanel::refreshChains()
+{
+  // A newly ranked chain lands while its task is on display: show it when
+  // the task root (chains mode) is selected, like incoming attempts do.
+  if (showingChains()) rebuildSolutionList();
 }
 
 void TaskConstructorPanel::refreshStageStatistics()
 {
-  for (auto it = stage_stats_.begin(); it != stage_stats_.end(); ++it) {
+  if (!task_) return;
+  for (auto it = stats_.begin(); it != stats_.end(); ++it) {
     auto item_it = stage_item_.find(it.key());
-    if (item_it == stage_item_.end() || !it.value()) {
-      continue;
-    }
-    item_it.value()->setText(COL_ATTEMPTS,
-                             QString::number(it.value()->attempt_count));
-    item_it.value()->setText(COL_TIME,
-                             QString::number(it.value()->total_compute_time, 'g', 4));
-    item_it.value()->setText(COL_COST,
-                             QString::number(it.value()->last_cost, 'g', 6));
-    item_it.value()->setToolTip(
-        COL_TYPE, QStringLiteral("successful attempts: %1").arg(it.value()->success_count));
+    if (item_it == stage_item_.end() || !it.value()) continue;
+    item_it.value()->setText(COL_TIME, QString::number(it.value()->total_compute_time, 'g', 4));
+    item_it.value()->setToolTip(COL_TYPE, QStringLiteral("successful attempts: %1")
+                                                 .arg(it.value()->success_count));
   }
 }
 
-// ----------------------------------------------------------------------------
-// selection + markers
-// ----------------------------------------------------------------------------
+bool TaskConstructorPanel::showingChains() const
+{
+  return tree_->currentItem() == task_root_item_;
+}
 
 void TaskConstructorPanel::onSelectedItemChanged()
 {
-  publishSelectedMarkers();
-
+  clearHighlight();
+  rebuildSolutionList();
   auto * item = tree_->currentItem();
   if (!item) {
+    properties_->clear();
+    return;
+  }
+  showStageProperties(item);
+  setStatus(tr("selected '%1'").arg(item->text(COL_STAGE)));
+}
+
+void TaskConstructorPanel::showStageProperties(QTreeWidgetItem * item)
+{
+  // MTC property view: the selected stage's properties.
+  properties_->clear();
+  if (!item) return;
+  auto add = [this](const QString & key, const QString & value) {
+    auto * row = new QTreeWidgetItem(properties_);
+    row->setText(0, key);
+    row->setText(1, value);
+  };
+  if (item == task_root_item_ && task_) {
+    add(tr("task"), QString::fromStdString(task_->task_id));
+    add(tr("stages"), QString::number(task_->stage_count));
+    add(tr("valid"), task_->valid ? tr("true") : tr("false"));
+    if (!task_->comment.empty()) add(tr("comment"), QString::fromStdString(task_->comment));
     return;
   }
   const uint32_t id = item->data(0, Qt::UserRole).toUInt();
-  QString status = tr("selected '%1'").arg(item->text(COL_STAGE));
-  auto sol_it = last_solution_.find(id);
-  if (sol_it != last_solution_.end() && sol_it.value() && !sol_it.value()->comment.empty()) {
-    status += tr(" — %1").arg(QString::fromStdString(sol_it.value()->comment));
-  }
-  setStatus(status);
+  add(tr("stage"), item->text(COL_STAGE));
+  add(tr("type"), item->text(COL_TYPE));
+  add(tr("successful"), item->text(COL_OK));
+  add(tr("failed"), item->text(COL_FAIL));
+  add(tr("cost"), item->text(COL_COST));
+  add(tr("compute time"), item->text(COL_TIME));
+  auto stat = stats_.find(id);
+  if (stat != stats_.end() && stat.value())
+    add(tr("planner attempts"), QString::number(stat.value()->attempt_count));
 }
 
-void TaskConstructorPanel::publishSelectedMarkers()
+void TaskConstructorPanel::showSolutionProperties(
+    const QString & rank, const QString & cost, const QString & comment,
+    const QString & extra)
 {
-  if (!pub_selected_markers_) {
+  properties_->clear();
+  auto add = [this](const QString & key, const QString & value) {
+    auto * row = new QTreeWidgetItem(properties_);
+    row->setText(0, key);
+    row->setText(1, value);
+  };
+  add(tr("solution"), rank);
+  add(tr("cost"), cost);
+  if (!comment.isEmpty()) add(tr("comment"), comment);
+  if (!extra.isEmpty()) add(tr("detail"), extra);
+}
+
+void TaskConstructorPanel::rebuildSolutionList()
+{
+  // MTC solutions view: selecting the task lists its complete solutions,
+  // selecting a stage lists that stage's attempts.
+  solutions_->blockSignals(true);
+  solutions_->clear();
+  if (!task_) {
+    solutions_->blockSignals(false);
     return;
   }
-  visualization_msgs::msg::MarkerArray msg;
-  auto * item = tree_->currentItem();
-  if (item) {
-    const uint32_t id = item->data(0, Qt::UserRole).toUInt();
-    auto marker_it = stage_markers_.find(id);
-    if (marker_it != stage_markers_.end() && marker_it.value()) {
-      msg = *marker_it.value();
+  if (showingChains()) {
+    for (const auto &sol : chains_) {
+      if (!sol) continue;
+      QString chain;
+      for (const auto &name : sol->stage_names) {
+        if (!chain.isEmpty()) chain += QStringLiteral(" → ");
+        chain += QString::fromStdString(name);
+      }
+      auto * row = new QTreeWidgetItem(solutions_);
+      row->setText(SOL_RANK, QStringLiteral("#%1").arg(sol->solution_index));
+      row->setText(SOL_COST, QString::number(sol->cost, 'g', 4));
+      row->setText(SOL_COMMENT, chain);
+      row->setData(0, Qt::UserRole, static_cast<int>(sol->solution_index));
+    }
+  } else {
+    auto * item = tree_->currentItem();
+    if (item) {
+      const uint32_t id = item->data(0, Qt::UserRole).toUInt();
+      auto it = attempts_.find(id);
+      if (it != attempts_.end()) {
+        int idx = 0;
+        for (const auto &sol : it.value()) {
+          if (!sol) continue;
+          // MTC solution rows: rank, cost (∞ for failures), comment —
+          // failures in red foreground, no background wash.
+          auto * row = new QTreeWidgetItem(solutions_);
+          row->setText(SOL_RANK, QStringLiteral("#%1").arg(sol->solution_id));
+          row->setText(SOL_COST, sol->success ? QString::number(sol->cost, 'g', 4)
+                                              : QString::fromUtf8("∞"));
+          row->setText(SOL_COMMENT, QString::fromStdString(sol->comment));
+          row->setData(0, Qt::UserRole, idx);
+          if (!sol->success) {
+            for (int col = 0; col < SOL_COUNT; ++col)
+              row->setForeground(col, QColor(Qt::red));
+          }
+          ++idx;
+        }
+      }
     }
   }
-  pub_selected_markers_->publish(msg);
+  solutions_->blockSignals(false);
+  showSelectedSolution();
 }
 
-// ----------------------------------------------------------------------------
-// re-execution
-// ----------------------------------------------------------------------------
-
-void TaskConstructorPanel::onReexecuteClicked()
+void TaskConstructorPanel::onSolutionSelectionChanged()
 {
-  reexecute(execute_checkbox_->isChecked());
+  // MTC: the current solution displays its trajectory; every selected row
+  // contributes its markers.
+  showSelectedSolution();
 }
 
-void TaskConstructorPanel::reexecute(bool execute)
+void TaskConstructorPanel::showSelectedSolution()
 {
-  if (!last_task_) {
-    setStatus(tr("no task to re-run yet"));
+  auto selected = solutions_->selectedItems();
+  if (selected.isEmpty()) {
+    auto * current = solutions_->currentItem();
+    if (current) selected.push_back(current);
+  }
+  publishSolutionTrajectory(selected);
+  publishToolPath(selected);
+  if (!selected.isEmpty()) showSolutionPropertiesFor(selected.front());
+}
+
+void TaskConstructorPanel::showSolutionPropertiesFor(QTreeWidgetItem * row)
+{
+  if (!row) return;
+  if (showingChains()) {
+    const int index = row->data(0, Qt::UserRole).toInt();
+    for (const auto &sol : chains_) {
+      if (sol && static_cast<int>(sol->solution_index) == index) {
+        QString chain;
+        for (const auto &name : sol->stage_names) {
+          if (!chain.isEmpty()) chain += QStringLiteral(" → ");
+          chain += QString::fromStdString(name);
+        }
+        showSolutionProperties(QStringLiteral("#%1").arg(sol->solution_index),
+                               QString::number(sol->cost, 'g', 4), chain,
+                               tr("%1 segments").arg(sol->stage_names.size()));
+        return;
+      }
+    }
+  } else {
+    auto * item = tree_->currentItem();
+    if (!item) return;
+    const uint32_t id = item->data(0, Qt::UserRole).toUInt();
+    auto it = attempts_.find(id);
+    const int idx = row->data(0, Qt::UserRole).toInt();
+    if (it != attempts_.end() && idx >= 0 && idx < static_cast<int>(it.value().size())) {
+      const auto & sol = it.value()[idx];
+      if (!sol) return;
+      showSolutionProperties(
+          QStringLiteral("#%1").arg(sol->solution_id),
+          sol->success ? QString::number(sol->cost, 'g', 4) : QString::fromUtf8("∞"),
+          QString::fromStdString(sol->comment),
+          tr("%1 waypoints").arg(static_cast<int>(sol->trajectory.size())));
+    }
+  }
+}
+
+void TaskConstructorPanel::publishSolutionTrajectory(const QList<QTreeWidgetItem *> & selected)
+{
+  // The current solution as JointTrajectory for the CuroboTrajectoryDisplay
+  // (full-robot animation + trail) — the same topic Task.publish uses. For a
+  // complete chain the waypoints concatenate its leaves' winning attempts.
+  (void)selected;
+  if (!pub_solution_trajectory_) return;
+  trajectory_msgs::msg::JointTrajectory msg;
+  const auto waypoints = currentWaypoints();
+  if (!waypoints.empty()) {
+    msg.joint_names = waypoints.front().name;
+    double t = 0.0;
+    for (const auto &wp : waypoints) {
+      trajectory_msgs::msg::JointTrajectoryPoint pt;
+      pt.positions = wp.position;
+      pt.time_from_start.sec = static_cast<int32_t>(t);
+      pt.time_from_start.nanosec =
+          static_cast<uint32_t>((t - static_cast<int32_t>(t)) * 1e9);
+      t += 0.05;
+      msg.points.push_back(pt);
+    }
+  }
+  pub_solution_trajectory_->publish(msg);
+}
+
+std::vector<sensor_msgs::msg::JointState> TaskConstructorPanel::currentWaypoints() const
+{
+  // Current row's waypoints: the attempt itself, or the concatenated leaf
+  // trajectories of the selected chain (boundary waypoint deduplicated like
+  // the executor's chain lifting).
+  std::vector<sensor_msgs::msg::JointState> out;
+  auto * current = solutions_->currentItem();
+  if (!current || !task_) return out;
+  if (showingChains()) {
+    const int index = current->data(0, Qt::UserRole).toInt();
+    for (const auto &chain : chains_) {
+      if (!chain || static_cast<int>(chain->solution_index) != index) continue;
+      for (size_t i = 0; i < chain->stage_ids.size(); ++i) {
+        const auto sol = findAttempt(chain->stage_ids[i], chain->solution_ids[i]);
+        if (!sol) continue;
+        for (const auto &wp : sol->trajectory) {
+          if (!out.empty() && !wp.position.empty() && !out.back().position.empty() &&
+              out.back().position.size() == wp.position.size()) {
+            bool same = true;
+            for (size_t j = 0; j < wp.position.size(); ++j) {
+              if (out.back().position[j] != wp.position[j]) {
+                same = false;
+                break;
+              }
+            }
+            if (same) continue;
+          }
+          out.push_back(wp);
+        }
+      }
+    }
+    return out;
+  }
+  const SolutionInfoShared sol = currentAttempt(current);
+  if (sol) {
+    for (const auto &wp : sol->trajectory) out.push_back(wp);
+  }
+  return out;
+}
+
+TaskConstructorPanel::SolutionInfoShared
+TaskConstructorPanel::findAttempt(uint32_t stage_id, uint32_t solution_id) const
+{
+  auto it = attempts_.find(stage_id);
+  if (it == attempts_.end()) return nullptr;
+  for (const auto &sol : it.value()) {
+    if (sol && sol->solution_id == solution_id) return sol;
+  }
+  return nullptr;
+}
+
+TaskConstructorPanel::SolutionInfoShared TaskConstructorPanel::currentAttempt(
+    QTreeWidgetItem * row) const
+{
+  if (!row || showingChains()) return nullptr;
+  auto * item = tree_->currentItem();
+  if (!item) return nullptr;
+  const uint32_t id = item->data(0, Qt::UserRole).toUInt();
+  auto it = attempts_.find(id);
+  const int idx = row->data(0, Qt::UserRole).toInt();
+  if (it == attempts_.end() || idx < 0 || idx >= static_cast<int>(it.value().size()))
+    return nullptr;
+  return it.value()[idx];
+}
+
+std::vector<TaskConstructorPanel::SolutionInfoShared>
+TaskConstructorPanel::selectedAttempts(const QList<QTreeWidgetItem *> & selected) const
+{
+  // Every selected row's records (MTC shows all selected rows' markers):
+  // attempts directly, or the leaves of selected chains.
+  std::vector<SolutionInfoShared> out;
+  for (auto * row : selected) {
+    if (!row) continue;
+    if (showingChains()) {
+      const int index = row->data(0, Qt::UserRole).toInt();
+      for (const auto &chain : chains_) {
+        if (!chain || static_cast<int>(chain->solution_index) != index) continue;
+        for (size_t i = 0; i < chain->stage_ids.size(); ++i) {
+          auto sol = findAttempt(chain->stage_ids[i], chain->solution_ids[i]);
+          if (sol) out.push_back(sol);
+        }
+      }
+    } else if (auto sol = currentAttempt(row)) {
+      out.push_back(sol);
+    }
+  }
+  return out;
+}
+
+void TaskConstructorPanel::publishToolPath(const QList<QTreeWidgetItem *> & selected)
+{
+  if (!pub_selected_markers_) return;
+  // Every selected row's tool trail (MTC shows all selected rows' markers);
+  // with nothing selected, every attempt of the current stage stays visible
+  // faintly so all alternatives read at a glance. The current row draws on
+  // top with the scrub... (no scrub: current row draws strongest).
+  visualization_msgs::msg::MarkerArray out;
+  std::vector<SolutionInfoShared> records = selectedAttempts(selected);
+  if (records.empty() && !showingChains()) {
+    auto * item = tree_->currentItem();
+    if (item && task_) {
+      const uint32_t id = item->data(0, Qt::UserRole).toUInt();
+      auto it = attempts_.find(id);
+      if (it != attempts_.end()) {
+        for (const auto &sol : it.value()) {
+          if (sol) records.push_back(sol);
+        }
+      }
+    }
+  }
+  auto current = solutions_->currentItem();
+  const SolutionInfoShared current_sol = current ? selectedAttempts({current}).front() : nullptr;
+  int marker_id = 0;
+  for (const auto &sol : records) {
+    if (!sol || sol->tool_poses.empty()) continue;
+    const bool strong = (sol == current_sol);
+    visualization_msgs::msg::Marker line;
+    line.header.frame_id = "world";
+    line.ns = "tool_path";
+    line.id = marker_id++;
+    line.type = visualization_msgs::msg::Marker::LINE_STRIP;
+    line.action = visualization_msgs::msg::Marker::ADD;
+    line.scale.x = strong ? 0.008 : 0.003;
+    if (sol->success) {
+      line.color.g = strong ? 0.9 : 0.45;
+    } else {
+      line.color.r = strong ? 1.0 : 0.5;
+    }
+    line.color.a = strong ? 1.0 : 0.45;
+    for (const auto &p : sol->tool_poses) {
+      geometry_msgs::msg::Point pt;
+      pt.x = p.position.x;
+      pt.y = p.position.y;
+      pt.z = p.position.z;
+      line.points.push_back(pt);
+    }
+    out.markers.push_back(line);
+  }
+  // Each drawn attempt's own markers (candidate spheres, start/goal frames).
+  for (const auto &sol : records) {
+    if (sol && !sol->markers.markers.empty())
+      out.markers.insert(out.markers.end(), sol->markers.markers.begin(),
+                         sol->markers.markers.end());
+  }
+  pub_selected_markers_->publish(out);
+}
+
+void TaskConstructorPanel::onExecSolution()
+{
+  // MTC onExecCurrentSolution: drive the selected solution with no
+  // replanning. A chain row executes the whole stored chain; an attempt row
+  // executes that single stored segment.
+  if (!task_) {
+    setStatus(tr("no task to execute yet"));
     return;
   }
-  setStatus(tr("sending task '%1' (execute=%2)...")
-                .arg(QString::fromStdString(last_task_->task_id))
-                .arg(execute ? "true" : "false"));
-
-  TaskAction::Goal goal;
-  goal.task_name = last_task_->task_id;
-  goal.stages = last_task_->stages;
-  goal.execute = execute;
-
-  // Feedback is published live via the action's feedback channel; the result
-  // is collected explicitly with async_get_result once the goal is accepted.
-  rclcpp_action::Client<TaskAction>::SendGoalOptions options;
-  // Jazzy's FeedbackCallback takes the goal handle plus the feedback message.
-  options.feedback_callback = [this](const GoalHandleTask::SharedPtr & /* goal_handle */,
-                                     TaskAction::Feedback::ConstSharedPtr feedback)
-  {
-    QMetaObject::invokeMethod(
-        this, "setStatus", Qt::QueuedConnection,
-        Q_ARG(QString, QString::fromStdString(feedback->feedback)));
-  };
-  options.goal_response_callback = [this](const GoalHandleTask::SharedPtr & goal_handle)
-  {
-    if (!goal_handle) {
-      QMetaObject::invokeMethod(
-          this, "setStatus", Qt::QueuedConnection,
-          Q_ARG(QString, tr("task rejected (another solve in progress?)")));
+  ExecuteAction::Goal goal;
+  goal.task_id = task_->task_id;
+  auto * current = solutions_->currentItem();
+  if (!current) {
+    setStatus(tr("select a solution to execute"));
+    return;
+  }
+  if (showingChains()) {
+    goal.stage_id = NO_STAGE;
+    goal.solution_index = static_cast<uint32_t>(current->data(0, Qt::UserRole).toInt());
+    goal.attempt_id = 0;
+  } else {
+    auto * item = tree_->currentItem();
+    if (!item) {
+      setStatus(tr("select a solution to execute"));
       return;
     }
-    auto result_cb = [this](const GoalHandleTask::WrappedResult & result)
-    {
+    goal.stage_id = item->data(0, Qt::UserRole).toUInt();
+    goal.solution_index = 0;
+    auto sol = currentAttempt(current);
+    if (!sol || !sol->success) {
+      setStatus(tr("only successful attempts execute"));
+      return;
+    }
+    goal.attempt_id = sol->solution_id;
+  }
+  setStatus(tr("executing selected solution (no replanning)..."));
+
+  rclcpp_action::Client<ExecuteAction>::SendGoalOptions options;
+  options.feedback_callback = [this](const GoalHandleExecute::SharedPtr &,
+                                     ExecuteAction::Feedback::ConstSharedPtr feedback) {
+    const QString stage = QString::fromStdString(feedback->current_stage_name);
+    QMetaObject::invokeMethod(
+        this,
+        [this, feedback, stage]() {
+          if (!stage.isEmpty()) highlightStage(stage);
+          setStatus(tr("executing '%1' (%2/%3)...")
+                        .arg(stage)
+                        .arg(feedback->segments_done)
+                        .arg(feedback->segments_total));
+        },
+        Qt::QueuedConnection);
+  };
+  options.goal_response_callback = [this](const GoalHandleExecute::SharedPtr & goal_handle) {
+    if (!goal_handle) {
+      QMetaObject::invokeMethod(
+          this, [this]() { setStatus(tr("execution rejected (another one in progress?)")); },
+          Qt::QueuedConnection);
+      return;
+    }
+    auto result_cb = [this](const GoalHandleExecute::WrappedResult & result) {
       QString text;
       if (result.code == rclcpp_action::ResultCode::SUCCEEDED) {
-        if (result.result->success) {
-          text = result.result->failed_stage_name.empty()
-                     ? tr("task succeeded")
-                     : tr("task succeeded (last stage '%1')")
-                           .arg(QString::fromStdString(result.result->failed_stage_name));
-        } else {
-          text = tr("task failed: %1").arg(QString::fromStdString(result.result->error));
-        }
-      } else if (result.code == rclcpp_action::ResultCode::ABORTED) {
-        text = tr("task aborted: %1").arg(QString::fromStdString(result.result->error));
+        text = result.result->success
+                   ? tr("execution succeeded")
+                   : tr("execution failed: %1").arg(
+                         QString::fromStdString(result.result->error));
+      } else if (result.code == rclcpp_action::ResultCode::CANCELED) {
+        text = tr("execution canceled");
       } else {
-        text = tr("task canceled");
+        text = tr("execution aborted: %1").arg(
+            QString::fromStdString(result.result->error));
       }
-      QMetaObject::invokeMethod(this, "setStatus", Qt::QueuedConnection,
-                                Q_ARG(QString, text));
+      QMetaObject::invokeMethod(
+          this,
+          [this, text]() {
+            clearHighlight();
+            setStatus(text);
+          },
+          Qt::QueuedConnection);
     };
-    action_client_->async_get_result(goal_handle, result_cb);
+    exec_client_->async_get_result(goal_handle, result_cb);
   };
+  exec_client_->async_send_goal(goal, options);
+}
 
-  action_client_->async_send_goal(goal, options);
+void TaskConstructorPanel::onShowTimeChanged()
+{
+  tree_->setColumnHidden(COL_TIME, !show_time_action_->isChecked());
 }
 
 void TaskConstructorPanel::setStatus(const QString & text)
@@ -551,12 +935,4 @@ void TaskConstructorPanel::setStatus(const QString & text)
 
 }  // namespace curobo_task_constructor_rviz
 
-// Pluginlib registration lives in the SAME translation unit as the class
-// (the layout every sibling plugin in this workspace uses). Note: the class
-// VTABLE itself is NOT anchored here — Q_OBJECT's `virtual metaObject()`
-// is the key function, so the vtable is emitted in the moc TU
-// (moc_task_constructor_panel.cpp, compiled into the library via
-// qt5_wrap_cpp in CMakeLists.txt). A missing moc TU shows up exactly like a
-// missing registration:
-//   "undefined symbol: vtable for ...::TaskConstructorPanel"
 PLUGINLIB_EXPORT_CLASS(curobo_task_constructor_rviz::TaskConstructorPanel, rviz_common::Panel)

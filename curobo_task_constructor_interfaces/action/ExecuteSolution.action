@@ -1,0 +1,26 @@
+# Execute a STORED solution (MTC ExecuteTaskSolution equivalent).
+#
+# No planning happens here: the server replays stored segment requests
+# (SendTrajectory, force_cached — the validated plan or failure), applying
+# each segment's scene ops in chain order first. Unknown or evicted
+# solutions are rejected: send (or re-run) the task first.
+#
+# Two modes, like MTC executing a whole solution or one of its parts:
+# - whole chain: stage_id == 0xFFFFFFFF, solution_index ranks the complete
+#   solution (0 = cheapest);
+# - one segment: stage_id + attempt_id address a single successful attempt,
+#   which drives standalone.
+string task_id
+uint32 solution_index
+uint32 stage_id
+uint32 attempt_id
+
+---
+bool success
+string error
+string failed_stage_name
+
+---
+string current_stage_name   # segment currently driven (panel highlight)
+uint32 segments_done
+uint32 segments_total
