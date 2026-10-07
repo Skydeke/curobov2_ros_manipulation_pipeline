@@ -163,6 +163,12 @@ class Stage(ABC):
         self._emitted_keys: set = set()
         self.attempt_count = 0
         self.compute_time = 0.0
+        # Planner calls in the current compute pass not yet "spent" on an
+        # emitted record. attempt_count = planner calls + records from
+        # computes that made none (generators, mutations, validation
+        # failures): a record consumes one pending try instead of counting
+        # again, so best-of-3 reads 3, not 4. Reset per pass in run_compute.
+        self._pending_tries = 0
         # Propagation direction resolved by the containing container
         # (EitherWay stages): None (unresolved) | "forward" | "backward".
         self._flow: Optional[str] = None
@@ -171,6 +177,17 @@ class Stage(ABC):
         # Event hooks (tests / introspection attach here):
         self.on_solution: Optional[Callable[[Solution], None]] = None
         self.on_failure: Optional[Callable[[StageFailure], None]] = None
+        # Fired on every planner attempt (each robot.plan call inside a
+        # stage's multi-attempt loop), so introspection can stream
+        # attempts/compute-time per try instead of only on emit. See
+        # _note_plan_attempt; chain with chain_hook like the other two.
+        self.on_progress: Optional[Callable[[Stage], None]] = None
+        # Fired for successful tries that are NOT ranked (the seeds a
+        # best-of-N loop discards): every attempt leaves a visible row, so
+        # attempts == successful + failed rows always. Ranked winners still
+        # go through on_solution (store + lift); containers never see this
+        # hook, so ranking is untouched. Chain with chain_hook.
+        self.on_considered: Optional[Callable[[Solution], None]] = None
 
     # ------------------------------------------------------------------
     # Stage identity / description
@@ -253,6 +270,20 @@ class Stage(ABC):
     # ------------------------------------------------------------------
     # Solution production
     # ------------------------------------------------------------------
+    def _count_record(self) -> None:
+        """Count one emitted record (solution or failure).
+
+        A record spends one pending planner try instead of counting again;
+        a record from a compute that made no planner call (generators,
+        mutations, validation failures) counts 1. So attempt_count reads as
+        planner calls plus try-less records: best-of-3 with one winner is 3,
+        three failed tries is 3, a generator run is 1.
+        """
+        if self._pending_tries > 0:
+            self._pending_tries -= 1
+        else:
+            self.attempt_count += 1
+
     def _emit(self, solution: Solution) -> None:
         key = solution.key()
         if key in self._emitted_keys:
@@ -261,16 +292,44 @@ class Stage(ABC):
         solution.stage = self
         solution.solution_id = len(self.solutions)
         self.solutions.append(solution)
-        self.attempt_count += 1
+        self._count_record()
         if self.on_solution:
             self.on_solution(solution)
 
     def _fail(self, from_state, to_state, message: str) -> None:
         failure = StageFailure(from_state, to_state, message)
         self.failures.append(failure)
-        self.attempt_count += 1
+        self._count_record()
         if self.on_failure:
             self.on_failure(failure)
+
+    def _consider(self, solution: Solution) -> None:
+        """Publish a successful try that is not ranked (best-of-N discard).
+
+        Fires ``on_considered`` only: no storing, no container lifting. The
+        node publishes it as a non-ranked success row, so every planner call
+        is visible exactly once (failed tries fail live, winners emit) and
+        successful + failed rows always sum to planner attempts.
+        """
+        solution.stage = self
+        if self.on_considered is not None:
+            self.on_considered(solution)
+
+    def _note_plan_attempt(self) -> None:
+        """Record one planner call and stream it (multi-attempt loops).
+
+        Best-of-N stages (MoveTo, TrajectoryStage) call the planner several
+        times but emit once, so without this the panel would sit still until
+        the Nth try finished. Each call counts and fires ``on_progress``;
+        the node publishes a per-stage statistics snapshot on it, so
+        attempts and compute time walk 1, 2, 3 live. The winning emit (or a
+        later record) spends the pending try via ``_count_record`` instead
+        of counting again.
+        """
+        self.attempt_count += 1
+        self._pending_tries += 1
+        if self.on_progress is not None:
+            self.on_progress(self)
 
     def spawn(self, state: InterfaceState, cost: float = 0.0, comment: str = "",
               response: Any = None) -> None:
@@ -317,7 +376,7 @@ class Stage(ABC):
     def run_compute(self) -> None:
         """Timed, counted execution of ``compute()`` (the MTC runCompute
         equivalent)."""
-        self.attempt_count += 0  # attempts counted on emit/fail
+        self._pending_tries = 0  # per-pass: records spend only this pass's tries
         started = time.perf_counter()
         try:
             self.compute()
@@ -336,6 +395,7 @@ class Stage(ABC):
         self._emitted_keys = set()
         self.attempt_count = 0
         self.compute_time = 0.0
+        self._pending_tries = 0
         self._flow = None
         self._batch = None
 
@@ -545,32 +605,31 @@ class TrajectoryStage(PropagatingStage):
                 self._batch.defer(self, start, req)
             return
         for start, req in self._pending:
-            # Multi-attempt planning: plan up to N times, keep the cheapest
-            # successful result (the old task constructor's
-            # num_planning_attempts). cuRobo's trajopt is stochastic, so N
-            # seeds through the same request can produce different
-            # trajectories; the lowest-cost one is the one to keep.
+            # Multi-attempt planning (MTC forwards num_planning_attempts to
+            # MoveIt; cuRobo has no server-side retry, so the client loops):
+            # every failed try is recorded immediately — MTC publishes each
+            # failed plan as a failed solution the moment it happens, so the
+            # panel walks attempt 1, 2, 3 live instead of only after the Nth
+            # try. Successful tries tick the count; only the cheapest result
+            # is emitted, so ranking still picks the best seed.
             attempts = max(1, int(self.params.get("planning_attempts", 3)))
             best_result = None
             best_cost = float("inf")
-            last_error = ""
             for _ in range(attempts):
                 try:
                     result = self.robot.plan(req)
                 except Exception as exc:  # ServiceError etc.
-                    last_error = f"plan call failed: {exc}"
+                    self._fail(start, None, f"plan call failed: {exc}")
                     continue
                 if not result.success:
-                    last_error = result.message or "plan failed"
+                    self._fail(start, None, result.message or "plan failed")
                     continue
+                self._note_plan_attempt()
                 cost = self._cost_of(result)
                 if cost < best_cost:
                     best_cost = cost
                     best_result = result
-            # attempt_count: +1 from the _emit/_fail below, +(N-1) here
-            self.attempt_count += attempts - 1
             if best_result is None:
-                self._fail(start, None, last_error or "plan failed")
                 continue
             end = self.make_end_state(start, best_result, raw=best_result)
             if end is not None:
@@ -582,6 +641,7 @@ class TrajectoryStage(PropagatingStage):
     def commit_result(self, start: InterfaceState, req: PlanRequest,
                       result: PlanResult) -> None:
         """Commit the result of a batched solve for (start, req)."""
+        self._note_plan_attempt()
         if not result.success:
             self._fail(start, None, result.message or "plan failed")
             return

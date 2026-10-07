@@ -1,7 +1,7 @@
 """The REAL pick graph from ``kortex_curobo_grasping``, replayed on the mock.
 
 ``grasp_orchestrator.py`` is rclpy-only, so the graph it builds was moved into
-``kortex_curobo_grasping/pick_tree.py`` — pure data, no ROS. That makes the
+``kortex_curobo_grasping/ctc.py`` — pure data, no ROS. That makes the
 deliverable itself testable: this file imports the *production* builder (not a
 re-declaration that could silently drift), hands it a candidate window, and
 solves the resulting tree against ``MockCuroboServer``.
@@ -30,7 +30,6 @@ import pytest
 import curobo_task_constructor.stages  # noqa: F401  (register builtins)
 from curobo_task_constructor.core.state import ObjectSpec, SceneDiff
 from curobo_task_constructor.executor import TaskExecutor
-from curobo_task_constructor.graph.spec import StageSpec
 from tests.mock_curobo import JOINT_NAMES, MockCuroboServer, fk_positions
 
 #: The orchestrator package lives in a sibling workspace package, not in this
@@ -38,30 +37,30 @@ from tests.mock_curobo import JOINT_NAMES, MockCuroboServer, fk_positions
 #: runs (minus this file) in a bare checkout of curobo_task_constructor.
 for _root in (Path(__file__).resolve().parents[i] for i in range(1, 6)):
     _pkg = _root / "iki_kortex_curobo_grasping"
-    if (_pkg / "kortex_curobo_grasping" / "pick_tree.py").is_file():
+    if (_pkg / "kortex_curobo_grasping" / "ctc_manager.py").is_file():
         sys.path.insert(0, str(_pkg))
         break
 
-pick_tree = pytest.importorskip(
-    "kortex_curobo_grasping.pick_tree",
+ctc = pytest.importorskip(
+    "kortex_curobo_grasping.ctc_manager",
     reason="kortex_curobo_grasping (the grasp orchestrator) is not present",
 )
 
 OBJECT = "object_0"
-CLOSE = pick_tree.GRIPPER_CLOSE
+CLOSE = ctc.GRIPPER_CLOSE
 LIFT = 0.15
 
 #: The orchestrator's own default: how far back along the approach axis the
 #: pre-grasp sits.
 APPROACH_OFFSET = 0.12
-STRATEGIES = pick_tree.STRATEGY_NAMES
+STRATEGIES = ctc.STRATEGY_NAMES
 
 #: Top-down grasp orientation: tool +z pointing DOWN at the object, so backing
 #: off along the approach axis moves the hand UP. (The mock's FK reports an
 #: identity tool orientation for every configuration, so the descent's hold
 #: frees the rotational block — the real arm's start pose would already match
 #: and the hold would pin all three rotation axes too.)
-TOP_DOWN_Q = pick_tree._Quat(1.0, 0.0, 0.0, 0.0)
+TOP_DOWN_Q = ctc._Quat(1.0, 0.0, 0.0, 0.0)
 
 #: Mock-arm start: tool at (0.40, 0, 0.10), inside the reach shell with room
 #: to travel both down onto a grasp and back up off it.
@@ -77,12 +76,12 @@ def _grasp_poses(robot, depths=(0.06, 0.09, 0.12)):
     x, y, z = _start_xyz(robot)
     out = []
     for d in depths:
-        g = pick_tree.PoseLike(
-            position=pick_tree._Vec(x, y, z - d),
-            orientation=pick_tree._Quat(TOP_DOWN_Q.x, TOP_DOWN_Q.y,
+        g = ctc.PoseLike(
+            position=ctc._Vec(x, y, z - d),
+            orientation=ctc._Quat(TOP_DOWN_Q.x, TOP_DOWN_Q.y,
                                         TOP_DOWN_Q.z, TOP_DOWN_Q.w))
-        pre = pick_tree.offset_along_approach(g, APPROACH_OFFSET)
-        out.append(pick_tree.GraspCandidate(pre_grasp=pre, grasp=g))
+        pre = ctc.offset_along_approach(g, APPROACH_OFFSET)
+        out.append(ctc.GraspCandidate(pre_grasp=pre, grasp=g))
     return out
 
 
@@ -104,14 +103,14 @@ def _scene():
 def _executor(robot=None, strategies=STRATEGIES, depths=(0.06, 0.09, 0.12),
               **kw):
     robot = robot or _robot(**kw)
-    tree = pick_tree.pick_root(
+    tree = ctc.pick_root(
         _grasp_poses(robot, depths),
         object_name=OBJECT,
         strategies=list(strategies),
         approach_offset=APPROACH_OFFSET,
         lift_offset=LIFT,
     )
-    ex = TaskExecutor(StageSpec.from_dict(tree), robot,
+    ex = TaskExecutor(tree, robot,
                       base_scene=_scene(), task_id="pick")
     assert ex.init(), ex.describe()["comment"]
     return robot, ex
@@ -139,11 +138,11 @@ def test_pick_tree_shape():
     reopened the gripper on its way out would erase that evidence. The reopen
     and the detach are ``release_root``, sent as a separate task afterwards.
     """
-    root = pick_tree.pick_root(
+    root = ctc.pick_root(
         _grasp_poses(_robot()), object_name=OBJECT)
-    assert root["container_type"] == "serial"
-    top = [(c["name"], c["stage_type"], c["container_type"])
-           for c in root["children"]]
+    assert root.container_type == "serial"
+    top = [(c.name, c.stage_type, c.container_type)
+           for c in root.children]
     assert top == [
         ("current_state", "current_state", ""),
         ("ready", "move_to", ""),
@@ -151,12 +150,12 @@ def test_pick_tree_shape():
         ("allow", "modify_scene", ""),
         ("return", "move_to", ""),
     ]
-    strat = root["children"][2]["children"][0]
-    assert strat["name"] == "strategy_0"
+    strat = root.children[2].children[0]
+    assert strat.name == "strategy_0"
     # attach BEFORE close, as the reference does: the attach fits the object's
     # collision geometry to the gripper, and it also puts the one stage that
     # must never run on a failed grasp ahead of the stage that fails it.
-    assert [c["name"] for c in strat["children"]] == [
+    assert [c.name for c in strat.children] == [
         "pre_grasp_0", "allow_0", "descend_0", "attach_0", "close_0",
         "retreat_0"]
 
@@ -201,8 +200,8 @@ def test_pick_tree_takes_the_cheapest_strategy_first():
 def test_pick_tree_refuses_a_stale_attach():
     """The pick must not be built on an object still held by a previous try."""
     robot = _robot()
-    root = pick_tree.pick_root(_grasp_poses(robot), object_name=OBJECT)
-    params = StageSpec.from_dict(root).children[0]
+    root = ctc.pick_root(_grasp_poses(robot), object_name=OBJECT)
+    params = root.children[0]
     assert "require_not_attached" in params.params_yaml
     assert OBJECT in params.params_yaml
 
@@ -326,7 +325,7 @@ def test_open_after_the_pick_reopens_the_finger():
     _, ex = _executor()
     assert ex.plan()
     end = dict(zip(JOINT_NAMES, ex.best().end.joint_state.position))
-    assert end["finger_joint"] == pytest.approx(pick_tree.GRIPPER_OPEN)
+    assert end["finger_joint"] == pytest.approx(ctc.GRIPPER_OPEN)
 
 
 # -----------------------------------------------------------------------------
@@ -343,7 +342,7 @@ def test_contact_is_allowed_before_the_descent_not_after():
     # ... and the descendent goalset inherits the allowance
     descend = next(l for l in _chain(ex) if l.stage.name == "descend_0")
     assert sorted(descend.end.scene.all_allowed_links()) == \
-        sorted(pick_tree.GRIPPER_CONTACT_LINKS)
+        sorted(ctc.GRIPPER_CONTACT_LINKS)
 
 
 def test_attach_happens_after_the_descent_and_before_the_close():
@@ -382,14 +381,14 @@ def test_pick_chain_is_continuous():
 def _scene_specs():
     """Two perceived cuboids, the shape ``_scene_object_specs`` produces."""
     return [
-        pick_tree.scene_object(
-            "object_0", pick_tree.PoseLike(pick_tree._Vec(0.40, 0.0, 0.24),
+        ctc.scene_object(
+            "object_0", ctc.PoseLike(ctc._Vec(0.40, 0.0, 0.24),
                                            TOP_DOWN_Q),
-            pick_tree._Vec(0.05, 0.05, 0.03)),
-        pick_tree.scene_object(
-            "plane_0", pick_tree.PoseLike(pick_tree._Vec(0.0, 0.0, 0.17),
+            ctc._Vec(0.05, 0.05, 0.03)),
+        ctc.scene_object(
+            "plane_0", ctc.PoseLike(ctc._Vec(0.0, 0.0, 0.17),
                                           TOP_DOWN_Q),
-            pick_tree._Vec(0.40, 0.40, 0.01)),
+            ctc._Vec(0.40, 0.40, 0.01)),
     ]
 
 
@@ -409,8 +408,8 @@ def test_scene_setup_task_clears_a_stale_attach_and_world_then_re_adds():
     seed_ops = len(robot.world_ops)  # the two seed adds above
 
     specs = _scene_specs()
-    root = pick_tree.scene_root(specs, remove_all=True)
-    ex = TaskExecutor(StageSpec.from_dict(root), robot, task_id="scene")
+    root = ctc.scene_root(specs, remove_all=True)
+    ex = TaskExecutor(root, robot, task_id="scene")
     ex.base_scene = ex.build_base_scene()  # the node's own construction
     assert ex.init(), ex.describe()["comment"]
     assert ex.plan(), "a mutation-only scene task must always solve"
@@ -437,12 +436,12 @@ def test_scene_add_flat_pose_dict_parses_through_the_stage():
     ``{x,y,z,qx,qy,qz,qw}`` dict — message types cannot ride YAML — and the
     ``add`` stage must rebuild a Pose-like from it, not pass the dict on."""
     robot = _robot()
-    spec = pick_tree.scene_object(
-        OBJECT, pick_tree.PoseLike(pick_tree._Vec(0.30, 0.0, 0.24),
+    spec = ctc.scene_object(
+        OBJECT, ctc.PoseLike(ctc._Vec(0.30, 0.0, 0.24),
                                    TOP_DOWN_Q),
-        pick_tree._Vec(0.05, 0.05, 0.03))
-    root = pick_tree.scene_root([spec], remove_all=False)
-    ex = TaskExecutor(StageSpec.from_dict(root), robot, task_id="scene")
+        ctc._Vec(0.05, 0.05, 0.03))
+    root = ctc.scene_root([spec], remove_all=False)
+    ex = TaskExecutor(root, robot, task_id="scene")
     assert ex.init(), ex.describe()["comment"]
     assert ex.plan()
     ex.execute(ex.best())  # mutation-only: [] results == success (see above)

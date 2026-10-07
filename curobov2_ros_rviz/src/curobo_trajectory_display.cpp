@@ -48,7 +48,7 @@ void CuroboTrajectoryDisplay::onInitialize()
 
   // --- Display properties ---
   topic_property_ = new rviz_common::properties::RosTopicProperty(
-    "Trajectory Topic", "",
+    "Trajectory Topic", "/curobo_task_constructor/solution_trajectory",
     "trajectory_msgs/msg/JointTrajectory",
     "trajectory_msgs/JointTrajectory topic to display.", this,
     SLOT(updateTopic()));

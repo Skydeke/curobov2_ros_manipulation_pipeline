@@ -156,11 +156,14 @@ class TaskExecutor:
     # ------------------------------------------------------------------
     # Plan
     # ------------------------------------------------------------------
-    def plan(self, max_iterations: int = 0) -> bool:
+    def plan(self, max_iterations: int = 0, progress_callback=None) -> bool:
         """Run the compute loop until no stage can make progress.
 
         Returns True when at least one full root solution was found.
         ``max_iterations`` (0 = unlimited) guards against pathological graphs.
+        ``progress_callback`` (MTC ``publishTaskState``) fires after every
+        compute pass so introspection can stream per-stage rollups while
+        planning instead of only at the end.
 
         The loop also stops the moment the FIRST complete root solution
         exists. Without that, a serial container sitting above a fallbacks /
@@ -182,6 +185,8 @@ class TaskExecutor:
         while any(s.can_compute() for s in self.root.subtree_stages()):
             self.root.run_compute()
             iterations += 1
+            if progress_callback is not None:
+                progress_callback()
             if self.root.solutions:
                 # First complete root solution: stop re-connecting / re-solving
                 # the trailing chain (see docstring). Return the first full
@@ -229,7 +234,8 @@ class TaskExecutor:
         walk(sol)
         return out
 
-    def execute(self, sol: Solution) -> list:
+    def execute(self, sol: Solution, progress_callback=None,
+                cancel_event=None) -> list:
         """Play back one solution: materialize each segment's scene delta on
         the curobo server in chain order, then drive each motion segment
         (SendTrajectory). The server replays the segment's PLANNED trajectory
@@ -237,6 +243,12 @@ class TaskExecutor:
         time, so execution reproduces the validated plan; only a genuine miss
         (cache cleared, TTL expired, world mutated) falls back to re-solving.
         Returns the list of drive results.
+
+        ``progress_callback`` fires with each driven segment's stage name
+        (MTC's active-stage highlight during playback): the node publishes
+        it as action feedback so the panel can follow execution.
+        ``cancel_event`` (threading.Event, MTC preempt) stops the chain
+        between segments; the returned list is truncated like a failure.
 
         The chain STOPS at the first segment that does not land where the plan
         said it would - either because the drive failed, or because the server
@@ -255,10 +267,14 @@ class TaskExecutor:
         self._applied_ops = []
         results = []
         for leaf in self.flatten_leaves(sol):
+            if cancel_event is not None and cancel_event.is_set():
+                break
             for kind, payload in leaf.scene_ops or []:
                 self._apply_op(kind, payload)
             if leaf.plan_request is None:
                 continue
+            if progress_callback is not None:
+                progress_callback(getattr(leaf.stage, "name", ""))
             result = self.robot.execute(leaf.plan_request)
             if not result.success:
                 results.append(result)
@@ -362,8 +378,10 @@ class TaskExecutor:
         candidate, and the last one is not necessarily the cheapest).
         ``total_compute_time`` is in seconds (wall-clock, accumulated across
         every ``run_compute`` call on the stage).
-        ``attempt_count`` is the number of planning attempts the stage made
-        (solutions emitted + failures recorded + extra multi-attempt solves).
+        ``attempt_count`` is planner calls plus records from computes that
+        made none (generators, mutations, validation failures): a record
+        spends one pending try instead of counting again, so best-of-3 with
+        one winner reads 3, three failed tries read 3, a generator run 1.
         """
         stages = []
         attempts = []

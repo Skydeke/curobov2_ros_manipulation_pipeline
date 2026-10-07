@@ -31,7 +31,7 @@ import threading
 from functools import partial
 
 import rclpy
-from rclpy.action import ActionServer, GoalResponse
+from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.qos import (
@@ -43,12 +43,13 @@ from rclpy.qos import (
 from sensor_msgs.msg import JointState
 from visualization_msgs.msg import MarkerArray
 
-from curobo_task_constructor_interfaces.action import Task
+from curobo_task_constructor_interfaces.action import ExecuteSolution, Task
 from curobo_task_constructor_interfaces.msg import (
     SolutionInfo,
     StageSpec as StageSpecMsg,
     StageStatistics,
     TaskDescription,
+    TaskSolution,
 )
 
 #: Populate STAGE_REGISTRY with the builtin stages (registry is import-driven).
@@ -63,17 +64,27 @@ from curobo_task_constructor.robot.curobo import _SERVICE_TIMEOUT
 #: solution_id carried by failed attempts (uint32 field; 0xFFFFFFFF = none).
 NO_SOLUTION_ID = 0xFFFFFFFF
 
+#: stage_id addressing a whole stored chain rather than one segment.
+NO_STAGE = 0xFFFFFFFF
+
 #: Depth of the introspection publishers/subscribers. The node publishes one
-#: StageStatistics per stage and one SolutionInfo per emit/failure in a tight
-#: burst at the end of a solve; the pick task alone has 27 stages. A depth of
+#: StageStatistics per stage per compute pass, one per planner try, and one
+#: SolutionInfo per emit/failure in tight bursts at solve time; the pick task
+#: alone has 27 stages, each motion stage planning up to 3 tries. A depth of
 #: 10 (the rviz default) silently DROPPED the messages for the first ~17 stages,
 #: so the panel showed compute time / attempts only for the last 10 — which are
 #: mostly never-run fallback stages. The multi-attempt planning happened, but
 #: its statistics were invisible for exactly the stages that matter. Sized to
-#: comfortably exceed the largest task (the pick) with margin.
-INTROSPECTION_QOS_DEPTH = 100
+#: comfortably exceed the largest burst with margin.
+INTROSPECTION_QOS_DEPTH = 500
 
 _ACTION_TOPIC = "/curobo_task_constructor/task"
+_EXECUTE_ACTION_TOPIC = "/curobo_task_constructor/execute_solution"
+_TASK_SOLUTION_TOPIC = "/curobo_task_constructor/task_solutions"
+#: Solved tasks kept for ExecuteSolution (task_id -> ranked chains, MTC's
+#: stored task solutions). Bounded: trajectories are small, but unbounded
+#: growth across pick cycles is not.
+_MAX_STORED_TASKS = 3
 _INTROSPECT_QOS_TOPICS = {
     "task_description": "/curobo_task_constructor/task_description",
     "solution_info": "/curobo_task_constructor/solution_info",
@@ -88,6 +99,7 @@ class TaskConstructorNode(rclpy.node.Node):
         self.declare_parameter("planner", -1)
         self.declare_parameter("joint_states_topic", "/joint_states")
         self.declare_parameter("service_timeout", _SERVICE_TIMEOUT)
+        self.declare_parameter("live_stats_period", 0.5)
 
         self._robot_config_path = str(
             self.get_parameter("robot_config_path").value)
@@ -123,10 +135,23 @@ class TaskConstructorNode(rclpy.node.Node):
             SolutionInfo, _INTROSPECT_QOS_TOPICS["solution_info"], qos)
         self._pub_stat = self.create_publisher(
             StageStatistics, _INTROSPECT_QOS_TOPICS["stage_statistics"], qos)
+        self._pub_chains = self.create_publisher(
+            TaskSolution, _TASK_SOLUTION_TOPIC, qos)
 
         # Solve serialization: one task at a time on the shared curobo server.
         self._solve_lock = threading.Lock()
         self._solve_in_progress = False
+
+        # Stored complete solutions for ExecuteSolution (task_id -> executor
+        # holding the ranked chains, MTC's stored task solutions). Driving a
+        # stored chain replays its own segment requests (force_cached) with
+        # no replanning. Bounded: oldest task evicted past _MAX_STORED_TASKS.
+        self._stored = {}
+        # One execution at a time on the shared server (same reason as solves)
+        # plus its cancel flag (MTC preempt stops between segments).
+        self._exec_lock = threading.Lock()
+        self._exec_in_progress = False
+        self._exec_cancel = threading.Event()
 
         # Active-solve context for the introspection hooks.
         self._active_goal_handle = None
@@ -169,6 +194,12 @@ class TaskConstructorNode(rclpy.node.Node):
             self, Task, _ACTION_TOPIC,
             execute_callback=self._execute_callback,
             goal_callback=self._goal_callback,
+            callback_group=ReentrantCallbackGroup())
+        self._exec_action = ActionServer(
+            self, ExecuteSolution, _EXECUTE_ACTION_TOPIC,
+            execute_callback=self._execute_solution_callback,
+            goal_callback=self._execute_goal_callback,
+            cancel_callback=self._execute_cancel_callback,
             callback_group=ReentrantCallbackGroup())
         self.get_logger().info(
             f"task constructor ready at {_ACTION_TOPIC} "
@@ -274,11 +305,42 @@ class TaskConstructorNode(rclpy.node.Node):
                 stg.on_solution, partial(self._publish_solution, stg))
             stg.on_failure = chain_hook(
                 stg.on_failure, partial(self._publish_failure, stg))
+            # Per-planner-try progress: best-of-N stages call the planner
+            # several times but emit once, so without this the panel would
+            # sit still until the Nth try finished. Each try publishes one
+            # stage rollup; attempts/compute-time walk 1, 2, 3 live.
+            stg.on_progress = chain_hook(
+                stg.on_progress, self._publish_stage_progress)
 
         self._publish_task_description(executor)
         self._publish_feedback("planning", "", hint="task accepted")
 
-        ok = executor.plan()
+        # Live statistics while planning: attempts and compute time would
+        # otherwise only appear after the solve (see
+        # _publish_stage_statistics), leaving the panel static for the whole
+        # plan. A wall timer snapshots the per-stage rollups during compute
+        # and is destroyed right after plan() returns, before the final
+        # burst below. Period 0 disables the live snapshots.
+        live_stats_timer = None
+        try:
+            period = float(self.get_parameter("live_stats_period").value)
+        except Exception:
+            period = 0.5
+        if period > 0.0:
+            live_stats_timer = self.create_timer(
+                period, lambda: self._publish_stage_statistics(executor))
+        try:
+            # Per-pass rollups (MTC publishTaskState): statistics stream
+            # after every compute pass on top of the per-try progress above.
+            ok = executor.plan(progress_callback=lambda:
+                               self._publish_stage_statistics(executor))
+        finally:
+            if live_stats_timer is not None:
+                live_stats_timer.cancel()
+                try:
+                    self.destroy_timer(live_stats_timer)
+                except Exception:
+                    pass
         self._publish_stage_statistics(executor)
 
         if not ok:
@@ -308,40 +370,216 @@ class TaskConstructorNode(rclpy.node.Node):
         sol = executor.best()
         self._publish_feedback("solved", sol.stage.name if sol else "",
                                hint=f"{self._solutions_total} solution(s)")
+        self._publish_winner_trajectory(sol)
+        self._store_and_publish_solutions(executor)
 
         if goal.execute and sol is not None:
-            try:
-                # Map each drive failure back to its leaf stage so clients can
-                # tell a variant reach failure (approach_*/grasp_*) from a
-                # post-reach failure (close/lift/return/...). Only motion leaves
-                # yield results; scene-only leaves (modify_scene) contribute
-                # none, so filter them before zipping.
-                motion_leaves = [
-                    leaf for leaf in executor.flatten_leaves(sol)
-                    if leaf.plan_request is not None]
-                results = executor.execute(sol)
-            except Exception as exc:
-                self.get_logger().error(f"task '{goal.task_name}' execution failed: {exc}")
-                goal_handle.abort()
-                return Task.Result(
-                    success=False, error=f"execution failed: {exc}",
-                    failed_stage_name="<execute>")
-            bad = [(leaf.stage.name, r) for leaf, r
-                   in zip(motion_leaves, results) if not r.success]
-            if bad:
-                name, first = bad[0]
+            ok_exec, error, failed_stage = self._drive_solution(
+                executor, sol,
+                lambda stage_name: self._publish_feedback(
+                    "executing", stage_name))
+            if not ok_exec:
+                if failed_stage == "<execute>":
+                    self.get_logger().error(
+                        f"task '{goal.task_name}' execution failed: {error}")
+                    goal_handle.abort()
+                    return Task.Result(
+                        success=False, error=f"execution failed: {error}",
+                        failed_stage_name="<execute>")
                 self.get_logger().error(
                     f"task '{goal.task_name}' execution failed at "
-                    f"'{name}': {first.message or 'SendTrajectory failed'}")
+                    f"'{failed_stage}': {error or 'SendTrajectory failed'}")
                 goal_handle.abort()
                 return Task.Result(
                     success=False,
-                    error=first.message or "execution failed",
-                    failed_stage_name=name)
+                    error=error or "execution failed",
+                    failed_stage_name=failed_stage)
             self._publish_feedback("executed", "", hint="winner executed")
 
         goal_handle.succeed()
         return Task.Result(success=True, error="", failed_stage_name="")
+
+    def _drive_solution(self, executor, sol, feedback_fn=None,
+                        cancel_event=None):
+        """Drive one ranked solution segment by segment (shared by the Task
+        execute flag and ExecuteSolution).
+
+        Map each drive failure back to its leaf stage so clients can tell a
+        variant reach failure (approach_*/grasp_*) from a post-reach failure
+        (close/lift/return/...). Only motion leaves yield results; scene-only
+        leaves (modify_scene) contribute none, so filter them before zipping.
+        Returns (ok, error, failed_stage_name); cancelled counts as not-ok
+        with failed_stage_name "<cancelled>".
+        """
+        try:
+            motion_leaves = [
+                leaf for leaf in executor.flatten_leaves(sol)
+                if leaf.plan_request is not None]
+
+            def _progress(stage_name):
+                if feedback_fn is not None:
+                    feedback_fn(stage_name)
+
+            results = executor.execute(
+                sol, progress_callback=_progress, cancel_event=cancel_event)
+        except Exception as exc:
+            return False, f"{exc}", "<execute>"
+        if cancel_event is not None and cancel_event.is_set():
+            return False, "cancelled", "<cancelled>"
+        bad = [(leaf.stage.name, r) for leaf, r
+               in zip(motion_leaves, results) if not r.success]
+        if bad:
+            name, first = bad[0]
+            return False, first.message or "execution failed", name
+        if len(results) < len(motion_leaves):
+            # Truncated without a failing result (e.g. divergence guard):
+            # the chain stopped early, report where.
+            idx = len(results)
+            name = motion_leaves[idx].stage.name if idx < len(motion_leaves) else ""
+            msg = results[-1].message if results else "chain stopped early"
+            return False, msg, name
+        return True, "", ""
+
+    def _store_and_publish_solutions(self, executor) -> None:
+        """Keep the solved executor for ExecuteSolution and list its chains.
+
+        MTC keeps all task solutions executable; the panel lists them and
+        drives any one of them with no replanning. Stored per task_id,
+        oldest task evicted past _MAX_STORED_TASKS.
+        """
+        self._stored[executor.task_id] = executor
+        while len(self._stored) > _MAX_STORED_TASKS:
+            self._stored.pop(next(iter(self._stored)))
+        for index, sol in enumerate(executor.rank()):
+            leaves = executor.flatten_leaves(sol)
+            msg = TaskSolution()
+            msg.task_id = executor.task_id
+            msg.solution_index = index
+            msg.cost = float(sol.cost)
+            for leaf in leaves:
+                msg.stage_names.append(getattr(leaf.stage, "name", ""))
+                msg.stage_ids.append(int(getattr(leaf.stage, "stage_id", -1)))
+                msg.solution_ids.append(int(getattr(leaf, "solution_id", -1)))
+            self._pub_chains.publish(msg)
+
+    # ------------------------------------------------------------------
+    # execute-solution server (MTC ExecuteTaskSolution equivalent)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lookup_solution(executor, solution_index):
+        chains = executor.rank()
+        if 0 <= solution_index < len(chains):
+            return chains[solution_index]
+        return None
+
+    @staticmethod
+    def _lookup_segment(executor, stage_id, attempt_id):
+        """One stored successful attempt (single-segment execute)."""
+        for stg in executor.root.subtree_stages():
+            if stg.stage_id != stage_id:
+                continue
+            for sol in stg.solutions:
+                if sol.solution_id == attempt_id:
+                    return sol
+        return None
+
+    def _execute_goal_callback(self, goal_request):
+        with self._exec_lock:
+            if self._exec_in_progress:
+                self.get_logger().warn(
+                    "rejecting execute goal: another execution is in progress")
+                return GoalResponse.REJECT
+        executor = self._stored.get(goal_request.task_id)
+        if executor is None:
+            self.get_logger().warn(
+                f"rejecting execute goal: unknown task {goal_request.task_id} "
+                "(send the task first)")
+            return GoalResponse.REJECT
+        if int(goal_request.stage_id) == NO_STAGE:
+            ok = self._lookup_solution(
+                executor, goal_request.solution_index) is not None
+        else:
+            ok = self._lookup_segment(
+                executor, int(goal_request.stage_id),
+                int(goal_request.attempt_id)) is not None
+        if not ok:
+            self.get_logger().warn(
+                f"rejecting execute goal: unknown solution "
+                f"{goal_request.task_id}#{goal_request.solution_index} "
+                "(send the task first)")
+            return GoalResponse.REJECT
+        return GoalResponse.ACCEPT
+
+    def _execute_cancel_callback(self, goal_handle):
+        self._exec_cancel.set()
+        return CancelResponse.ACCEPT
+
+    def _execute_solution_callback(self, goal_handle):
+        with self._exec_lock:
+            self._exec_in_progress = True
+        self._exec_cancel.clear()
+        try:
+            return self._run_execute_solution(goal_handle)
+        finally:
+            with self._exec_lock:
+                self._exec_in_progress = False
+
+    def _run_execute_solution(self, goal_handle) -> ExecuteSolution.Result:
+        def _unknown(detail: str) -> ExecuteSolution.Result:
+            goal_handle.abort()
+            return ExecuteSolution.Result(
+                success=False,
+                error=f"unknown solution {goal.task_id}#{goal.solution_index} "
+                      f"({detail} — send the task first)",
+                failed_stage_name="<lookup>")
+
+        goal = goal_handle.request
+        executor = self._stored.get(goal.task_id)
+        if executor is None:
+            return _unknown("task evicted or never solved")
+        if int(goal.stage_id) == NO_STAGE:
+            sol = self._lookup_solution(executor, goal.solution_index)
+            if sol is None:
+                return _unknown("solution index out of range")
+        else:
+            # One stored segment, driven standalone (MTC executes any
+            # solution, whole or part). Only successful attempts carry a
+            # plannable trajectory; failures have nothing to drive.
+            sol = self._lookup_segment(
+                executor, int(goal.stage_id), int(goal.attempt_id))
+            if sol is None or sol.plan_request is None:
+                return _unknown("no successful attempt there")
+            from curobo_task_constructor.core.stage import Solution
+            sol = Solution(
+                start=sol.start, end=sol.end, trajectory=sol.trajectory,
+                cost=sol.cost, comment=sol.comment, response=sol.response,
+                children=[sol], plan_request=sol.plan_request,
+                scene_ops=list(sol.scene_ops or []))
+        motion_total = sum(
+            1 for leaf in executor.flatten_leaves(sol)
+            if leaf.plan_request is not None)
+        fb = ExecuteSolution.Feedback()
+        fb.segments_total = motion_total
+        ok, error, failed = self._drive_solution(
+            executor, sol, lambda name: self._execute_feedback(
+                goal_handle, fb, name),
+            cancel_event=self._exec_cancel)
+        if not ok and failed == "<cancelled>":
+            goal_handle.canceled()
+            return ExecuteSolution.Result(
+                success=False, error="cancelled", failed_stage_name="")
+        if not ok:
+            goal_handle.abort()
+            return ExecuteSolution.Result(
+                success=False, error=error, failed_stage_name=failed)
+        goal_handle.succeed()
+        return ExecuteSolution.Result(
+            success=True, error="", failed_stage_name="")
+
+    def _execute_feedback(self, goal_handle, fb, stage_name: str) -> None:
+        fb.current_stage_name = stage_name
+        fb.segments_done += 1
+        goal_handle.publish_feedback(fb)
 
     # ------------------------------------------------------------------
     # introspection publishing (Sec. 7)
@@ -384,7 +622,9 @@ class TaskConstructorNode(rclpy.node.Node):
         msg.success = True
         msg.comment = sol.comment or ""
         msg.planner_id = self._planner_id(stg, sol)
-        msg.markers = MarkerArray()
+        msg.trajectory = self._solution_trajectory(sol)
+        msg.tool_poses = self._solution_tool_poses(sol)
+        msg.markers = self._attempt_markers(sol, msg.tool_poses, success=True)
         self._pub_sol.publish(msg)
         self._publish_feedback("computing", stg.name)
 
@@ -399,23 +639,67 @@ class TaskConstructorNode(rclpy.node.Node):
         msg.success = False
         msg.comment = failure.message or ""
         msg.planner_id = self._planner_id(stg, None)
-        msg.markers = MarkerArray()
+        msg.markers = self._failure_markers(failure)
+        msg.trajectory = []
+        msg.tool_poses = []
         self._pub_sol.publish(msg)
         self._publish_feedback("computing", stg.name)
 
+    def _failure_markers(self, failure) -> MarkerArray:
+        """Red marker at the state a failed attempt started from (best
+        effort): MTC marks failed goals red, and the start state is the
+        only pose a failure always carries."""
+        from visualization_msgs.msg import Marker
+        out = MarkerArray()
+        try:
+            state = getattr(failure, "from_state", None)
+            js = getattr(state, "joint_state", None) if state else None
+            if js is None:
+                return out
+            pose = self._solver.fk(js)
+            mark = Marker()
+            mark.header.frame_id = "world"
+            mark.ns = "failed_at"
+            mark.id = 0
+            mark.type = Marker.SPHERE
+            mark.action = Marker.ADD
+            mark.pose = pose
+            mark.scale.x = mark.scale.y = mark.scale.z = 0.025
+            mark.color.r, mark.color.a = 1.0, 1.0
+            out.markers.append(mark)
+        except Exception as exc:
+            self.get_logger().debug(f"failure markers failed: {exc!r}")
+        return out
+
     def _publish_stage_statistics(self, executor) -> None:
         for stg in executor.root.subtree_stages():
-            msg = StageStatistics()
-            msg.task_id = executor.task_id
-            msg.stage_id = stg.stage_id
-            msg.stage_name = stg.name
-            msg.stage_type = stg.stage_type()
-            msg.attempt_count = stg.attempt_count
-            msg.success_count = len(stg.solutions)
-            msg.last_cost = min((s.cost for s in stg.solutions),
-                                default=float("inf"))
-            msg.total_compute_time = stg.compute_time  # seconds
-            self._pub_stat.publish(msg)
+            self._pub_stat.publish(
+                self._stage_statistics(stg, executor.task_id))
+
+    def _publish_stage_progress(self, stg) -> None:
+        """One stage's rollup after every planner attempt (MTC per-pass
+        TaskStatistics, at try granularity).
+
+        ``on_progress`` fires inside a stage's multi-attempt loop, so each
+        try streams attempts/compute-time immediately instead of only when
+        the stage emits after its Nth try.
+        """
+        self._pub_stat.publish(
+            self._stage_statistics(stg, self._active_task_id))
+
+    @staticmethod
+    def _stage_statistics(stg, task_id: str) -> StageStatistics:
+        msg = StageStatistics()
+        msg.task_id = task_id
+        msg.stage_id = stg.stage_id
+        msg.stage_name = stg.name
+        msg.stage_type = stg.stage_type()
+        msg.attempt_count = stg.attempt_count
+        msg.success_count = len(stg.solutions)
+        msg.last_cost = min((s.cost for s in stg.solutions),
+                            default=float("inf"))
+        msg.total_compute_time = stg.compute_time  # seconds
+        return msg
 
     def _publish_feedback(self, state: str, current_stage: str,
                           hint: str = "") -> None:
@@ -428,6 +712,106 @@ class TaskConstructorNode(rclpy.node.Node):
         fb.attempts = self._attempt_count
         fb.solutions = self._solutions_total
         gh.publish_feedback(fb)
+
+    def _publish_winner_trajectory(self, sol) -> None:
+        """Show the winning solution in RViz like ``Task.publish`` does.
+
+        The panel republishes whatever solution is selected, but a solve
+        without an open panel should still land on the trajectory display:
+        transient_local keeps it for a display that subscribes later.
+        """
+        if sol is None:
+            return
+        try:
+            from curobo_task_constructor.viz import publish_solution_trajectory
+            publish_solution_trajectory(self, sol)
+        except Exception as exc:
+            self.get_logger().debug(f"winner trajectory publish failed: {exc!r}")
+
+    def _attempt_markers(self, sol, tool_poses, success: bool) -> MarkerArray:
+        """Debug markers for one attempt (MTC stage start/goal frames).
+
+        MTC's stages mark the start frame and the goal frame(s) green on
+        success and red on failure; the panel shows the selected attempt's
+        markers verbatim. Here: one sphere per goal candidate (steel blue,
+        so every alternative the planner chose from stays visible), the
+        start tool pose green, and the reached tool pose green (success) or
+        red (failure).
+        """
+        from visualization_msgs.msg import Marker
+        out = MarkerArray()
+        try:
+            req = getattr(sol, "plan_request", None)
+            goalsets = list(getattr(req, "goalsets", None) or [])
+            positions = [p.position for gs in goalsets
+                         for p in (getattr(gs, "poses", None) or [])]
+            if positions:
+                spheres = Marker()
+                spheres.header.frame_id = "world"
+                spheres.ns = "candidates"
+                spheres.id = 0
+                spheres.type = Marker.SPHERE_LIST
+                spheres.action = Marker.ADD
+                spheres.scale.x = spheres.scale.y = spheres.scale.z = 0.02
+                spheres.color.r, spheres.color.g = 0.3, 0.6
+                spheres.color.b, spheres.color.a = 1.0, 0.8
+                spheres.points.extend(positions)
+                out.markers.append(spheres)
+            poses = list(tool_poses or [])
+            if poses:
+                for i, (label, pose) in enumerate(
+                        (("start", poses[0]), ("end", poses[-1]))):
+                    mark = Marker()
+                    mark.header.frame_id = "world"
+                    mark.ns = label
+                    mark.id = 1 + i
+                    mark.type = Marker.SPHERE
+                    mark.action = Marker.ADD
+                    mark.pose = pose
+                    mark.scale.x = mark.scale.y = mark.scale.z = 0.025
+                    if success or i == 0:
+                        mark.color.g, mark.color.a = 1.0, 1.0
+                    else:
+                        mark.color.r, mark.color.a = 1.0, 1.0
+                    out.markers.append(mark)
+        except Exception as exc:
+            self.get_logger().debug(f"attempt markers failed: {exc!r}")
+        return out
+
+    @staticmethod
+    def _solution_trajectory(sol) -> list:
+        """Solution waypoints as sensor_msgs/JointState (empty on failure).
+
+        Full-clone trajectory playback (MTC TaskDisplay equivalent): the
+        panel scrubs these waypoints with a slider instead of only coloring
+        the stage row. Waypoints may be ROS messages already or ROS-free
+        stubs (tests) carrying name/position attrs.
+        """
+        out = []
+        for wp in (getattr(sol, "trajectory", None) or []):
+            if isinstance(wp, JointState):
+                out.append(wp)
+                continue
+            js = JointState()
+            js.name = [str(n) for n in (getattr(wp, "name", []) or [])]
+            js.position = [float(v) for v in (getattr(wp, "position", []) or [])]
+            out.append(js)
+        return out
+
+    def _solution_tool_poses(self, sol) -> list:
+        """FK tool pose per solution waypoint (best-effort, may be empty)."""
+        traj = list(getattr(sol, "trajectory", None) or [])
+        if not traj:
+            return []
+        try:
+            fk = getattr(self._solver, "fk_batch", None)
+            if fk is None:
+                return []
+            poses = fk(traj)
+            return list(poses or [])
+        except Exception as exc:
+            self.get_logger().debug(f"tool_poses FK failed: {exc!r}")
+            return []
 
     @staticmethod
     def _planner_id(stg, sol) -> str:

@@ -9,4 +9,11 @@ float64 cost
 bool success
 string comment               # failure hint / human note
 string planner_id            # planner backing this stage (e.g. "MULTIPOINT")
+bool ranked true             # ranked (stored, lifted, executable) vs a
+                             # best-of-N seed that succeeded but lost: shown
+                             # and counted, never ranked or executed
 visualization_msgs/MarkerArray markers   # optional debug markers (may be empty)
+# Full-clone trajectory playback (MTC TaskDisplay equivalent): waypoints of
+# this attempt (empty on failure) plus the FK tool pose per waypoint.
+sensor_msgs/JointState[] trajectory
+geometry_msgs/Pose[] tool_poses
