@@ -25,6 +25,9 @@ class StageSpec:
     container_type: str = ""  # "" | serial | alternatives | fallbacks | independent
     children: list = field(default_factory=list)  # list[StageSpec]
     params_yaml: str = ""
+    #: Interface flags (MTC StageDescription.flags bits); 0 when unknown
+    #: (authoring time) — the node fills live flags from resolved stages.
+    flags: int = 0
 
     # -- format converters --------------------------------------------
     def to_dict(self) -> dict:
@@ -34,6 +37,7 @@ class StageSpec:
             "container_type": self.container_type,
             "children": [c.to_dict() for c in self.children],
             "params_yaml": self.params_yaml,
+            "flags": int(self.flags),
         }
 
     @classmethod
@@ -44,6 +48,7 @@ class StageSpec:
             container_type=d.get("container_type", ""),
             children=[cls.from_dict(c) for c in d.get("children", []) or []],
             params_yaml=d.get("params_yaml", ""),
+            flags=int(d.get("flags", 0) or 0),
         )
 
     def to_yaml(self) -> str:
@@ -131,6 +136,25 @@ class StageSpec:
                 visit(child, msg.id)
 
         visit(self, 0)
+        # Wire flags ride alongside (0 at authoring time; the node fills
+        # live flags from resolved stages before publishing).
+        for spec_msg, spec_node in zip(out, self._preorder()):
+            try:
+                spec_msg.flags = int(spec_node.flags)
+            except Exception:
+                pass
+        return out
+
+    def _preorder(self) -> list:
+        """This tree in the same pre-order to_msg_list emits."""
+        out = []
+
+        def visit(node: "StageSpec") -> None:
+            out.append(node)
+            for child in node.children:
+                visit(child)
+
+        visit(self)
         return out
 
     @property
@@ -156,6 +180,7 @@ class _StageSpecStub:
         self.parent_id = None
         self.stage_type = spec.stage_type
         self.name = spec.name
+        self.flags = spec.flags
         self.container_type = spec.container_type
         self.params_yaml = spec.params_yaml
         self.children = [_StageSpecStub(c) for c in spec.children]

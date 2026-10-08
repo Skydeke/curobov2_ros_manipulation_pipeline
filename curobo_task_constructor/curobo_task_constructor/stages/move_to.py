@@ -78,7 +78,7 @@ class MoveTo(PropagatingEitherWay):
             return pose_from_params(goal["pose"], self.robot)
         return None
 
-    def _goal_poses(self):
+    def _goal_poses(self, start=None):
         """Every candidate pose goal, in the order the caller listed them.
 
         ``goal.poses`` is a LIST of pose dicts. All candidates go into ONE
@@ -91,11 +91,28 @@ class MoveTo(PropagatingEitherWay):
         the reference pipeline's ``ComputeIK``+``Connect`` multi-seed solve, and
         the reason ``max_goalset`` must be > 1 on the server.
 
-        ``goal.pose`` is sugar for a one-element list.
+        ``goal.pose`` is sugar for a one-element list. ``goal.point`` (MTC
+        PointStamped: position goal, orientation kept) resolves against the
+        start state's tool orientation, so it needs ``start``.
         """
+        from curobo_task_constructor.core.geom import Pose3
         goal = self.params.get("goal") or {}
         if "poses" in goal:
             return [pose_from_params(p, self.robot) for p in (goal["poses"] or [])]
+        if "point" in goal and start is not None:
+            try:
+                anchor = Pose3.from_any(
+                    self.robot.fk(start.joint_state,
+                                  self.params.get("link")))
+            except Exception:
+                return []
+            pt = goal["point"]
+            target = anchor.copy()
+            target.position = [float(pt.get("x", target.position[0])),
+                               float(pt.get("y", target.position[1])),
+                               float(pt.get("z", target.position[2]))]
+            from curobo_task_constructor.core.geom import pose_to_any
+            return [pose_to_any(target, getattr(self.robot, "pose_cls", None))]
         single = self._goal_pose()
         return [single] if single is not None else []
 
@@ -146,10 +163,10 @@ class MoveTo(PropagatingEitherWay):
 
     def compute_forward(self, state: InterfaceState) -> None:
         joint_goal = self._goal_positions(state)
-        pose_goals = [] if joint_goal is not None else self._goal_poses()
+        pose_goals = [] if joint_goal is not None else self._goal_poses(state)
         if joint_goal is None and not pose_goals:
             self._fail(state, None,
-                       "move_to goal must be one of name/joints/pose/poses")
+                       "move_to goal must be one of name/joints/pose/poses/point")
             return
         if pose_goals:
             goalset = goalset_for_scene(state.scene, poses=pose_goals)

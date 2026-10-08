@@ -17,7 +17,7 @@
 #include <rviz_common/config.hpp>
 #include <rviz_common/panel.hpp>
 
-#include <curobo_task_constructor_interfaces/action/execute_solution.hpp>
+#include <curobo_task_constructor_interfaces/action/execute_task_solution.hpp>
 #include <curobo_task_constructor_interfaces/msg/solution_info.hpp>
 #include <curobo_task_constructor_interfaces/msg/stage_spec.hpp>
 #include <curobo_task_constructor_interfaces/msg/stage_statistics.hpp>
@@ -47,7 +47,7 @@ class QTreeWidgetItem;
 namespace curobo_task_constructor_rviz
 {
 
-using ExecuteAction = curobo_task_constructor_interfaces::action::ExecuteSolution;
+using ExecuteAction = curobo_task_constructor_interfaces::action::ExecuteTaskSolution;
 using SolutionInfoMsg = curobo_task_constructor_interfaces::msg::SolutionInfo;
 
 /// Task tree + solutions tree + properties, like MTC's TaskView.
@@ -93,6 +93,11 @@ private:
   void clearHighlight();
   bool showingChains() const;
   void rebuildSolutionList();
+  void refreshProperties();
+  /// Rewrite the properties pane in place (same rows, fresh values) so new
+  /// introspection data ticks the displayed values live without collapsing
+  /// the user's expanded rows or needing a reselection.
+  void syncProperties(const std::vector<std::pair<QString, QString>> & rows);
   void showSelectedSolution();
   void showStageProperties(QTreeWidgetItem * item);
   void showSolutionProperties(const QString & rank, const QString & cost,

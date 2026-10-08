@@ -36,6 +36,8 @@ CONTAINERS: dict = {
     "alternatives": Alternatives,
     "fallbacks": Fallbacks,
     "independent": IndependentComponents,
+    # MTC Merger: same disjoint-groups contract as independent components.
+    "merger": IndependentComponents,
 }
 
 

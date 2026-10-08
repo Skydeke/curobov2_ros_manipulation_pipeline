@@ -88,3 +88,22 @@ def test_on_progress_fires_per_planner_try():
     move.on_progress = lambda stg: seen.append(stg.attempt_count)
     assert ex.plan()
     assert seen == [1, 2, 3]  # one tick per try, ahead of the emit
+
+
+def test_rows_sum_to_attempts_when_seeds_lose():
+    """Three succeeding tries: one ranked winner, two non-ranked rows.
+
+    attempts(3) == successful rows(3) + failed rows(0): every planner call
+    is visible exactly once, and ranking still keeps only the cheapest.
+    """
+    considered = []
+    robot = MockCuroboServer()
+    ex = TaskExecutor(_spec(), robot, task_id="t")
+    assert ex.init()
+    move = next(s for s in ex.root.subtree_stages() if s.name == "m")
+    move.on_considered = considered.append
+    assert ex.plan()
+    assert len(move.solutions) == 1
+    assert len(move.failures) == 0
+    assert len(considered) == 2
+    assert move.attempt_count == 3
