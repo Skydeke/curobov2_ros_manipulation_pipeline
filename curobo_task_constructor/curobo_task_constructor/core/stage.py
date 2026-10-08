@@ -61,6 +61,16 @@ class InitStageError(Exception):
         super().__init__(f"[{stage_name}] {message}")
 
 
+class PropertyInitializerSource:
+    """OR-combinable flags defining a source to initialize a property from
+    (MTC ``Stage.PropertyInitializerSource``). Used in
+    ``PropertyMap.configureInitFrom()``.
+    """
+
+    PARENT = 0x01
+    INTERFACE = 0x02
+
+
 @dataclass(frozen=True)
 class InterfaceFlag:
     read: bool
@@ -98,6 +108,10 @@ class StageFailure:
     from_state: Optional[InterfaceState]
     to_state: Optional[InterfaceState]
     message: str
+    #: Record id, unique with solutions in this stage's id space (MTC
+    #: numbers stored solutions and failures together; solved[]/failed[]
+    #: in StageStatistics reference these ids).
+    failure_id: int = -1
 
 
 @dataclass
@@ -121,6 +135,9 @@ class Solution:
     # Scene ops this solution materializes before its motion (computed from
     # the scene delta it introduced).
     scene_ops: list = field(default_factory=list)
+    # MTC parity: failure marking and markers.
+    _is_failure: bool = field(default=False, repr=False)
+    _markers: list = field(default_factory=list, repr=False)
 
     def key(self):
         return (self.start.key(), self.end.key())
@@ -132,6 +149,38 @@ class Solution:
         if not self.trajectory:
             return 0.0
         return max(0.0, len(self.trajectory) - 1)
+
+    @property
+    def isFailure(self) -> bool:
+        """True if the trajectory is marked as a failure (MTC)."""
+        return self._is_failure
+
+    @property
+    def markers(self) -> list:
+        """Markers to visualize important aspects of the trajectory (MTC)."""
+        return self._markers
+
+    def markAsFailure(self, comment: str = "") -> None:
+        """Mark the SubTrajectory as a failure (MTC)."""
+        self._is_failure = True
+        if comment:
+            self.comment = comment
+
+    def toMsg(self, introspection: Any = None) -> dict:
+        """Convert to the ROS message Solution (MTC).
+
+        Returns a dict with the solution's fields (cuRobo does not use
+        ROS messages internally).
+        """
+        return {
+            "start": self.start.key() if self.start else None,
+            "end": self.end.key() if self.end else None,
+            "cost": self.cost,
+            "comment": self.comment,
+            "isFailure": self._is_failure,
+            "trajectory": self.trajectory or [],
+            "markers": self._markers,
+        }
 
 
 class Stage(ABC):
@@ -161,6 +210,9 @@ class Stage(ABC):
         self.robot: Optional[RobotInterface] = None
         self._computed = False  # generators run once per task
         self._emitted_keys: set = set()
+        #: Record sequence shared by solutions and failures (MTC numbers
+        #: stored solutions and failures in one id space per stage).
+        self._record_seq = 0
         self.attempt_count = 0
         self.compute_time = 0.0
         # Planner calls in the current compute pass not yet "spent" on an
@@ -284,20 +336,28 @@ class Stage(ABC):
         else:
             self.attempt_count += 1
 
+    def _next_record_id(self) -> int:
+        """Next id in this stage's shared record space (MTC numbers stored
+        solutions and failures together; solved[]/failed[] reference them)."""
+        record_id = self._record_seq
+        self._record_seq += 1
+        return record_id
+
     def _emit(self, solution: Solution) -> None:
         key = solution.key()
         if key in self._emitted_keys:
             return
         self._emitted_keys.add(key)
         solution.stage = self
-        solution.solution_id = len(self.solutions)
+        solution.solution_id = self._next_record_id()
         self.solutions.append(solution)
         self._count_record()
         if self.on_solution:
             self.on_solution(solution)
 
     def _fail(self, from_state, to_state, message: str) -> None:
-        failure = StageFailure(from_state, to_state, message)
+        failure = StageFailure(from_state, to_state, message,
+                               failure_id=self._next_record_id())
         self.failures.append(failure)
         self._count_record()
         if self.on_failure:
@@ -393,6 +453,7 @@ class Stage(ABC):
         self.failures = []
         self._computed = False
         self._emitted_keys = set()
+        self._record_seq = 0
         self.attempt_count = 0
         self.compute_time = 0.0
         self._pending_tries = 0
@@ -610,11 +671,12 @@ class TrajectoryStage(PropagatingStage):
             # every failed try is recorded immediately — MTC publishes each
             # failed plan as a failed solution the moment it happens, so the
             # panel walks attempt 1, 2, 3 live instead of only after the Nth
-            # try. Successful tries tick the count; only the cheapest result
-            # is emitted, so ranking still picks the best seed.
+            # try. Successful tries tick the count; losers publish as
+            # non-ranked rows at the end and only the cheapest result emits,
+            # so successful + failed rows always sum to planner attempts while
+            # ranking still picks the best seed.
             attempts = max(1, int(self.params.get("planning_attempts", 3)))
-            best_result = None
-            best_cost = float("inf")
+            candidates = []
             for _ in range(attempts):
                 try:
                     result = self.robot.plan(req)
@@ -625,12 +687,20 @@ class TrajectoryStage(PropagatingStage):
                     self._fail(start, None, result.message or "plan failed")
                     continue
                 self._note_plan_attempt()
-                cost = self._cost_of(result)
-                if cost < best_cost:
-                    best_cost = cost
-                    best_result = result
-            if best_result is None:
+                candidates.append((result, self._cost_of(result)))
+            if not candidates:
                 continue
+            best_result = min(candidates, key=lambda rc: rc[1])[0]
+            for result, cost in candidates:
+                if result is best_result:
+                    continue
+                end = self.make_end_state(start, result, raw=result)
+                if end is None:
+                    continue  # already recorded (e.g. straightness gate)
+                self._consider(Solution(
+                    start, end, trajectory=result.trajectory, cost=cost,
+                    comment=self._comment(req, result),
+                    response=result.raw, plan_request=req))
             end = self.make_end_state(start, best_result, raw=best_result)
             if end is not None:
                 self.send_forward(start, end, trajectory=best_result.trajectory,

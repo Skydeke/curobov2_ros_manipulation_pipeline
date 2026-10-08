@@ -19,11 +19,12 @@ set(msg_files
   "msg/SolutionInfo.msg"
   "msg/TaskDescription.msg"
   "msg/TaskSolution.msg"
+  "msg/TaskStatistics.msg"
 )
 
 set(action_files
   "action/Task.action"
-  "action/ExecuteSolution.action"
+  "action/ExecuteTaskSolution.action"
 )
 
 rosidl_generate_interfaces(${PROJECT_NAME}

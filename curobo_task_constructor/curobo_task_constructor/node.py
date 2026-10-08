@@ -41,15 +41,15 @@ from rclpy.qos import (
     ReliabilityPolicy,
 )
 from sensor_msgs.msg import JointState
-from visualization_msgs.msg import MarkerArray
 
-from curobo_task_constructor_interfaces.action import ExecuteSolution, Task
+from curobo_task_constructor_interfaces.action import ExecuteTaskSolution, Task
 from curobo_task_constructor_interfaces.msg import (
     SolutionInfo,
     StageSpec as StageSpecMsg,
     StageStatistics,
     TaskDescription,
     TaskSolution,
+    TaskStatistics,
 )
 
 #: Populate STAGE_REGISTRY with the builtin stages (registry is import-driven).
@@ -61,7 +61,8 @@ from curobo_task_constructor.graph.spec import StageSpec
 from curobo_task_constructor.robot import CuroboServerInterface
 from curobo_task_constructor.robot.curobo import _SERVICE_TIMEOUT
 
-#: solution_id carried by failed attempts (uint32 field; 0xFFFFFFFF = none).
+#: id carried by rows with no stored record (uint32 field; 0xFFFFFFFF = none):
+#: non-ranked seeds share it (they are display-only, never looked up).
 NO_SOLUTION_ID = 0xFFFFFFFF
 
 #: stage_id addressing a whole stored chain rather than one segment.
@@ -79,9 +80,9 @@ NO_STAGE = 0xFFFFFFFF
 INTROSPECTION_QOS_DEPTH = 500
 
 _ACTION_TOPIC = "/curobo_task_constructor/task"
-_EXECUTE_ACTION_TOPIC = "/curobo_task_constructor/execute_solution"
+_EXECUTE_ACTION_TOPIC = "/curobo_task_constructor/execute_task_solution"
 _TASK_SOLUTION_TOPIC = "/curobo_task_constructor/task_solutions"
-#: Solved tasks kept for ExecuteSolution (task_id -> ranked chains, MTC's
+#: Solved tasks kept for ExecuteTaskSolution (task_id -> ranked chains, MTC's
 #: stored task solutions). Bounded: trajectories are small, but unbounded
 #: growth across pick cycles is not.
 _MAX_STORED_TASKS = 3
@@ -135,6 +136,8 @@ class TaskConstructorNode(rclpy.node.Node):
             SolutionInfo, _INTROSPECT_QOS_TOPICS["solution_info"], qos)
         self._pub_stat = self.create_publisher(
             StageStatistics, _INTROSPECT_QOS_TOPICS["stage_statistics"], qos)
+        self._pub_task_stat = self.create_publisher(
+            TaskStatistics, "/curobo_task_constructor/task_statistics", qos)
         self._pub_chains = self.create_publisher(
             TaskSolution, _TASK_SOLUTION_TOPIC, qos)
 
@@ -142,7 +145,7 @@ class TaskConstructorNode(rclpy.node.Node):
         self._solve_lock = threading.Lock()
         self._solve_in_progress = False
 
-        # Stored complete solutions for ExecuteSolution (task_id -> executor
+        # Stored complete solutions for ExecuteTaskSolution (task_id -> executor
         # holding the ranked chains, MTC's stored task solutions). Driving a
         # stored chain replays its own segment requests (force_cached) with
         # no replanning. Bounded: oldest task evicted past _MAX_STORED_TASKS.
@@ -196,7 +199,7 @@ class TaskConstructorNode(rclpy.node.Node):
             goal_callback=self._goal_callback,
             callback_group=ReentrantCallbackGroup())
         self._exec_action = ActionServer(
-            self, ExecuteSolution, _EXECUTE_ACTION_TOPIC,
+            self, ExecuteTaskSolution, _EXECUTE_ACTION_TOPIC,
             execute_callback=self._execute_solution_callback,
             goal_callback=self._execute_goal_callback,
             cancel_callback=self._execute_cancel_callback,
@@ -305,6 +308,11 @@ class TaskConstructorNode(rclpy.node.Node):
                 stg.on_solution, partial(self._publish_solution, stg))
             stg.on_failure = chain_hook(
                 stg.on_failure, partial(self._publish_failure, stg))
+            # Non-ranked seeds (best-of-N discards): rows without storing
+            # or lifting, so attempts always sum to tries. Containers never
+            # see this hook (only on_solution lifts).
+            stg.on_considered = chain_hook(
+                stg.on_considered, partial(self._publish_considered, stg))
             # Per-planner-try progress: best-of-N stages call the planner
             # several times but emit once, so without this the panel would
             # sit still until the Nth try finished. Each try publishes one
@@ -402,7 +410,7 @@ class TaskConstructorNode(rclpy.node.Node):
     def _drive_solution(self, executor, sol, feedback_fn=None,
                         cancel_event=None):
         """Drive one ranked solution segment by segment (shared by the Task
-        execute flag and ExecuteSolution).
+        execute flag and ExecuteTaskSolution).
 
         Map each drive failure back to its leaf stage so clients can tell a
         variant reach failure (approach_*/grasp_*) from a post-reach failure
@@ -441,7 +449,7 @@ class TaskConstructorNode(rclpy.node.Node):
         return True, "", ""
 
     def _store_and_publish_solutions(self, executor) -> None:
-        """Keep the solved executor for ExecuteSolution and list its chains.
+        """Keep the solved executor for ExecuteTaskSolution and list its chains.
 
         MTC keeps all task solutions executable; the panel lists them and
         drives any one of them with no replanning. Stored per task_id,
@@ -524,10 +532,10 @@ class TaskConstructorNode(rclpy.node.Node):
             with self._exec_lock:
                 self._exec_in_progress = False
 
-    def _run_execute_solution(self, goal_handle) -> ExecuteSolution.Result:
-        def _unknown(detail: str) -> ExecuteSolution.Result:
+    def _run_execute_solution(self, goal_handle) -> ExecuteTaskSolution.Result:
+        def _unknown(detail: str) -> ExecuteTaskSolution.Result:
             goal_handle.abort()
-            return ExecuteSolution.Result(
+            return ExecuteTaskSolution.Result(
                 success=False,
                 error=f"unknown solution {goal.task_id}#{goal.solution_index} "
                       f"({detail} — send the task first)",
@@ -558,7 +566,7 @@ class TaskConstructorNode(rclpy.node.Node):
         motion_total = sum(
             1 for leaf in executor.flatten_leaves(sol)
             if leaf.plan_request is not None)
-        fb = ExecuteSolution.Feedback()
+        fb = ExecuteTaskSolution.Feedback()
         fb.segments_total = motion_total
         ok, error, failed = self._drive_solution(
             executor, sol, lambda name: self._execute_feedback(
@@ -566,14 +574,14 @@ class TaskConstructorNode(rclpy.node.Node):
             cancel_event=self._exec_cancel)
         if not ok and failed == "<cancelled>":
             goal_handle.canceled()
-            return ExecuteSolution.Result(
+            return ExecuteTaskSolution.Result(
                 success=False, error="cancelled", failed_stage_name="")
         if not ok:
             goal_handle.abort()
-            return ExecuteSolution.Result(
+            return ExecuteTaskSolution.Result(
                 success=False, error=error, failed_stage_name=failed)
         goal_handle.succeed()
-        return ExecuteSolution.Result(
+        return ExecuteTaskSolution.Result(
             success=True, error="", failed_stage_name="")
 
     def _execute_feedback(self, goal_handle, fb, stage_name: str) -> None:
@@ -584,11 +592,39 @@ class TaskConstructorNode(rclpy.node.Node):
     # ------------------------------------------------------------------
     # introspection publishing (Sec. 7)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _interface_flags(stage) -> int:
+        """Resolved interface as MTC StageDescription.flags bits (0x01 reads
+        start, 0x02 reads end, 0x04 writes next start, 0x08 writes prev end).
+        Our InterfaceFlag(read, write) pair maps exactly onto MTC's
+        READS_START/READS_END/WRITES_NEXT_START/WRITES_PREV_END.
+        """
+        try:
+            start, end = stage.interface_flags()
+        except Exception:
+            return 0
+        flags = 0
+        if start.read:
+            flags |= 0x01
+        if end.read:
+            flags |= 0x02
+        if end.write:
+            flags |= 0x04
+        if start.write:
+            flags |= 0x08
+        return flags
+
     def _publish_task_description(self, executor) -> None:
         desc = executor.describe()
         msg = TaskDescription()
         msg.task_id = desc["task_id"]
         msg.stages = StageSpec.from_dict(desc["root"]).to_msg_list(StageSpecMsg)
+        live = {stg.stage_id: stg
+                for stg in executor.root.subtree_stages()}
+        for stage_msg in msg.stages:
+            stg = live.get(int(stage_msg.id))
+            if stg is not None:
+                stage_msg.flags = self._interface_flags(stg)
         msg.stage_count = int(desc["stage_count"])
         msg.valid = bool(desc["valid"])
         msg.comment = desc["comment"] or ""
@@ -614,43 +650,65 @@ class TaskConstructorNode(rclpy.node.Node):
         self._attempt_count += 1
         self._solutions_total += 1
         msg = SolutionInfo()
-        msg.task_id = self._active_task_id
-        msg.stage_id = stg.stage_id
-        msg.stage_name = stg.name
-        msg.solution_id = sol.solution_id
+        msg.id = int(sol.solution_id)
         msg.cost = float(sol.cost)
-        msg.success = True
         msg.comment = sol.comment or ""
+        msg.stage_id = stg.stage_id
         msg.planner_id = self._planner_id(stg, sol)
+        msg.task_id = self._active_task_id
+        msg.stage_name = stg.name
+        msg.success = True
+        msg.ranked = True
         msg.trajectory = self._solution_trajectory(sol)
         msg.tool_poses = self._solution_tool_poses(sol)
         msg.markers = self._attempt_markers(sol, msg.tool_poses, success=True)
         self._pub_sol.publish(msg)
         self._publish_feedback("computing", stg.name)
 
+    def _publish_considered(self, stg, sol) -> None:
+        """One non-ranked success row per discarded best-of-N seed: every
+        planner call is visible exactly once, so successful + failed rows
+        always sum to planner attempts. No counters, no feedback here — the
+        try already ticked those when it ran."""
+        msg = SolutionInfo()
+        msg.id = NO_SOLUTION_ID
+        msg.cost = float(sol.cost)
+        msg.comment = sol.comment or ""
+        msg.stage_id = stg.stage_id
+        msg.planner_id = self._planner_id(stg, sol)
+        msg.task_id = self._active_task_id
+        msg.stage_name = stg.name
+        msg.success = True
+        msg.ranked = False
+        msg.trajectory = self._solution_trajectory(sol)
+        msg.tool_poses = []
+        msg.markers = self._attempt_markers(sol, [], success=True)
+        self._pub_sol.publish(msg)
+
     def _publish_failure(self, stg, failure) -> None:
         self._attempt_count += 1
         msg = SolutionInfo()
-        msg.task_id = self._active_task_id
-        msg.stage_id = stg.stage_id
-        msg.stage_name = stg.name
-        msg.solution_id = NO_SOLUTION_ID
+        msg.id = int(failure.failure_id)
         msg.cost = float("inf")
-        msg.success = False
         msg.comment = failure.message or ""
+        msg.stage_id = stg.stage_id
         msg.planner_id = self._planner_id(stg, None)
+        msg.task_id = self._active_task_id
+        msg.stage_name = stg.name
+        msg.success = False
+        msg.ranked = False
         msg.markers = self._failure_markers(failure)
         msg.trajectory = []
         msg.tool_poses = []
         self._pub_sol.publish(msg)
         self._publish_feedback("computing", stg.name)
 
-    def _failure_markers(self, failure) -> MarkerArray:
+    def _failure_markers(self, failure) -> list:
         """Red marker at the state a failed attempt started from (best
         effort): MTC marks failed goals red, and the start state is the
         only pose a failure always carries."""
         from visualization_msgs.msg import Marker
-        out = MarkerArray()
+        out = []
         try:
             state = getattr(failure, "from_state", None)
             js = getattr(state, "joint_state", None) if state else None
@@ -666,7 +724,7 @@ class TaskConstructorNode(rclpy.node.Node):
             mark.pose = pose
             mark.scale.x = mark.scale.y = mark.scale.z = 0.025
             mark.color.r, mark.color.a = 1.0, 1.0
-            out.markers.append(mark)
+            out.append(mark)
         except Exception as exc:
             self.get_logger().debug(f"failure markers failed: {exc!r}")
         return out
@@ -675,6 +733,18 @@ class TaskConstructorNode(rclpy.node.Node):
         for stg in executor.root.subtree_stages():
             self._pub_stat.publish(
                 self._stage_statistics(stg, executor.task_id))
+        self._publish_task_statistics(executor)
+
+    def _publish_task_statistics(self, executor) -> None:
+        """Whole-task rollup, MTC TaskStatistics shape (one entry per
+        stage). Published alongside the per-stage stream after every
+        compute pass and at the end, so MTC-shaped tooling can read one
+        message instead of joining the stream."""
+        msg = TaskStatistics()
+        msg.task_id = executor.task_id
+        for stg in executor.root.subtree_stages():
+            msg.stages.append(self._stage_statistics(stg, executor.task_id))
+        self._pub_task_stat.publish(msg)
 
     def _publish_stage_progress(self, stg) -> None:
         """One stage's rollup after every planner attempt (MTC per-pass
@@ -690,15 +760,18 @@ class TaskConstructorNode(rclpy.node.Node):
     @staticmethod
     def _stage_statistics(stg, task_id: str) -> StageStatistics:
         msg = StageStatistics()
+        msg.id = stg.stage_id
+        msg.solved = [int(s.solution_id) for s in stg.solutions]
+        msg.failed = [int(f.failure_id) for f in stg.failures]
+        msg.num_failed = len(stg.failures)
+        msg.total_compute_time = stg.compute_time  # seconds
         msg.task_id = task_id
-        msg.stage_id = stg.stage_id
         msg.stage_name = stg.name
         msg.stage_type = stg.stage_type()
         msg.attempt_count = stg.attempt_count
         msg.success_count = len(stg.solutions)
         msg.last_cost = min((s.cost for s in stg.solutions),
                             default=float("inf"))
-        msg.total_compute_time = stg.compute_time  # seconds
         return msg
 
     def _publish_feedback(self, state: str, current_stage: str,
@@ -728,7 +801,7 @@ class TaskConstructorNode(rclpy.node.Node):
         except Exception as exc:
             self.get_logger().debug(f"winner trajectory publish failed: {exc!r}")
 
-    def _attempt_markers(self, sol, tool_poses, success: bool) -> MarkerArray:
+    def _attempt_markers(self, sol, tool_poses, success: bool) -> list:
         """Debug markers for one attempt (MTC stage start/goal frames).
 
         MTC's stages mark the start frame and the goal frame(s) green on
@@ -739,7 +812,7 @@ class TaskConstructorNode(rclpy.node.Node):
         red (failure).
         """
         from visualization_msgs.msg import Marker
-        out = MarkerArray()
+        out = []
         try:
             req = getattr(sol, "plan_request", None)
             goalsets = list(getattr(req, "goalsets", None) or [])
@@ -756,7 +829,7 @@ class TaskConstructorNode(rclpy.node.Node):
                 spheres.color.r, spheres.color.g = 0.3, 0.6
                 spheres.color.b, spheres.color.a = 1.0, 0.8
                 spheres.points.extend(positions)
-                out.markers.append(spheres)
+                out.append(spheres)
             poses = list(tool_poses or [])
             if poses:
                 for i, (label, pose) in enumerate(
@@ -773,7 +846,7 @@ class TaskConstructorNode(rclpy.node.Node):
                         mark.color.g, mark.color.a = 1.0, 1.0
                     else:
                         mark.color.r, mark.color.a = 1.0, 1.0
-                    out.markers.append(mark)
+                    out.append(mark)
         except Exception as exc:
             self.get_logger().debug(f"attempt markers failed: {exc!r}")
         return out

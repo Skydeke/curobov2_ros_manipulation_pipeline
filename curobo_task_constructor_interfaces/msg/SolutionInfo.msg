@@ -1,19 +1,19 @@
-# One considered (attempted) solution — success AND failure — of a stage.
-# The executor publishes one of these per stage attempt as compute() runs,
-# matching MTC's choice to keep failed attempts visible for debugging.
-string task_id
-uint32 stage_id
-string stage_name
-uint32 solution_id
-float64 cost
-bool success
+# One considered (attempted) solution of a stage, MTC SolutionInfo shape.
+# The executor publishes one per stage attempt as compute() runs, matching
+# MTC's choice to keep failed attempts visible for debugging (MTC marks a
+# failure with cost=inf; the explicit success flag below says the same).
+uint32 id                    # unique record id within the stage's id space
+float32 cost                 # associated cost, inf = failed attempt
 string comment               # failure hint / human note
-string planner_id            # planner backing this stage (e.g. "MULTIPOINT")
+uint32 stage_id              # id of stage that created this solution
+string planner_id            # planner backing this stage (e.g. "classic")
+visualization_msgs/Marker[] markers   # debug markers, e.g. goal candidates
+# --- curobo extensions (no MTC counterpart; needed without moveit_msgs) ---
+string task_id               # task this attempt belongs to
+string stage_name            # display name of the creating stage
+bool success                 # false for failed attempts (cost is inf then)
 bool ranked true             # ranked (stored, lifted, executable) vs a
                              # best-of-N seed that succeeded but lost: shown
                              # and counted, never ranked or executed
-visualization_msgs/MarkerArray markers   # optional debug markers (may be empty)
-# Full-clone trajectory playback (MTC TaskDisplay equivalent): waypoints of
-# this attempt (empty on failure) plus the FK tool pose per waypoint.
-sensor_msgs/JointState[] trajectory
-geometry_msgs/Pose[] tool_poses
+sensor_msgs/JointState[] trajectory   # waypoints (empty on failure)
+geometry_msgs/Pose[] tool_poses       # FK tool pose per waypoint

@@ -13,6 +13,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QMetaObject>
+#include <QSet>
 #include <QSplitter>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -22,6 +23,8 @@
 
 #include <functional>
 #include <string>
+#include <utility>
+#include <vector>
 
 namespace curobo_task_constructor_rviz
 {
@@ -53,7 +56,7 @@ const char * kTopicStageStatistics = "/curobo_task_constructor/stage_statistics"
 const char * kTopicTaskSolutions = "/curobo_task_constructor/task_solutions";
 const char * kTopicSelectedMarkers = "/curobo_task_constructor/selected_solution_markers";
 const char * kTopicSolutionTrajectory = "/curobo_task_constructor/solution_trajectory";
-const char * kActionExecute = "/curobo_task_constructor/execute_solution";
+const char * kActionExecute = "/curobo_task_constructor/execute_task_solution";
 
 rclcpp::QoS introspectionQoS()
 {
@@ -240,7 +243,7 @@ void TaskConstructorPanel::onInitialize()
       kTopicStageStatistics, qos,
       [this](curobo_task_constructor_interfaces::msg::StageStatistics::ConstSharedPtr msg) {
         if (!task_ || task_->task_id != msg->task_id) return;
-        stats_[msg->stage_id] = msg;
+        stats_[msg->id] = msg;
         QMetaObject::invokeMethod(this, "refreshStageStatistics", Qt::QueuedConnection);
       },
       sub_options);
@@ -316,7 +319,7 @@ void TaskConstructorPanel::refreshTaskDescription()
   stage_item_.clear();
   task_root_item_ = nullptr;
   solutions_->clear();
-  properties_->clear();
+  syncProperties({});
   exec_button_->setEnabled(false);
   if (!task_ || task_->stages.empty()) {
     setStatus(tr("no task — waiting for task_description..."));
@@ -492,6 +495,26 @@ void TaskConstructorPanel::refreshStageStatistics()
     item_it.value()->setToolTip(COL_TYPE, QStringLiteral("successful attempts: %1")
                                                  .arg(it.value()->success_count));
   }
+  refreshProperties();
+}
+
+void TaskConstructorPanel::refreshProperties()
+{
+  // Properties follow data ticks (compute time, attempts) without waiting
+  // for a selection change. No trajectory/marker republish here — that
+  // stays on selection changes via showSelectedSolution.
+  auto selected = solutions_->selectedItems();
+  if (selected.isEmpty()) {
+    auto * current = solutions_->currentItem();
+    if (current) selected.push_back(current);
+  }
+  if (!selected.isEmpty()) {
+    showSolutionPropertiesFor(selected.front());
+  } else if (tree_->currentItem()) {
+    showStageProperties(tree_->currentItem());
+  } else {
+    syncProperties({});
+  }
 }
 
 bool TaskConstructorPanel::showingChains() const
@@ -505,7 +528,7 @@ void TaskConstructorPanel::onSelectedItemChanged()
   rebuildSolutionList();
   auto * item = tree_->currentItem();
   if (!item) {
-    properties_->clear();
+    syncProperties({});
     return;
   }
   showStageProperties(item);
@@ -514,19 +537,23 @@ void TaskConstructorPanel::onSelectedItemChanged()
 
 void TaskConstructorPanel::showStageProperties(QTreeWidgetItem * item)
 {
-  // MTC property view: the selected stage's properties.
-  properties_->clear();
-  if (!item) return;
-  auto add = [this](const QString & key, const QString & value) {
-    auto * row = new QTreeWidgetItem(properties_);
-    row->setText(0, key);
-    row->setText(1, value);
+  // MTC property view: the selected stage's properties. Rows are synced in
+  // place (syncProperties) so every data tick — attempts, statistics, chains
+  // — refreshes the displayed values live while the selection stays put.
+  if (!item) {
+    syncProperties({});
+    return;
+  }
+  std::vector<std::pair<QString, QString>> rows;
+  auto add = [&rows](const QString & key, const QString & value) {
+    rows.emplace_back(key, value);
   };
   if (item == task_root_item_ && task_) {
     add(tr("task"), QString::fromStdString(task_->task_id));
     add(tr("stages"), QString::number(task_->stage_count));
     add(tr("valid"), task_->valid ? tr("true") : tr("false"));
     if (!task_->comment.empty()) add(tr("comment"), QString::fromStdString(task_->comment));
+    syncProperties(rows);
     return;
   }
   const uint32_t id = item->data(0, Qt::UserRole).toUInt();
@@ -539,28 +566,52 @@ void TaskConstructorPanel::showStageProperties(QTreeWidgetItem * item)
   auto stat = stats_.find(id);
   if (stat != stats_.end() && stat.value())
     add(tr("planner attempts"), QString::number(stat.value()->attempt_count));
+  syncProperties(rows);
+}
+
+void TaskConstructorPanel::syncProperties(
+    const std::vector<std::pair<QString, QString>> & rows)
+{
+  // In-place sync, like MTC's RemoteTaskModel::setProperties reusing the
+  // existing rviz properties: values tick live on every introspection burst
+  // without collapsing the user's expanded rows. A clear() + re-add here
+  // would reset expansion several times a second mid-plan.
+  const int want = static_cast<int>(rows.size());
+  while (properties_->topLevelItemCount() > want)
+    delete properties_->takeTopLevelItem(properties_->topLevelItemCount() - 1);
+  for (int i = 0; i < want; ++i) {
+    QTreeWidgetItem * row = properties_->topLevelItem(i);
+    if (!row) row = new QTreeWidgetItem(properties_);
+    // Row order is stable per view, so index i keeps its expansion state
+    // across ticks; only the texts are rewritten.
+    row->setText(0, rows[i].first);
+    row->setText(1, rows[i].second);
+  }
 }
 
 void TaskConstructorPanel::showSolutionProperties(
     const QString & rank, const QString & cost, const QString & comment,
     const QString & extra)
 {
-  properties_->clear();
-  auto add = [this](const QString & key, const QString & value) {
-    auto * row = new QTreeWidgetItem(properties_);
-    row->setText(0, key);
-    row->setText(1, value);
-  };
-  add(tr("solution"), rank);
-  add(tr("cost"), cost);
-  if (!comment.isEmpty()) add(tr("comment"), comment);
-  if (!extra.isEmpty()) add(tr("detail"), extra);
+  std::vector<std::pair<QString, QString>> rows;
+  rows.emplace_back(tr("solution"), rank);
+  rows.emplace_back(tr("cost"), cost);
+  if (!comment.isEmpty()) rows.emplace_back(tr("comment"), comment);
+  if (!extra.isEmpty()) rows.emplace_back(tr("detail"), extra);
+  syncProperties(rows);
 }
 
 void TaskConstructorPanel::rebuildSolutionList()
 {
   // MTC solutions view: selecting the task lists its complete solutions,
-  // selecting a stage lists that stage's attempts.
+  // selecting a stage lists that stage's attempts. The rebuild runs on
+  // every incoming attempt, so the selection is snapshotted by record id
+  // and restored afterwards — otherwise the properties pane and the
+  // trajectory display would go stale mid-plan.
+  QSet<int> selected_ids;
+  for (auto * row : solutions_->selectedItems()) selected_ids.insert(row->data(0, Qt::UserRole).toInt());
+  int current_id = -1;
+  if (solutions_->currentItem()) current_id = solutions_->currentItem()->data(0, Qt::UserRole).toInt();
   solutions_->blockSignals(true);
   solutions_->clear();
   if (!task_) {
@@ -593,7 +644,7 @@ void TaskConstructorPanel::rebuildSolutionList()
           // MTC solution rows: rank, cost (∞ for failures), comment —
           // failures in red foreground, no background wash.
           auto * row = new QTreeWidgetItem(solutions_);
-          row->setText(SOL_RANK, QStringLiteral("#%1").arg(sol->solution_id));
+          row->setText(SOL_RANK, QStringLiteral("#%1").arg(idx + 1));
           row->setText(SOL_COST, sol->success ? QString::number(sol->cost, 'g', 4)
                                               : QString::fromUtf8("∞"));
           row->setText(SOL_COMMENT, QString::fromStdString(sol->comment));
@@ -608,6 +659,12 @@ void TaskConstructorPanel::rebuildSolutionList()
     }
   }
   solutions_->blockSignals(false);
+  for (int i = 0; i < solutions_->topLevelItemCount(); ++i) {
+    auto * row = solutions_->topLevelItem(i);
+    const int id = row->data(0, Qt::UserRole).toInt();
+    if (selected_ids.contains(id)) row->setSelected(true);
+    if (id == current_id) solutions_->setCurrentItem(row);
+  }
   showSelectedSolution();
 }
 
@@ -627,7 +684,7 @@ void TaskConstructorPanel::showSelectedSolution()
   }
   publishSolutionTrajectory(selected);
   publishToolPath(selected);
-  if (!selected.isEmpty()) showSolutionPropertiesFor(selected.front());
+  refreshProperties();
 }
 
 void TaskConstructorPanel::showSolutionPropertiesFor(QTreeWidgetItem * row)
@@ -658,7 +715,7 @@ void TaskConstructorPanel::showSolutionPropertiesFor(QTreeWidgetItem * row)
       const auto & sol = it.value()[idx];
       if (!sol) return;
       showSolutionProperties(
-          QStringLiteral("#%1").arg(sol->solution_id),
+          QStringLiteral("#%1").arg(idx + 1),
           sol->success ? QString::number(sol->cost, 'g', 4) : QString::fromUtf8("∞"),
           QString::fromStdString(sol->comment),
           tr("%1 waypoints").arg(static_cast<int>(sol->trajectory.size())));
@@ -737,7 +794,7 @@ TaskConstructorPanel::findAttempt(uint32_t stage_id, uint32_t solution_id) const
   auto it = attempts_.find(stage_id);
   if (it == attempts_.end()) return nullptr;
   for (const auto &sol : it.value()) {
-    if (sol && sol->solution_id == solution_id) return sol;
+    if (sol && sol->id == solution_id) return sol;
   }
   return nullptr;
 }
@@ -831,9 +888,9 @@ void TaskConstructorPanel::publishToolPath(const QList<QTreeWidgetItem *> & sele
   }
   // Each drawn attempt's own markers (candidate spheres, start/goal frames).
   for (const auto &sol : records) {
-    if (sol && !sol->markers.markers.empty())
-      out.markers.insert(out.markers.end(), sol->markers.markers.begin(),
-                         sol->markers.markers.end());
+    if (sol && !sol->markers.empty())
+      out.markers.insert(out.markers.end(), sol->markers.begin(),
+                         sol->markers.end());
   }
   pub_selected_markers_->publish(out);
 }
@@ -867,11 +924,11 @@ void TaskConstructorPanel::onExecSolution()
     goal.stage_id = item->data(0, Qt::UserRole).toUInt();
     goal.solution_index = 0;
     auto sol = currentAttempt(current);
-    if (!sol || !sol->success) {
-      setStatus(tr("only successful attempts execute"));
+    if (!sol || !sol->success || !sol->ranked) {
+      setStatus(tr("only ranked solutions execute"));
       return;
     }
-    goal.attempt_id = sol->solution_id;
+    goal.attempt_id = sol->id;
   }
   setStatus(tr("executing selected solution (no replanning)..."));
 
