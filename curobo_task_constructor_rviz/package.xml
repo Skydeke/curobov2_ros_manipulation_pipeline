@@ -4,10 +4,10 @@
   <version>0.1.0</version>
   <description>
     rviz2 panel for curobo_task_constructor tasks: renders the stage tree,
-    browses every attempted solution per stage, scrubs/plays trajectories
-    with tool-path markers, publishes the selected solution as a
+    browses every attempted solution per stage with live properties,
+    publishes the selected solution as a
     trajectory_msgs/JointTrajectory for the trajectory display, and
-    re-requests task execution via the Task.action client.
+    drives the selected solution via the ExecuteTaskSolution action.
   </description>
 
   <license>BSD-3-Clause</license>
@@ -23,6 +23,7 @@
   <build_depend>qtbase5-dev</build_depend>
 
   <depend>curobo_task_constructor_interfaces</depend>
+  <depend>moveit_msgs</depend>
   <depend>pluginlib</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>

@@ -64,9 +64,26 @@ class ClassicPlanner(SinglePlanner):
         # Node validation rejects empty goalsets for classic; be defensive since
         # plan() forwards invalid requests straight here.
         if num_goalset == 0:
+            goalsets = list(getattr(goal_request, "goalsets", []) or [])
+            # Two very different causes collapse into the same "empty request"
+            # symptom: no segments at all (a caller that built an empty
+            # request, e.g. a replay whose goal lost its goalsets), and
+            # segments that exist but carry neither poses nor joint targets
+            # (a caller that picked the classic planner for a joint-space
+            # segment). Say which one it is, or this costs hours to trace.
+            shapes = [
+                {
+                    "poses": len(list(getattr(g, "poses", []) or [])),
+                    "joint_positions": len(
+                        list(getattr(g, "target_joint_positions", []) or [])),
+                    "holds": len(list(getattr(g, "trajectory_constraints", []) or [])),
+                }
+                for g in goalsets
+            ]
             self.node.get_logger().warn(
                 f"{self.get_planner_name()}: goalsets must contain exactly 1 "
-                f"segment with >= 1 pose for classic planning, got empty request"
+                f"segment with >= 1 pose for classic planning, got empty "
+                f"request ({len(goalsets)} segment(s), shapes={shapes})"
             )
             return None
 

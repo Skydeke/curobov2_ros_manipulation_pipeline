@@ -157,19 +157,28 @@ class FKServices:
             return response
 
         qs = [self._positions_for_model(js) for js in request.joint_states]
-        with self._gpu_guard():
-            ok, poses = self._compute_poses(qs)
-            if not ok:
-                return response
+        # A GPU fault (e.g. poisoned CUDA context) must fail THIS request,
+        # not the process: service callbacks raising into spin() kill the
+        # whole server node (seen live via torch AcceleratorError).
+        try:
+            with self._gpu_guard():
+                ok, poses = self._compute_poses(qs)
+                if not ok:
+                    return response
 
-            response.poses = poses
+                response.poses = poses
 
-            # Fk.srv also declares poses_valid; populate it from the same validator
-            # (joint limits, self-collision, scene collision).
-            for v in self._validate(qs):
-                b = Bool()
-                b.data = bool(v)
-                response.poses_valid.append(b)
+                # Fk.srv also declares poses_valid; populate it from the same validator
+                # (joint limits, self-collision, scene collision).
+                for v in self._validate(qs):
+                    b = Bool()
+                    b.data = bool(v)
+                    response.poses_valid.append(b)
+        except Exception as exc:
+            self._node.get_logger().warn(
+                f"FK failed, returning failure (GPU fault?): {exc}",
+                throttle_duration_sec=5.0)
+            return response
         return response
 
     def _fk_batch_callback(self, request: FkBatch.Request, response: FkBatch.Response):
@@ -189,23 +198,32 @@ class FKServices:
 
         qs = [self._positions_for_model(js) for js in request.joint_states]
 
-        with self._gpu_guard():
-            ok, poses = self._compute_poses(qs)
-            if not ok:
-                response.success = False
-                response.error_msg = String(data="FK batch solve failed")
-                return response
+        # See _fk_callback: a GPU fault must fail this request, not the node.
+        try:
+            with self._gpu_guard():
+                ok, poses = self._compute_poses(qs)
+                if not ok:
+                    response.success = False
+                    response.error_msg = String(data="FK batch solve failed")
+                    return response
 
-            # Validate each configuration: joint limits, self-collision, scene
-            # collision (see RobotCollisionChecker.validate()).
-            valid = self._validate(qs)
+                # Validate each configuration: joint limits, self-collision, scene
+                # collision (see RobotCollisionChecker.validate()).
+                valid = self._validate(qs)
 
-            response.poses = poses
-            for v in valid:
-                b = Bool()
-                b.data = bool(v)
-                response.poses_valid.append(b)
-            response.success = True
+                response.poses = poses
+                for v in valid:
+                    b = Bool()
+                    b.data = bool(v)
+                    response.poses_valid.append(b)
+                response.success = True
+        except Exception as exc:
+            self._node.get_logger().warn(
+                f"FK batch failed, returning failure (GPU fault?): {exc}",
+                throttle_duration_sec=5.0)
+            response.success = False
+            response.error_msg = String(data=f"FK batch failed: {exc}")
+            return response
         return response
 
     # ------------------------------------------------------------------

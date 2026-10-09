@@ -1,16 +1,17 @@
 """Declarative task description — the ``StageSpec`` tree.
 
-Mirror of ``curobo_task_constructor_interfaces/msg/StageSpec.msg``: one node
-per graph element, generic across every registered stage type. Stage-specific
-parameters ride in ``params_yaml`` (an opaque string the stage class itself
-parses) — that openness is what keeps the wire format stable while the stage
-catalog grows.
+One node per graph element, generic across every registered stage type.
+Stage-specific parameters ride in ``params_yaml`` (an opaque string the
+stage class itself parses) — that openness is what keeps the format stable
+while the stage catalog grows. Planning is local (in-process), so this
+tree never crosses the wire; introspection describes stages with
+StageDescription/Property messages instead.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 try:  # keep the core importable without yaml in exotic envs
     import yaml
@@ -62,91 +63,11 @@ class StageSpec:
             raise RuntimeError("PyYAML is required to parse a StageSpec")
         return cls.from_dict(yaml.safe_load(text) or {})
 
-    # -- ROS message conversion -----------------------------------------
-    # The wire format is FLAT (StageSpec[] with MTC-style id/parent_id wiring;
-    # parent_id == id marks the root — see StageSpec.msg). The python-side tree
-    # keeps ``children``; only the msg boundary flattens.
-    @classmethod
-    def from_msg_list(cls, stages: list) -> "StageSpec":
-        """Re-link a flat ``StageSpec[]`` wire list into a tree.
-
-        The list must be in pre-order (a stage's parent always precedes it,
-        the root is element 0 with ``parent_id == id``); this mirrors what
-        ``to_msg_list`` emits and matches how moveit_task_constructor_msgs
-        serializes StageDescription.
-        """
-        nodes: dict = {}
-        roots: list = []
-        for idx, s in enumerate(stages):
-            sid = int(s.id)
-            if sid in nodes:
-                raise ValueError(f"duplicate stage id {sid} in task spec")
-            nodes[sid] = cls(
-                stage_type=str(s.stage_type),
-                name=str(s.name),
-                container_type=str(s.container_type),
-                children=[],
-                params_yaml=str(s.params_yaml),
-            )
-            pid = int(s.parent_id)
-            if pid == sid:
-                roots.append(nodes[sid])
-            elif pid not in nodes:
-                raise ValueError(
-                    f"stage {sid} ('{s.name}') references parent {pid} that "
-                    "has not appeared yet — task spec must be in pre-order "
-                    "(root first, parents before children)")
-            else:
-                nodes[pid].children.append(nodes[sid])
-        if len(roots) != 1:
-            raise ValueError(
-                f"task spec must have exactly one root stage "
-                f"(parent_id == id), found {len(roots)}")
-        if roots[0] is not nodes[0]:
-            raise ValueError("task spec root must be the first element")
-        return roots[0]
-
-    def to_msg_list(self, msg_cls: Optional[Any] = None) -> list:
-        """Flatten this tree into a list of wire messages, pre-order: the
-        root is element 0 (parent_id == id marks it) and every other stage's
-        parent_id points at an earlier element. ``msg_cls`` default: a
-        duck-typed stand-in so the core stays ROS-free."""
-        out = []
-
-        def visit(node: "StageSpec", parent_id: int) -> None:
-            stub = _StageSpecStub(node)
-            stub.id = len(out)
-            stub.parent_id = parent_id
-            if msg_cls is None:
-                msg = stub
-            else:
-                # The real ROS message constructor starts blank, so copy every
-                # field: without this the wire carries empty strings and
-                # consumers get blank stages (rviz Stage/Type columns render
-                # empty, and a re-sent goal fails validate()).
-                msg = msg_cls()
-                msg.id = stub.id
-                msg.parent_id = stub.parent_id
-                msg.stage_type = stub.stage_type
-                msg.name = stub.name
-                msg.container_type = stub.container_type
-                msg.params_yaml = stub.params_yaml
-            out.append(msg)
-            for child in node.children:
-                visit(child, msg.id)
-
-        visit(self, 0)
-        # Wire flags ride alongside (0 at authoring time; the node fills
-        # live flags from resolved stages before publishing).
-        for spec_msg, spec_node in zip(out, self._preorder()):
-            try:
-                spec_msg.flags = int(spec_node.flags)
-            except Exception:
-                pass
-        return out
-
+    # -- flat pre-order traversal ---------------------------------------
+    # (kept for tree utilities; the tree itself never crosses the wire —
+    # introspection describes stages with StageDescription/Property).
     def _preorder(self) -> list:
-        """This tree in the same pre-order to_msg_list emits."""
+        """This tree in pre-order (root first, parents before children)."""
         out = []
 
         def visit(node: "StageSpec") -> None:
@@ -170,20 +91,6 @@ class StageSpec:
             raise ValueError("stage_type must be non-empty")
         for child in self.children:
             child.validate()
-
-
-class _StageSpecStub:
-    """Duck-typed StageSpec stand-in for the ROS-free core/tests."""
-
-    def __init__(self, spec: StageSpec):
-        self.id = None
-        self.parent_id = None
-        self.stage_type = spec.stage_type
-        self.name = spec.name
-        self.flags = spec.flags
-        self.container_type = spec.container_type
-        self.params_yaml = spec.params_yaml
-        self.children = [_StageSpecStub(c) for c in spec.children]
 
 
 def params_from_yaml(params_yaml: str) -> dict:

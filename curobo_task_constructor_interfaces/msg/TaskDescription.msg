@@ -2,4 +2,4 @@
 string task_id
 
 # list of all stages, including the task stage itself
-StageSpec[] stages
+StageDescription[] stages

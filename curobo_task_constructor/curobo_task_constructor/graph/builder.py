@@ -8,8 +8,8 @@ them (a ``ContainerStage`` via ``add``, a wrapper such as ``ComputeIK`` via
 ``set_child``); anything else with children that cannot take them is a
 validation error at build time.
 
-The root of a task may be a container (the common case — the StageSpec root
-of Task.action is normally a ``SerialContainer``) or a single stage.
+The root of a task may be a container (the common case — a task root is
+normally a ``SerialContainer``) or a single stage.
 """
 
 from __future__ import annotations

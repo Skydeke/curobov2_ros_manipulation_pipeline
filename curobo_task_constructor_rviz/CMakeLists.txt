@@ -8,6 +8,7 @@ endif()
 find_package(ament_cmake REQUIRED)
 find_package(curobo_task_constructor_interfaces REQUIRED)
 find_package(geometry_msgs REQUIRED)
+find_package(moveit_msgs REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(rclcpp_action REQUIRED)
@@ -63,6 +64,7 @@ target_include_directories(${PROJECT_NAME}
 ament_target_dependencies(${PROJECT_NAME}
   curobo_task_constructor_interfaces
   geometry_msgs
+  moveit_msgs
   pluginlib
   rclcpp
   rclcpp_action
@@ -125,6 +127,7 @@ ament_export_targets(export_${PROJECT_NAME} HAS_LIBRARY_TARGET)
 ament_export_dependencies(ament_cmake)
 ament_export_dependencies(curobo_task_constructor_interfaces)
 ament_export_dependencies(geometry_msgs)
+ament_export_dependencies(moveit_msgs)
 ament_export_dependencies(pluginlib)
 ament_export_dependencies(rclcpp)
 ament_export_dependencies(rclcpp_action)

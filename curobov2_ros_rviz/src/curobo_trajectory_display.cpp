@@ -74,7 +74,8 @@ void CuroboTrajectoryDisplay::onInitialize()
   trail_step_size_property_->setMin(1);
 
   loop_property_ = new rviz_common::properties::BoolProperty(
-    "Loop Animation", true, "Restart from beginning when finished.", this,
+    "Loop Animation", false,
+    "Restart from beginning when finished (MTC default: off).", this,
     SLOT(updateLoop()));
 
   speed_property_ = new rviz_common::properties::FloatProperty(
@@ -338,14 +339,26 @@ static std::map<std::string, double> buildJointMap(
 
 void CuroboTrajectoryDisplay::rebuildTrail()
 {
-  trail_robots_.clear();
-  if (!show_trail_property_->getBool() || !robot_ || waypoints_.empty()) {return;}
+  // Wanted ghost indices for the current trajectory / step size. No cap:
+  // the ghost pool below grows to fit once and is then reused, so steady
+  // operation creates nothing regardless of trajectory length.
+  std::vector<int> wanted;
+  if (show_trail_property_->getBool() && robot_ && !waypoints_.empty()) {
+    const int step = std::max(1, trail_step_size_property_->getInt());
+    const int count = static_cast<int>(waypoints_.size());
+    for (int i = 0; i < count; i += step) {
+      wanted.push_back(i);
+    }
+  }
 
-  const int step = trail_step_size_property_->getInt();
-  const int count = static_cast<int>(waypoints_.size());
+  // Ghost pool: every TrailRobot loads the shared parsed URDF model once
+  // (meshes/materials stay shared through it) and is then re-posed forever
+  // after. Grow-only outside reset()/updateTopic(): creating on demand and
+  // merely hiding the surplus avoids the old destroy + re-create + re-load
+  // storm on every trajectory message, which is what tanked the frame rate
+  // as soon as solutions streamed in.
   const float alpha = alpha_property_->getFloat() * 0.4f;
-
-  for (int i = 0; i < count; i += step) {
+  while (trail_robots_.size() < wanted.size()) {
     TrailRobot tr;
     tr.robot = std::make_unique<rviz_default_plugins::robot::Robot>(
       scene_node_, context_, "Trail", nullptr);
@@ -353,14 +366,23 @@ void CuroboTrajectoryDisplay::rebuildTrail()
     tr.robot->setVisualVisible(true);
     tr.robot->setCollisionVisible(false);
     tr.robot->setAlpha(alpha);
-    tr.waypoint_index = i;
-
-    CuroboLinkUpdater updater(waypoints_[i].link_transforms);
-    tr.robot->update(updater);
     tr.robot->setVisible(false);
-
     trail_robots_.push_back(std::move(tr));
   }
+
+  for (size_t i = 0; i < trail_robots_.size(); ++i) {
+    TrailRobot & tr = trail_robots_[i];
+    if (i < wanted.size()) {
+      tr.waypoint_index = wanted[i];
+      CuroboLinkUpdater updater(waypoints_[wanted[i]].link_transforms);
+      tr.robot->update(updater);
+      tr.robot->setAlpha(alpha);
+    } else {
+      tr.waypoint_index = -1;
+      tr.robot->setVisible(false);
+    }
+  }
+  updateTrailVisibility();
 }
 
 void CuroboTrajectoryDisplay::updateTrailVisibility()

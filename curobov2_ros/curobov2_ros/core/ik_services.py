@@ -132,17 +132,27 @@ class IKServices:
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
-        with self._gpu_guard():
-            ok, result = self._solve([request.pose])
-            if not ok:
-                response.success = False
-                response.error_msg.data = "IK solve failed"
-                return response
+        # See fk_services._fk_callback: a GPU fault must fail this request,
+        # not the node.
+        try:
+            with self._gpu_guard():
+                ok, result = self._solve([request.pose])
+                if not ok:
+                    response.success = False
+                    response.error_msg.data = "IK solve failed"
+                    return response
 
-            js = JointState()
-            js.position = result.solution.cpu().numpy()[0][0].tolist()
-            valid = std_msgs.msg.Bool()
-            valid.data = bool(result.success.cpu().numpy()[0][0])
+                js = JointState()
+                js.position = result.solution.cpu().numpy()[0][0].tolist()
+                valid = std_msgs.msg.Bool()
+                valid.data = bool(result.success.cpu().numpy()[0][0])
+        except Exception as exc:
+            self._node.get_logger().warn(
+                f"IK failed, returning failure (GPU fault?): {exc}",
+                throttle_duration_sec=5.0)
+            response.success = False
+            response.error_msg.data = f"IK failed: {exc}"
+            return response
         response.joint_states = js
         response.joint_states_valid = valid
         response.success = True
@@ -154,21 +164,30 @@ class IKServices:
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
-        with self._gpu_guard():
-            ok, result = self._solve(request.poses)
-            if not ok:
-                response.success = False
-                response.error_msg.data = "IK batch solve failed"
-                return response
+        # See _ik_callback: a GPU fault must fail this request, not the node.
+        try:
+            with self._gpu_guard():
+                ok, result = self._solve(request.poses)
+                if not ok:
+                    response.success = False
+                    response.error_msg.data = "IK batch solve failed"
+                    return response
 
-            for i, j in enumerate(result.solution.cpu().numpy()):
-                js = JointState()
-                js.position = j[0].tolist()
-                valid = std_msgs.msg.Bool()
-                valid.data = bool(result.success.cpu().numpy()[i][0])
-                response.joint_states.append(js)
-                response.joint_states_valid.append(valid)
-            response.success = True
+                for i, j in enumerate(result.solution.cpu().numpy()):
+                    js = JointState()
+                    js.position = j[0].tolist()
+                    valid = std_msgs.msg.Bool()
+                    valid.data = bool(result.success.cpu().numpy()[i][0])
+                    response.joint_states.append(js)
+                    response.joint_states_valid.append(valid)
+                response.success = True
+        except Exception as exc:
+            self._node.get_logger().warn(
+                f"IK batch failed, returning failure (GPU fault?): {exc}",
+                throttle_duration_sec=5.0)
+            response.success = False
+            response.error_msg.data = f"IK batch failed: {exc}"
+            return response
         return response
 
     # ------------------------------------------------------------------

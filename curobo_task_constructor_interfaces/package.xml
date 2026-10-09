@@ -4,12 +4,10 @@
   <name>curobo_task_constructor_interfaces</name>
   <version>0.0.1</version>
   <description>
-    Declarative task description for the curobo_task_constructor executor.
-    Owns the open wire format (StageSpec tree, Task action, introspection
-    messages) and deliberately depends only on std_msgs/geometry_msgs/
-    visualization_msgs — never on curobov2_ros_interfaces. New stage
-    types extend the schema through the opaque stage_params string without
-    touching any message definition.
+    Introspection and execution interfaces for the curobo_task_constructor,
+    mirroring moveit_task_constructor_msgs: task description/statistics,
+    solutions, and the ExecuteTaskSolution action. Planning is local
+    (in-process, like MoveIt); only execution goes over the wire.
   </description>
   <maintainer email="me@todo.com">me</maintainer>
   <url type="repository">https://github.com/Skydeke/curobov2_ros_manipulation_pipeline</url>
@@ -22,6 +20,8 @@
   <depend>geometry_msgs</depend>
   <depend>sensor_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>moveit_msgs</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
 

@@ -104,6 +104,7 @@ RUN source /opt/ros/jazzy/setup.bash && \
 
 RUN source /opt/ros/jazzy/setup.bash && \
   colcon build --symlink-install \
+  --cmake-args -DCMAKE_BUILD_TYPE=Release \
   --packages-select \
   curobo curobov2_ros_interfaces \
   curobov2_ros curobov2_ros_moveit \

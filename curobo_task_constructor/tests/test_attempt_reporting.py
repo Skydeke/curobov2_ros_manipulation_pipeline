@@ -91,10 +91,11 @@ def test_on_progress_fires_per_planner_try():
 
 
 def test_rows_sum_to_attempts_when_seeds_lose():
-    """Three succeeding tries: one ranked winner, two non-ranked rows.
+    """Three succeeding tries: winner plus two stored loser rows.
 
     attempts(3) == successful rows(3) + failed rows(0): every planner call
-    is visible exactly once, and ranking still keeps only the cheapest.
+    is stored (MTC stores every computed solution) and visible exactly
+    once; ranking still returns only the cheapest via best().
     """
     considered = []
     robot = MockCuroboServer()
@@ -103,7 +104,67 @@ def test_rows_sum_to_attempts_when_seeds_lose():
     move = next(s for s in ex.root.subtree_stages() if s.name == "m")
     move.on_considered = considered.append
     assert ex.plan()
-    assert len(move.solutions) == 1
+    assert len(move.solutions) == 3
+    assert ex.best() is not None
     assert len(move.failures) == 0
-    assert len(considered) == 2
+    assert len(considered) == 3  # every try streams live, winner included
     assert move.attempt_count == 3
+
+
+class _SlowRobot(MockCuroboServer):
+    """Sleeps per plan call so compute-time ticking is observable."""
+
+    def __init__(self, delay=0.03, **kw):
+        super().__init__(**kw)
+        self._delay = float(delay)
+
+    def plan(self, request):
+        import time as _time
+
+        _time.sleep(self._delay)
+        return super().plan(request)
+
+
+def test_compute_time_ticks_during_tries_not_just_after():
+    """The time column must move while attempts run: each planner call ticks
+    the stage clock live (run_compute only adds the unaccounted remainder,
+    so the total stays exactly the wall duration)."""
+    robot = _SlowRobot(delay=0.03)
+    ex = TaskExecutor(_spec(), robot, task_id="t")
+    assert ex.init()
+    move = next(s for s in ex.root.subtree_stages() if s.name == "m")
+    seen = []
+    orig_progress = move.on_progress
+    move.on_progress = lambda stg: (seen.append(stg.compute_time),
+                                    orig_progress(stg) if orig_progress else None)
+    assert ex.plan()
+    assert seen == sorted(seen) and seen[-1] > seen[0], (
+        f"time must tick live across tries, got {seen}")
+    total = move.compute_time
+    assert 0.06 <= total <= 0.30, (
+        f"total must equal wall time once, not double-counted: {total}")
+
+
+def test_statistics_publish_per_try():
+    """Task streams statistics per planner call (MTC formula, finer
+    granularity than per-pass): a 3-attempt leg emits at least 3 snapshots."""
+    from curobo_task_constructor.mtc import core as mtc_core
+    from curobo_task_constructor.mtc import stages as mtc_stages
+
+    calls = []
+    orig = mtc_core.Introspection.publishTaskState
+    mtc_core.Introspection.publishTaskState = (
+        lambda self: calls.append(1))
+    try:
+        robot = MockCuroboServer()
+        task = mtc_core.Task(robot)
+        task.add(mtc_stages.CurrentState("c"))
+        mv = mtc_stages.MoveTo(
+            "m", mtc_core.JointInterpolationPlanner(), planning_attempts=3)
+        mv.setGoal({"joint_2": 0.4})
+        task.add(mv)
+        assert task.plan()
+    finally:
+        mtc_core.Introspection.publishTaskState = orig
+    assert len(calls) >= 3, (
+        f"statistics must stream per try, got {len(calls)} snapshots")
