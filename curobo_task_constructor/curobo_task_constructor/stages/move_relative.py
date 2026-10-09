@@ -121,7 +121,7 @@ class MoveRelative(PropagatingEitherWay):
         req = full_request(self.robot, state.joint_state, [goalset], self.params)
         try:
             self._note_plan_attempt()
-            result = self.robot.plan(req)
+            result = self._timed_plan(req)
         except Exception as exc:
             self._fail(state, None, f"plan call failed: {exc}")
             return True
@@ -150,7 +150,7 @@ class MoveRelative(PropagatingEitherWay):
             req = full_request(self.robot, state.joint_state, [goal], self.params)
             try:
                 self._note_plan_attempt()
-                result = self.robot.plan(req)
+                result = self._timed_plan(req)
             except Exception as exc:
                 self._fail(state, None, f"plan call failed: {exc}")
                 continue
@@ -184,7 +184,7 @@ class MoveRelative(PropagatingEitherWay):
         req.start_pose = self._joint_state_with(names, start_positions)
         try:
             self._note_plan_attempt()
-            result = self.robot.plan(req)
+            result = self._timed_plan(req)
         except Exception as exc:
             self._fail(state, None, f"plan call failed: {exc}")
             return True
@@ -241,7 +241,7 @@ class MoveRelative(PropagatingEitherWay):
             req = full_request(self.robot, seed, [goal], self.params)
             try:
                 self._note_plan_attempt()
-                result = self.robot.plan(req)
+                result = self._timed_plan(req)
             except Exception as exc:
                 self._fail(state, None, f"plan call failed: {exc}")
                 continue

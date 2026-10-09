@@ -14,15 +14,14 @@ Package layout
     GenerateGraspPose, ComputeIK, MoveTo, MoveRelative, ModifyScene, Connect.
 
 ``curobo_task_constructor.graph``
-    Declarative task description: StageSpec (mirror of
-    curobo_task_constructor_interfaces/msg/StageSpec.msg), the registry-based
+    Declarative task description: StageSpec trees, the registry-based
     spec->Stage tree builder and interface-adjacency validation.
 
 ``curobo_task_constructor.executor`` / ``node``
-    The MTC ``Task::init()/plan()/execute()`` equivalent and the thin ROS 2
-    action server that fronts it. ``node`` runs at
-    ``/curobo_task_constructor/task`` and publishes the Sec. 7 introspection
-    topics (TaskDescription / SolutionInfo / StageStatistics).
+    The MTC ``Task::init()/plan()/execute()`` equivalent (planning is local,
+    in-process) and the ExecuteTaskSolution action server. ``node``
+    serves ``/curobo_task_constructor/execute_task_solution`` and drives a
+    full Solution message's sub-trajectories with no replanning.
 
 ``curobo_task_constructor.robot``
     Deployment adapter (rclpy): ``CuroboServerInterface`` converts the core's

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Launch the curobo_task_constructor action server.
+"""Launch the curobo_task_constructor ExecuteTaskSolution server.
 
 Runs inside the kortex_moveit / kortex_cumotion container (NOT with the grasp
 orchestrator): the same container that hosts curobo_server and move_group, so
-the task node can drive SendTrajectory, /joint_states and the planning-scene
-services without cross-container networking.
+the execute server can drive SendTrajectory, /joint_states and the planning-scene
+services without cross-container networking. Planning is local (in-process,
+like MoveIt); only execution goes over the wire.
 
 Params mirror curobo_task_constructor.node.TaskConstructorNode:
 

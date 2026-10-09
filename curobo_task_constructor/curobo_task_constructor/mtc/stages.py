@@ -32,7 +32,20 @@ from typing import Any
 def _dump_params(params: dict) -> str:
     try:
         import yaml
-        text = yaml.safe_dump(dict(params), sort_keys=False)
+        try:
+            text = yaml.safe_dump(dict(params), sort_keys=False)
+        except Exception:
+            # A value that is not YAML-serializable (e.g. a Constraints
+            # message via setProperty) must not wipe the whole stage config:
+            # fall back per value.
+            safe = {}
+            for key, value in dict(params).items():
+                try:
+                    yaml.safe_dump({key: value})
+                    safe[key] = value
+                except Exception:
+                    safe[key] = repr(value)
+            text = yaml.safe_dump(safe, sort_keys=False)
         return text or ""
     except Exception:
         return ""
@@ -43,7 +56,14 @@ def _vec_norm(v) -> float:
 
 
 def _planner_name(planner: Any) -> Any:
-    """Planner object/int/str -> the wire ``planner`` param (None = default)."""
+    """Planner object/int/str -> the wire ``planner`` param (None = default).
+
+    A solver object resolves through ``planner_key()`` (the cuRobo
+    ``SetPlanner`` int it selects); a ``PipelinePlanner`` whose pipeline maps
+    to no backend key resolves to ``None`` — the server default — rather than
+    raising, so a stage can still be built, dumped and inspected. Strings and
+    ints pass through verbatim (``planner_key`` in ``_util`` maps them).
+    """
     if planner is None:
         return None
     if isinstance(planner, (str, int)):
@@ -51,10 +71,40 @@ def _planner_name(planner: Any) -> Any:
     name = getattr(planner, "wire_name", None)
     if isinstance(name, str):
         return name
-    key = getattr(planner, "planner_key", None)
-    if callable(key):
-        return int(key())
+    key_fn = getattr(planner, "planner_key", None)
+    if callable(key_fn):
+        try:
+            key = key_fn()
+        except Exception:
+            return None
+        return None if key is None else key
     return None
+
+
+class _PropertyMap(dict):
+    """Stage PropertyMap (MTC): a dict with ``configureInitFrom``.
+
+    Property inheritance is resolved at authoring time in cuRobo (builders
+    carry explicit values), so this only records the declaration for
+    inspection.
+
+    Calling it returns itself, so both the Python-binding shape
+    (``stage.properties``) and the C++ shape
+    (``stage.properties().configureInitFrom(...)``) work.
+    """
+
+    def __call__(self) -> "_PropertyMap":
+        return self
+
+    def configureInitFrom(self, source: Any, names=None) -> None:
+        """Declare init-from sources (MTC ``PropertyMap::configureInitFrom``).
+
+        ``source`` is a PropertyInitializerSource flag (PARENT/INTERFACE);
+        ``names`` limits it to listed properties (empty = all).
+        """
+        self.setdefault("_init_from", []).append(
+            {"source": source, "names": list(names or [])}
+        )
 
 
 class _StageBase:
@@ -65,7 +115,7 @@ class _StageBase:
         self._name = name or self.stage_type
         self.planner = planner
         self.group: str = ""
-        self.params: dict = {}
+        self.params: _PropertyMap = _PropertyMap()
         self._timeout: float = 0.0
         self._marker_ns: str = ""
         self._forwarded_properties: list = []
@@ -105,9 +155,22 @@ class _StageBase:
     def properties(self) -> dict:
         """PropertyMap of the stage (MTC, read-only).
 
-        cuRobo stores params as a plain dict; returned read-only.
+        cuRobo stores params in a PropertyMap dict; ``configureInitFrom``
+        declarations ride along for inspection.
         """
         return self.params
+
+    def setProperty(self, name: str, value: Any) -> None:
+        """Set a stage property (MTC ``Stage::setProperty``)."""
+        self.params[str(name)] = value
+
+    def setGroup(self, group: str) -> None:
+        """Set the planning group (MTC ``Stage::setGroup``)."""
+        self.group = str(group)
+
+    def setTimeout(self, timeout: float) -> None:
+        """Set the planning timeout (MTC ``Stage::setTimeout``)."""
+        self.timeout = float(timeout)
 
     @property
     def solutions(self) -> list:
@@ -128,11 +191,27 @@ class _StageBase:
     def setCostTerm(self, *args, **kwargs) -> None:
         """Specify a CostTerm for calculation of stage costs (MTC).
 
-        cuRobo stages use ``setCost(term)`` instead; this stores the
-        term for API parity.
+        Accepts a ranking-term string (cuRobo ``setCost``) or a CostTerm
+        object (MTC ``cost::PathLength``/``LinkMotion``/``Clearance``/...),
+        which maps onto the closest cuRobo ranking term; the original is
+        kept under ``cost_term`` for inspection.
         """
-        if args and isinstance(args[0], str):
-            self.params["cost"] = args[0]
+        if not args:
+            return
+        term = args[0]
+        if isinstance(term, str):
+            known = getattr(_MotionBase, "COST_TERMS", ())
+            if known and term not in known:
+                raise ValueError(f"unknown cost term {term!r}; "
+                                 f"expected one of {list(known)}")
+            self.params["cost"] = term
+            return
+        name = type(term).__name__
+        mapped = "path_length" if "PathLength" in name else "auto"
+        self.params["cost"] = mapped
+        # Kept off params (params must stay YAML-serializable for the
+        # StageSpec); the backend ranks on the mapped term.
+        self._cost_term_obj = term
 
     def init(self, robot_model: Any = None) -> None:
         """Initialize the stage once before planning (MTC ``Stage.init``).
@@ -150,20 +229,58 @@ class _StageBase:
         pass
 
     def _planner_params(self) -> dict:
+        """Planner-derived stage params (MTC: the planner config wins over
+        stage defaults, so it is what reaches the wire and the panel)."""
         out: dict = {}
         wire = _planner_name(self.planner)
         if wire is not None:
             out["planner"] = wire
         extra = getattr(self.planner, "extra_params", None)
         if callable(extra):
-            out.update(extra() or {})
+            try:
+                out.update(extra() or {})
+            except Exception:
+                pass
+        # Which planner actually backs this stage (MTC getPlannerId), so the
+        # panel shows the planner behind each row instead of guessing from
+        # the wire key.
+        get_id = getattr(self.planner, "getPlannerId", None)
+        if callable(get_id) and self.planner is not None:
+            try:
+                planner_id = get_id()
+            except Exception:
+                planner_id = ""
+            if planner_id:
+                out.setdefault("planner_id", str(planner_id))
         return out
+
+    def _stage_timeout(self) -> float:
+        """Configured timeout [s] (0 = unbounded).
+
+        MTC resolves the timeout on the planner (``planner->setTimeout``) and
+        the stage (``stage->setTimeout``); the stage's explicit value wins,
+        else the planner's. Both are propagated: an unset timeout is the
+        single most common cause of an MTC stage silently planning forever,
+        so it is never left implicit.
+        """
+        if self._timeout > 0:
+            return self._timeout
+        props = getattr(self.planner, "properties", None)
+        if callable(props) and self.planner is not None:
+            try:
+                return float(props().get("timeout", 0.0) or 0.0)
+            except Exception:
+                return 0.0
+        return 0.0
 
     def _common_params(self) -> dict:
         params = dict(self.params)
         params.update(self._planner_params())
         if self.group and "group" not in params:
             params["group"] = self.group
+        timeout = self._stage_timeout()
+        if timeout:
+            params.setdefault("timeout", timeout)
         return params
 
     def to_spec(self):
@@ -312,6 +429,20 @@ class MoveRelative(_MotionBase):
                 "MoveRelative.setDirection: expected Vector3Stamped, "
                 "TwistStamped, or {joint: delta} dict")
 
+    def setMinMaxDistance(self, min_distance: float,
+                          max_distance: float) -> None:
+        """Set the accepted distance range (MTC ``MoveRelative``)."""
+        self.min_distance = float(min_distance)
+        self.max_distance = float(max_distance)
+
+    def setPathConstraints(self, constraints: Any) -> None:
+        """Set path constraints (MTC ``MoveRelative``).
+
+        Stored, not solved: the cuRobo backend expresses Cartesian holds
+        geometrically instead.
+        """
+        self.path_constraints = constraints
+
 
 class MoveTo(_MotionBase):
     stage_type = "move_to"
@@ -377,6 +508,14 @@ class MoveTo(_MotionBase):
             raise TypeError("MoveTo.setGoals: every goal must be a pose")
         self.params["goal"] = {"poses": dicts}
 
+    def setPathConstraints(self, constraints: Any) -> None:
+        """Set path constraints (MTC ``MoveTo``).
+
+        Stored, not solved: the cuRobo backend expresses Cartesian holds
+        geometrically instead.
+        """
+        self.path_constraints = constraints
+
     def computeForward(self, state: Any) -> None:
         """Compute forward (MTC ``MoveTo.computeForward``).
 
@@ -435,6 +574,13 @@ class Connect(_MotionBase):
             params["max_distance"] = float(self.max_distance)
         return params
 
+    def setPathConstraints(self, constraints: Any) -> None:
+        """Set path constraints (MTC ``Connect``).
+
+        Stored, not solved.
+        """
+        self.path_constraints = constraints
+
 
 class CartesianPath(_MotionBase):
     """Straight-line solve with whole-path axis holds (MTC CartesianPath).
@@ -490,6 +636,84 @@ class CartesianPath(_MotionBase):
         self.params["check_straightness"] = bool(enabled)
 
 
+class GeneratePose(_StageBase):
+    """Spawn one configured target pose (MTC GeneratePose).
+
+    The pose rides ``meta["target_pose"]`` for an enclosing ComputeIK,
+    like the old demo_ws ``ik_movement`` generator.
+    """
+
+    stage_type = "generate_pose"
+    is_generator = True
+
+    def __init__(self, name: str = "target pose"):
+        super().__init__(name, None)
+        self._monitored_stage: Any = None
+
+    def setPose(self, pose: Any) -> None:
+        """Set the pose to spawn (PoseStamped/dict/Pose)."""
+        pose_dict = _pose_dict_of(pose)
+        if pose_dict is None:
+            raise TypeError(f"GeneratePose.setPose: unsupported {type(pose)}")
+        self.params["pose"] = pose_dict
+
+    def setMonitoredStage(self, stage: Any) -> None:
+        """Set the stage to monitor (MTC ``GeneratePose``).
+
+        Recorded for API parity; seeding always reads the live state.
+        """
+        self._monitored_stage = stage
+
+
+class ComputeIK(_StageBase):
+    """Turn a generator child's candidate poses into joint states (MTC ComputeIK).
+
+    Wraps one generator (MTC ``ComputeIK(name, generator)``); the child
+    nests under this stage in ``to_spec`` so the builder installs it via
+    ``set_child``.
+    """
+
+    stage_type = "compute_ik"
+
+    def __init__(self, name: str = "IK", generator: Any = None):
+        super().__init__(name, None)
+        self._children: list = []
+        #: IK reference frame (MTC ik_frame). Carried for API compatibility.
+        self.ik_frame = None
+        self._ignore_collisions = False
+        if generator is not None:
+            self._children.append(generator)
+
+    def setMaxIKSolutions(self, count: int) -> None:
+        """Cap the IK solutions (MTC ``ComputeIK``; maps to max_solutions)."""
+        self.params["max_solutions"] = int(count)
+
+    def setTargetPose(self, pose: Any) -> None:
+        """Set the IK target hint (MTC ``ComputeIK``; recorded)."""
+        pose_dict = _pose_dict_of(pose)
+        if pose_dict is None:
+            raise TypeError(
+                f"ComputeIK.setTargetPose: unsupported {type(pose)}")
+        self.params["target_pose"] = pose_dict
+
+    def setIKFrame(self, frame: Any) -> None:
+        """Set the IK frame (MTC ``ComputeIK``; recorded)."""
+        self.ik_frame = frame
+        self.params["ik_frame"] = str(frame)
+
+    def setIgnoreCollisions(self, ignore: bool) -> None:
+        """Ignore collisions in IK (MTC ``ComputeIK``; recorded)."""
+        self._ignore_collisions = bool(ignore)
+        self.params["ignore_collisions"] = bool(ignore)
+
+    def to_spec(self):
+        from curobo_task_constructor.graph.spec import StageSpec
+        return StageSpec(stage_type=self.stage_type, name=self.name,
+                         container_type="", children=[
+                             c.to_spec() for c in self._children],
+                         params_yaml=_dump_params(self._common_params()))
+
+
 class ModifyPlanningScene(_StageBase):
     """Scene mutation without moving the robot (MTC ModifyPlanningScene).
 
@@ -536,16 +760,42 @@ class ModifyPlanningScene(_StageBase):
                         enabled: bool = True) -> None:
         """Allow (or forbid) collisions between object and links.
 
-        ``links`` may be one link name or a list; a single string reads as
-        the one pair, mirroring MTC's (first, second) form.
+        ``links`` may be one link name, a list of names, or a joint-model
+        group (MTC passes the group: link names are read off it),
+        mirroring MTC's (object, group, allowed) form.
         """
         if isinstance(links, str):
             links = [links]
+        elif links is not None and not isinstance(links, (list, tuple)):
+            links = _group_link_names(links)
         self.params["allow_collisions"] = {
             "object": str(object_name),
             "links": [str(link) for link in (links or [])],
             "enabled": bool(enabled),
         }
+
+
+def _group_link_names(group: Any) -> list:
+    """Link names out of a joint-model group (MTC JointModelGroup).
+
+    Tries the common accessors (C++ getJointModelNames/getLinkModelNames,
+    python joint_names/link_names, plain iterables); falls back to the
+    string form so an unknown object degrades to one pair, never a crash.
+    """
+    for attr in ("get_joint_model_names", "getJointModelNames",
+                 "get_link_model_names", "getLinkModelNames",
+                 "joint_names", "link_names", "links"):
+        try:
+            value = getattr(group, attr, None)
+            names = value() if callable(value) else value
+            if names:
+                return [str(n) for n in names]
+        except Exception:
+            continue
+    try:
+        return [str(n) for n in group]
+    except Exception:
+        return [str(group)]
 
 
 def _frame_of(header: Any, default: str = "world") -> str:

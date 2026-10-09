@@ -75,17 +75,15 @@ def test_cartesian_replica_plans_locally():
     assert task.last_published is task.solutions[0]
 
 
-def test_spec_round_trips_through_wire_format():
+def test_spec_round_trips_through_dict_format():
     task = _cartesian_task(_robot())
     spec = task.to_spec()
     assert spec.container_type == "serial"
     assert [c.stage_type for c in spec.children] == [
         "current_state", "move_relative", "move_relative",
         "move_relative", "move_relative", "move_to"]
-    msgs = spec.to_msg_list()
-    assert msgs[0].parent_id == msgs[0].id == 0
     from curobo_task_constructor.graph.spec import StageSpec
-    back = StageSpec.from_msg_list(msgs)
+    back = StageSpec.from_dict(spec.to_dict())
     assert [c.stage_type for c in back.children] == [
         "current_state", "move_relative", "move_relative",
         "move_relative", "move_relative", "move_to"]

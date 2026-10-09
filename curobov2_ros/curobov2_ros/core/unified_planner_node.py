@@ -62,6 +62,10 @@ from curobo.logging import setup_logger as setup_curobo_logger
 
 from curobov2_ros.robot.robot_context import RobotContext
 from curobov2_ros.core.config_wrapper_motion import ConfigWrapperMotion
+from curobov2_ros.core.joint_order import (
+    resolve_joint_targets,
+    resolve_start_pose,
+)
 from curobov2_ros.core.collision_distance import (
     _attributed_collisions,
     _attributed_joint_limit_violations,
@@ -2375,22 +2379,29 @@ class UnifiedPlannerNode(Node):
         """
         start_pose = getattr(src, "start_pose", None)
         current = list(self.robot_context.get_joint_pose())
-        if start_pose is not None and len(start_pose.position) > 0:
-            start_joint_pose = list(start_pose.position)
+        # The start pose may now name its joints (sensor_msgs/JointState.name).
+        # Named poses are re-ordered into the model's active cspace order HERE,
+        # so a client needs no out-of-band knowledge of that order. A nameless
+        # pose keeps its historical meaning: already in active-DOF order.
+        model_names = self.robot_context.description.joint_names
+        start_joint_pose = resolve_start_pose(start_pose, model_names, current)
             # A short start pose (e.g. the MoveIt arm group sends only its 7
             # DOF) pads the trailing DOF (wrist-mounted gripper) from the
-            # robot's current pose so the planner always gets a full-DOF
-            # start state.
-            if len(start_joint_pose) < len(current):
-                start_joint_pose = start_joint_pose + current[len(start_joint_pose) :]
+        # A short start pose (e.g. the MoveIt arm group sends only its 7
+        # DOF) pads the trailing DOF (wrist-mounted gripper) from the
+        # robot's current pose so the planner always gets a full-DOF
+        # start state. Padding happens after the re-order, so the padding
+        # lands on the DOF the caller did not name.
+        if len(start_joint_pose) < len(current):
+            padded = len(current) - len(start_joint_pose)
+            start_joint_pose = start_joint_pose + current[len(start_joint_pose) :]
             self.get_logger().info(
-                f"Using start position from request: "
-                f"{[f'{x:.3f}' for x in start_joint_pose]}"
+                f"Using start position from request (padded {padded} DOF from "
+                f"current): {[f'{x:.3f}' for x in start_joint_pose]}"
             )
         else:
-            start_joint_pose = current
             self.get_logger().info(
-                f"Using robot current position: "
+                f"Using start position from request: "
                 f"{[f'{x:.3f}' for x in start_joint_pose]}"
             )
         start_state = JointState.from_position(
@@ -2597,8 +2608,15 @@ class UnifiedPlannerNode(Node):
         ]
         # Joint targets are per-segment (Goalset.target_joint_positions); each
         # entry stays aligned with its goalset ([] for Cartesian segments).
+        # The NAMES are part of the key: a name-keyed goal and a nameless one
+        # that happen to hold the same numbers must not share a cache entry,
+        # because the node resolves them differently.
         joints = [
             [float(x) for x in (getattr(g, "target_joint_positions", None) or [])]
+            for g in (getattr(req, "goalsets", None) or [])
+        ]
+        joint_names = [
+            [str(n) for n in (getattr(g, "target_joint_names", None) or [])]
             for g in (getattr(req, "goalsets", None) or [])
         ]
         # Planning options shape the plan (waypoint_tolerance gates waypoint
@@ -2609,6 +2627,7 @@ class UnifiedPlannerNode(Node):
             "start": start,
             "goalsets": goalsets,
             "target_joints": joints,
+            "target_joint_names": joint_names,
             "options": (
                 (
                     float(getattr(opts, "waypoint_tolerance", 0.0)),

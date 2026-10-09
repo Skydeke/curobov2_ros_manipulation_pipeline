@@ -112,6 +112,12 @@ class StageFailure:
     #: numbers stored solutions and failures together; solved[]/failed[]
     #: in StageStatistics reference these ids).
     failure_id: int = -1
+    #: Recording stage (MTC: failures live in the stage that made them, so
+    #: no reverse lookup is ever needed). Set by Stage._fail; excluded from
+    #: equality so identical failures from sibling stages sharing one input
+    #: state (e.g. every strategy's pre_grasp failing the same IK) stay
+    #: distinct records instead of all attributing to the first match.
+    stage: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -215,6 +221,7 @@ class Stage(ABC):
         self._record_seq = 0
         self.attempt_count = 0
         self.compute_time = 0.0
+        self._accounted_time = 0.0
         # Planner calls in the current compute pass not yet "spent" on an
         # emitted record. attempt_count = planner calls + records from
         # computes that made none (generators, mutations, validation
@@ -358,20 +365,31 @@ class Stage(ABC):
     def _fail(self, from_state, to_state, message: str) -> None:
         failure = StageFailure(from_state, to_state, message,
                                failure_id=self._next_record_id())
+        failure.stage = self
         self.failures.append(failure)
         self._count_record()
         if self.on_failure:
             self.on_failure(failure)
+        # Tick statistics live too (on_progress drives publishTaskState):
+        # without this the ✗ column only moves at pass end while the red
+        # row itself already streams via on_failure.
+        if self.on_progress is not None:
+            self.on_progress(self)
 
     def _consider(self, solution: Solution) -> None:
-        """Publish a successful try that is not ranked (best-of-N discard).
+        """Store a successful try without lifting it.
 
-        Fires ``on_considered`` only: no storing, no container lifting. The
-        node publishes it as a non-ranked success row, so every planner call
-        is visible exactly once (failed tries fail live, winners emit) and
-        successful + failed rows always sum to planner attempts.
+        MTC stores every computed solution; best-of-N ranking still picks
+        the cheapest via cost sort, and containers only ever see the
+        promoted winner. Fires ``on_considered`` for consumers that want
+        per-try visibility. Task itself publishes no Solution messages
+        during planning (MTC parity) — rows and counts reach the panel
+        through statistics and explicit publish calls.
         """
         solution.stage = self
+        solution.solution_id = self._next_record_id()
+        self.solutions.append(solution)
+        self._count_record()
         if self.on_considered is not None:
             self.on_considered(solution)
 
@@ -390,6 +408,22 @@ class Stage(ABC):
         self._pending_tries += 1
         if self.on_progress is not None:
             self.on_progress(self)
+
+    def _timed_plan(self, req) -> Any:
+        """robot.plan timed into compute_time as it happens.
+
+        MTC accumulates compute time per compute; attempts here span seconds
+        each, so each call ticks the stage clock live instead of only at
+        pass end. run_compute subtracts the accounted share, so the total
+        stays exactly the wall duration (never double-counted).
+        """
+        started = time.perf_counter()
+        try:
+            return self.robot.plan(req)
+        finally:
+            dt = time.perf_counter() - started
+            self.compute_time += dt
+            self._accounted_time += dt
 
     def spawn(self, state: InterfaceState, cost: float = 0.0, comment: str = "",
               response: Any = None) -> None:
@@ -418,6 +452,27 @@ class Stage(ABC):
                             cost=cost, comment=comment, response=response,
                             plan_request=plan_request))
 
+    def _promote_forward(self, from_state, to_state, solution: Solution) -> None:
+        """Lift an already-stored winner downstream without re-storing it.
+
+        Best-of-N legs store every try live (via _consider) so the panel
+        walks each attempt the moment it solves; only the cheapest may feed
+        downstream. Re-emitting the winner through send_forward would store
+        (and count) it a second time, so promotion writes the end interface
+        and fires the hook chain (container lift + live republish of the
+        same global id, deduplicated by receivers) exactly like an emit
+        minus the store.
+        """
+        self._ends.append(to_state)
+        if self.on_solution is not None:
+            self.on_solution(solution)
+
+    def _promote_backward(self, from_state, to_state, solution: Solution) -> None:
+        """Backward variant of _promote_forward (writes the start interface)."""
+        self._starts.append(from_state)
+        if self.on_solution is not None:
+            self.on_solution(solution)
+
     def lift_solution(self, solution: Solution) -> None:
         """Container helper: forward a child solution as our own."""
         from curobo_task_constructor.core.container import ContainerStage
@@ -436,12 +491,16 @@ class Stage(ABC):
     def run_compute(self) -> None:
         """Timed, counted execution of ``compute()`` (the MTC runCompute
         equivalent)."""
+        self._accounted_time = 0.0  # per-pass live-ticked share, see below
         self._pending_tries = 0  # per-pass: records spend only this pass's tries
         started = time.perf_counter()
         try:
             self.compute()
         finally:
-            self.compute_time += time.perf_counter() - started
+            # Tries that timed themselves via _timed_plan already ticked
+            # compute_time live; add only the unaccounted remainder so the
+            # total stays exactly the wall duration.
+            self.compute_time += time.perf_counter() - started - self._accounted_time
 
     def reset(self) -> None:
         """Reset per-task state so the stage can be re-planned (MTC reset)."""
@@ -456,6 +515,7 @@ class Stage(ABC):
         self._record_seq = 0
         self.attempt_count = 0
         self.compute_time = 0.0
+        self._accounted_time = 0.0
         self._pending_tries = 0
         self._flow = None
         self._batch = None
@@ -668,18 +728,16 @@ class TrajectoryStage(PropagatingStage):
         for start, req in self._pending:
             # Multi-attempt planning (MTC forwards num_planning_attempts to
             # MoveIt; cuRobo has no server-side retry, so the client loops):
-            # every failed try is recorded immediately — MTC publishes each
-            # failed plan as a failed solution the moment it happens, so the
-            # panel walks attempt 1, 2, 3 live instead of only after the Nth
-            # try. Successful tries tick the count; losers publish as
-            # non-ranked rows at the end and only the cheapest result emits,
-            # so successful + failed rows always sum to planner attempts while
-            # ranking still picks the best seed.
+            # every try is stored and published the moment it solves — like
+            # failed tries fail live — so the panel walks attempt 1, 2, 3 as
+            # they happen instead of only after the Nth try. Only the
+            # cheapest try is promoted downstream; ranking still picks the
+            # best seed while successful + failed rows sum to attempts.
             attempts = max(1, int(self.params.get("planning_attempts", 3)))
-            candidates = []
+            tried = []
             for _ in range(attempts):
                 try:
-                    result = self.robot.plan(req)
+                    result = self._timed_plan(req)
                 except Exception as exc:  # ServiceError etc.
                     self._fail(start, None, f"plan call failed: {exc}")
                     continue
@@ -687,26 +745,20 @@ class TrajectoryStage(PropagatingStage):
                     self._fail(start, None, result.message or "plan failed")
                     continue
                 self._note_plan_attempt()
-                candidates.append((result, self._cost_of(result)))
-            if not candidates:
-                continue
-            best_result = min(candidates, key=lambda rc: rc[1])[0]
-            for result, cost in candidates:
-                if result is best_result:
-                    continue
                 end = self.make_end_state(start, result, raw=result)
                 if end is None:
                     continue  # already recorded (e.g. straightness gate)
-                self._consider(Solution(
-                    start, end, trajectory=result.trajectory, cost=cost,
+                sol = Solution(
+                    start, end, trajectory=result.trajectory,
+                    cost=self._cost_of(result),
                     comment=self._comment(req, result),
-                    response=result.raw, plan_request=req))
-            end = self.make_end_state(start, best_result, raw=best_result)
-            if end is not None:
-                self.send_forward(start, end, trajectory=best_result.trajectory,
-                                  cost=self._cost_of(best_result),
-                                  comment=self._comment(req, best_result),
-                                  response=best_result.raw, plan_request=req)
+                    response=result.raw, plan_request=req)
+                self._consider(sol)
+                tried.append(sol)
+            if not tried:
+                continue
+            best = min(tried, key=lambda s: s.cost)
+            self._promote_forward(start, best.end, best)
 
     def commit_result(self, start: InterfaceState, req: PlanRequest,
                       result: PlanResult) -> None:

@@ -528,16 +528,16 @@ class CuroboServerInterface(RobotInterface):
     def _ensure_planner(self, planner) -> None:
         """Make sure the requested planner is the server's current one.
 
-        The switch is sticky per planner: once set, a repeat request for the
-        SAME planner is skipped (no extra service round-trip), but a DIFFERENT
-        planner is switched to on the spot. Without this, a task mixing planner
-        types (e.g. joint-space reach + classic pose lift) would silently run
-        every stage under whichever planner was switched first.
+        The planner is (re-)selected on EVERY request, like MTC routes every
+        plan through the requested pipeline. A client-side sticky skip ("do
+        not re-issue the same planner") is wrong here: the server switches
+        planners on its own (execution replay runs each segment under its
+        cached plan's planner), so a cached "already active" belief goes
+        stale — a joint-space request then plans under Classic and fails
+        validation, with no client error pointing at the cause.
         """
         key = planner if planner is not None else self._planner
         if key is None:
-            return
-        if self._planner_active and self._active_planner == int(key):
             return
         self.set_planner(key)
 
@@ -570,6 +570,15 @@ class CuroboServerInterface(RobotInterface):
             raise ServiceError(f"set_link_collision failed: {res.message}")
 
     def plan(self, request: PlanRequest) -> PlanResult:
+        # Identity fast path: a joint-space goal equal to the start needs no
+        # motion and, more importantly, no server round trip. Beyond saving
+        # the solve, this avoids sending degenerate zero-distance problems
+        # (e.g. a "ready"/"home" leg issued while already there) into trajopt,
+        # where they have preceded CUDA faults. Tight tolerance, joint goals
+        # only, single goalset: anything else plans normally.
+        trivial = self._trivial_goal(request)
+        if trivial is not None:
+            return trivial
         self._ensure_planner(request.planner)
         # Apply the goalset's allowed links (spheres OFF) for the duration of
         # the solve and restore (spheres ON) right after — exception-safe.
@@ -589,6 +598,30 @@ class CuroboServerInterface(RobotInterface):
             return self._from_result(res.response)
         finally:
             self._set_links_collision([request], True)
+
+    @staticmethod
+    def _trivial_goal(request: PlanRequest):
+        """Trivial success for a no-motion joint goal, or None.
+
+        Single goalset with joint targets matching the start pose within
+        1e-6 rad on every joint: returns a single-waypoint success without
+        touching the server.
+        """
+        goalsets = list(getattr(request, "goalsets", None) or [])
+        if len(goalsets) != 1:
+            return None
+        want = [float(v) for v in (
+            getattr(goalsets[0], "target_joint_positions", None) or [])]
+        if not want:
+            return None
+        start = getattr(request, "start_pose", None)
+        have = [float(v) for v in (getattr(start, "position", None) or [])]
+        if len(have) != len(want):
+            return None
+        if any(abs(a - b) > 1e-6 for a, b in zip(have, want)):
+            return None
+        return PlanResult(True, "start equals goal (no motion needed)",
+                          trajectory=[start], cost=0.0)
 
     def plan_batch(self, requests: list) -> list:
         planners = {r.planner for r in requests if r.planner is not None}

@@ -119,47 +119,24 @@ class MoveTo(PropagatingEitherWay):
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
-    def _plan_best(self, req, state, fail_msg):
-        """Plan ``req`` up to ``planning_attempts`` times.
+    def _attempts(self) -> int:
+        return max(1, int(self.params.get("planning_attempts", 3)))
 
-        Returns ``(best_result, losers)``: the cheapest successful result
-        (or None) plus the non-winning successful ``[(result, cost)]`` pairs.
-        MTC records every attempt's outcome the moment it happens (a failed
-        plan becomes a failed solution, published live); successful tries tick
-        the count, losers publish as non-ranked rows at the end, and only the
-        cheapest result emits — so successful + failed rows always sum to
-        planner attempts while ranking still picks the best seed.
-        """
-        attempts = max(1, int(self.params.get("planning_attempts", 3)))
-        candidates = []
-        for _ in range(attempts):
-            try:
-                result = self.robot.plan(req)
-            except Exception as exc:  # ServiceError etc.
-                # repr, not str: rclpy futures can fail with an empty-str
-                # exception (CancelledError/StopIteration), which str() would
-                # silently swallow into "plan call failed: ".
-                self._fail(state, None, f"plan call failed: {exc!r}")
-                continue
-            if not result.success:
-                self._fail(state, None, result.message or fail_msg)
-                continue
-            self._note_plan_attempt()
-            candidates.append((result, self._cost_of(result)))
-        if not candidates:
-            return None, []
-        best = min(candidates, key=lambda rc: rc[1])
-        losers = [rc for rc in candidates if rc[0] is not best[0]]
-        return best[0], losers
-
-    def _publish_losers(self, req, state, end_state_fn, losers) -> None:
-        """One non-ranked row per discarded seed (see _plan_best)."""
-        from curobo_task_constructor.core.stage import Solution
-        for result, cost in losers:
-            self._consider(Solution(
-                state, end_state_fn(result), trajectory=result.trajectory,
-                cost=cost, comment=self._comment(result),
-                response=result.raw, plan_request=req))
+    def _try_plan(self, req, state, fail_msg):
+        """One planner call: None on failure (recorded), result on success."""
+        try:
+            result = self._timed_plan(req)
+        except Exception as exc:  # ServiceError etc.
+            # repr, not str: rclpy futures can fail with an empty-str
+            # exception (CancelledError/StopIteration), which str() would
+            # silently swallow into "plan call failed: ".
+            self._fail(state, None, f"plan call failed: {exc!r}")
+            return None
+        if not result.success:
+            self._fail(state, None, result.message or fail_msg)
+            return None
+        self._note_plan_attempt()
+        return result
 
     def compute_forward(self, state: InterfaceState) -> None:
         joint_goal = self._goal_positions(state)
@@ -173,18 +150,27 @@ class MoveTo(PropagatingEitherWay):
         else:
             goalset = goalset_for_scene(state.scene, joint_positions=joint_goal)
         req = full_request(self.robot, state.joint_state, [goalset], self.params)
-        result, losers = self._plan_best(req, state, "move_to plan failed")
-        if result is None:
+        # Every try is stored and published the moment it solves (like failed
+        # tries fail live); only the cheapest is promoted downstream.
+        from curobo_task_constructor.core.stage import Solution
+        tried = []
+        for _ in range(self._attempts()):
+            result = self._try_plan(req, state, "move_to plan failed")
+            if result is None:
+                continue
+            end = state.clone(joint_state=result.last_state)
+            sol = Solution(
+                state, end, trajectory=result.trajectory,
+                cost=self._cost_of(result), comment=self._comment(result),
+                response=result.raw, plan_request=req)
+            self._consider(sol)
+            tried.append(sol)
+        if not tried:
             # Every failed try already recorded itself above (MTC: each
             # failed plan is a failed solution); nothing more to report.
             return
-        self._publish_losers(
-            req, state,
-            lambda res: state.clone(joint_state=res.last_state), losers)
-        end = state.clone(joint_state=result.last_state)
-        self.send_forward(state, end, trajectory=result.trajectory,
-                          cost=self._cost_of(result), comment=self._comment(result),
-                          response=result.raw, plan_request=req)
+        best = min(tried, key=lambda s: s.cost)
+        self._promote_forward(state, best.end, best)
 
     # ------------------------------------------------------------------
     # Backward
@@ -202,21 +188,27 @@ class MoveTo(PropagatingEitherWay):
                 joint_positions=list(getattr(state.joint_state, "position", [])
                                      or []))],
             self.params)
-        result, losers = self._plan_best(req, state, "move_to backward failed")
-        if result is None:
-            # Every failed try already recorded itself (see _plan_best).
+        from curobo_task_constructor.core.stage import Solution
+        tried = []
+        for _ in range(self._attempts()):
+            result = self._try_plan(req, state, "move_to backward failed")
+            if result is None:
+                continue
+            if not result.trajectory:
+                self._fail(state, None, "move_to backward failed")
+                continue
+            start = state.clone(joint_state=result.trajectory[0])
+            sol = Solution(
+                start, state, trajectory=result.trajectory,
+                cost=self._cost_of(result), comment=self._comment(result),
+                response=result.raw, plan_request=req)
+            self._consider(sol)
+            tried.append(sol)
+        if not tried:
+            # Every failed try already recorded itself (see _try_plan).
             return
-        if not result.trajectory:
-            self._fail(state, None, "move_to backward failed")
-            return
-        self._publish_losers(
-            req, state,
-            lambda res: state.clone(joint_state=res.trajectory[0]),
-            [(res, cost) for res, cost in losers if res.trajectory])
-        start = state.clone(joint_state=result.trajectory[0])
-        self.send_backward(start, state, trajectory=result.trajectory,
-                           cost=self._cost_of(result), comment=self._comment(result),
-                           response=result.raw, plan_request=req)
+        best = min(tried, key=lambda s: s.cost)
+        self._promote_backward(best.start, state, best)
 
     def _comment(self, result=None) -> str:
         goal = self.params.get("goal", {})

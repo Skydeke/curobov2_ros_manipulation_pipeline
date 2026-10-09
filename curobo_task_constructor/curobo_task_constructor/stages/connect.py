@@ -38,7 +38,7 @@ class Connect(ConnectingStage):
         req = full_request(self.robot, s.joint_state, [goalset], self.params)
         try:
             self._note_plan_attempt()
-            result = self.robot.plan(req)
+            result = self._timed_plan(req)
         except Exception as exc:  # ServiceError etc.
             self._fail(s, e, f"plan call failed: {exc}")
             return

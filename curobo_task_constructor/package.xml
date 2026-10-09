@@ -7,13 +7,11 @@
     An open MoveIt Task Constructor equivalent for cuRobo: a stage/container
     framework (generators / propagators / connectors composed into serial,
     alternatives, fallbacks and independent containers) with cuRobo's batched
-    GPU solve as the execution substrate. Task graphs are declared as
-    StageSpec trees referencing stage types through an open STAGE_REGISTRY —
-    adding a capability is writing a Stage subclass, never editing an enum or
-    the executor. The action server at /curobo_task_constructor/task fronts
-    the MTC Task::init()/plan()/execute() lifecycle and publishes
-    per-attempt introspection (TaskDescription / SolutionInfo /
-    StageStatistics) for the companion rviz panel.
+    GPU solve as the execution substrate. Planning is local (in-process, like
+    MoveIt: core.Task.plan() publishes introspection itself). The action
+    server at /curobo_task_constructor/execute_task_solution fronts MTC
+    ExecuteTaskSolution: it drives a full Solution message's
+    sub-trajectories in order with no replanning.
   </description>
   <maintainer email="me@todo.com">me</maintainer>
   <url type="repository">https://github.com/Skydeke/curobov2_ros_manipulation_pipeline</url>
@@ -26,6 +24,8 @@
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
   <depend>visualization_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>moveit_msgs</depend>
   <depend>curobo_task_constructor_interfaces</depend>
   <depend>curobov2_ros_interfaces</depend>
 

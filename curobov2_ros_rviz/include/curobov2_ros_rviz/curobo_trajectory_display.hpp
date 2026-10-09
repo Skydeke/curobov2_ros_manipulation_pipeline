@@ -76,6 +76,8 @@ private:
   void loadRobotModel();
 
   // --- Trail (ghost copies) ---
+  // Grow-only pool (see rebuildTrail): ghosts share the single parsed URDF
+  // model and are re-posed, never rebuilt, in steady operation.
   struct TrailRobot
   {
     std::unique_ptr<rviz_default_plugins::robot::Robot> robot;

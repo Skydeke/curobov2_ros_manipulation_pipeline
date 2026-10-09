@@ -1,0 +1,26 @@
+# Per-group planner configuration (moveit_wrapper jaco2.yaml shape).
+#
+# Load with curobo_task_constructor.mtc.core.load_planner_configs():
+#
+#   from curobo_task_constructor.mtc import core
+#   planners = core.load_planner_configs("params/planning_groups.yaml")
+#   move = stages.MoveTo("move_to_home", planners["arm"])
+#
+# Empty planner_id means the pipeline default (MTC: OMPL default from
+# ompl_planning.yaml). Pipelines map via PIPELINE_PLANNERS
+# (ompl/joint/chomp -> JOINT_SPACE, classic/cartesian/pilz -> CLASSIC).
+planning_groups: ["arm", "gripper"]
+arm:
+  planning_pipeline_id: "ompl"
+  planner_id: "RRTConnectkConfigDefault"
+  planning_time: 15.0
+  max_velocity_scaling_factor: 0.5
+  max_acceleration_scaling_factor: 0.5
+  planning_attempts: 2
+gripper:
+  planning_pipeline_id: "ompl"
+  planner_id: ""
+  planning_time: 5.0
+  max_velocity_scaling_factor: 1.0
+  max_acceleration_scaling_factor: 1.0
+  planning_attempts: 1
