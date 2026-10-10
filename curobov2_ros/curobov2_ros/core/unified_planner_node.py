@@ -917,15 +917,19 @@ class UnifiedPlannerNode(Node):
                     throttle_duration_sec=5.0,
                 )
 
+            _t_push0 = time.monotonic()
             if self.motion_planner is not None:
                 self.motion_planner.update_world(scene)
+            _t_push_motion = time.monotonic()
 
             # Reactive controllers each own their collision model; delegate to the
             # controller's update_world() override (no node dependency on internals).
             if self.mpc is not None:
                 self.planner_manager.get_planner("mpc").update_world(scene)
+            _t_push_mpc = time.monotonic()
             if self.retargeter is not None:
                 self.planner_manager.get_planner("retarget").update_world(scene)
+            _t_push_retarget = time.monotonic()
 
             # Both services take the scene we just resolved — they must not
             # re-derive it from the obstacle manager, or the two degradation
@@ -933,13 +937,28 @@ class UnifiedPlannerNode(Node):
             # the voxel layer by construction (its checker has no voxel cache,
             # see FKServices.update_world).
             self.ik_services.update_world(scene)
+            _t_push_ik = time.monotonic()
             self.fk_services.update_world()
+            _t_push_fk = time.monotonic()
 
             # Every update_world above clears + re-adds all obstacles with enable=1,
             # which wipes the flag cuRobo set for an attached obstacle — re-assert
             # the disabled set now or the static copy collides with the attached
             # spheres again.
             obstacle_manager.reapply_attached_disables(self)
+            _t0 = getattr(obstacle_manager, "_world_set_t0", None)
+            _handler_ms = (
+                f", handler_total {(time.monotonic() - _t0) * 1e3:.1f} ms"
+                if _t0 is not None else "")
+            obstacle_manager._world_set_t0 = None
+            self.get_logger().info(
+                f"world-push: motion {(_t_push_motion - _t_push0) * 1e3:.1f} ms, "
+                f"mpc {(_t_push_mpc - _t_push_motion) * 1e3:.1f} ms, "
+                f"retarget {(_t_push_retarget - _t_push_mpc) * 1e3:.1f} ms, "
+                f"ik {(_t_push_ik - _t_push_retarget) * 1e3:.1f} ms, "
+                f"fk {(_t_push_fk - _t_push_ik) * 1e3:.1f} ms, "
+                f"total {(_t_push_fk - _t_push0) * 1e3:.1f} ms{_handler_ms}"
+            )
 
     def _solver_bound_scene(self, scene, obstacle_manager):
         """Resolve/normalize a scene before it is pushed to the solvers.
@@ -1296,6 +1315,14 @@ class UnifiedPlannerNode(Node):
         OFF on the execution-failure path (already returning False).
         """
         meta = result.metadata or {}
+        # Solver-reported solve time for PlanningStats.solver_time_s — the
+        # same number the native leg records as "Solve Time"
+        # (result.solve_time, seconds; NOT total_time, which is what the
+        # planner-phases line reports as solver_total for the wrapper split).
+        # result.solve_time is not always a plain float (solver internals may
+        # leave a tensor), so try scalar, single-element tensor, then the
+        # winner considered row — NaN only when nothing usable exists.
+        solver_time_s = self._solver_time_s(result, meta)
         self._fill_insight_fields(
             result_msg,
             goal,
@@ -1304,6 +1331,7 @@ class UnifiedPlannerNode(Node):
             success=result.success,
             message=result.message,
             start_state=start_state,
+            solver_time_s=solver_time_s,
         )
 
         if not result.success:
@@ -1339,6 +1367,7 @@ class UnifiedPlannerNode(Node):
         success: bool,
         message: str,
         start_state=None,
+        solver_time_s: float = float("nan"),
     ) -> TrajectoryResult:
         """Write winner arrays + stats + collision diagnostics from ``meta``.
 
@@ -1362,7 +1391,8 @@ class UnifiedPlannerNode(Node):
             [int(x) for x in status] if status is not None else []
         )
 
-        result_msg.stats = self._build_planning_stats(goal, meta, problems=1)
+        result_msg.stats = self._build_planning_stats(goal, meta, problems=1,
+                                                      solver_time_s=solver_time_s)
 
         if not success:
             goal_joints = self._goalset_joint_target(goal)
@@ -1441,14 +1471,17 @@ class UnifiedPlannerNode(Node):
             result_msg.dt = dt
 
     def _build_planning_stats(
-        self, goal, meta: dict, problems: int = 1
+        self, goal, meta: dict, problems: int = 1,
+        solver_time_s: float = float("nan"),
     ) -> PlanningStats:
         """PlanningStats for one problem — ALWAYS populated.
 
         ``waypoints_planned`` = the number of goal segments solved (one per
         ``goalsets`` entry); the candidate accounting and considered rows ride
         the planner metadata when reported (considered rows gated on the
-        request's ``log_considered_trajectories``).
+        request's ``log_considered_trajectories``). ``solver_time_s`` is
+        cuRobo's self-reported solve time (result.total_time, seconds) — the
+        same metric the native leg records; NaN when no solve ran.
         """
         stats = PlanningStats()
         stats.problems = int(problems)
@@ -1456,10 +1489,88 @@ class UnifiedPlannerNode(Node):
         stats.candidates_generated = int(meta.get("candidates_generated", 0))
         stats.candidates_solved = int(meta.get("candidates_solved", 0))
         stats.candidates_pruned = int(meta.get("candidates_pruned", 0))
+        try:
+            stats.solver_time_s = float(solver_time_s)
+        except Exception:
+            stats.solver_time_s = float("nan")
+        stats.position_error_mm = self._winner_position_error_mm(meta)
+        try:
+            _mt = float(meta.get("motion_time_s", float("nan")))
+            stats.motion_time_s = _mt if _mt == _mt else float("nan")
+        except Exception:
+            stats.motion_time_s = float("nan")
         if self._log_considered_requested(goal) and meta.get("considered"):
             for row in meta["considered"]:
                 stats.considered.append(self._to_considered_trajectory(row))
         return stats
+
+    @staticmethod
+    def _solver_time_s(result, meta: dict) -> float:
+        """Solver-reported solve time (s) for PlanningStats, or NaN.
+
+        Prefers ``result.solve_time`` as a plain scalar (what the native leg
+        records); accepts single-element tensors via ``.item()``; falls back
+        to the winner considered row's ``solve_time`` (same rows/indices as
+        :meth:`_winner_position_error_mm`). NaN when nothing usable exists.
+        """
+        try:
+            return float(getattr(result, "solve_time", None))
+        except Exception:
+            pass
+        try:
+            import torch
+            _v = getattr(result, "solve_time", None)
+            if isinstance(_v, torch.Tensor) and _v.numel() == 1:
+                return float(_v.detach().flatten()[0].item())
+        except Exception:
+            pass
+        try:
+            rows = [r for r in (meta.get("considered") or []) if r is not None]
+            goal_index = [int(v) for v in (meta.get("selected_goal_index") or [])]
+            seed_index = [int(v) for v in (meta.get("selected_seed_index") or [])]
+            if rows and goal_index and len(seed_index) == len(goal_index):
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    if (row.get("problem", 0) != 0
+                            or row.get("segment", 0) >= len(goal_index)):
+                        continue
+                    if (int(row.get("goalset_candidate", 0)) == goal_index[row.get("segment", 0)]
+                            and int(row.get("seed", 0)) == seed_index[row.get("segment", 0)]):
+                        return float(row.get("solve_time", float("nan")))
+        except Exception:
+            pass
+        return float("nan")
+
+    @staticmethod
+    def _winner_position_error_mm(meta: dict) -> float:
+        """Winner candidate's solver-reported position error (mm), or NaN.
+
+        Mirrors the benchmark's ``winner_position_error_mm`` (compare.py) on
+        the planner's considered rows: match problem 0, the selected
+        goalset-candidate/seed per segment, read ``max_waypoint_error`` (m)
+        × 1000. Same metric, same computation as the native leg's
+        ``result.position_error * 1000`` — but server-side, so it needs no
+        request flag and is always present.
+        """
+        try:
+            rows = [r for r in (meta.get("considered") or []) if r is not None]
+            goal_index = [int(v) for v in (meta.get("selected_goal_index") or [])]
+            seed_index = [int(v) for v in (meta.get("selected_seed_index") or [])]
+            if not rows or not goal_index or len(seed_index) != len(goal_index):
+                return float("nan")
+            for row in rows:
+                gv = row.get("goalset_candidate", 0) if isinstance(row, dict) else 0
+                sv = row.get("seed", 0) if isinstance(row, dict) else 0
+                seg = row.get("segment", 0) if isinstance(row, dict) else 0
+                pv = row.get("problem", 0) if isinstance(row, dict) else 0
+                if pv != 0 or seg >= len(goal_index):
+                    continue
+                if int(gv) == goal_index[seg] and int(sv) == seed_index[seg]:
+                    return float(row.get("max_waypoint_error", float("nan"))) * 1000.0
+        except Exception:
+            pass
+        return float("nan")
 
     @staticmethod
     def _rollup_stats(responses) -> PlanningStats:
@@ -1470,6 +1581,8 @@ class UnifiedPlannerNode(Node):
         """
         total = PlanningStats()
         total.problems = len(responses)
+        total.solver_time_s = float("nan")  # times don't sum; per-problem rows carry them
+        total.position_error_mm = float("nan")  # likewise per-problem
         total.candidates_generated = sum(
             int(r.stats.candidates_generated) for r in responses
         )
@@ -1483,7 +1596,10 @@ class UnifiedPlannerNode(Node):
     @staticmethod
     def _empty_stats() -> PlanningStats:
         """Truly-empty PlanningStats (no problems were dispatched)."""
-        return PlanningStats()
+        stats = PlanningStats()
+        stats.solver_time_s = float("nan")
+        stats.position_error_mm = float("nan")
+        return stats
 
     @staticmethod
     def _log_considered_requested(goal) -> bool:

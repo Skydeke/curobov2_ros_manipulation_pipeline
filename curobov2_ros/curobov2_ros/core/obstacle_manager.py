@@ -1,5 +1,6 @@
 import os
 import math
+import time
 import numpy as np
 import torch
 import ros2_numpy as rnp
@@ -74,6 +75,7 @@ class ObstacleManager:
         self._voxel_act = None          # Tensor [1]
         self._voxel_grid_key = None     # (grid_min tuple, voxel_size, size tuple)
         self._voxel_sc_caps = (0, 0)    # (cuboids, meshes) the SceneCollision was built for
+        self._world_set_t0 = None       # set_objects entry stamp, read by the world-push log
 
         # Observer callbacks (registered by ConfigWrapper). They decouple scene
         # mutations from solver propagation so that ANY caller — ROS service or
@@ -806,6 +808,7 @@ class ObstacleManager:
         any entry is invalid — unlike N add_object calls, which also pay one
         full solver-world refresh per obstacle. See SetObjects.srv.
         """
+        self._world_set_t0 = time.monotonic()
         taken = set()
         if not request.clear_first:
             taken = set(self.obstacle_names)

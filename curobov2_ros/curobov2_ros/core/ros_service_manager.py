@@ -542,7 +542,17 @@ class RosServiceManager:
                     response.blox_cache = voxel["layers"] if isinstance(voxel, dict) else 0
                     self.node.get_logger().error(response.message)
                     return response
-        response = self.obstacle_manager.set_collision_cache(node, request, response)
+        try:
+            response = self.obstacle_manager.set_collision_cache(node, request, response)
+        except Exception as e:
+            # A failed rebuild (e.g. cache smaller than the loaded world) must
+            # fail THIS request, never the process: an exception escaping a
+            # service callback kills spin() and takes the whole node down
+            # (observed live: ValueError from the rebuild aborted the server).
+            response.success = False
+            response.message = f"set_collision_cache failed: {e}"
+            self.node.get_logger().error(response.message)
+            return response
         if response.success:
             response.message += " - solvers rebuilt (blocking, ~20s)"
         return response
