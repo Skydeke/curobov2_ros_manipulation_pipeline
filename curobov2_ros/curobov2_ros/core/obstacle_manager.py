@@ -503,25 +503,38 @@ class ObstacleManager:
         mapper = self.mapper
         if mapper is None:
             return
-        # Every CUDA op in this node runs under gpu_lock so it cannot race a
-        # CUDA graph capture (same invariant as the depth-camera callback).
-        # The acquire is NON-blocking (matching the depth-callback and viz
-        # publishers): this is a periodic statistics timer, it must not stall
-        # the executor on a long plan / capture — it simply skips this round
-        # and retries on the next tick.
-        gpu_lock = getattr(self.node, 'gpu_lock', None)
-        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-            return
-        try:
-            try:
-                stats = mapper.get_stats(scan_pool=True, scan_hash=False)
-            except Exception as e:
-                self.node.get_logger().warn(
-                    f"mapper.get_stats failed: {e}", throttle_duration_sec=10.0)
+        # Every CUDA op in this node runs on a lane (shared barrier side) so it
+        # cannot race a CUDA graph capture (same invariant as the depth-camera
+        # callback). submit_if_idle is NON-blocking (matching the old try-lock):
+        # this is a periodic statistics timer, it must not stall the executor
+        # on a long plan / capture — it simply skips this round and retries on
+        # the next tick.
+        lane = getattr(self.node, 'lane_viz', None)
+        if lane is None:
+            gpu_lock = getattr(self.node, 'gpu_lock', None)
+            if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
                 return
-        finally:
-            if gpu_lock is not None:
-                gpu_lock.release()
+            try:
+                try:
+                    stats = mapper.get_stats(scan_pool=True, scan_hash=False)
+                except Exception as e:
+                    self.node.get_logger().warn(
+                        f"mapper.get_stats failed: {e}", throttle_duration_sec=10.0)
+                    return
+            finally:
+                if gpu_lock is not None:
+                    gpu_lock.release()
+            self._log_mapper_stats_summary(stats)
+            return
+        fut = lane.submit_if_idle(mapper.get_stats, scan_pool=True, scan_hash=False)
+        if fut is None:
+            return  # lane busy — skip this round (same semantics as before)
+        try:
+            stats = fut.result(timeout=2.0)
+        except Exception as e:
+            self.node.get_logger().debug(
+                f"mapper.get_stats failed: {e}", throttle_duration_sec=10.0)
+            return
         self._log_mapper_stats_summary(stats)
 
     def _log_mapper_stats_summary(self, stats: dict) -> None:

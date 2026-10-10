@@ -42,6 +42,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 
 from .trajectory_planner import TrajectoryPlanner, PlannerResult, ExecutionMode
 from curobov2_ros_interfaces.action import SendTrajectory
+from curobov2_ros.core.gpu_lanes import PRIO_REACTIVE
 
 
 class ReactiveController(TrajectoryPlanner):
@@ -289,9 +290,23 @@ class ReactiveController(TrajectoryPlanner):
     # Planning: set up the reactive goal (no full trajectory is produced).
     # ------------------------------------------------------------------
 
+    def _setup_exclusive(self, start_state: JointState, goal_request: Any) -> bool:
+        """Run setup() under the exclusive barrier. Runs ON the reactive lane.
+
+        setup() cold-starts the solver, which CAPTURES CUDA graphs
+        (reproduced live: MPC cold-start capture vs in-flight segmentation
+        kernels -> cudaErrorStreamCaptureUnsupported + capture invalidated).
+        Capture is process-global, so like every other capturing path it must
+        run exclusive (other lanes drain, then pause). Replay-only steps stay
+        shared (see _step_guard). Called via the lane (inline when already on
+        it); never call it while holding exclusive from another thread.
+        """
+        with self.node.gpu.exclusive():
+            return self.setup(start_state, goal_request)
+
     def plan(self, start_state: JointState, goal_request: Any, config: dict,
              robot_context: Optional[Any] = None) -> PlannerResult:
-        self.ensure_solver()
+        self.node.lane_reactive.call(self.ensure_solver, prio=PRIO_REACTIVE)
         if self.solver is None:
             return PlannerResult(
                 success=False,
@@ -303,8 +318,12 @@ class ReactiveController(TrajectoryPlanner):
         self.start_state = start_state
 
         try:
-            with self.node.gpu_lock:
-                setup_ok = self.setup(start_state, goal_request)
+            lane = self.node.lane_reactive
+            if lane.owns_current_thread():
+                setup_ok = self._setup_exclusive(start_state, goal_request)
+            else:
+                setup_ok = lane.call(
+                    self._setup_exclusive, start_state, goal_request, prio=PRIO_REACTIVE)
             if not setup_ok:
                 return PlannerResult(success=False, message="Failed to set reactive goal")
             # Discard any live goal left over from a previous session — it must
@@ -356,6 +375,7 @@ class ReactiveController(TrajectoryPlanner):
         return self._execute_immediate(robot_context, goal_handle)
 
     def _execute_immediate(self, robot_context, goal_handle=None) -> bool:
+        lane = self.node.lane_reactive
         try:
             tstep = 0
             self._step_times = []
@@ -392,7 +412,7 @@ class ReactiveController(TrajectoryPlanner):
                 if (self.perception_refresh_period > 0
                         and tstep % self.perception_refresh_period == 0
                         and hasattr(self.node, 'refresh_perception_world')):
-                    self.node.refresh_perception_world()
+                    lane.call(self.node.refresh_perception_world, prio=PRIO_REACTIVE)
 
                 # Consume a pending live goal on the loop thread only, under
                 # gpu_lock: retargeting runs the solver's IK, which can capture
@@ -407,8 +427,7 @@ class ReactiveController(TrajectoryPlanner):
                 raw = self._take_live_goal()
                 if raw is not None:
                     try:
-                        with self.node.gpu_lock:
-                            self.apply_live_goal(raw, current_state)
+                        lane.call(self.apply_live_goal, raw, current_state, prio=PRIO_REACTIVE)
                     except Exception as e:
                         self.node.get_logger().error(
                             f"{self.get_planner_name()}: live goal rejected "
@@ -417,12 +436,14 @@ class ReactiveController(TrajectoryPlanner):
                         )
 
                 st_time = self._now()
-                with self._step_guard():
-                    action = self.step(current_state)  # step() already syncs (FK .item())
+                def _step_job(cs=current_state):
+                    with self._step_guard():       # unchanged: takes the (adapter) lock only when a capture is pending
+                        return self.step(cs)
+                action = lane.call(_step_job, prio=PRIO_REACTIVE)
                 if tstep > 5:
                     self._step_times.append(self._now() - st_time)
 
-                self._send_command(robot_context, action)
+                lane.call(self._send_command, robot_context, action, prio=PRIO_REACTIVE)
 
                 # Close the loop with the REAL robot position (a fast,
                 # non-blocking read of the joint_states subscriber's latest
@@ -440,7 +461,7 @@ class ReactiveController(TrajectoryPlanner):
 
 
                 if goal_handle is not None and tstep % 5 == 0:
-                    self._publish_feedback(goal_handle, action)
+                    lane.call(self._publish_feedback, goal_handle, action, prio=PRIO_REACTIVE)
 
                 now = self._now()
                 if now - self._last_log_time > 1.0:
@@ -501,6 +522,7 @@ class ReactiveController(TrajectoryPlanner):
         sequencing: the cuRobo step() call itself is unchanged. Only this loop
         calls step() (CUDA).
         """
+        lane = self.node.lane_reactive
         try:
             tstep = 0
             self._step_times = []
@@ -531,15 +553,14 @@ class ReactiveController(TrajectoryPlanner):
                 if (self.perception_refresh_period > 0
                         and tstep % self.perception_refresh_period == 0
                         and hasattr(self.node, 'refresh_perception_world')):
-                    self.node.refresh_perception_world()
+                    lane.call(self.node.refresh_perception_world, prio=PRIO_REACTIVE)
 
                 # Under gpu_lock, failure narrowed to the goal — see
                 # _execute_immediate for why.
                 raw = self._take_live_goal()
                 if raw is not None:
                     try:
-                        with self.node.gpu_lock:
-                            self.apply_live_goal(raw, current_state)
+                        lane.call(self.apply_live_goal, raw, current_state, prio=PRIO_REACTIVE)
                     except Exception as e:
                         self.node.get_logger().error(
                             f"{self.get_planner_name()}: live goal rejected "
@@ -548,14 +569,16 @@ class ReactiveController(TrajectoryPlanner):
                         )
 
                 st_time = self._now()
-                with self._step_guard():
-                    action = self.step_paced(current_state)  # fresh single-plan window
+                def _step_job(cs=current_state):
+                    with self._step_guard():       # unchanged: takes the (adapter) lock only when a capture is pending
+                        return self.step_paced(cs)
+                action = lane.call(_step_job, prio=PRIO_REACTIVE)
                 if tstep > 5:
                     self._step_times.append(self._now() - st_time)
 
-                self._send_command(robot_context, action)
+                lane.call(self._send_command, robot_context, action, prio=PRIO_REACTIVE)
                 if goal_handle is not None:
-                    self._publish_feedback(goal_handle, action)
+                    lane.call(self._publish_feedback, goal_handle, action, prio=PRIO_REACTIVE)
 
                 # Let the window fully execute before re-solving: the next
                 # plan must be anchored on the fresh, post-execution robot

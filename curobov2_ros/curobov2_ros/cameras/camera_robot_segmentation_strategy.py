@@ -196,30 +196,53 @@ class RobotSegmentationCameraStrategy(CameraStrategy):
                 throttle_duration_sec=5.0)
             return
 
-        gpu_lock = getattr(self.node, 'gpu_lock', None)
-        if gpu_lock is not None:
-            # Blocking (vs a non-blocking drop): during planning/servoing the
-            # planner repeatedly holds gpu_lock for the ESDF refresh, and a
-            # non-blocking acquire dropped every frame in those windows —
-            # masked_depth stalled to ~2 Hz during planning from a 5 Hz input.
-            # Waiting is safe (see the class docstring): the lock holders only
-            # do GPU work and never wait on this callback, so the wait is
-            # finite. tf2's single-camera frame resolution is unchanged.
-            gpu_lock.acquire()
-        try:
-            depth = torch.from_numpy(depth).to(
+        gpu = getattr(self.node, 'gpu', None)
+        if gpu is None:
+            gpu_lock = getattr(self.node, 'gpu_lock', None)
+            if gpu_lock is not None:
+                # Blocking (vs a non-blocking drop): during planning/servoing the
+                # planner repeatedly holds gpu_lock for the ESDF refresh, and a
+                # non-blocking acquire dropped every frame in those windows —
+                # masked_depth stalled to ~2 Hz during planning from a 5 Hz input.
+                # Waiting is safe (see the class docstring): the lock holders only
+                # do GPU work and never wait on this callback, so the wait is
+                # finite. tf2's single-camera frame resolution is unchanged.
+                gpu_lock.acquire()
+            try:
+                depth = torch.from_numpy(depth).to(
+                    dtype=self._ops_dtype, device=self._device)
+                q = torch.tensor(joint_pose, dtype=self._ops_dtype, device=self._device)
+                masked = self._mask_depth_image(depth, q, msg.header.stamp)
+                self.publisher.publish(
+                    self.depth_tensor_to_image_msg(masked, msg.header.stamp))
+            except Exception as e:
+                self.node.get_logger().debug(
+                    f'robot_segmentation frame dropped ({e})',
+                    throttle_duration_sec=2.0)
+            finally:
+                if gpu_lock is not None:
+                    gpu_lock.release()
+            return
+        # Scheduler present: the GPU block runs on the dedicated 'seg' lane
+        # (sole owner of the segmentation FK state); the ROS publish stays on
+        # this callback thread. The job returns a CPU Image message.
+        stamp = msg.header.stamp
+
+        def _seg_job():
+            depth_t = torch.from_numpy(depth).to(
                 dtype=self._ops_dtype, device=self._device)
             q = torch.tensor(joint_pose, dtype=self._ops_dtype, device=self._device)
-            masked = self._mask_depth_image(depth, q, msg.header.stamp)
-            self.publisher.publish(
-                self.depth_tensor_to_image_msg(masked, msg.header.stamp))
+            masked = self._mask_depth_image(depth_t, q, stamp)
+            return self.depth_tensor_to_image_msg(masked, stamp)
+
+        try:
+            img_msg = gpu.lane("seg").call(_seg_job)
         except Exception as e:
             self.node.get_logger().debug(
                 f'robot_segmentation frame dropped ({e})',
                 throttle_duration_sec=2.0)
-        finally:
-            if gpu_lock is not None:
-                gpu_lock.release()
+            return
+        self.publisher.publish(img_msg)
 
     def _joint_pose_at(self, stamp):
         """Joint position at the depth frame's capture time, or the live pose.

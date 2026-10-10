@@ -386,7 +386,15 @@ class RobotModelManager:
         request: SetLinkCollision.Request,
         response: SetLinkCollision.Response,
     ) -> SetLinkCollision.Response:
-        applied, unknown = self.set_link_collision(list(request.link_names), request.enabled)
+        # Mutates kinematics tensors shared by every solver: run under the
+        # exclusive barrier (no-op adapter when the node has no scheduler,
+        # e.g. standalone tests). `node` is self.node (manager attribute).
+        gpu = getattr(self.node, "gpu", None) if self.node else None
+        if gpu is not None:
+            with gpu.exclusive():
+                applied, unknown = self.set_link_collision(list(request.link_names), request.enabled)
+        else:
+            applied, unknown = self.set_link_collision(list(request.link_names), request.enabled)
 
         response.applied_links = applied
         response.unknown_links = unknown

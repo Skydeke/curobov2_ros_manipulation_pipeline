@@ -103,18 +103,10 @@ class ReachabilityServices:
         try:
             gx, gy = self._grid_size(request)
             goals = self._build_goals(request, gx, gy)
-            # Guard the shared IK solver's rebuild/solve with the planner's
-            # gpu_lock so it never races an open-loop plan's CUDA graph
-            # capture (capture is process-global; cf. unified_planner_node).
+            # solve_poses() runs on the shared 'kin' lane (see IKServices._on_lane),
+            # so it never races an open-loop plan's CUDA graph capture.
             # solve_poses() uses the same default seed count as /ik & /ik_batch.
-            gpu_lock = getattr(self._node, "gpu_lock", None)
-            if gpu_lock is not None:
-                with gpu_lock:
-                    ok, positions, flags, joint_names = (
-                        self._ik_services.solve_poses(goals))
-            else:
-                ok, positions, flags, joint_names = (
-                    self._ik_services.solve_poses(goals))
+            ok, positions, flags, joint_names = self._ik_services.solve_poses(goals)
 
             metrics = ReachabilityMetrics()
             metrics.header.stamp = self._node.get_clock().now().to_msg()

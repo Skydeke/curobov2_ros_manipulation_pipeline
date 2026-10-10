@@ -76,6 +76,7 @@ from curobov2_ros.core.ik_services import IKServices
 from curobov2_ros.core.fk_services import FKServices
 from curobov2_ros.core.reachability_services import ReachabilityServices
 from curobov2_ros.core.robot_segmentation import RobotSegmentation
+from curobov2_ros.core.gpu_lanes import GpuScheduler, PRIO_REACTIVE, PRIO_PLAN, PRIO_KIN, PRIO_PERCEPTION, PRIO_BULK
 from curobov2_ros.planners import (
     PlannerFactory,
     PlannerManager,
@@ -233,7 +234,16 @@ class UnifiedPlannerNode(Node):
         # entire plan() call — cuRobo can re-capture GraphExecutors mid-plan
         # (reset_shape from _prepare_goal_buffer), so the old single-shot
         # pending-flag guard was insufficient (exit 1, 2026-09-11).
-        self.gpu_lock = threading.RLock()
+        self.declare_parameter("exit_on_gpu_fault", True)
+        self.declare_parameter("gpu_exclusive_plans", True)   # S4/S7: True = old safe behaviour
+        self.gpu = GpuScheduler(on_poisoned=self._on_gpu_poisoned)
+        # Legacy adapter: `with node.gpu_lock:` == barrier.exclusive(); acquire(blocking=False) works too.
+        self.gpu_lock = self.gpu.legacy_lock()
+        self.lane_reactive = self.gpu.lane("reactive")
+        self.lane_plan = self.gpu.lane("plan")
+        self.lane_kin = self.gpu.lane("kin")
+        self.lane_perception = self.gpu.lane("perception")
+        self.lane_viz = self.gpu.lane("viz")
 
         # Callback groups for the MultiThreadedExecutor (num_threads=8): without
         # these every subscription/timer lands in the default MutuallyExclusive
@@ -614,6 +624,7 @@ class UnifiedPlannerNode(Node):
         # divergence the chain-continuity check exists to catch). See
         # _store_pending_plan / _pending_plan_matches / _prune_plan_cache.
         self._pending_plan = []
+        self._last_pushed_epoch = -1
 
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_motion)
@@ -712,10 +723,6 @@ class UnifiedPlannerNode(Node):
             "Unified planner ready with initial planner: "
             f"{self.planner_manager.get_current_planner().get_planner_name()}"
         )
-        self.get_logger().info(
-            "collision diagnostic v3: world (collision_contacts) + self "
-            "(self_collision_contacts) + cspace (cspace_bound_contacts)"
-        )
 
     # ------------------------------------------------------------------
     # Warmup
@@ -791,6 +798,18 @@ class UnifiedPlannerNode(Node):
     def _warmup_initial_planner(self, planner_type: str):
         self.get_logger().info(f"Warming up {planner_type} planner...")
 
+        # Startup captures CUDA graphs (seed-IK graph in _warmup_classic; the
+        # camera workers are already live and would invalidate an unguarded
+        # capture). Hold the barrier exclusive across the warmup; in-flight
+        # lane jobs drain in milliseconds and nothing else contends yet.
+        with self.gpu_lock:
+            self._warmup_initial_planner_locked(planner_type)
+
+        self.get_logger().info(f"{planner_type} planner ready")
+
+    def _warmup_initial_planner_locked(self, planner_type: str):
+        """Warmup dispatch. Runs with the GPU barrier held (see above)."""
+
         if planner_type in ("mpc", "model_predictive_control"):
             self._warmup_mpc()
         elif planner_type in ("retarget", "motion_retargeting", "teleop"):
@@ -802,8 +821,6 @@ class UnifiedPlannerNode(Node):
             self.get_logger().warn(
                 f"Planner '{planner_type}' not fully wired, falling back to classic warmup"
             )
-
-        self.get_logger().info(f"{planner_type} planner ready")
 
     def _warmup_classic(self):
         """Warm up MotionPlanner for Classic/JointSpace planners."""
@@ -937,18 +954,14 @@ class UnifiedPlannerNode(Node):
         return obstacle_manager.collision_world_scene_from(scene)
 
     def refresh_perception_world(self):
-        """Recompute the perception ESDF and push it to all solvers.
-
-        Called on-demand before each plan (and per step during MPC) so the
-        collision world reflects the latest camera data — no background timer,
-        so no race with CUDA graph capture.
-        """
+        epoch = getattr(self, "perception_epoch", 0)
+        if epoch == self._last_pushed_epoch:
+            return                                  # nothing integrated since the last push
         obs = self.config_wrapper_motion.obstacle_manager
-        # ESDF recompute + world push are GPU ops — hold the lock so they never
-        # overlap a concurrent depth integrate / graph capture.
         with self.gpu_lock:
             if obs.refresh_esdf():
                 self.update_all_solvers_world(obs.get_scene())
+                self._last_pushed_epoch = epoch
 
     def rebuild_solvers_for_cache_change(self):
         """Rebuild all active solvers after a collision-cache change.
@@ -1058,7 +1071,11 @@ class UnifiedPlannerNode(Node):
             response.end_state_collisions = StateCollisions()
             return response
 
-    def _plan_trajectory_goal(self, planner, goal: TrajectoryGoal) -> TrajectoryResult:
+    def _plan_trajectory_goal(self, planner, goal):
+        """Serialise this plan on the 'plan' lane (sole owner of the MotionPlanner + its graphs)."""
+        return self.lane_plan.call(self._plan_trajectory_goal_impl, planner, goal, prio=PRIO_PLAN)
+
+    def _plan_trajectory_goal_impl(self, planner, goal: TrajectoryGoal) -> TrajectoryResult:
         """Plan one TrajectoryGoal and produce its TrajectoryResult.
 
         Shared by the generate_trajectory srv and the trajectory_generation_batch
@@ -1099,10 +1116,10 @@ class UnifiedPlannerNode(Node):
             _t_plan = time.monotonic()
             self.get_logger().info(
                 f"[plan-perf] {planner.get_planner_name()}: "
-                f"setup(start_state+config+gpu_lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
-                f"world refresh {(_t_world - _t_setup) * 1e3:.1f} ms, "
-                f"plan() {(_t_plan - _t_world) * 1e3:.1f} ms, "
-                f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
+                f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
             )
 
             self._fill_result_insight(result_msg, planner, goal, result, start_state)
@@ -1126,7 +1143,11 @@ class UnifiedPlannerNode(Node):
             result_msg.stats = self._build_planning_stats(goal, {}, problems=1)
             return result_msg
 
-    def _plan_trajectory_goal_batch(self, planner, goals) -> list:
+    def _plan_trajectory_goal_batch(self, planner, goals):
+        """Serialise this batch plan on the 'plan' lane (sole owner of the MotionPlanner + its graphs)."""
+        return self.lane_plan.call(self._plan_trajectory_goal_batch_impl, planner, goals, prio=PRIO_PLAN)
+
+    def _plan_trajectory_goal_batch_impl(self, planner, goals) -> list:
         """Plan an array of goals in ONE planner.plan_batch call.
 
         Mirrors _plan_trajectory_goal's ordering (validate → resolve starts →
@@ -1757,6 +1778,17 @@ class UnifiedPlannerNode(Node):
             with self._goal_lock:
                 self._goal_active = False
 
+    def _refresh_and_plan(self, planner, start_state, goal, config):
+        """Runs ON a lane thread."""
+        self.refresh_perception_world()
+        with self._plan_lock():
+            return planner.plan(start_state, goal, config, self.robot_context)
+
+    def _refresh_and_plan_reactive(self, planner, start_state, goal, config):
+        """Runs ON the reactive lane thread."""
+        self.refresh_perception_world()
+        return planner.plan(start_state, goal, config, self.robot_context)
+
     def _execute_goal(self, goal_handle, goal, planner, result_msg):
         _t_total = time.monotonic()
         try:
@@ -1781,7 +1813,9 @@ class UnifiedPlannerNode(Node):
             if planner.is_open_loop():
                 reuse = bool(
                     getattr(goal_handle.request, "allow_cached", True)
-                ) and self._pending_plan_matches(start_state, goal)
+                ) and self.lane_plan.call(
+                    self._pending_plan_matches, start_state, goal, prio=PRIO_PLAN
+                )
                 if reuse:
                     _t_reuse = time.monotonic()
                     self.get_logger().info(
@@ -1824,33 +1858,27 @@ class UnifiedPlannerNode(Node):
                         result_msg.result.message = drift_msg
                         goal_handle.abort()
                         return result_msg
-                    self.refresh_perception_world()
-                    _t_world = time.monotonic()
-                    self.get_logger().info(
-                        f"Planning with {planner.get_planner_name()}"
-                    )
-                    # _plan_lock() holds gpu_lock for the entire plan when CUDA
-                    # graphs are enabled (see _plan_lock docstring, 2026-09-11).
-                    with self._plan_lock():
-                        result = planner.plan(
-                            start_state, goal, config, self.robot_context
-                        )
+                    result = self.lane_plan.call(
+                        self._refresh_and_plan, planner, start_state, goal, config, prio=PRIO_PLAN)
+                    _t_world = _t_setup
                     _t_plan = time.monotonic()
                     self.get_logger().info(
                         f"[plan-perf] {planner.get_planner_name()} (execute path): "
-                        f"setup(start_state+config+gpu_lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
-                        f"world refresh {(_t_world - _t_setup) * 1e3:.1f} ms, "
-                        f"plan() {(_t_plan - _t_world) * 1e3:.1f} ms, "
-                        f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
+                        f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                        f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                        f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                        f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
                     )
                     if not result.success:
-                        self._fill_result_insight(
+                        self.lane_plan.call(
+                            self._fill_result_insight,
                             result_msg.result,
                             planner,
                             goal,
                             result,
                             start_state,
                             fill_arrays=False,
+                            prio=PRIO_PLAN,
                         )
                         self.get_logger().error(
                             f"Planning failed in execute path: {result.message}\n"
@@ -1867,29 +1895,32 @@ class UnifiedPlannerNode(Node):
                 # supersedes its plan-time entry. Either way the arm is no
                 # longer where that plan's start_pose says — keep every
                 # OTHER segment's entry for the rest of the chain.
-                self._drop_pending_plan(start_state, goal, entry=reuse)
+                self.lane_plan.call(
+                    self._drop_pending_plan, start_state, goal, entry=reuse, prio=PRIO_PLAN
+                )
             else:
                 # Reactive: (re)set the goal on the solver before servoing.
-                self.refresh_perception_world()
-                _t_world = time.monotonic()
+                result = self.lane_reactive.call(self._refresh_and_plan_reactive, planner, start_state, goal, config, prio=PRIO_REACTIVE)
+                _t_world = _t_setup
                 self.get_logger().info(f"Planning with {planner.get_planner_name()}")
-                result = planner.plan(start_state, goal, config, self.robot_context)
                 _t_plan = time.monotonic()
                 self.get_logger().info(
                     f"[plan-perf] {planner.get_planner_name()} (execute path): "
-                    f"setup(start_state+config+gpu_lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
-                    f"world refresh {(_t_world - _t_setup) * 1e3:.1f} ms, "
-                    f"plan() {(_t_plan - _t_world) * 1e3:.1f} ms, "
-                    f"TOTAL {(_t_plan - _t_total) * 1e3:.1f} ms"
+                    f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                    f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                    f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                    f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
                 )
                 if not result.success:
-                    self._fill_result_insight(
+                    self.lane_reactive.call(
+                        self._fill_result_insight,
                         result_msg.result,
                         planner,
                         goal,
                         result,
                         start_state,
                         fill_arrays=False,
+                        prio=PRIO_REACTIVE,
                     )
                     self.get_logger().error(
                         f"Planning failed in execute path: {result.message}\n"
@@ -1913,13 +1944,15 @@ class UnifiedPlannerNode(Node):
                 # the chain silently drives on into segments anchored to the
                 # old end state - which is the bug this trajectory reporting
                 # exists to stop.
-                self._fill_result_insight(
+                self.lane_plan.call(
+                    self._fill_result_insight,
                     result_msg.result,
                     planner,
                     goal,
                     result,
                     start_state,
                     fill_arrays=True,
+                    prio=PRIO_PLAN,
                 )
             else:
                 # Reused a matching cached preview: report the planner's own
@@ -1937,8 +1970,9 @@ class UnifiedPlannerNode(Node):
                     message="Execution completed",
                     start_state=start_state,
                 )
-                self._fill_reused_trajectory(
-                    result_msg.result, planner, reuse["trajectory"]
+                self.lane_plan.call(
+                    self._fill_reused_trajectory,
+                    result_msg.result, planner, reuse["trajectory"], prio=PRIO_PLAN,
                 )
 
             self.get_logger().info(f"Executing with {planner.get_planner_name()}")
@@ -2272,24 +2306,14 @@ class UnifiedPlannerNode(Node):
             return pending
 
     def _plan_lock(self):
-        """Hold gpu_lock for the entire open-loop plan when CUDA graphs are on.
+        """Exclusive barrier around a plan only when asked (default) and graphs are on.
 
-        cuRobo's optimizer can reset and re-capture its GraphExecutors mid-plan
-        (e.g. _prepare_goal_buffer → reset_shape → reset_cuda_graph when the
-        goal buffer structure changes). That re-capture is a process-global CUDA
-        op — any concurrent CPU-side CUDA call (viz timer .cpu(), depth
-        integrate) invalidates the stream and crashes the node. The original
-        single-shot pending-flag design only covered the first plan after a
-        graph release; re-captures on subsequent plans raced with the viz timer
-        (cudaErrorStreamCaptureUnsupported → exit 1, 2026-09-11).
-
-        Holding gpu_lock for the full plan() call means the depth callback and
-        viz publishers drop their frames during planning — but the data is
-        already stale (refresh_perception_world ran right before), and plans
-        finish in seconds. Correctness beats throughput.
+        Plans already run inside a lane job (shared). With gpu_exclusive_plans=False a plan
+        only goes exclusive in the places that really capture (see S7).
         """
-        if self.config_wrapper_motion.use_cuda_graph:
-            return self.gpu_lock
+        if self.config_wrapper_motion.use_cuda_graph and \
+                self.get_parameter("gpu_exclusive_plans").get_parameter_value().bool_value:
+            return self.gpu.exclusive()
         return contextlib.nullcontext()
 
     def torch_sync_enabled(self) -> bool:
@@ -2301,6 +2325,16 @@ class UnifiedPlannerNode(Node):
         only when deterministic GPU/CPU ordering is needed (race debugging).
         """
         return bool(self.get_parameter("torch_sync").get_parameter_value().bool_value)
+
+    def _on_gpu_poisoned(self, lane, exc):
+        """A lane hit a fatal CUDA error: the context is unusable. Fail loudly, then exit."""
+        try:
+            self.get_logger().fatal(f"GPU lane '{lane.name}' poisoned: {exc!r}")
+            exit_flag = self.get_parameter("exit_on_gpu_fault").get_parameter_value().bool_value
+        except Exception:
+            exit_flag = True
+        if exit_flag:
+            threading.Timer(0.5, lambda: os._exit(70)).start()
 
     def _safe_reset_graph(self, solver):
         """Release a solver's captured CUDA graph(s); never raise into callers.
@@ -2800,6 +2834,7 @@ def main(args=None):
         context_destroy = getattr(laser_context, "destroy", None)
         if context_destroy is not None:
             context_destroy()
+    node.gpu.shutdown()
     node.destroy_node()
     # rclpy's own SIGINT handler already shuts the context down, so calling
     # shutdown() unconditionally raises "rcl_shutdown already called" and the
