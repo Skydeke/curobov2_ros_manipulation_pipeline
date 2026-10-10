@@ -27,6 +27,7 @@ from curobo.types import Pose as CuroboPose, GoalToolPose, JointState as CuRoboJ
 from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
 
 from curobov2_ros_interfaces.srv import Ik, IkBatch, WarmupIK
+from curobov2_ros.core.gpu_lanes import PRIO_KIN
 
 
 class IKServices:
@@ -126,26 +127,34 @@ class IKServices:
             with gpu_lock:
                 yield
 
+    _LANE_TIMEOUT_S = 120.0
+
+    def _on_lane(self, fn):
+        """Run fn on the node's 'kin' lane (sole owner of IK/FK solver state)."""
+        lane = getattr(self._node, "lane_kin", None)
+        if lane is None:                      # standalone / tests
+            with self._gpu_guard():
+                return fn()
+        return lane.call(fn, timeout=self._LANE_TIMEOUT_S, prio=PRIO_KIN)
+
     def _ik_callback(self, request: Ik.Request, response: Ik.Response):
         if self._ik_solver is None:
             response.success = False
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
-        # See fk_services._fk_callback: a GPU fault must fail this request,
-        # not the node.
-        try:
-            with self._gpu_guard():
-                ok, result = self._solve([request.pose])
-                if not ok:
-                    response.success = False
-                    response.error_msg.data = "IK solve failed"
-                    return response
+        def _job():
+            ok, result = self._solve([request.pose])
+            if not ok:
+                return None
+            js = JointState()
+            js.position = result.solution.cpu().numpy()[0][0].tolist()
+            valid = std_msgs.msg.Bool()
+            valid.data = bool(result.success.cpu().numpy()[0][0])
+            return js, valid
 
-                js = JointState()
-                js.position = result.solution.cpu().numpy()[0][0].tolist()
-                valid = std_msgs.msg.Bool()
-                valid.data = bool(result.success.cpu().numpy()[0][0])
+        try:
+            out = self._on_lane(_job)
         except Exception as exc:
             self._node.get_logger().warn(
                 f"IK failed, returning failure (GPU fault?): {exc}",
@@ -153,8 +162,11 @@ class IKServices:
             response.success = False
             response.error_msg.data = f"IK failed: {exc}"
             return response
-        response.joint_states = js
-        response.joint_states_valid = valid
+        if out is None:
+            response.success = False
+            response.error_msg.data = "IK solve failed"
+            return response
+        response.joint_states, response.joint_states_valid = out
         response.success = True
         return response
 
@@ -164,23 +176,25 @@ class IKServices:
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
-        # See _ik_callback: a GPU fault must fail this request, not the node.
-        try:
-            with self._gpu_guard():
-                ok, result = self._solve(request.poses)
-                if not ok:
-                    response.success = False
-                    response.error_msg.data = "IK batch solve failed"
-                    return response
+        poses = list(request.poses)
 
-                for i, j in enumerate(result.solution.cpu().numpy()):
-                    js = JointState()
-                    js.position = j[0].tolist()
-                    valid = std_msgs.msg.Bool()
-                    valid.data = bool(result.success.cpu().numpy()[i][0])
-                    response.joint_states.append(js)
-                    response.joint_states_valid.append(valid)
-                response.success = True
+        def _job():
+            ok, result = self._solve(poses)
+            if not ok:
+                return None
+            sol = result.solution.cpu().numpy()
+            suc = result.success.cpu().numpy()
+            out = []
+            for i in range(len(poses)):            # padded rows (if any) are ignored
+                js = JointState()
+                js.position = sol[i][0].tolist()
+                valid = std_msgs.msg.Bool()
+                valid.data = bool(suc[i][0])
+                out.append((js, valid))
+            return out
+
+        try:
+            out = self._on_lane(_job)
         except Exception as exc:
             self._node.get_logger().warn(
                 f"IK batch failed, returning failure (GPU fault?): {exc}",
@@ -188,6 +202,14 @@ class IKServices:
             response.success = False
             response.error_msg.data = f"IK batch failed: {exc}"
             return response
+        if out is None:
+            response.success = False
+            response.error_msg.data = "IK batch solve failed"
+            return response
+        for js, valid in out:
+            response.joint_states.append(js)
+            response.joint_states_valid.append(valid)
+        response.success = True
         return response
 
     # ------------------------------------------------------------------
@@ -390,16 +412,14 @@ class IKServices:
         if n == 0:
             return False, None, [], []
 
-        # ReachabilityServices already holds gpu_lock when it calls us; the
-        # guard is reentrant (RLock) so the solve + extraction stay covered
-        # either way — the .cpu().numpy() host syncs must not race a capture.
-        with self._gpu_guard():
+        def _job():
             ok, result = self._solve(list(poses), num_seeds=num_seeds)
             if not ok:
                 return False, None, [False] * n, []
+            sol = result.solution.detach().cpu().numpy()
+            suc = result.success.detach().cpu().numpy()
+            return (True, [sol[i][0].tolist() for i in range(n)],
+                    [bool(suc[i][0]) for i in range(n)],
+                    list(self._ik_solver.kinematics.joint_names))
 
-            sol = result.solution.detach().cpu().numpy()  # [B, seeds, D]
-            suc = result.success.detach().cpu().numpy()   # [B, seeds]
-            positions = [sol[i][0].tolist() for i in range(n)]
-            flags = [bool(suc[i][0]) for i in range(n)]
-            return True, positions, flags, list(self._ik_solver.kinematics.joint_names)
+        return self._on_lane(_job)

@@ -13,6 +13,7 @@ from collections import deque
 
 import torch
 import numpy as np
+from curobov2_ros.core.gpu_lanes import PRIO_PERCEPTION
 
 
 class DepthMapCameraStrategy(CameraStrategy):
@@ -230,15 +231,26 @@ class DepthMapCameraStrategy(CameraStrategy):
                     throttle_duration_sec=5.0)
                 continue
             gpu_lock = getattr(self.node, 'gpu_lock', None)
-            if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-                continue  # capture in progress — drop this frame
+            lane = getattr(self.node, 'lane_perception', None)
+            if lane is None:
+                if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+                    continue  # capture in progress — drop this frame
+                try:
+                    self._integrate_once(depth_img_float, pose_list, mapper)
+                except Exception as e:
+                    self.node.get_logger().error(f"Depth integrate failed: {e}")
+                finally:
+                    if gpu_lock is not None:
+                        gpu_lock.release()
+                continue
+            fut = lane.submit_if_idle(self._integrate_once, depth_img_float, pose_list, mapper,
+                                      prio=PRIO_PERCEPTION)
+            if fut is None:
+                continue                       # lane busy -> drop this frame (same semantics as before)
             try:
-                self._integrate_once(depth_img_float, pose_list, mapper)
+                fut.result(timeout=5.0)
             except Exception as e:
                 self.node.get_logger().error(f"Depth integrate failed: {e}")
-            finally:
-                if gpu_lock is not None:
-                    gpu_lock.release()
 
     def _integrate_once(self, depth_img_float, pose_list, mapper):
         """Move the frame to cuda and push it into the Mapper TSDF (under gpu_lock)."""
@@ -269,6 +281,7 @@ class DepthMapCameraStrategy(CameraStrategy):
         if self.node.torch_sync_enabled():
             torch.cuda.synchronize()
         self.depth_map = depth_tensor
+        self.node.perception_epoch = getattr(self.node, "perception_epoch", 0) + 1
 
     def destroy(self):
         """Stop the integration worker (daemon; safe to call once)."""

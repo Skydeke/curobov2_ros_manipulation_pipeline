@@ -666,10 +666,10 @@ class SinglePlanner(TrajectoryPlanner):
             )
             _t_final_end = time.monotonic()
             self.node.get_logger().info(
-                f"{self.get_planner_name()} timing: "
-                f"solve {(_t_solve_end - _t_plan_start) * 1e3:.1f} ms, "
-                f"finalize {(_t_final_end - _t_solve_end) * 1e3:.1f} ms, "
-                f"total {(_t_final_end - _t_plan_start) * 1e3:.1f} ms"
+                f"{self.get_planner_name()} planner-phases: "
+                f"curobo_solve {(_t_solve_end - _t_plan_start) * 1e3:.1f} ms, "
+                f"finalize(insight+preview+debug_image) {(_t_final_end - _t_solve_end) * 1e3:.1f} ms, "
+                f"planner_total {(_t_final_end - _t_plan_start) * 1e3:.1f} ms"
             )
             return planner_result
 

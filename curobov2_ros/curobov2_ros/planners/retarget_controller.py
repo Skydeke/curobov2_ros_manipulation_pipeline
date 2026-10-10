@@ -92,6 +92,10 @@ class RetargetController(ReactiveController):
         # reset() clears the warm-start so the first solve_frame uses global IK.
         self.solver.reset()
         self.goal = self._set_target(raw)
+        # reset() also means the first solve_frame in step() will CAPTURE its
+        # graph. Flag it pending so _step_guard runs that one step exclusive
+        # (capture is process-global); later replays stay shared.
+        self.node._set_graph_capture_pending()
         return True
 
     def step(self, current_state: JointState) -> JointState:

@@ -231,16 +231,29 @@ class LaserContext:
         if mapper is None:
             return
 
-        gpu_lock = getattr(self.node, 'gpu_lock', None)
-        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-            return  # CUDA graph capture in progress — drop this batch
+        lane = getattr(self.node, 'lane_perception', None)
+        if lane is None:
+            gpu_lock = getattr(self.node, 'gpu_lock', None)
+            if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+                return  # CUDA graph capture in progress — drop this batch
 
+            try:
+                self._build_and_integrate(laser_names, frames, mapper)
+                self._last_integrated_versions = dict(versions)
+            finally:
+                if gpu_lock is not None:
+                    gpu_lock.release()
+            return
+        fut = lane.submit_if_idle(
+            self._build_and_integrate, laser_names, frames, mapper)
+        if fut is None:
+            return  # lane busy — drop this batch (same semantics as before)
         try:
-            self._build_and_integrate(laser_names, frames, mapper)
-            self._last_integrated_versions = dict(versions)
-        finally:
-            if gpu_lock is not None:
-                gpu_lock.release()
+            fut.result(timeout=5.0)
+        except Exception as e:
+            self.node.get_logger().error(f'Laser batch integrate failed: {e}')
+            return
+        self._last_integrated_versions = dict(versions)
 
     def _build_and_integrate(self, laser_names: list, frames: dict, mapper):
         """Stack the per-laser frames into a batched ``LidarObservation`` and

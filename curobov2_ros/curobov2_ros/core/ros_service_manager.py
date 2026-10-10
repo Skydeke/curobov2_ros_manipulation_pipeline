@@ -308,18 +308,33 @@ class RosServiceManager:
         graph it holds gpu_lock; skip this publish cycle rather than race it. Never
         blocks the planner (non-blocking acquire) and costs nothing when idle.
         """
-        gpu_lock = getattr(node, 'gpu_lock', None)
-        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-            node.get_logger().warn(
-                "gpu_lock busy (CUDA graph capture in progress) - skipping this "
-                "voxel grid publish cycle",
+        lane = getattr(node, 'lane_viz', None)
+        if lane is None:
+            gpu_lock = getattr(node, 'gpu_lock', None)
+            if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
+                node.get_logger().warn(
+                    "gpu_lock busy (CUDA graph capture in progress) - skipping this "
+                    "voxel grid publish cycle",
+                    throttle_duration_sec=5.0)
+                return  # planner is capturing a CUDA graph — skip this cycle
+            try:
+                self.obstacle_manager.publish_sparse_voxel_grid(node, self.sparse_voxel_pub)
+            finally:
+                if gpu_lock is not None:
+                    gpu_lock.release()
+            return
+        fut = lane.submit_if_idle(
+            self.obstacle_manager.publish_sparse_voxel_grid, node, self.sparse_voxel_pub)
+        if fut is None:
+            node.get_logger().debug(
+                "viz lane busy - skipping this voxel grid publish cycle",
                 throttle_duration_sec=5.0)
-            return  # planner is capturing a CUDA graph — skip this cycle
+            return  # lane busy — skip this cycle (same semantics as before)
         try:
-            self.obstacle_manager.publish_sparse_voxel_grid(node, self.sparse_voxel_pub)
-        finally:
-            if gpu_lock is not None:
-                gpu_lock.release()
+            fut.result(timeout=2.0)
+        except Exception as e:
+            node.get_logger().debug(
+                f"voxel grid publish failed: {e}", throttle_duration_sec=5.0)
 
     def publish_scene_obstacles(self, node):
         """Publish scene obstacles as a MarkerArray, recolouring the currently
@@ -702,92 +717,94 @@ class RosServiceManager:
         if not self.collision_spheres_enabled:
             return
 
-        # This timer does REAL GPU work (torch.tensor host->device copies in
-        # get_collision_spheres*, cuda core kinematics, blocking .cpu() reads,
-        # and the sphere collision queries) and must never overlap a CUDA graph
-        # capture. A capture is a process-global CUDA state: any other thread
-        # issuing host<->device copies or kernels while the solver re-captures
-        # its graphs (the rebuild holds gpu_lock) performs capture-illegal ops
-        # (cudaErrorStreamCaptureUnsupported) that invalidate the in-flight
-        # capture — the node then crashes at the next solver launch with a
-        # misleading CUDA_ERROR_STREAM_CAPTURE_INVALIDATED. Skip this publish
-        # cycle when the lock is busy, mirroring _publish_sparse_voxel_grid.
-        # RLock: the nested _spheres_in_collision guard below re-acquires on
-        # this same thread.
-        gpu_lock = getattr(node, 'gpu_lock', None)
-        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-            self.node.get_logger().debug(
-                "gpu_lock busy (CUDA graph capture) - skipping sphere publish cycle",
-                throttle_duration_sec=5.0)
+        lane = getattr(node, 'lane_viz', None)
+        if lane is None:
+            self._publish_collision_spheres_job(node)
             return
-
+        fut = lane.submit_if_idle(self._publish_collision_spheres_job, node)
+        if fut is None:
+            self.node.get_logger().debug(
+                "viz lane busy - skipping sphere publish cycle",
+                throttle_duration_sec=5.0)
+            return  # lane busy — skip this cycle (same semantics as before)
         try:
-            # Source spheres from the MotionPlanner's kinematics when available — it
-            # carries attaches (our robot_model_manager kin_model does not), so the
-            # fitted attached-object spheres show and ride the arm. attached_mask
-            # flags them for a distinct colour. Fall back to robot_model_manager.
-            kin = self._attachment_kinematics()
-            if kin is not None:
-                try:
-                    robot_spheres, attached_mask = \
-                        self.robot_model_manager.get_collision_spheres_with_attached(kin)
-                except Exception as e:
-                    self.node.get_logger().debug(
-                        f"attached-sphere viz fallback: {e}", throttle_duration_sec=5.0)
-                    robot_spheres = self.robot_model_manager.get_collision_spheres()
-                    attached_mask = [False] * len(robot_spheres)
-            else:
+            fut.result(timeout=2.0)
+        except Exception as e:
+            self.node.get_logger().debug(
+                f"sphere publish failed: {e}", throttle_duration_sec=5.0)
+
+    def _publish_collision_spheres_job(self, node):
+        """Body of publish_collision_spheres. Runs ON the viz lane thread.
+
+        This timer does REAL GPU work (torch.tensor host->device copies in
+        get_collision_spheres*, cuda core kinematics, blocking .cpu() reads,
+        and the sphere collision queries) and must never overlap a CUDA graph
+        capture. Running on the viz lane (shared barrier side) provides that;
+        skip-via-submit_if_idle in the caller provides the drop-if-busy.
+        """
+        # Source spheres from the MotionPlanner's kinematics when available — it
+        # carries attaches (our robot_model_manager kin_model does not), so the
+        # fitted attached-object spheres show and ride the arm. attached_mask
+        # flags them for a distinct colour. Fall back to robot_model_manager.
+        kin = self._attachment_kinematics()
+        if kin is not None:
+            try:
+                robot_spheres, attached_mask = \
+                    self.robot_model_manager.get_collision_spheres_with_attached(kin)
+            except Exception as e:
+                self.node.get_logger().debug(
+                    f"attached-sphere viz fallback: {e}", throttle_duration_sec=5.0)
                 robot_spheres = self.robot_model_manager.get_collision_spheres()
                 attached_mask = [False] * len(robot_spheres)
+        else:
+            robot_spheres = self.robot_model_manager.get_collision_spheres()
+            attached_mask = [False] * len(robot_spheres)
 
-            # Determine per-sphere collision status so colliding spheres can be
-            # coloured red. Purely a visualization nicety — any failure falls back
-            # to "all green".
-            colliding = self._spheres_in_collision(node, kin)
-            red_indices = {r['index'] for r in colliding or []}
+        # Determine per-sphere collision status so colliding spheres can be
+        # coloured red. Purely a visualization nicety — any failure falls back
+        # to "all green".
+        colliding = self._query_spheres_in_collision(node, kin)
+        red_indices = {r['index'] for r in colliding or []}
 
-            # Prepend a DELETEALL so markers that are no longer re-published (e.g.
-            # an attached object's spheres after detach) do not linger. It must
-            # carry an EMPTY namespace: rviz's DELETEALL is namespace-scoped
-            # (ros2/rviz#685), so a namespaced DELETEALL would only clear markers
-            # in that namespace. The sphere markers all live under
-            # ns='collision_spheres', so an unset-ns DELETEALL cannot collide with
-            # any of them.
-            marker_array = MarkerArray()
-            clear = Marker()
-            clear.action = Marker.DELETEALL
-            marker_array.markers.append(clear)
+        # Prepend a DELETEALL so markers that are no longer re-published (e.g.
+        # an attached object's spheres after detach) do not linger. It must
+        # carry an EMPTY namespace: rviz's DELETEALL is namespace-scoped
+        # (ros2/rviz#685), so a namespaced DELETEALL would only clear markers
+        # in that namespace. The sphere markers all live under
+        # ns='collision_spheres', so an unset-ns DELETEALL cannot collide with
+        # any of them.
+        marker_array = MarkerArray()
+        clear = Marker()
+        clear.action = Marker.DELETEALL
+        marker_array.markers.append(clear)
 
-            for i, sphere in enumerate(robot_spheres):
-                if sphere[3] <= 0:  # skip disabled spheres (radius = -100)
-                    continue
-                marker = Marker()
-                marker.ns = 'collision_spheres'
-                marker.header.frame_id = self.config_manager.base_link
-                marker.type = Marker.SPHERE
-                marker.action = Marker.ADD
-                marker.id = i
-                marker.pose.position.x = sphere[0]
-                marker.pose.position.y = sphere[1]
-                marker.pose.position.z = sphere[2]
-                marker.scale.x = sphere[3] * 2  # Diameter
-                marker.scale.y = sphere[3] * 2
-                marker.scale.z = sphere[3] * 2
-                marker.color.a = 0.5  # Transparency
-                is_colliding = colliding is not None and i in red_indices
-                if is_colliding:
-                    marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0  # colliding = red
-                elif attached_mask[i]:  # attached object, not colliding = blue
-                    marker.color.r, marker.color.g, marker.color.b = 0.0, 0.0, 1.0
-                else:
-                    marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0  # collision-free = green
-                marker_array.markers.append(marker)
+        for i, sphere in enumerate(robot_spheres):
+            if sphere[3] <= 0:  # skip disabled spheres (radius = -100)
+                continue
+            marker = Marker()
+            marker.ns = 'collision_spheres'
+            marker.header.frame_id = self.config_manager.base_link
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.id = i
+            marker.pose.position.x = sphere[0]
+            marker.pose.position.y = sphere[1]
+            marker.pose.position.z = sphere[2]
+            marker.scale.x = sphere[3] * 2  # Diameter
+            marker.scale.y = sphere[3] * 2
+            marker.scale.z = sphere[3] * 2
+            marker.color.a = 0.5  # Transparency
+            is_colliding = colliding is not None and i in red_indices
+            if is_colliding:
+                marker.color.r, marker.color.g, marker.color.b = 1.0, 0.0, 0.0  # colliding = red
+            elif attached_mask[i]:  # attached object, not colliding = blue
+                marker.color.r, marker.color.g, marker.color.b = 0.0, 0.0, 1.0
+            else:
+                marker.color.r, marker.color.g, marker.color.b = 0.0, 1.0, 0.0  # collision-free = green
+            marker_array.markers.append(marker)
 
-            # Publish marker array
-            self.publish_collision_spheres_pub.publish(marker_array)
-        finally:
-            if gpu_lock is not None:
-                gpu_lock.release()
+        # Publish marker array
+        self.publish_collision_spheres_pub.publish(marker_array)
 
     def _spheres_in_collision(self, node, kin):
         """
@@ -808,56 +825,62 @@ class RosServiceManager:
         Returns the list of attribution dicts (see
         collision_distance._attributed_collisions) or None if the solver /
         collision checker isn't ready (callers then fall back to "all green").
-        Runs under the node's gpu_lock so the RViz timer thread can't race a
+        Runs on the viz lane so the RViz timer thread can't race a
         CUDA-graph capture on the GPU.
         """
+        lane = getattr(node, 'lane_viz', None)
+        if lane is None:
+            return self._query_spheres_in_collision(node, kin)
+        fut = lane.submit_if_idle(self._query_spheres_in_collision, node, kin)
+        if fut is None:
+            self.node.get_logger().debug(
+                "viz lane busy - skipping sphere collision colouring",
+                throttle_duration_sec=5.0)
+            return None
+        try:
+            return fut.result(timeout=2.0)
+        except Exception as e:
+            self.node.get_logger().debug(
+                f"sphere collision colouring failed: {e}",
+                throttle_duration_sec=5.0)
+            return None
+
+    def _query_spheres_in_collision(self, node, kin):
+        """Body of _spheres_in_collision. Runs ON the viz lane thread."""
         wrapper = getattr(self, 'config_wrapper', None)
         if wrapper is None:
             return None
 
-        # Reuse the non-blocking gpu_lock guard used elsewhere: the collision
-        # checker atoms otherwise collide with the CUDA-graph capture.
-        gpu_lock = getattr(node, 'gpu_lock', None)
-        if gpu_lock is not None and not gpu_lock.acquire(blocking=False):
-            self.node.get_logger().debug(
-                "gpu_lock busy (CUDA graph capture) - skipping sphere "
-                "collision colouring", throttle_duration_sec=5.0)
-            return None
-
-        try:
-            reports = _attributed_collisions(wrapper, node, kin=kin)
-            if not reports:
-                self._collision_red_key = None
-                return reports
-            # Dedupe log spam: log a full attribution only when the SET of
-            # (sphere, link, obstacles) actually changes; while it persists,
-            # fall back to a throttled one-liner.
-            red_key = tuple(sorted(
-                (r['index'], r['link'], tuple(r['obstacles']), r['clobber_note'])
-                for r in reports))
-            if red_key != getattr(self, '_collision_red_key', None):
-                act_mm = reports[0].get('activation')
-                act_mm = act_mm * 1000.0 if act_mm is not None else None
-                for r in sorted(reports, key=lambda r: -r['depth']):
-                    what = ", ".join(r['obstacles']) if r['obstacles'] \
-                        else r['clobber_note']
-                    margin_txt = (f" within {act_mm:.1f} mm margin"
-                                  if act_mm is not None else "")
-                    self.node.get_logger().warn(
-                        f"collision_spheres: sphere#{r['index']} on link "
-                        f"{r['link']} (r={r['radius'] * 1000:.1f} mm at "
-                        f"{', '.join(f'{v:.3f}' for v in r['position'])})"
-                        f"{margin_txt} of {what} (overlap "
-                        f"{r['depth'] * 1000:.1f} mm)")
-                self._collision_red_key = red_key
-            else:
-                self.node.get_logger().debug(
-                    f"collision_spheres: {len(reports)} sphere(s) still in "
-                    "collision (unchanged)", throttle_duration_sec=5.0)
+        reports = _attributed_collisions(wrapper, node, kin=kin)
+        if not reports:
+            self._collision_red_key = None
             return reports
-        finally:
-            if gpu_lock is not None:
-                gpu_lock.release()
+        # Dedupe log spam: log a full attribution only when the SET of
+        # (sphere, link, obstacles) actually changes; while it persists,
+        # fall back to a throttled one-liner.
+        red_key = tuple(sorted(
+            (r['index'], r['link'], tuple(r['obstacles']), r['clobber_note'])
+            for r in reports))
+        if red_key != getattr(self, '_collision_red_key', None):
+            act_mm = reports[0].get('activation')
+            act_mm = act_mm * 1000.0 if act_mm is not None else None
+            for r in sorted(reports, key=lambda r: -r['depth']):
+                what = ", ".join(r['obstacles']) if r['obstacles'] \
+                    else r['clobber_note']
+                margin_txt = (f" within {act_mm:.1f} mm margin"
+                              if act_mm is not None else "")
+                self.node.get_logger().warn(
+                    f"collision_spheres: sphere#{r['index']} on link "
+                    f"{r['link']} (r={r['radius'] * 1000:.1f} mm at "
+                    f"{', '.join(f'{v:.3f}' for v in r['position'])})"
+                    f"{margin_txt} of {what} (overlap "
+                    f"{r['depth'] * 1000:.1f} mm)")
+            self._collision_red_key = red_key
+        else:
+            self.node.get_logger().debug(
+                f"collision_spheres: {len(reports)} sphere(s) still in "
+                "collision (unchanged)", throttle_duration_sec=5.0)
+        return reports
 
     def _attachment_kinematics(self):
         """The MotionPlanner's kinematics (carries attached-object spheres), or

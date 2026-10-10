@@ -387,7 +387,16 @@ class AttachmentServices:
         """Attach a scene obstacle to the arm at its current joint configuration."""
         try:
             if self.motion_planner is None:
-                self.node._warmup_classic()
+                # _warmup_classic captures the seed-IK CUDA graph: capture is
+                # process-global, so it must run exclusive (other lanes drain,
+                # then pause) — same invariant as _setup_planner. Fall back to
+                # a bare call when there is no scheduler (standalone/tests).
+                gpu = getattr(self.node, "gpu", None)
+                if gpu is not None:
+                    with gpu.exclusive():
+                        self.node._warmup_classic()
+                else:
+                    self.node._warmup_classic()
             _, current_state = self.node._resolve_start_state(None)
             self.attach(request.object_name, current_state)
             response.success = True
