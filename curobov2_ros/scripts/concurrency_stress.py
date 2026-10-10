@@ -10,7 +10,7 @@ Usage (node already running, joint states publishing):
 Exit code 0 = node survived and error rate below --max-error-rate; 1 otherwise.
 Prints per-kind count / ok / p50 / p95 / max latency (ms).
 """
-import argparse, random, statistics, sys, threading, time
+import argparse, os, random, statistics, sys, threading, time
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -19,7 +19,10 @@ from sensor_msgs.msg import JointState
 from curobov2_ros_interfaces.srv import FkBatch, IkBatch, TrajectoryGeneration
 from curobov2_ros_interfaces.msg import Goalset, TrajectoryGoal
 
-NODE = "unified_planner"
+# Server node name differs per stack (curobo_server on the kortex stack,
+# unified_planner on the benchmark stack). Override without editing:
+# CUROBO_SERVER_NODE=curobo_server python3 concurrency_stress.py ...
+NODE = os.environ.get("CUROBO_SERVER_NODE", "unified_planner")
 
 
 class Stress(Node):
@@ -93,12 +96,14 @@ class Stress(Node):
             self._rec("ik", bool(resp and resp.success), t0)
 
     def w_plan(self):
-        names = [n for n in self.js.name][: self.a.arm_dof]
         while not self.stop.is_set():
             start = JointState(); start.name = list(self.js.name); start.position = list(self.js.position)
             g = Goalset()
+            # NOTE: Goalset has no target_joint_names field (verified via
+            # `ros2 interface show`); positions are resolved in the robot's
+            # active-DOF order, first arm_dof joints of /joint_states.
             tgt = [p + random.uniform(-0.4, 0.4) for p in self.js.position[: self.a.arm_dof]]
-            g.target_joint_positions = tgt; g.target_joint_names = names
+            g.target_joint_positions = tgt
             tg = TrajectoryGoal(); tg.start_pose = start; tg.goalsets = [g]
             r = TrajectoryGeneration.Request(); r.request = tg
             t0 = time.monotonic(); resp = self._call(self.tg, r, 60)
