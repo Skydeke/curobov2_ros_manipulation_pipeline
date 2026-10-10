@@ -63,7 +63,9 @@ class ObstacleManager:
         self.mapper = None
         self._esdf_voxel_name = None
 
-        # GPU voxel query buffers (pre-allocated, rebuilt only when grid changes).
+        # GPU voxel query buffers (pre-allocated, rebuilt when the grid changes
+        # or the scene outgrows the built obstacle capacity — like the native
+        # benchmark, which sizes its collision world per scene).
         # Avoids per-call CPU trimesh; uses the scene's own collision checker.
         self._voxel_sc = None           # SceneCollision
         self._voxel_spheres = None      # Tensor [1,1,N,4] on GPU
@@ -71,6 +73,7 @@ class ObstacleManager:
         self._voxel_weight = None       # Tensor [1]
         self._voxel_act = None          # Tensor [1]
         self._voxel_grid_key = None     # (grid_min tuple, voxel_size, size tuple)
+        self._voxel_sc_caps = (0, 0)    # (cuboids, meshes) the SceneCollision was built for
 
         # Observer callbacks (registered by ConfigWrapper). They decouple scene
         # mutations from solver propagation so that ANY caller — ROS service or
@@ -1356,10 +1359,30 @@ class ObstacleManager:
         device = f'cuda:{torch.cuda.current_device()}' if torch.cuda.is_available() else 'cpu'
         dtype = torch.float32
         primitives_scene = self.primitives_only_scene()
+        # Snapshot the buckets by value: with no attached objects,
+        # primitives_only_scene() shares the LIVE scene lists by reference,
+        # and the benchmark/service world-sets mutate those lists (clear +
+        # append) on another thread. Build-cap then load-model below must see
+        # ONE immutable scene, or a world swap in between fails with
+        # "cache is full (N)" (native builds an immutable world per scene).
+        # Copying ≤ dozens of object refs is microseconds.
+        for _bucket in ('cuboid', 'sphere', 'capsule', 'cylinder', 'mesh'):
+            _live = getattr(primitives_scene, _bucket, None)
+            if _live is not None:
+                setattr(primitives_scene, _bucket, list(_live))
 
         # Build grid centers [N, 3] — same layout as get_voxel_grid
         grid_key = (tuple(grid_min.tolist()), float(voxel_size), tuple(size.tolist()))
-        if self._voxel_grid_key != grid_key:
+        # Like the native benchmark (fresh collision world per scene), the
+        # checker must fit the CURRENT scene: SceneCollision sizes its cuboid
+        # cache from the scene it is built with, so a later scene with more
+        # obstacles would fail with "cache is full". Rebuild on growth
+        # (shrinkage needs nothing — fewer obstacles always fit).
+        n_cub = len(getattr(primitives_scene, "cuboid", None) or [])
+        n_mesh = len(getattr(primitives_scene, "mesh", None) or [])
+        cap_cub, cap_mesh = self._voxel_sc_caps
+        if (self._voxel_sc is None or self._voxel_grid_key != grid_key
+                or n_cub > cap_cub or n_mesh > cap_mesh):
             ax = np.arange(size[0]); ay = np.arange(size[1]); az = np.arange(size[2])
             gx, gy, gz = np.meshgrid(ax, ay, az, indexing='ij')
             idx = np.stack([gx.ravel(), gy.ravel(), gz.ravel()], axis=1)
@@ -1383,6 +1406,7 @@ class ObstacleManager:
             self._voxel_weight = torch.ones(1, device=device, dtype=dtype)
             self._voxel_act = torch.zeros(1, device=device, dtype=dtype)
             self._voxel_grid_key = grid_key
+            self._voxel_sc_caps = (n_cub, n_mesh)
 
         # Sync current scene obstacles into the checker (cheap — no GPU realloc).
         self._voxel_sc.load_collision_model(primitives_scene)
