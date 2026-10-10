@@ -539,6 +539,44 @@ class SinglePlanner(TrajectoryPlanner):
             )
         return rows
 
+    @staticmethod
+    def _knot_motion_time(result, interp_steps) -> float:
+        """Motion duration the way the native leg reports it.
+
+        Native measures the KNOT solution (``js_solution.dt *
+        (H_knots - offset)``, ``offset = 2 * interpolation_steps`` for
+        bspline, else 1) — not the interpolated waypoints, whose
+        ``(n - 1) * dt`` counts boundary knots. Same object, same fields,
+        same formula, so equal solves report equal times. NaN when
+        unavailable (runner omits the row rather than printing wrong).
+        """
+        try:
+            from curobo._src.types.control_space import ControlSpace
+            js = getattr(result, "js_solution", None)
+            if js is None:
+                return float("nan")
+            h = int(js.position.shape[-2])
+            dt = getattr(js, "dt", None)
+            if dt is None:
+                return float("nan")
+            if hasattr(dt, "detach"):
+                dt = dt.detach()
+            if hasattr(dt, "flatten"):
+                flat = dt.flatten()
+                dt = flat[0] if len(flat) else None
+            if hasattr(dt, "item"):
+                dt = dt.item()
+            dt = float(dt)
+            if getattr(js, "control_space", None) in ControlSpace.bspline_types():
+                if interp_steps is None or int(interp_steps) <= 0:
+                    return float("nan")
+                offset = 2 * int(interp_steps)
+            else:
+                offset = 1
+            return max(0.0, dt * (h - offset))
+        except Exception:
+            return float("nan")
+
     def _result_metadata(self, result=None, num_wp=None) -> dict:
         """Metadata block for PlannerResult; includes per-segment insight.
 
@@ -665,11 +703,20 @@ class SinglePlanner(TrajectoryPlanner):
                 result, goal_request, config, robot_context
             )
             _t_final_end = time.monotonic()
+            # cuRobo's self-reported solve time (same clock native reports as
+            # "Solve Time"): curobo_solve above wraps goal building, logging
+            # and insight binding around the solver, so solver_total tells how
+            # much of it is the solver itself vs our wrapper.
+            try:
+                _solver_total_ms = float(result.total_time) * 1e3
+            except Exception:
+                _solver_total_ms = float("nan")
             self.node.get_logger().info(
                 f"{self.get_planner_name()} planner-phases: "
                 f"curobo_solve {(_t_solve_end - _t_plan_start) * 1e3:.1f} ms, "
                 f"finalize(insight+preview+debug_image) {(_t_final_end - _t_solve_end) * 1e3:.1f} ms, "
-                f"planner_total {(_t_final_end - _t_plan_start) * 1e3:.1f} ms"
+                f"planner_total {(_t_final_end - _t_plan_start) * 1e3:.1f} ms, "
+                f"solver_total {_solver_total_ms:.1f} ms"
             )
             return planner_result
 
@@ -775,9 +822,17 @@ class SinglePlanner(TrajectoryPlanner):
         # v2: position shape can be [B, T, D] — count waypoints on horizon dim.
         _pos = self.planned_trajectory.position
         num_wp = _pos.shape[-2] if _pos.ndim >= 2 else len(_pos)
+        # Trim diagnosis for motion-time quantization (see benchmark notes):
+        # None = full untrimmed horizon; tensor = trim endpoint in steps.
+        _lt = getattr(result, "interpolated_last_tstep", "n/a")
+        try:
+            _lt_str = "full" if _lt is None or _lt == "n/a" else str(
+                _lt.detach().cpu().tolist() if hasattr(_lt, "detach") else _lt)
+        except Exception:
+            _lt_str = "?"
         self.node.get_logger().info(
             f"{self.get_planner_name()}: Successfully planned trajectory "
-            f"with {num_wp} waypoints"
+            f"with {num_wp} waypoints (last_tstep={_lt_str})"
         )
 
         # Publish the motion-plan debug image (gated by publish_plan_debug_image).
@@ -787,11 +842,21 @@ class SinglePlanner(TrajectoryPlanner):
         if robot_context is not None:
             self._stage_trajectory(self.planned_trajectory, robot_context)
 
+        _meta = self._result_metadata(result=result, num_wp=num_wp)
+        # Native-equivalent motion time from the knot solution (same object
+        # and formula the native leg reports). Missing → NaN → runner omits.
+        try:
+            _mp = getattr(self, "motion_planner", None)
+            _trajopt = getattr(_mp, "trajopt_solver", None)
+            _steps = getattr(_trajopt, "interpolation_steps", None)
+        except Exception:
+            _steps = None
+        _meta["motion_time_s"] = SinglePlanner._knot_motion_time(result, _steps)
         return PlannerResult(
             success=True,
             message="Trajectory planned successfully",
             trajectory=self.planned_trajectory,
-            metadata=self._result_metadata(result=result, num_wp=num_wp),
+            metadata=_meta,
         )
 
     def plan_batch(

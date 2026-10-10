@@ -13,6 +13,7 @@ from visualization_msgs.msg import Marker
 from curobov2_ros_interfaces.msg import MpcCosts
 from curobo.content import get_task_configs_path
 from curobo.types import JointState, GoalToolPose, Pose
+from curobo.scene import Scene
 from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
 from curobo.model_predictive_control import (
     ModelPredictiveControl,
@@ -176,9 +177,10 @@ class MPCController(ReactiveController):
         cold_iters = node.get_parameter('mpc_cold_start_iters').get_parameter_value().integer_value
         solver_type = node.get_parameter('mpc_solver_type').get_parameter_value().string_value
 
-        # Common kwargs for both branches. The REAL production collision scene
-        # (obstacle_manager) must be preserved — do not copy the scene_model=None
-        # from the standalone script.
+        # Common kwargs for both branches. Built against an EMPTY scene, never
+        # the live one: after a cache shrink the live world may not fit the
+        # new cache ("Cannot load N cuboids" killed a benchmark rebuild).
+        # Empty always fits; update_world() pushes the real scene below.
         #
         # Built WITHOUT the perception voxel layer on purpose: handing a live
         # ESDF layer to the constructor makes cuRobo alias the solver's collision
@@ -187,7 +189,7 @@ class MPCController(ReactiveController):
         # instead; update_world fills it by copy. See primitives_only_scene().
         base_kwargs = dict(
             robot=cw.robot_model_manager.robot_cfg,
-            scene_model=cw.obstacle_manager.primitives_only_scene(),
+            scene_model=Scene(),
             optimization_dt=step_dt,
             use_cuda_graph=resolve_use_cuda_graph(node),
             self_collision_check=True,
@@ -227,6 +229,16 @@ class MPCController(ReactiveController):
         solver = ModelPredictiveControl(cfg)
 
         node.mpc = solver
+        # Push the real scene after the empty build (same primitives-only
+        # scene construction used to embed). Best-effort: after a cache
+        # shrink the previous world may not fit — warn and continue empty;
+        # the next world event pushes a fitting world.
+        try:
+            self.update_world(cw.obstacle_manager.primitives_only_scene())
+        except Exception as e:
+            node.get_logger().warn(
+                f"MPC solver built empty: current world does not fit the new "
+                f"cache ({e}); push a fitting world before servoing")
         # Namespace under the owning node (e.g. /curobo_server/mpc_predicted_path)
         # so multiple planners don't clobber each other on the global topic,
         # matching ros_service_manager's collision_spheres/scene_obstacles.

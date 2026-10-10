@@ -70,8 +70,6 @@ from std_srvs.srv import Trigger
 from .compare import (
     trajectory_jerk,
     trajectory_metrics,
-    winner_position_error_mm,
-    winner_solve_time,
 )
 from .obstacle_convert import obstacles_dict_to_add_requests
 from .problems import (
@@ -587,11 +585,6 @@ class RosBenchmarkRunner(Node):
         pose.orientation.y = float(gp["quaternion_wxyz"][2])
         pose.orientation.z = float(gp["quaternion_wxyz"][3])
         goalset = Goalset(poses=[pose])
-        # log_considered_trajectories is a *reporting-only* flag (no search
-        # effect; accepted on the classic planner): the server fills
-        # stats.considered with one row per seed, so the runner can read the
-        # winner's solver-reported solve time and position error
-        # (see _winner_solve_time / _winner_position_error_mm).
         return TrajectoryGoal(
             start_pose=start,
             goalsets=[goalset],
@@ -678,13 +671,16 @@ class RosBenchmarkRunner(Node):
             return entry
 
         waypoints = [list(w.position) for w in result.trajectory]
-        n, path_length, motion_time = trajectory_metrics(waypoints, float(result.dt))
+        n, path_length, _ = trajectory_metrics(waypoints, float(result.dt))
         entry["n_waypoints"] = n
         entry["path_length"] = path_length
-        entry["motion_time_s"] = motion_time
-        entry["solve_time_s"] = self._winner_solve_time(result)
+        # Server-reported metrics, same definitions as the native leg. No
+        # fallbacks: servers without these fields are too old for this
+        # runner (DDS already requires matched interfaces anyway).
+        entry["motion_time_s"] = self._result_motion_time(result)
+        entry["solve_time_s"] = self._result_solver_time(result)
         entry["jerk"] = trajectory_jerk(waypoints, float(result.dt))
-        entry["position_error_mm"] = self._winner_position_error_mm(result)
+        entry["position_error_mm"] = self._result_position_error(result)
         # Retain the winning endpoint for client-side FK verification
         # (position + orientation vs the goal pose). Server joint order
         # matches the requesting robot config, so callers FK with the
@@ -711,45 +707,45 @@ class RosBenchmarkRunner(Node):
         return entry
 
     @staticmethod
-    def _winner_position_error_mm(result) -> Optional[float]:
-        """Solver-reported position error (mm) of the winning candidate.
-
-        The request sets ``log_considered_trajectories`` (a reporting-only
-        flag), so the server fills ``stats.considered`` with one row per seed;
-        the winning row's ``max_waypoint_error`` carries the solver's own
-        per-seed ``position_error`` (m, the same convergence metric the native
-        leg records as ``result.position_error``), ×1000 here. When the rows
-        are absent (or the winner can't be attributed) the field is ``None``
-        and the row is omitted — deliberately no client-side FK fallback: the
-        returned interpolated trajectory's final waypoint is pinned to the
-        goal joint state by implicit-goal interpolation, so FK'ing it would
-        report ~0 mm by construction rather than the solver's honest residual.
-        """
-        stats = getattr(result, "stats", None)
-        rows = list(getattr(stats, "considered", None) or [])
-        return winner_position_error_mm(
-            rows,
-            getattr(result, "selected_goal_index", None),
-            getattr(result, "selected_seed_index", None),
-        )
+    def _finite_or_none(value) -> Optional[float]:
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None
+        return v if v == v and v not in (float("inf"), float("-inf")) else None
 
     @staticmethod
-    def _winner_solve_time(result) -> Optional[float]:
-        """Solver-reported solve time from the winner's considered row.
+    def _result_motion_time(result) -> Optional[float]:
+        """Server-reported motion time (PlanningStats.motion_time_s).
 
-        The request sets ``log_considered_trajectories`` (a reporting-only
-        flag), so the server fills ``stats.considered`` with one row per seed;
-        the winning row's ``solve_time`` is the solver's own time — the same
-        ``result.solve_time`` the native leg records, not client-side wall
-        time.
+        Same definition as the native leg (boundary knots excluded). None
+        when unavailable.
         """
         stats = getattr(result, "stats", None)
-        rows = list(getattr(stats, "considered", None) or [])
-        return winner_solve_time(
-            rows,
-            getattr(result, "selected_goal_index", None),
-            getattr(result, "selected_seed_index", None),
-        )
+        return RosBenchmarkRunner._finite_or_none(
+            getattr(stats, "motion_time_s", None))
+
+    @staticmethod
+    def _result_solver_time(result) -> Optional[float]:
+        """Top-level solver time (PlanningStats.solver_time_s).
+
+        Same metric as the native leg (cuRobo result.solve_time, seconds),
+        filled server-side for every solve. None when unavailable.
+        """
+        stats = getattr(result, "stats", None)
+        return RosBenchmarkRunner._finite_or_none(
+            getattr(stats, "solver_time_s", None))
+
+    @staticmethod
+    def _result_position_error(result) -> Optional[float]:
+        """Top-level winner position error (PlanningStats.position_error_mm).
+
+        Same metric and computation as the native leg, done server-side.
+        None when unavailable.
+        """
+        stats = getattr(result, "stats", None)
+        return RosBenchmarkRunner._finite_or_none(
+            getattr(stats, "position_error_mm", None))
 
 
 def run_ros(
@@ -891,9 +887,28 @@ def run_ros(
                 active_lock = lock
                 switched_locks = True
 
-        if size_collision_cache:
-            node.size_collision_cache(problems, timeout=call_timeout)
-        else:
+        # Per-scene cache sizes (native parity, see above). Fires on scene
+        # changes with new counts only; returns True when it rebuilt.
+        active_cache: Optional[tuple] = None
+
+        def apply_cache(scene_key: str) -> bool:
+            nonlocal active_cache
+            if not size_collision_cache:
+                return False
+            need = collision_cache_sizes({scene_key: problems[scene_key]})
+            if need == active_cache:
+                return False
+            node.size_collision_cache({scene_key: problems[scene_key]},
+                                      timeout=call_timeout)
+            active_cache = need
+            return True
+
+        # Cache sizing happens per SCENE inside the loop (apply_cache): upstream
+        # builds one planner per dataset file with check_problems' exact OBB
+        # count, and a persistent server matches those kernel grids only by
+        # rebuilding for each scene's exact counts. Consecutive scenes with
+        # identical counts skip the rebuild.
+        if not size_collision_cache:
             node.get_logger().warn(
                 "size_collision_cache=False: leaving the server's default "
                 "collision cache in place (padded kernel grids — diagnostic)"
@@ -937,12 +952,9 @@ def run_ros(
             current_hash = digest
             world_sets += 1
 
-        if warmup_probe:
-            scene_key, i, first_problem = ready_problems[0]
-            # Switch to the first scene's lock BEFORE warming up, so the probe
-            # exercises the geometry the run actually solves with (the rebuild
-            # it triggers is the same one the loop would have paid anyway).
-            apply_lock(scene_key)
+        def warmup_probe_for(scene_key: str, i: int, first_problem: Dict[str, Any]) -> None:
+            """One discarded plan so CUDA-graph warmup / first-solve JIT never
+            lands in a timed problem (native warms 3 solves per scene)."""
             node.get_logger().info(
                 f"Warmup probe: {scene_key}_{i} (world clear + add + plan)"
             )
@@ -958,13 +970,31 @@ def run_ros(
             except RuntimeError as exc:
                 node.get_logger().warn(f"Warmup probe failed (continuing): {exc}")
 
+        if warmup_probe:
+            scene_key, i, first_problem = ready_problems[0]
+            # Switch to the first scene's lock BEFORE warming up, so the probe
+            # exercises the geometry the run actually solves with (the rebuild
+            # it triggers is the same one the loop would have paid anyway).
+            # Size the cache for this scene first for the same reason.
+            apply_lock(scene_key)
+            apply_cache(scene_key)
+            warmup_probe_for(scene_key, i, first_problem)
+
         results: List[Dict[str, Any]] = []
+        _split_acc = {"world": 0.0, "plan": 0.0, "n": 0}
         for scene_key, i, problem in ready_problems:
             problem_name = f"{scene_key}_{i}"
             if verbose:
                 node.get_logger().info(f"Solving {problem_name} ...")
             apply_lock(scene_key)
+            if warmup_probe and apply_cache(scene_key):
+                # Fresh solver/graphs for this scene's exact cache: warm them
+                # with a discarded probe so no timed problem pays first-solve
+                # JIT (native warms per scene the same way).
+                warmup_probe_for(scene_key, i, problem)
+            _t0 = time.perf_counter()
             ensure_world(problem["obstacles"])
+            _t1 = time.perf_counter()
             results.append(
                 node.plan_one(
                     problem,
@@ -974,6 +1004,20 @@ def run_ros(
                     robot_model_data=robot_model_data,
                 )
             )
+            _t2 = time.perf_counter()
+            # Per-problem runner-side split (world-set vs plan-call round
+            # trips, measured client-side). Logged as a running average so a
+            # systematic gap between server-measured spans shows up here.
+            _split_acc["world"] += _t1 - _t0
+            _split_acc["plan"] += _t2 - _t1
+            _split_acc["n"] += 1
+            if verbose and _split_acc["n"] % 25 == 0:
+                _n = _split_acc["n"]
+                node.get_logger().info(
+                    f"runner-split avg over {_n}: "
+                    f"world-set {_split_acc['world'] / _n * 1e3:.0f} ms, "
+                    f"plan-call {_split_acc['plan'] / _n * 1e3:.0f} ms"
+                )
 
         node.get_logger().info(
             f"ROS leg done: {len(results)} problems, "

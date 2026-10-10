@@ -59,6 +59,7 @@ if os.environ.get("CUROBO_DEBUG_CUDA_GRAPH", "").strip().lower() not in (
     _curobo_runtime_public.debug_cuda_graphs = True
 
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+from curobo.scene import Scene
 from curobo._src.util.config_io import join_path, resolve_config
 from curobo.content import get_task_configs_path
 
@@ -162,6 +163,13 @@ class ConfigWrapperMotion(ConfigWrapper):
     def _resolve_graph_planner_config(self, node):
         """Graph-planner config for the build, with ROS-param search-budget overrides.
 
+        Set env ``CUROBO_DISABLE_GRAPH_PLANNER=1`` to build with no graph
+        planner at all (matching the native benchmark, whose MotionGen gets
+        no graph config, so its enable_graph_attempt=1 is a no-op). With a
+        planner built, attempts >= enable_graph_attempt run PRM seeding with
+        different seeds/finetuning than native. Env (not a ROS param) so
+        benchmark compose files can flip it without launch edits.
+
         The v2 PRM graph planner has no per-plan "seed count": its search
         effort is (nodes sampled per iteration) x (path-finding iterations),
         capped by ``max_nodes``. Those three knobs are exposed as node params
@@ -170,6 +178,11 @@ class ConfigWrapperMotion(ConfigWrapper):
         ``exact_graph_planner.yml`` defaults. When none are set this returns
         the default YAML path — identical behavior to passing nothing.
         """
+        if os.environ.get("CUROBO_DISABLE_GRAPH_PLANNER", "0") == "1":
+            node.get_logger().warn(
+                "CUROBO_DISABLE_GRAPH_PLANNER=1: MotionPlanner built without "
+                "graph planner (native-benchmark parity)")
+            return None
         overrides = {}
         if node.has_parameter("graph_new_nodes_per_iteration"):
             overrides["new_nodes_per_iteration"] = max(
@@ -258,11 +271,18 @@ class ConfigWrapperMotion(ConfigWrapper):
                     .get_parameter_value()
                     .bool_value
                 )
-            # No perception voxel layer at construction — collision_cache allocates
-            # the voxel storage and update_world fills it by copy. Passing the live
+            # Build against an EMPTY scene, never the live one: the new cache
+            # may be smaller than the currently loaded world (per-scene exact
+            # sizing shrinks it), and constructing against the live scene
+            # would raise "Cannot load N cuboids, max cache size is M" and
+            # kill the rebuild. Empty always fits; the caller pushes the real
+            # world right after (benchmark probe / next set_objects), which
+            # fits by exactness. (No perception voxel layer at construction
+            # either — collision_cache allocates the voxel storage and
+            # update_world fills it by copy. Passing the live
             # layer aliases the solver's buffer onto our ESDF tensor, which the first
-            # update_world then clears to "solid". See primitives_only_scene().
-            scene = self.obstacle_manager.primitives_only_scene()
+            # update_world then clears to "solid". See primitives_only_scene().)
+            scene = Scene()
             collision_activation_distance = (
                 node.get_parameter("collision_activation_distance")
                 .get_parameter_value()

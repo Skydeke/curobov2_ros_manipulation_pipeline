@@ -32,10 +32,6 @@
 #   also pins the server's plan-time max_attempts to the run's own
 #   --max-attempts before each motion ROS leg, so native and ROS share one
 #   retry budget.
-#   Set CUROBO_RUN_PARITY=1 to additionally run the compare-verdict suite
-#   (`all` motion planning demo dataset, `ik`, `cost`); each leg's exit code
-#   is captured separately (`ik`/`cost` return 1 on any PARITY-DELTA verdict,
-#   like `all`).
 #
 #   Timing diagnostics (see the README "timing attribution" section):
 #     CUROBO_USE_CUDA_GRAPH=false   relaunch the server with eager solvers
@@ -207,19 +203,5 @@ services:
           --dataset ${CUROBO_DATASET:-full} --max-attempts ${CUROBO_MAX_ATTEMPTS:-100} \
           -o /tmp/benchmark_webpage.json;
         webpage_exit=$?;
-        if [ "${CUROBO_RUN_PARITY:-0}" = "1" ]; then
-          echo "CUROBO_RUN_PARITY=1: additionally running the compare-verdict suite (all/ik/cost)..." &&
-          python3 -m curobov2_ros_extra.benchmark.run all \
-            --dataset ${CUROBO_PARITY_DATASET:-demo} --show-all -o /tmp/benchmark_report.json \
-            ${CUROBO_DYN_FLAGS:-};
-          planning_exit=$?;
-          python3 -m curobov2_ros_extra.benchmark.run ik \
-            --show-all -o /tmp/benchmark_ik_report.json;
-          ik_exit=$?;
-          python3 -m curobov2_ros_extra.benchmark.run cost \
-            --show-all -o /tmp/benchmark_cost_report.json;
-          cost_exit=$?;
-          echo "Parity exit codes: planning=$$planning_exit ik=$$ik_exit cost=$$cost_exit (any PARITY-DELTA verdict is expected as exit 1)";
-        fi;
         echo "Webpage exit code: $$webpage_exit" &&
         tail -f /dev/null

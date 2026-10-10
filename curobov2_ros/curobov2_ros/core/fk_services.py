@@ -28,6 +28,7 @@ from std_msgs.msg import Bool, String
 from geometry_msgs.msg import Pose
 
 from curobo.kinematics import Kinematics
+from curobo.scene import Scene
 from curobo.collision_checking import RobotCollisionChecker, RobotCollisionCheckerCfg
 from curobo.types import DeviceCfg, JointState as CuRoboJS
 
@@ -258,7 +259,16 @@ class FKServices:
         ``collision_cache['voxel']``.
         """
         if self._collision_checker is None:
+            # Rebuild (a failed update disables it below, as does a failed
+            # init): the world set that follows a cache change fits the new
+            # cache, so the validator heals on the next world event instead
+            # of reporting all-True forever.
+            self._init(1)
             return
+        self._push_world()
+
+    def _push_world(self):
+        """Push the primitives-only scene into the existing validator."""
         # Normalize primitives to solver-supported collision types
         # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
         # (primitives_only_scene also applies the attached-object exclusion,
@@ -303,10 +313,15 @@ class FKServices:
         fk_model = Kinematics(robot_cfg.kinematics)
         self._fk_model = fk_model
 
-        # Collision validator for FkBatch: built from the same primitives-only
-        # Scene the planners are constructed with, so cache is honoured and the
-        # ESDF voxel layer is not double-counted. Synced later via update_world().
-        scene = self._obstacle_manager.primitives_only_scene()
+        # Collision validator for FkBatch: sized from the shared collision_cache
+        # so it holds exactly what the planners' does, and built against an
+        # EMPTY scene (never the live one: after a cache shrink the live world
+        # may not fit the new cache — same "Cannot load N cuboids" failure as
+        # the planners; empty always fits and update_world() pushes the real
+        # scene below). Synced later via update_world().
+        # NOTE: load_from_config has no voxel-cache knob at all (see
+        # update_world), so the ESDF voxel layer is not double-counted here.
+        scene = Scene()
         robot_cfg_dict = self._config.config_manager.get_robot_config_dict()
         # Size the validator's obstacle cache from the shared collision_cache so
         # it holds exactly what the planners' does. load_from_config has no
@@ -339,6 +354,20 @@ class FKServices:
         )
         js = CuRoboJS.from_position(q, joint_names=fk_model.joint_names)
         fk_model.compute_kinematics(js)
+
+        # Push the real scene after the empty build (validator is advisory-only
+        # so an overflow here must not fail the build — see the try above).
+        # Same-cache rebuilds always fit; after a cache shrink the previous
+        # world may not fit and the next world event pushes a fitting one.
+        # _push_world (not update_world: that would recurse into _init when
+        # the checker is missing).
+        try:
+            self._push_world()
+        except Exception as e:
+            self._node.get_logger().warn(
+                f"FK validator rebuilt empty: current world does not fit the "
+                f"new cache ({e}); poses_valid stays all-True until the next "
+                f"world update")
 
         self._node.get_logger().info("FK model ready")
 

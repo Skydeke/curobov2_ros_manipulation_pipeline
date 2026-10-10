@@ -24,6 +24,7 @@ import std_msgs.msg
 from sensor_msgs.msg import JointState
 
 from curobo.types import Pose as CuroboPose, GoalToolPose, JointState as CuRoboJS
+from curobo.scene import Scene
 from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
 
 from curobov2_ros_interfaces.srv import Ik, IkBatch, WarmupIK
@@ -285,9 +286,12 @@ class IKServices:
         """Create (or recreate) the IK solver for the given batch size/seeds."""
         if num_seeds is None:
             num_seeds = self._resolve_num_seeds()
-        # Primitives only at construction; update_world() pushes the perception
-        # layer by copy afterwards. See primitives_only_scene().
-        scene = self._config.obstacle_manager.primitives_only_scene()
+        # Build against an EMPTY scene, never the live one: after a cache
+        # shrink the live world may not fit the new cache, and constructing
+        # against it raises "Cannot load N cuboids" (observed live, killing a
+        # benchmark rebuild). Empty always fits; the real scene is pushed
+        # right below (same primitives-only scene this used to embed).
+        scene = Scene()
 
         self._node.get_logger().info(
             f"Initializing IK solver (batch_size={batch_size}, num_seeds={num_seeds})..."
@@ -325,6 +329,20 @@ class IKServices:
         # node.torch_sync_enabled().
         if self._node.torch_sync_enabled():
             torch.cuda.synchronize()
+
+        # Push the real scene after the empty build (same primitives-only
+        # scene construction used to embed). Best-effort: after a cache
+        # shrink the previous world may not fit the new cache — warn loudly
+        # and continue empty; the next world event (or an explicit world set)
+        # pushes a fitting world. Same-cache rebuilds (batch-size changes,
+        # startup) always fit, so those paths are unchanged.
+        try:
+            self.update_world(
+                self._config.obstacle_manager.primitives_only_scene())
+        except Exception as e:
+            self._node.get_logger().warn(
+                f"IK solver rebuilt empty: current world does not fit the new "
+                f"cache ({e}); push a fitting world before planning")
 
         self._node.get_logger().info("IK solver ready")
 

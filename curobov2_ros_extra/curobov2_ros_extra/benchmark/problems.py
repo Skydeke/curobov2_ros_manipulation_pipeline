@@ -36,6 +36,10 @@ MPINETS_LOCK = 0.025
 DEFAULT_LOCK = 0.04
 
 _LOADERS: Dict[str, Any] = {}
+# Memoized single-dataset mpinets probe (see is_mpinets_scene): dataset files
+# are multi-MB YAML and re-parsing per problem costs seconds (measured 6 s
+# for mb_set.yaml). Dataset content never changes mid-run.
+_SINGLE_DATASET_PROBE_CACHE: Dict[str, bool] = {}
 
 
 def _get_loaders() -> Dict[str, Any]:
@@ -135,7 +139,17 @@ def is_mpinets_scene(
     if mpinets_scenes is not None:
         return scene_key in mpinets_scenes
     # Single dataset == one file_path upstream: probe an mpinets-only scene.
-    return "dresser_task_oriented" in _get_loaders()[dataset]().keys()
+    # The probe re-parses the whole dataset YAML (seconds for multi-MB
+    # files), but the answer is per-DATASET, not per-scene — cache it so the
+    # per-problem/per-scene callers (apply_lock, native _run_scene) pay it
+    # once per process instead of once per problem.
+    global _SINGLE_DATASET_PROBE_CACHE
+    try:
+        return _SINGLE_DATASET_PROBE_CACHE[dataset]
+    except KeyError:
+        answer = "dresser_task_oriented" in _get_loaders()[dataset]().keys()
+        _SINGLE_DATASET_PROBE_CACHE[dataset] = answer
+        return answer
 
 
 def mpinets_lock_for_scene(
