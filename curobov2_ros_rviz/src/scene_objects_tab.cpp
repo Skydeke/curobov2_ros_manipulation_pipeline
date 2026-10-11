@@ -461,11 +461,61 @@ void SceneObjectsTab::addObject()
   request->color.b = ui_->color_b->value();
   request->color.a = ui_->color_a->value();
 
+  // The server keys objects by name and rejects a duplicate add, so pressing
+  // Add for a name that is already in the scene — the ordinary case after
+  // clicking a row, editing the form and pressing Add again — removes the old
+  // object first and then adds the edited one. That is the tab's update path:
+  // there is no edit-object service, so replace is what "change the pose of
+  // the selected object" means here.
+  if (scene_objects_.contains(name)) {
+    if (remove_client_ == nullptr || !remove_client_->service_is_ready()) {
+      setStatus(tr("remove_object service not available — cannot update '%1'").arg(name));
+      return;
+    }
+    busy_ = true;
+    setButtonsEnabled();
+    setStatus(tr("updating '%1': removing the old one first...").arg(name));
+    auto remove_request =
+      std::make_shared<curobov2_ros_interfaces::srv::RemoveObject::Request>();
+    remove_request->name = name.toStdString();
+    remove_client_->async_send_request(
+      remove_request, [this, request, name](
+                        rclcpp::Client<curobov2_ros_interfaces::srv::RemoveObject>::SharedFuture
+                          future) {
+        bool success = false;
+        QString message;
+        try {
+          auto result = future.get();
+          success = result->success;
+          message = QString::fromStdString(result->message);
+        } catch (const std::exception & e) {
+          message = QString::fromStdString(e.what());
+        }
+        if (!success) {
+          runOnGuiThread([this, name, message]() {
+            busy_ = false;
+            setStatus(tr("could not update '%1': removing the old one failed: %2")
+                      .arg(name, message));
+            refreshObjects();
+          });
+          return;
+        }
+        sendAddRequest(request, name, true);
+      });
+    return;
+  }
+  sendAddRequest(request, name, false);
+}
+
+void SceneObjectsTab::sendAddRequest(
+  std::shared_ptr<curobov2_ros_interfaces::srv::AddObject::Request> request,
+  const QString & name, bool updating)
+{
   busy_ = true;
   setButtonsEnabled();
   add_client_->async_send_request(
     request,
-    [this, name](
+    [this, name, updating](
       rclcpp::Client<curobov2_ros_interfaces::srv::AddObject>::SharedFuture future) {
       bool success = false;
       QString message;
@@ -476,10 +526,15 @@ void SceneObjectsTab::addObject()
       } catch (const std::exception & e) {
         message = QString::fromStdString(e.what());
       }
-      runOnGuiThread([this, name, success, message]() {
+      runOnGuiThread([this, name, updating, success, message]() {
         busy_ = false;
-        setStatus(success ? tr("added '%1': %2").arg(name, message)
-                          : tr("could not add '%1': %2").arg(name, message));
+        if (success) {
+          setStatus(updating ? tr("updated '%1': %2").arg(name, message)
+                             : tr("added '%1': %2").arg(name, message));
+        } else {
+          setStatus(updating ? tr("removed '%1' but could not re-add it: %2").arg(name, message)
+                             : tr("could not add '%1': %2").arg(name, message));
+        }
         // The list is the server's, so it is refreshed rather than appended to:
         // if the name was already taken the server said so, and if it accepted
         // then the object really is in the scene now.

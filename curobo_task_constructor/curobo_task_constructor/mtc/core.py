@@ -174,13 +174,18 @@ _INTROSPECTION_NODE_LOCK: Any = None
 
 
 def _private_action_executor() -> Any:
-    """A PRIVATE (node, executor) pair for one action round trip.
+    """A PRIVATE (node, executor) pair for action round trips.
 
-    The executor is fresh, has no ``spin()`` running on it anywhere, and is
-    to be serviced by the CALLING thread with ``spin_once()``
-    only. It is structurally impossible to get the shared introspection
-    executor from here: that one has a background ``spin()``, and driving it
-    from two threads is what raised "Executor is already spinning".
+    The executor has no ``spin()`` running on it anywhere, and is to be
+    serviced by the CALLING thread with ``spin_once()`` only. It is
+    structurally impossible to get the shared introspection executor from
+    here: that one has a background ``spin()``, and driving it from two
+    threads is what raised "Executor is already spinning".
+
+    One pair is created per action rendezvous and shared process-wide (see
+    ``_shared_execute_endpoint``): a fresh node per execute leaks ~350KB per
+    round trip at the rcl layer even when ``destroy_node()`` runs, and every
+    motion executes exactly once, so per-execute nodes are a per-motion leak.
     """
     import rclpy
     from rclpy.executors import SingleThreadedExecutor
@@ -191,6 +196,41 @@ def _private_action_executor() -> Any:
         "_private_action_executor must never return the shared executor")
     executor.add_node(node)
     return node, executor
+
+
+#: Process-shared ExecuteTaskSolution endpoints by action name:
+#: ``[node, executor, client, lock]``. See ``_shared_execute_endpoint``.
+_EXEC_ENDPOINTS: dict = {}
+
+
+def _shared_execute_endpoint(action_name: str, action_type: Any):
+    """One (node, executor, ActionClient, lock) per action, process lifetime.
+
+    ``Task.execute`` runs once per motion, so the MTC-shaped "private node
+    per execute" is a node per motion — and node create/destroy cycles leak
+    (~350KB each at the rcl layer, measured; entity counts stay flat while
+    RSS climbs) even with ``destroy_node()`` in a ``finally``. The endpoint
+    is therefore created once per action rendezvous and reused: one node,
+    one client, zero churn.
+
+    The lock serializes round trips on an endpoint: the executor is driven
+    with ``spin_once()`` by the calling thread, and two threads driving one
+    ``SingleThreadedExecutor`` concurrently corrupt its wait set. The
+    orchestrator never overlaps executes (one motion in flight), so the lock
+    is uncontended there; it only makes the library safe in general.
+    """
+    import threading
+
+    from rclpy.action.client import ActionClient
+
+    with _service_lock():
+        ep = _EXEC_ENDPOINTS.get(action_name)
+        if ep is None:
+            node, executor = _private_action_executor()
+            client = ActionClient(node, action_type, action_name)
+            ep = [node, executor, client, threading.Lock()]
+            _EXEC_ENDPOINTS[action_name] = ep
+        return ep[0], ep[1], ep[2], ep[3]
 
 
 def _shared_introspection_node() -> Any:
@@ -218,6 +258,58 @@ def _shared_introspection_node() -> Any:
             return None
         _INTROSPECTION_NODE = node
         return node
+
+
+def shutdown_shared_introspection() -> None:
+    """Tear down the shared introspection node, execute endpoints, and spin thread.
+
+    MTC stops its introspection executor when the last introspection goes
+    away; the shared node pins the refcount at 1 forever, so without this the
+    background ``spin()`` outlives every task and ``rclpy.shutdown()`` aborts
+    the process ("terminate called without an active exception"). Process-exit
+    cleanup only: the next ``_ensure_publishers`` / ``_execute_remote`` after
+    this recreates everything, so a task that outlives the call keeps
+    publishing onto dead handles (caught per-call) until it is released. Call
+    once, after all task activity has stopped and before ``rclpy.shutdown()``.
+    """
+    global _INTROSPECTION_NODE
+    lock = _INTROSPECTION_NODE_LOCK
+    if lock is None:
+        node = _INTROSPECTION_NODE
+        _INTROSPECTION_NODE = None
+    else:
+        with lock:
+            node, _INTROSPECTION_NODE = _INTROSPECTION_NODE, None
+    with _service_lock():
+        # Handles die with the nodes below (destroy_node destroys every
+        # tracked entity); the registries must not keep naming them.
+        _SERVICE_HANDLES.clear()
+        _SHARED_PUBLISHERS.clear()
+        endpoints = list(_EXEC_ENDPOINTS.values())
+        _EXEC_ENDPOINTS.clear()
+    for ep_node, ep_executor, ep_client, _ep_lock in endpoints:
+        try:
+            ep_client.destroy()
+        except Exception:
+            pass
+        try:
+            ep_executor.remove_node(ep_node)
+        except Exception:
+            pass
+        try:
+            ep_node.destroy_node()
+        except Exception:
+            pass
+    if node is None:
+        return
+    try:
+        _IntrospectionExecutor.remove_node(node)
+    except Exception:
+        pass
+    try:
+        node.destroy_node()
+    except Exception:
+        pass
 
 
 class _DoneFuture:
@@ -844,6 +936,45 @@ def _replace_service(node: Any, srv_type: Any, name: str, callback: Any):
         return handle
 
 
+#: Process-shared introspection publishers by topic (see ``_shared_publisher``).
+_SHARED_PUBLISHERS: dict = {}
+
+
+def _shared_publisher(node: Any, msg_type: Any, topic: str, depth: int):
+    """One publisher per topic for the whole process (the ``viz.py`` pattern).
+
+    Every motion builds a fresh ``Task``, so a publisher per task is a
+    publisher leak per motion: the node retains every created publisher in
+    ``node._publishers`` until ``destroy_publisher`` runs, and dropping the
+    Python handle does NOT destroy it — the process accumulates 3
+    TRANSIENT_LOCAL publishers (+ their latched samples) per motion,
+    unbounded. The topics are task-namespace rendezvous, not per-task state,
+    so all tasks with the same namespace publish the same three topics and
+    share one handle each. Created once under the service lock; the
+    ``get_solution_<task_id>`` service stays per task (MTC's naming).
+    """
+    with _service_lock():
+        pub = _SHARED_PUBLISHERS.get(topic)
+        if pub is None:
+            from rclpy.qos import (
+                DurabilityPolicy,
+                HistoryPolicy,
+                QoSProfile,
+                ReliabilityPolicy,
+            )
+
+            # MTC introspection.cpp:118-126 rendezvous, verbatim (depths 2/1/1,
+            # transient_local).
+            pub = node.create_publisher(
+                msg_type, topic,
+                QoSProfile(
+                    depth=depth, history=HistoryPolicy.KEEP_LAST,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL))
+            _SHARED_PUBLISHERS[topic] = pub
+        return pub
+
+
 class Introspection:
     """MTC ``Task::introspection()`` (``core::Introspection``) surface.
 
@@ -929,14 +1060,16 @@ class Introspection:
         and pin the publishers after the owner is gone.
 
         So: the node is PROCESS-SHARED (one per process, on MTC's shared
-        executor), while the publishers are shared per node AND the
+        executor), the three publishers are PROCESS-SHARED too (one handle
+        per topic — a publisher per task leaks 3 TRANSIENT_LOCAL publishers
+        per motion, see ``_shared_publisher``), while the
         ``get_solution_<task_id>`` service stays PER TASK — MTC's naming, MTC's
         isolation, one node total.
         """
         task = self._task
         if not task._introspection_enabled:
             return False
-        if task._pub_desc is not None and task._srv_get_solution is not None:
+        if task._srv_get_solution is not None:
             return True
         try:
             from curobo_task_constructor_interfaces.msg import (
@@ -955,29 +1088,15 @@ class Introspection:
 
         node = task._introspection_node
         try:
-            from rclpy.qos import (
-                DurabilityPolicy,
-                HistoryPolicy,
-                QoSProfile,
-                ReliabilityPolicy,
-            )
-
-            # MTC introspection.cpp:118-126 rendezvous, verbatim (depths 2/1/1,
-            # transient_local). Topics are ns-aware: default
-            # /curobo_task_constructor/*, or <Task ns>/* when constructed
-            # with Task(ns=...).
-            for attr, msg_type, topic_fn, depth in (
-                ("_pub_desc", TaskDescription, task.description_topic, 2),
-                ("_pub_stat", TaskStatistics, task.statistics_topic, 1),
-                ("_pub_sol", Solution, task.solution_topic, 1),
-            ):
-                if getattr(task, attr) is None:
-                    setattr(task, attr, node.create_publisher(
-                        msg_type, topic_fn(),
-                        QoSProfile(
-                            depth=depth, history=HistoryPolicy.KEEP_LAST,
-                            reliability=ReliabilityPolicy.RELIABLE,
-                            durability=DurabilityPolicy.TRANSIENT_LOCAL)))
+            # Shared handles: every task in this namespace publishes the same
+            # three rendezvous topics (default /curobo_task_constructor/*, or
+            # <Task ns>/* when constructed with Task(ns=...)).
+            task._pub_desc = _shared_publisher(
+                node, TaskDescription, task.description_topic(), 2)
+            task._pub_stat = _shared_publisher(
+                node, TaskStatistics, task.statistics_topic(), 1)
+            task._pub_sol = _shared_publisher(
+                node, Solution, task.solution_topic(), 1)
             # Per-task service (MTC's get_solution_<task_id>) on the shared
             # node, created once per task object. Replacement is
             # deterministic (see _replace_service): this pipeline reuses
@@ -998,11 +1117,13 @@ class Introspection:
     def _release(self) -> None:
         """Drop this task's publishers/service (MTC ``~IntrospectionPrivate``).
 
-        The NODE is shared and outlives any one task, so only the handles
-        this task owns are torn down: its ``get_solution_<task_id>`` service
-        stops answering (removed from the shared registry only if it is
-        still ours — a successor task may already have taken the name) and
-        its publisher handles are released.
+        The NODE and the three publishers are shared and outlive any one
+        task, so only the handle this task owns is torn down: its
+        ``get_solution_<task_id>`` service stops answering (removed from the
+        shared registry only if it is still ours — a successor task may
+        already have taken the name). The publisher refs are plain aliases
+        of the shared handles — deliberately NOT destroyed here, or every
+        task handover would kill the topics for its successor.
         """
         task = self._task
         handle = task._srv_get_solution
@@ -1382,6 +1503,12 @@ class Task:
         task's ``get_solution_<task_id>`` service stops answering and its
         node leaves the shared executor.
 
+        The flag is set UNCONDITIONALLY (MTC assigns
+        ``introspection_enabled_`` first): disabling a fresh task with no
+        object yet still sticks, so a later ``plan()`` cannot silently
+        re-enable it. Only an explicit ``introspection()`` access or
+        ``enableIntrospection(True)`` turns it back on.
+
         The release has to happen HERE, on the Task: dropping the reference
         alone leaks the node, its executor slot, and with it the shared
         spinning thread, because ``Introspection`` never learns it was
@@ -1391,11 +1518,12 @@ class Task:
             if self._introspection is None:
                 self._introspection_enabled = True
                 self._introspection = Introspection(self)
-        elif self._introspection is not None:
-            introspection = self._introspection
+        else:
             self._introspection_enabled = False
-            self._introspection = None
-            introspection._release()
+            if self._introspection is not None:
+                introspection = self._introspection
+                self._introspection = None
+                introspection._release()
 
     def getRobotModel(self) -> Any:
         """Get the robot model (MTC ``Task.getRobotModel``).
@@ -1534,11 +1662,20 @@ class Task:
 
     # -- introspection plumbing (MTC Introspection-backed) --------------
     def _register_solution(self, obj: Any) -> int:
-        """Global solution id (delegates to ``Introspection::solutionId``)."""
-        return self.introspection().solutionId(obj)
+        """Global solution id without touching introspection endpoints.
+
+        The ids live in the EXECUTOR's registry (MTC
+        ``Introspection::id_solution_bimap_``), which needs no node,
+        publishers or service — so serializing a solution (the execute
+        path) never creates endpoints on a dark task. ``Introspection``
+        delegates here too, so enabled and dark tasks number identically.
+        """
+        ex = self._executor
+        return ex.register_solution(obj) if ex is not None else 0
 
     def _solution_from_id(self, solution_id: int) -> Any:
-        return self.introspection().solutionFromId(solution_id)
+        ex = self._executor
+        return ex.solutionFromId(solution_id) if ex is not None else None
 
     def _on_get_solution(self, request, response):
         """Serve GetSolution (MTC ``Introspection::getSolution``)."""
@@ -1727,9 +1864,13 @@ class Task:
         if not ex.init():
             self._solutions = []
 
-        # MTC Task::init step 3 + 4: give the stages the introspection
-        # instance (their onNewSolution publishes during compute), then
-        # publish the task description once.
+        # MTC Task::init steps 3 + 4, gated on the flag like MTC gates on
+        # its introspection_ member: a dark task gets stages with no hooks
+        # and no description publish. init() must NOT reach for the enabling
+        # introspection() getter here, or every plan would force-enable a
+        # task the caller explicitly darkened.
+        if not self._introspection_enabled:
+            return
         introspect = self.introspection()
         from curobo_task_constructor.core.stage import chain_hook
         for stg in ex.root.subtree_stages():
@@ -1785,7 +1926,10 @@ class Task:
         ex = self._executor
         # MTC Task::plan (task.cpp:243-272) is: init() + compute loop (no
         # description publish, no hook install here - init() did both).
-        introspect = self.introspection()
+        # The per-pass statistics publish, like init's hooks, only exists
+        # on an enabled task: the loop must not conjure endpoints onto a
+        # dark task via the enabling introspection() getter.
+        enabled = self._introspection is not None
 
         def _guarded_progress():
             if self._preempted:
@@ -1796,7 +1940,8 @@ class Task:
         def _progress():
             _guarded_progress()
             # MTC Task::plan publishes task state after every compute pass.
-            introspect.publishTaskState()
+            if self._introspection is not None:
+                self._introspection.publishTaskState()
 
         try:
             ok = ex.plan(
@@ -1809,7 +1954,8 @@ class Task:
         # above (MTC Stage::onNewSolution -> publishSolution), so the panel
         # follows the plan live rather than only at the end.
         self._solutions = ex.rank()
-        introspect.publishTaskState()
+        if enabled and self._introspection is not None:
+            self._introspection.publishTaskState()
         if ok and self._solutions:
             return MoveItErrorCode(MoveItErrorCode.SUCCESS)
         return MoveItErrorCode(MoveItErrorCode.PLANNING_FAILED)
@@ -1864,10 +2010,13 @@ class Task:
         orchestrator believe the drive had failed while the trajectory was
         actually starting, so it issued a fresh plan mid-execution and took
         the server down with a CUDA illegal memory access.
+
+        The endpoint itself (node, executor, client) is process-shared per
+        action rendezvous (see ``_shared_execute_endpoint``): only the goal
+        is per call. A private node per execute leaks at the rcl layer even
+        with ``destroy_node()``, and every motion executes exactly once.
         """
         import rclpy
-        from rclpy.action.client import ActionClient
-        from rclpy.executors import SingleThreadedExecutor
         from curobo_task_constructor_interfaces.action import (
             ExecuteTaskSolution,
         )
@@ -1883,17 +2032,13 @@ class Task:
         goal = ExecuteTaskSolution.Goal()
         goal.solution = msg_convert.solution_to_msg(d)
 
-        # Private node + LOCAL executor, driven by THIS thread only (see the
-        # spin invariant in _IntrospectionExecutor.add_node). Returned by a
-        # factory so nothing can ever hand _execute_remote the shared, already
-        # spinning executor again.
-        node, executor = _private_action_executor()
-        try:
-            # Ns-aware rendezvous (MTC relative action name; default keeps the
-            # absolute /curobo_task_constructor/... for compat).
-            client = ActionClient(
-                node, ExecuteTaskSolution, self.execute_action_name())
-
+        # Shared endpoint (node + LOCAL executor + client), driven by THIS
+        # thread only while holding the endpoint lock (see the spin invariant
+        # in _IntrospectionExecutor.add_node and _shared_execute_endpoint).
+        # Never the shared, already-spinning introspection executor.
+        _, executor, client, lock = _shared_execute_endpoint(
+            self.execute_action_name(), ExecuteTaskSolution)
+        with lock:
             # Bounded wait (MTC: 0.5s) - an execution backend that is not up
             # must fail the call, never hang the caller's thread.
             if not client.wait_for_server(
@@ -1918,8 +2063,9 @@ class Task:
                 # rclpy has no spin_some() - that is a C++ rclcpp method
                 # (MTC's Task::execute calls executor.spin_some()). The
                 # rclpy equivalent for "service this once, then check" is
-                # spin_once(), which is safe here because this executor is
-                # private and driven by this thread only.
+                # spin_once(), which is safe here because this executor has
+                # no background spin() and the endpoint lock holds off every
+                # other driver.
                 executor.spin_once(timeout_sec=0.01)
             raw = result_future.result()
             # Mirror MTC: surface the server's MoveItErrorCodes value, default
@@ -1934,12 +2080,6 @@ class Task:
             ok = _result_ok(raw)
             return MoveItErrorCode(
                 MoveItErrorCode.SUCCESS if ok else MoveItErrorCode.CONTROL_FAILED)
-        finally:
-            try:
-                executor.remove_node(node)
-                node.destroy_node()
-            except Exception:
-                pass
 
     @staticmethod
     def _spin_until(executor, future) -> bool:
@@ -1964,8 +2104,6 @@ class Task:
         be the consumer's job, done twice.
         """
         self.last_published = solution
-        if not self._introspection_enabled:
-            return
         self.introspection().publishSolution(solution)
 
     def publishAllSolutions(self, wait: bool = True) -> None:

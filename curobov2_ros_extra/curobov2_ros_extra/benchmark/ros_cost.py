@@ -89,7 +89,13 @@ class RosCostRunner(Node):
         return future.result()
 
     def size_collision_cache(self, timeout: float = 120.0) -> None:
-        """Size the server's collision cache to the cost world (native parity)."""
+        """Size the server's collision cache to the cost world (native parity).
+
+        Clears the world first: the server refuses a shrink below the
+        loaded scene, and empty fits every size. The cost world is pushed
+        back right after (see add_world).
+        """
+        self.clear_world(timeout=timeout)
         request = SetCollisionCache.Request()
         request.obb = COST_WORLD_CUBOIDS
         request.mesh = 0

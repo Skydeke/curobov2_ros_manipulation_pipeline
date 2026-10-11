@@ -158,6 +158,10 @@ def test_statistics_publish_per_try():
     try:
         robot = MockCuroboServer()
         task = mtc_core.Task(robot)
+        # Opt into introspection explicitly: plan() no longer force-enables
+        # it as a side effect (MTC gates init on the flag; a dark task must
+        # stay dark). The hooks below then stream without needing ROS.
+        task.enableIntrospection(True)
         task.add(mtc_stages.CurrentState("c"))
         mv = mtc_stages.MoveTo(
             "m", mtc_core.JointInterpolationPlanner(), planning_attempts=3)

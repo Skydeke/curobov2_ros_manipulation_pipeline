@@ -780,9 +780,9 @@ class RosServiceManager:
         # an attached object's spheres after detach) do not linger. It must
         # carry an EMPTY namespace: rviz's DELETEALL is namespace-scoped
         # (ros2/rviz#685), so a namespaced DELETEALL would only clear markers
-        # in that namespace. The sphere markers all live under
-        # ns='collision_spheres', so an unset-ns DELETEALL cannot collide with
-        # any of them.
+        # in that namespace. The sphere markers live under ns='collision_spheres'
+        # (robot) and ns='attached_spheres' (grasped object, see below), so an
+        # unset-ns DELETEALL clears both.
         marker_array = MarkerArray()
         clear = Marker()
         clear.action = Marker.DELETEALL
@@ -792,7 +792,13 @@ class RosServiceManager:
             if sphere[3] <= 0:  # skip disabled spheres (radius = -100)
                 continue
             marker = Marker()
-            marker.ns = 'collision_spheres'
+            # Attached-object spheres carry their own namespace (same ids as
+            # the robot spheres) so a consumer can show the grasped object
+            # on its own — e.g. the trajectory display's Show Attached
+            # toggle. Colour alone cannot split them: a colliding sphere is
+            # red whichever group it belongs to.
+            marker.ns = ('attached_spheres' if attached_mask[i]
+                         else 'collision_spheres')
             marker.header.frame_id = self.config_manager.base_link
             marker.type = Marker.SPHERE
             marker.action = Marker.ADD

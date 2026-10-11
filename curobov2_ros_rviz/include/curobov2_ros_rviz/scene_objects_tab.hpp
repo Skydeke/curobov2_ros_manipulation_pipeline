@@ -106,6 +106,11 @@ private:
   void runOnGuiThread(std::function<void()> fn);
   void setStatus(const QString & text);
   void setButtonsEnabled();
+  /// Sends a built add request; `updating` selects the "updated" status
+  /// wording (the remove half already succeeded) over the "added" one.
+  void sendAddRequest(
+    std::shared_ptr<curobov2_ros_interfaces::srv::AddObject::Request> request,
+    const QString & name, bool updating);
   /// The first non-empty name among the selected rows, or an empty string.
   QString selectedName() const;
   /// Repopulates `collision_objects_list` from `names`, keeping the selection
@@ -129,9 +134,11 @@ private:
   /// `get_scene_objects` answers from the scene the SOLVER holds, so this
   /// struct is replaced wholesale on every poll and cannot drift from it.
   ///
-  /// It is read-only state: nothing here is used to build a request. curobo has
-  /// no edit-object service, so editing the form after a click and pressing Add
-  /// either re-adds under a new name or is rejected for reusing the old one.
+  /// It is read-only state: nothing here is used to build a request, except
+  /// through Add. curobo has no edit-object service, so editing the form
+  /// after a click and pressing Add for the selected name removes the old
+  /// object and re-adds the edited one — that remove-then-add is the tab's
+  /// update path. Pressing Add for a name the scene does not have adds it.
   struct SceneObject
   {
     /// A `GetSceneObjects` type constant (CUBOID, SPHERE, ...), which are

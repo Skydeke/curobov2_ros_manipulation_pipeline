@@ -3,7 +3,6 @@
 // QComboBox only forward-declares its view, and refreshPlannerNodeList() asks the
 // popup whether it is on screen.
 #include <QAbstractItemView>
-#include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -96,23 +95,10 @@ ContextTab::ContextTab(QWidget * parent) : QWidget(parent)
 
   layout->addWidget(server_group);
 
-  // --- the one diagnostic switch, deliberately NOT in a group -----------------
-  // This used to be a group box called "World Representation", which was the
-  // worst of both: not a MoveIt title (MoveIt's Context tab has no such group),
-  // and a titled box around a single checkbox, which is not a shape MoveIt ever
-  // draws either. MoveIt puts lone checkboxes in the "Options" group on its
-  // Planning tab, next to five other checkboxes; with no other checkbox to sit
-  // with, the honest rendering is no box at all. It stays directly on the tab,
-  // below the "Planning Library" group, where a single option belongs.
-  collision_spheres_check_ = new QCheckBox(tr("Publish collision spheres"), this);
-  collision_spheres_check_->setToolTip(
-    tr("Ask the server to publish its collision-sphere markers. Diagnostic only "
-       "— it changes nothing about what the planner will do."));
-  connect(
-    collision_spheres_check_, &QCheckBox::toggled, this,
-    &ContextTab::applyCollisionSpheres);
-  layout->addWidget(collision_spheres_check_);
-
+  // Collision-sphere visualisation lives on the trajectory display now (Show
+  // Collision / Show Attached over the spheres topic), not here: it is
+  // display state, and a per-server enable switch for it does not belong on
+  // this tab.
   status_ = new QLabel(tr("waiting for the planner..."), this);
   status_->setWordWrap(true);
   layout->addWidget(status_);
@@ -288,8 +274,6 @@ void ContextTab::rebuildClients()
     ns + "set_robot_strategy");
   set_planner_client_ = node_->create_client<curobov2_ros_interfaces::srv::SetPlanner>(
     ns + "set_planner");
-  collision_spheres_client_ = node_->create_client<std_srvs::srv::SetBool>(
-    ns + "set_collisions_enabled");
 }
 
 void ContextTab::runOnGuiThread(std::function<void()> fn)
@@ -310,13 +294,12 @@ void ContextTab::refreshStrategies()
   // and the widget would be left showing a state the server never adopted.
   // Retried here until the service is up rather than sent once into the void,
   // because service_is_ready() is false for a while after the planner starts.
-  // NOTE: trajectory_type_pending_ and collision_spheres_pending_ are
-  // intentionally NOT applied here. Sending set_planner or set_collisions_enabled
-  // on startup (before the user has interacted with the panel) changes server
-  // state without being asked, and can override the planner that another client
-  // (e.g. the task constructor) has already selected. The combo/checkbox are
-  // restored from the config for display only; the user must explicitly change
-  // them to send anything to the server.
+  // NOTE: trajectory_type_pending_ is intentionally NOT applied here. Sending
+  // set_planner on startup (before the user has interacted with the panel)
+  // changes server state without being asked, and can override the planner
+  // that another client (e.g. the task constructor) has already selected.
+  // The combo is restored from the config for display only; the user must
+  // explicitly change it to send anything to the server.
 
   if (get_strategies_client_ == nullptr || !get_strategies_client_->service_is_ready()) {
     return;
@@ -466,42 +449,10 @@ void ContextTab::applyStrategy()
     });
 }
 
-void ContextTab::applyCollisionSpheres(bool enabled)
-{
-  if (collision_spheres_client_ == nullptr || !collision_spheres_client_->service_is_ready()) {
-    setStatus(tr("set_collisions_enabled service not available"));
-    return;
-  }
-  auto request = std::make_shared<std_srvs::srv::SetBool::Request>();
-  request->data = enabled;
-  collision_spheres_client_->async_send_request(
-    request, [this, enabled](rclcpp::Client<std_srvs::srv::SetBool>::SharedFuture future) {
-      bool success = false;
-      QString message;
-      try {
-        auto result = future.get();
-        success = result->success;
-        message = QString::fromStdString(result->message);
-      } catch (const std::exception & e) {
-        message = QString::fromStdString(e.what());
-      }
-      runOnGuiThread([this, enabled, success, message]() {
-        // Put the checkbox back where the truth is: a failed call must not
-        // leave the box showing a state the server never adopted.
-        collision_spheres_check_->setChecked(success ? enabled : !enabled);
-        setStatus(
-          success ? tr("collision sphere publishing %1: %2")
-                        .arg(enabled ? tr("enabled") : tr("disabled"), message)
-                  : tr("could not change collision sphere publishing: %1").arg(message));
-      });
-    });
-}
-
 void ContextTab::save(rviz_common::Config config) const
 {
   config.mapSetValue("planner_node_name", planner_node_);
   config.mapSetValue("trajectory_type", trajectory_type_);
-  config.mapSetValue("collision_spheres", collision_spheres_check_->isChecked());
 }
 
 void ContextTab::load(const rviz_common::Config & config)
@@ -517,35 +468,20 @@ void ContextTab::load(const rviz_common::Config & config)
     planner_node_combo_->setCurrentText(planner_node.trimmed());
   }
 
-  // Read through a QVariant, like the collision-sphere flag below: mapGetString
+  // Read through a QVariant, like the sibling panels' keys: mapGetString
   // on a numeric value comes back empty, and mapGetInt is not part of the Config
   // API this panel relies on.
   QVariant type_value;
   if (config.mapGetValue("trajectory_type", &type_value) && type_value.canConvert<int>()) {
     const int wanted = type_value.toInt();
     if (wanted >= 0 && wanted <= 1) {
-      // Same reasoning as the collision-sphere flag below, plus one more:
+      // Same reasoning as the sibling panels' pending flags, plus one more:
       // setting the index emits currentIndexChanged, which would fire
       // set_planner straight out of load(), where there is no client and the
       // call would be dropped. The flag hands it to refreshStrategies(), which
       // retries until the service exists.
       trajectory_type_pending_ = true;
       trajectory_type_combo_->setCurrentIndex(wanted);
-    }
-  }
-
-  // A bool is read through a QVariant: mapGetString on a bool value comes back
-  // empty, and this is the accessor the sibling panels' "ExecuteOnServer" key is
-  // read with.
-  QVariant spheres;
-  if (config.mapGetValue("collision_spheres", &spheres) && spheres.canConvert<bool>()) {
-    // setChecked() emits toggled() only when the value CHANGES, which would fire
-    // a service call straight out of load(). The flag hands it to
-    // refreshStrategies() instead.
-    const bool wanted = spheres.toBool();
-    collision_spheres_pending_ = true;
-    if (collision_spheres_check_->isChecked() != wanted) {
-      collision_spheres_check_->setChecked(wanted);
     }
   }
 }

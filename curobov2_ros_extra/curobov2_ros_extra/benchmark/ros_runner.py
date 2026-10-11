@@ -438,6 +438,10 @@ class RosBenchmarkRunner(Node):
         are live for the whole timed run. ``--no-size-cache`` on the CLI skips
         this to reproduce the padded (slow) behaviour.
         """
+        # The server refuses a shrink below the loaded scene (it would
+        # leave the solvers blind), so the world goes first: empty fits
+        # every size, and the scene is pushed back right after the rebuild.
+        self.clear_world(timeout=timeout)
         cuboid_slots, mesh_slots = collision_cache_sizes(problems)
         request = SetCollisionCache.Request()
         request.obb = cuboid_slots

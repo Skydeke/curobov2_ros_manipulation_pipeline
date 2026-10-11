@@ -1571,6 +1571,29 @@ class ObstacleManager:
         return [obs for obs in bucket
                 if getattr(obs, 'name', None) not in self.excluded_obstacle_names]
 
+    def _solver_bucket_counts(self) -> tuple:
+        """Current scene in solver cache terms: (cuboid slots, mesh slots).
+
+        Mirrors `_collision_supported`, which is what a re-push after the
+        rebuild actually loads: cuboids stay cuboids; sphere/capsule/cylinder
+        ride the cuboid bucket in the default 'cuboid' mode and the mesh
+        bucket in legacy 'mesh' mode; meshes stay meshes. Attached
+        (excluded) obstacles count too — solver scenes keep them registered,
+        disabled by name, so they occupy slots like any other object.
+        """
+        scene = self.scene
+        n_cuboid = len(scene.cuboid or [])
+        n_mesh = len(scene.mesh or [])
+        converted = sum(
+            len(getattr(scene, bucket, None) or [])
+            for bucket in ('sphere', 'capsule', 'cylinder')
+        )
+        if self._obstacle_collision_mode == 'mesh':
+            n_mesh += converted
+        else:
+            n_cuboid += converted
+        return n_cuboid, n_mesh
+
     def set_collision_cache(
         self,
         node,
@@ -1585,10 +1608,37 @@ class ObstacleManager:
         # v1 SetCollisionCache carries an obb/mesh/blox triple; v2 expects a
         # dict {"cuboid": N, "mesh": N, "voxel": N}. We map obb→cuboid,
         # mesh→mesh, blox→voxel.
+        new_cuboid = int(request.obb) if request.obb >= 0 \
+            else self.collision_cache["cuboid"]
+        new_mesh = int(request.mesh) if request.mesh >= 0 \
+            else self.collision_cache["mesh"]
+
+        # Refuse a shrink below the loaded scene BEFORE touching anything.
+        # Rebuilding the solvers with a smaller cache builds them against an
+        # empty scene, and the re-push of the oversized world then fails
+        # ("Cannot load N cuboids") — leaving the solvers blind while this
+        # tab still lists the objects. A resize that cannot hold the current
+        # scene is a caller error, reported as one, with cache and solvers
+        # unchanged.
+        need_cuboid, need_mesh = self._solver_bucket_counts()
+        if need_cuboid > new_cuboid or need_mesh > new_mesh:
+            response.success = False
+            response.message = (
+                f"refusing collision-cache resize to cuboid={new_cuboid} "
+                f"mesh={new_mesh}: the current scene holds {need_cuboid} "
+                f"cuboid slot(s) and {need_mesh} mesh slot(s). Remove objects "
+                f"(or clear the scene) so it fits, then retry — the cache "
+                f"and the solvers are unchanged.")
+            response.obb_cache = self.collision_cache["cuboid"]
+            response.mesh_cache = self.collision_cache["mesh"]
+            voxel = self.collision_cache["voxel"]
+            response.blox_cache = voxel["layers"] if isinstance(voxel, dict) else 0
+            return response
+
         if request.obb >= 0:
-            self.collision_cache["cuboid"] = int(request.obb)
+            self.collision_cache["cuboid"] = new_cuboid
         if request.mesh >= 0:
-            self.collision_cache["mesh"] = int(request.mesh)
+            self.collision_cache["mesh"] = new_mesh
         if request.blox == 0:
             # Explicit disable: no voxel storage pre-allocated in the solvers
             # -> camera-based (ESDF) collision avoidance will not work.
