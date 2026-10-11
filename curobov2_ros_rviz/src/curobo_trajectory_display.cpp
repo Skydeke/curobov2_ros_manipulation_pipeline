@@ -13,6 +13,9 @@
 #include <rviz_common/logging.hpp>
 #include <rviz_common/properties/parse_color.hpp>
 #include <rviz_common/ros_integration/ros_node_abstraction_iface.hpp>
+#include <rviz_rendering/objects/shape.hpp>
+
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <curobov2_ros_rviz/curobo_trajectory_display.hpp>
 #include <curobov2_ros_rviz/curobo_link_updater.hpp>
@@ -33,6 +36,8 @@ CuroboTrajectoryDisplay::CuroboTrajectoryDisplay()
   , trail_step_size_property_(nullptr)
   , loop_property_(nullptr)
   , speed_property_(nullptr)
+  , collision_topic_property_(nullptr)
+  , show_attached_property_(nullptr)
 {
 }
 
@@ -84,7 +89,24 @@ void CuroboTrajectoryDisplay::onInitialize()
   speed_property_->setMin(0.01);
   speed_property_->setMax(100.0);
 
+  collision_topic_property_ = new rviz_common::properties::RosTopicProperty(
+    "Collision Spheres Topic", "/curobo_server/collision_spheres",
+    "visualization_msgs/msg/MarkerArray",
+    "Collision-sphere MarkerArray topic to display.", this,
+    SLOT(updateCollisionTopic()));
+
+  // Same dropdown guard as the trajectory topic: without initialize() the
+  // weak_ptr inside RosTopicProperty stays empty and opening the dropdown
+  // segfaults (fillTopicList() dereferences a null lock()).
+  collision_topic_property_->initialize(context_->getRosNodeAbstraction());
+
+  show_attached_property_ = new rviz_common::properties::BoolProperty(
+    "Show Attached", true,
+    "Show the grasped object's spheres (the 'attached_spheres' namespace).", this,
+    SLOT(updateShowAttached()));
+
   updateTopic();
+  updateCollisionTopic();
 }
 
 void CuroboTrajectoryDisplay::reset()
@@ -102,6 +124,17 @@ void CuroboTrajectoryDisplay::reset()
   trail_robots_.clear();
   if (robot_) {
     robot_->setVisible(false);
+  }
+  {
+    std::lock_guard<std::mutex> spheres_lock(spheres_mutex_);
+    spheres_msg_new_.reset();
+  }
+  spheres_got_message_ = false;
+  sphere_active_count_ = 0;
+  for (auto & sv : sphere_pool_) {
+    if (sv.node) {
+      sv.node->setVisible(false);
+    }
   }
 }
 
@@ -284,6 +317,196 @@ void CuroboTrajectoryDisplay::onTrajectoryMessage(
 }
 
 // ============================================================================
+// Collision spheres (merged MarkerArray overlay)
+// ============================================================================
+
+void CuroboTrajectoryDisplay::updateCollisionTopic()
+{
+  spheres_subscription_.reset();
+  {
+    std::lock_guard<std::mutex> lock(spheres_mutex_);
+    spheres_msg_new_.reset();
+  }
+  spheres_got_message_ = false;
+  sphere_active_count_ = 0;
+  for (auto & sv : sphere_pool_) {
+    if (sv.node) {
+      sv.node->setVisible(false);
+    }
+  }
+
+  if (!collision_topic_property_->getStdString().empty()) {
+    auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
+    if (!ros_node_abstraction) {return;}
+    auto node = ros_node_abstraction->get_raw_node();
+    spheres_subscription_ = node->create_subscription<visualization_msgs::msg::MarkerArray>(
+      collision_topic_property_->getStdString(), 10,
+      std::bind(&CuroboTrajectoryDisplay::onCollisionSpheresMessage, this,
+        std::placeholders::_1));
+  }
+}
+
+void CuroboTrajectoryDisplay::onCollisionSpheresMessage(
+  visualization_msgs::msg::MarkerArray::ConstSharedPtr msg)
+{
+  std::lock_guard<std::mutex> lock(spheres_mutex_);
+  spheres_msg_new_ = msg;
+}
+
+void CuroboTrajectoryDisplay::updateShowAttached()
+{
+  updateSpheresVisibility();
+}
+
+void CuroboTrajectoryDisplay::updateSpheresVisibility()
+{
+  // Attached only: the pool never holds robot spheres (syncSpheres filters
+  // them out), so this is the overlay's master switch. Only the active
+  // prefix is toggled — the surplus keeps whatever it had (hidden), so a
+  // shrink (e.g. detach leaving zero attached markers) cannot resurrect
+  // stale balls.
+  const bool show_attached = show_attached_property_->getBool();
+  const size_t active = std::min(sphere_active_count_, sphere_pool_.size());
+  for (size_t i = 0; i < active; ++i) {
+    if (sphere_pool_[i].node) {
+      sphere_pool_[i].node->setVisible(show_attached);
+    }
+  }
+  for (size_t i = active; i < sphere_pool_.size(); ++i) {
+    if (sphere_pool_[i].node) {
+      sphere_pool_[i].node->setVisible(false);
+    }
+  }
+}
+
+void CuroboTrajectoryDisplay::applySpheres(const std::vector<SphereDatum> & data)
+{
+  // Grow-only pool (same reasoning as the trail ghosts): the sphere count is
+  // stable in steady operation, so creating on demand and merely hiding the
+  // surplus keeps every frame allocation-free.
+  while (sphere_pool_.size() < data.size()) {
+    SphereVisual sv;
+    sv.node = scene_node_->createChildSceneNode();
+    sv.shape = std::make_shared<rviz_rendering::Shape>(
+      rviz_rendering::Shape::Sphere, scene_manager_, sv.node);
+    sv.node->setVisible(false);
+    sphere_pool_.push_back(std::move(sv));
+  }
+  for (size_t i = 0; i < data.size(); ++i) {
+    SphereVisual & sv = sphere_pool_[i];
+    const SphereDatum & d = data[i];
+    sv.node->setPosition(d.pos);
+    sv.shape->setScale(Ogre::Vector3(d.sx, d.sy, d.sz));
+    sv.shape->setColor(d.r, d.g, d.b, d.a);
+    sv.attached = d.attached;
+  }
+  for (size_t i = data.size(); i < sphere_pool_.size(); ++i) {
+    if (sphere_pool_[i].node) {
+      sphere_pool_[i].node->setVisible(false);
+    }
+  }
+  sphere_active_count_ = data.size();
+  updateSpheresVisibility();
+}
+
+void CuroboTrajectoryDisplay::syncSpheres()
+{
+  visualization_msgs::msg::MarkerArray::ConstSharedPtr msg;
+  {
+    std::lock_guard<std::mutex> lock(spheres_mutex_);
+    if (!spheres_msg_new_) {return;}
+    msg = spheres_msg_new_;
+    spheres_msg_new_.reset();
+  }
+  spheres_got_message_ = true;
+  deleteStatus("Collision Spheres");
+
+  // The array carries no header of its own; every sphere marker shares the
+  // robot base frame. Transform to the fixed frame once per message, the way
+  // the voxel display does, rather than once per sphere.
+  std::string frame;
+  rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
+  for (const auto & marker : msg->markers) {
+    if (marker.action == visualization_msgs::msg::Marker::ADD &&
+      !marker.header.frame_id.empty())
+    {
+      frame = marker.header.frame_id;
+      stamp = rclcpp::Time(marker.header.stamp);
+      break;
+    }
+  }
+
+  Ogre::Vector3 offset = Ogre::Vector3::ZERO;
+  Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
+  if (!frame.empty() && context_ != nullptr && context_->getFrameManager() != nullptr &&
+    frame != context_->getFrameManager()->getFixedFrame())
+  {
+    if (context_->getFrameManager()->getTransform(frame, stamp, offset, rotation)) {
+      setTransformOk();
+    } else {
+      setMissingTransformToFixedFrame(frame);
+      for (auto & sv : sphere_pool_) {
+        if (sv.node) {
+          sv.node->setVisible(false);
+        }
+      }
+      return;
+    }
+  }
+
+  // Grow-only pool (same reasoning as the trail ghosts): the sphere count per
+  // message is stable in steady operation, so creating on demand and merely
+  // hiding the surplus keeps every frame allocation-free.
+  size_t want = 0;
+  for (const auto & marker : msg->markers) {
+    if (marker.action == visualization_msgs::msg::Marker::ADD &&
+      marker.type == visualization_msgs::msg::Marker::SPHERE)
+    {
+      ++want;
+    }
+  }
+  while (sphere_pool_.size() < want) {
+    SphereVisual sv;
+    sv.node = scene_node_->createChildSceneNode();
+    sv.shape = std::make_shared<rviz_rendering::Shape>(
+      rviz_rendering::Shape::Sphere, scene_manager_, sv.node);
+    sv.node->setVisible(false);
+    sphere_pool_.push_back(std::move(sv));
+  }
+
+  // Attached objects only: robot collision spheres are deliberately not
+  // shown. Spheres are symmetric: orientation is irrelevant, only the
+  // translation (rotated into the fixed frame) plus the message's own scale
+  // and colour. Colours arrive decided (blue attached, red colliding) and
+  // are used verbatim.
+  std::vector<SphereDatum> data;
+  for (const auto & marker : msg->markers) {
+    if (marker.action != visualization_msgs::msg::Marker::ADD ||
+      marker.type != visualization_msgs::msg::Marker::SPHERE ||
+      marker.ns != "attached_spheres")
+    {
+      continue;
+    }
+    SphereDatum d;
+    const Ogre::Vector3 local(
+      static_cast<float>(marker.pose.position.x),
+      static_cast<float>(marker.pose.position.y),
+      static_cast<float>(marker.pose.position.z));
+    d.pos = rotation * local + offset;
+    d.sx = static_cast<float>(marker.scale.x);
+    d.sy = static_cast<float>(marker.scale.y);
+    d.sz = static_cast<float>(marker.scale.z);
+    d.r = marker.color.r;
+    d.g = marker.color.g;
+    d.b = marker.color.b;
+    d.a = marker.color.a;
+    d.attached = (marker.ns == "attached_spheres");
+    data.push_back(d);
+  }
+  applySpheres(data);
+}
+
+// ============================================================================
 // Property update slots
 // ============================================================================
 
@@ -401,6 +624,17 @@ void CuroboTrajectoryDisplay::updateTrailVisibility()
 void CuroboTrajectoryDisplay::update(float wall_dt, float ros_dt)
 {
   Display::update(wall_dt, ros_dt);
+
+  // The sphere overlay is independent of the robot model: it has its own
+  // subscription, pool and transform, so it renders even before (or without)
+  // a URDF.
+  syncSpheres();
+  if (!spheres_got_message_ && !collision_topic_property_->getStdString().empty()) {
+    setStatus(
+      rviz_common::properties::StatusProperty::Warn, "Collision Spheres",
+      QString("No messages on '%1' yet.")
+        .arg(QString::fromStdString(collision_topic_property_->getStdString())));
+  }
 
   // Lazy-load robot model
   if (!robot_loaded_) {

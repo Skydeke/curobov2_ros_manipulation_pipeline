@@ -103,7 +103,12 @@ class RosIkRunner(Node):
         slot), so an over-padded server cache (the 32/4 launch defaults)
         inflates the kernel grid vs the native leg's ``{cuboid: 1}`` cache.
         The one synchronous solver rebuild (~25-37 s) is paid inside the call.
+
+        Clears the world first: the server refuses a shrink below the
+        loaded scene, and empty fits every size. The IK world is pushed
+        back right after (see add_world).
         """
+        self.clear_world(timeout=timeout)
         request = SetCollisionCache.Request()
         request.obb = IK_WORLD_CUBOIDS
         request.mesh = 0

@@ -13,6 +13,13 @@
 #
 # Refusé (success=False) si un goal d'exécution est actif : le changement
 # déclenche un rebuild complet des solveurs (~20s, bloquant).
+#
+# Refusé (success=False, rien n'est modifié) si la scène courante ne rentre
+# pas dans les nouvelles tailles : réduire le cache sous les objets chargés
+# reconstruirait les solveurs vides puis échouerait à repousser le monde
+# («Cannot load N cuboids») — les solveurs deviendraient aveugles alors que
+# la scène liste toujours les objets. Vider d'abord la scène (ou retirer des
+# objets), puis refaire la demande.
 
 # Request: nouvelles valeurs de cache
 int32 obb   # Taille cache OBB (-1=ne pas modifier, 0=désactiver, >0=taille)

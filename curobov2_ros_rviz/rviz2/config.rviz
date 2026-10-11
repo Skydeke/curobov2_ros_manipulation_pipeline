@@ -30,7 +30,6 @@ Panels:
   - Class: curobov2_ros_rviz/CuroboPanel
     Name: Curobo
     Context:
-      collision_spheres: false
       planner_node_name: unified_planner
       trajectory_type: 0
     Planning:

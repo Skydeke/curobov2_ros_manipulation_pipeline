@@ -6,7 +6,6 @@
 #include <curobov2_ros_interfaces/srv/set_planner.hpp>
 #include <curobov2_ros_interfaces/srv/set_robot_strategy.hpp>
 #include <rviz_common/config.hpp>
-#include <std_srvs/srv/set_bool.hpp>
 
 #include <QString>
 #include <QWidget>
@@ -16,7 +15,6 @@
 #include <set>
 #include <string>
 
-class QCheckBox;
 class QComboBox;
 class QGroupBox;
 class QLabel;
@@ -51,15 +49,13 @@ namespace curobov2_ros_rviz
 ///    generated trajectory is handed to the robot. Genuinely per-server state
 ///    that no other tab could set. Switchable at runtime, which is what the
 ///    server's `set_robot_strategy` exists for.
-///  * **Collision-sphere visualisation** — a debug overlay the server can
-///    publish or not. Purely visual, but it is a per-server switch and it is
-///    exactly the kind of thing MoveIt keeps in Context rather than in the
-///    request. It sits **directly on the tab**, not in a group: it used to be
-///    wrapped in a "World Representation" box, which was the worst of both — not
-///    a MoveIt title (MoveIt's Context tab has no such group) and a titled box
-///    around a single checkbox, which is not a shape MoveIt draws either. MoveIt
-///    puts lone checkboxes in the "Options" group on its Planning tab beside five
-///    others; with no other checkbox to sit with, no box is the honest rendering.
+///
+/// Collision-sphere visualisation is deliberately NOT here: it is display
+/// state, and it lives on the trajectory display (Show Collision / Show
+/// Attached over the spheres topic), where a visualisation toggle belongs.
+/// A per-server enable switch for it on this tab would change server state
+/// from a panel whose other controls are all about which server to talk to
+/// and how it plans.
 ///
 /// The planner node and the trajectory type live in MoveIt's "Planning Library"
 /// group, with MoveIt's own "Planning Group:" label on the first row — in MoveIt
@@ -123,7 +119,6 @@ private Q_SLOTS:
   void refreshStrategies();
   void applyStrategy();
   void applyTrajectoryType();
-  void applyCollisionSpheres(bool enabled);
 
 private:
   void runOnGuiThread(std::function<void()> fn);
@@ -138,11 +133,9 @@ private:
   bool planner_node_from_config_ = false;
   /// Forwarded from the Planning tab; gates the trajectory-type combo only.
   bool planner_ready_ = false;
-  /// Set by load(): a saved collision-sphere setting cannot be sent at load
+  /// Set by load(): a saved trajectory type cannot be sent at load
   /// time (rviz loads before onInitialize, so there is no client yet), so it
-  /// waits here and refreshStrategies() pushes it once the service exists.
-  bool collision_spheres_pending_ = false;
-  /// Same reason, for the saved trajectory type.
+  /// waits here until refreshStrategies() pushes it once the service exists.
   bool trajectory_type_pending_ = false;
   /// What the server last acknowledged, and what trajectoryType() reports.
   int trajectory_type_ = 0;
@@ -153,7 +146,6 @@ private:
     set_strategy_client_;
   rclcpp::Client<curobov2_ros_interfaces::srv::SetPlanner>::SharedPtr
     set_planner_client_;
-  rclcpp::Client<std_srvs::srv::SetBool>::SharedPtr collision_spheres_client_;
 
   /// Last node set shown in the planner-node combo, so refreshPlannerNodeList()
   /// only rebuilds items when the graph actually changed.
@@ -164,7 +156,6 @@ private:
   QLabel * current_strategy_label_ = nullptr;
   QComboBox * strategy_combo_ = nullptr;
   QPushButton * apply_button_ = nullptr;
-  QCheckBox * collision_spheres_check_ = nullptr;
   QLabel * status_ = nullptr;
 };
 
