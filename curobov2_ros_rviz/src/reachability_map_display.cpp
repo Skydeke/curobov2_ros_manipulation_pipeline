@@ -1011,11 +1011,9 @@ void ReachabilityMapDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & po
 
   visualization_msgs::msg::InteractiveMarker int_marker;
   int_marker.header.frame_id = gizmo_frame_;
-  auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
-  if (ros_node_abstraction) {
-    int_marker.header.stamp =
-      ros_node_abstraction->get_raw_node()->get_clock()->now();
-  }
+  // Frame-locked marker (header.stamp == 0) so RViz follows TF every frame;
+  // a timestamped marker would freeze the reference transform at creation.
+  // See TargetDisplay::makeGizmoMarker for the full rationale.
   int_marker.pose = pose;
   int_marker.scale = 1.0;
   int_marker.name = gizmo_name_;

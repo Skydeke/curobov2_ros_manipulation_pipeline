@@ -52,7 +52,9 @@ namespace curobov2_ros_rviz
  *    selectable Ogre objects and publishes drag feedback back to the server.
  *
  * No separate "Interactive Markers" display is needed in the RViz config.
- * Renders in the fixed frame; set the RViz fixed frame to the robot base frame.
+ * The pose is expressed in the robot base frame (the `base_link` parameter,
+ * matching the planner), and the marker is frame-locked (header.stamp == 0)
+ * so it tracks a moving base and drag feedback arrives in the base frame.
  */
 class TargetDisplay : public rviz_common::Display
 {
