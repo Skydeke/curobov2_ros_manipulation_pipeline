@@ -10,6 +10,7 @@ a running curobo_server.
 
 from __future__ import annotations
 
+import contextlib
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -153,6 +154,16 @@ class RobotInterface(ABC):
     @abstractmethod
     def execute(self, request: PlanRequest) -> PlanResult:
         """Plan and drive the arm (SendTrajectory action)."""
+
+    def allowance_scope(self, requests):
+        """Hold a collision allowance OFF across nested planning calls.
+
+        Stages planning several attempts of one request enter this once
+        around the loop instead of paying OFF/ON per attempt; nested
+        ``_set_links_collision`` calls then compose instead of flapping.
+        Default: no tracking (offline mocks, tests) — plain nested calls.
+        """
+        return contextlib.nullcontext()
 
     # ----- scene -------------------------------------------------------
     @abstractmethod

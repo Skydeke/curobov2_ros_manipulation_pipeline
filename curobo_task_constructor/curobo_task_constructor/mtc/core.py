@@ -2083,12 +2083,14 @@ class Task:
 
     @staticmethod
     def _spin_until(executor, future) -> bool:
-        """Spin ``executor`` until ``future`` completes; False on timeout."""
-        import time as _time
+        """Drive ``executor`` until ``future`` completes; False on timeout.
 
-        deadline = _time.monotonic() + EXECUTE_WAIT_SEC
-        while not future.done() and _time.monotonic() < deadline:
-            executor.spin_once(timeout_sec=0.01)
+        The executor is private to the caller (never the shared, spinning
+        one), so ``spin_until_future_complete`` is safe here — it wakes on
+        completion instead of polling at a fixed granularity.
+        """
+        executor.spin_until_future_complete(
+            future, timeout_sec=EXECUTE_WAIT_SEC)
         return future.done()
 
     def publish(self, solution: Any) -> None:

@@ -25,6 +25,8 @@ Known wire limitations (mirror of the framework contract):
 
 from __future__ import annotations
 
+import contextlib
+import threading
 import time
 from typing import Any, Optional
 
@@ -63,6 +65,61 @@ from curobo_task_constructor.core.robot_config import (
     reorder_joint_vectors,
 )
 
+
+class PlannerSessionState:
+    """Sticky planner/collision session: skip identical setup round trips.
+
+    Consecutive motion legs usually re-send the same configuration — three
+    best-of-3 attempts of one request, back-to-back same-planner legs — so
+    remembering the last sent state removes those round trips. The server
+    mutates both states on its own during execution replay (segments run
+    under their cached plans' planners) and any failed call leaves the
+    state unknown, so ``invalidate()`` forgets everything: ``execute()``
+    and every ``ServiceError`` path call it, and the next request re-sends
+    unconditionally. Within one planning burst (single thread, no executes
+    interleaved) skipping is therefore airtight; across bursts it never
+    trusts a stale belief — the failure mode the old always-reissue policy
+    existed for.
+
+    Pure Python, no ROS: unit-tested without a node.
+    """
+
+    def __init__(self):
+        self._planner_key = None
+        self._planner_known = False
+        self._collision_key = None
+        self._collision_known = False
+
+    def planner_request_needed(self, key) -> bool:
+        """True when a set_planner(key) round trip must go out."""
+        return not self._planner_known or key != self._planner_key
+
+    def note_planner_sent(self, key) -> None:
+        self._planner_key = key
+        self._planner_known = True
+
+    def collision_transition_needed(self, links, enabled: bool) -> bool:
+        """True when a set_link_collision(links, enabled) must go out.
+
+        An empty link set never needs a call (the adapter skips it) and
+        never changes the remembered state.
+        """
+        if not links:
+            return False
+        key = (tuple(sorted(links)), bool(enabled))
+        return not self._collision_known or key != self._collision_key
+
+    def note_collision_sent(self, links, enabled: bool) -> None:
+        if not links:
+            return
+        self._collision_key = (tuple(sorted(links)), bool(enabled))
+        self._collision_known = True
+
+    def invalidate(self) -> None:
+        """Forget everything (execute drove, or a call failed)."""
+        self._planner_known = False
+        self._collision_known = False
+
 #: ObjectSpec.shape -> AddObject type constant (mirror of the srv).
 _ADD_OBJECT_SHAPES = {
     "cuboid": AddObject.Request.CUBOID,
@@ -87,6 +144,16 @@ _SERVICE_TIMEOUT = 60.0  # s per call
 #: invalidates the cache outright, so this bound only governs changes made by
 #: OTHER clients.
 _SCENE_CACHE_SECONDS = 1.0
+
+#: Per-joint tolerance (rad) under which a joint-space goal counts as already
+#: reached (see _trivial_goal). 1e-6 was tighter than encoder reality: live
+#: joint readings routinely sit ~1e-3..1e-4 off a constant goal (the finger
+#: at 0.001 vs a requested 0.000), so no-op legs — ready/open/close issued
+#: while already there — missed the fast path and each burned a full
+#: ~300 ms trajopt solve. 1e-3 rad (~0.06 deg) is far above float and
+#: encoder noise yet an order of magnitude below MoveIt's 0.01 rad
+#: allowed_start_tolerance: anything skipped here is physically no motion.
+_TRIVIAL_GOAL_TOLERANCE = 1e-3
 
 #: GetSceneObjects type constant -> the `ObjectSpec.shape` spelling the rest of
 #: the task constructor uses. The constants are AddObject's; rosidl cannot import
@@ -140,6 +207,14 @@ class CuroboServerInterface(RobotInterface):
         #: switch when a different planner is requested, so a task may use
         #: per-stage planners (joint moves -> JOINT_SPACE, lift pose -> CLASSIC).
         self._active_planner = None
+        #: Sticky setup session (see PlannerSessionState): identical
+        #: set_planner / set_link_collision repeats are skipped; execute()
+        #: and every failed call invalidate it.
+        self._session = PlannerSessionState()
+        #: Re-entrant allowance depth, per planning thread (see
+        #: allowance_scope): nested OFF/ON pairs around one request's
+        #: attempts compose into a single OFF...ON instead of flapping.
+        self._allowance_tls = threading.local()
 
         self._traj_client = self._client(
             TrajectoryGeneration, "/curobo_server/generate_trajectory"
@@ -528,18 +603,28 @@ class CuroboServerInterface(RobotInterface):
     def _ensure_planner(self, planner) -> None:
         """Make sure the requested planner is the server's current one.
 
-        The planner is (re-)selected on EVERY request, like MTC routes every
-        plan through the requested pipeline. A client-side sticky skip ("do
-        not re-issue the same planner") is wrong here: the server switches
-        planners on its own (execution replay runs each segment under its
-        cached plan's planner), so a cached "already active" belief goes
-        stale — a joint-space request then plans under Classic and fails
-        validation, with no client error pointing at the cause.
+        Identical repeats are skipped through the session (see
+        PlannerSessionState): three best-of-3 attempts of one request and
+        back-to-back same-planner legs send once. The skip used to be wrong
+        on its own — the server switches planners by itself during execution
+        replay, so a cached "already active" belief goes stale (a joint-space
+        request then plans under Classic and fails validation, with no client
+        error pointing at the cause). It is safe now because the session is
+        invalidated on every execute() and every failed call: within one
+        planning burst nothing can go stale, and across bursts nothing is
+        trusted.
         """
         key = planner if planner is not None else self._planner
         if key is None:
             return
-        self.set_planner(key)
+        if not self._session.planner_request_needed(key):
+            return
+        try:
+            self.set_planner(key)
+        except Exception:
+            self._session.invalidate()
+            raise
+        self._session.note_planner_sent(key)
 
     def _set_links_collision(self, requests: list, enabled: bool) -> None:
         """Enable/disable collision spheres for the goalsets' allowed links.
@@ -562,12 +647,63 @@ class CuroboServerInterface(RobotInterface):
         )
         if not links:
             return
+        tls = self._allowance_tls
+        depth = getattr(tls, "depth", 0)
+        held = getattr(tls, "links", None)
+        if depth > 0 and held != links:
+            # Mixed nesting (not produced by our graphs — every scope wraps
+            # one request's attempts): fall back to a stateless extra call
+            # so the outer scope still balances. Session and depth untouched.
+            self._send_collision_update(links, enabled)
+            return
+        if not enabled:
+            if depth == 0 and self._session.collision_transition_needed(
+                    links, False):
+                self._send_collision_update(links, False)
+                self._session.note_collision_sent(links, False)
+            tls.links = links
+            tls.depth = depth + 1
+            return
+        if depth <= 1:
+            if self._session.collision_transition_needed(links, True):
+                self._send_collision_update(links, True)
+                self._session.note_collision_sent(links, True)
+            tls.links = None
+            tls.depth = 0
+            return
+        tls.depth = depth - 1
+
+    def _send_collision_update(self, links, enabled: bool) -> None:
+        """One set_link_collision round trip (refuse/fail invalidates)."""
         req = SetLinkCollision.Request()
-        req.link_names = links
-        req.enabled = enabled
-        res = self._call(self._link_collision_client, req)
+        req.link_names = list(links)
+        req.enabled = bool(enabled)
+        try:
+            res = self._call(self._link_collision_client, req)
+        except Exception:
+            self._session.invalidate()
+            raise
         if not res.success:
+            self._session.invalidate()
             raise ServiceError(f"set_link_collision failed: {res.message}")
+
+    @contextlib.contextmanager
+    def allowance_scope(self, requests):
+        """Hold this request's allowance OFF across nested planning calls.
+
+        A stage planning N attempts of one request enters once around the
+        loop: the first OFF sends (outermost), nested OFF/ON pairs from each
+        ``plan()`` compose silently, and the exit restores ON. Standalone
+        ``plan()``/``execute()`` calls keep their own balanced OFF...ON
+        without any scope. Thread-local depth keeps concurrent planning
+        threads independent; a scope that never exits (caller bug) leaks OFF
+        exactly like an unbalanced call would have — no new failure mode.
+        """
+        self._set_links_collision(requests, False)
+        try:
+            yield
+        finally:
+            self._set_links_collision(requests, True)
 
     def plan(self, request: PlanRequest) -> PlanResult:
         # Identity fast path: a joint-space goal equal to the start needs no
@@ -604,8 +740,10 @@ class CuroboServerInterface(RobotInterface):
         """Trivial success for a no-motion joint goal, or None.
 
         Single goalset with joint targets matching the start pose within
-        1e-6 rad on every joint: returns a single-waypoint success without
-        touching the server.
+        ``_TRIVIAL_GOAL_TOLERANCE`` on every joint: returns a single-waypoint
+        success without touching the server. Returning the start state as the
+        whole trajectory is safe precisely because nothing moves — there is
+        no path to collide-check.
         """
         goalsets = list(getattr(request, "goalsets", None) or [])
         if len(goalsets) != 1:
@@ -618,7 +756,7 @@ class CuroboServerInterface(RobotInterface):
         have = [float(v) for v in (getattr(start, "position", None) or [])]
         if len(have) != len(want):
             return None
-        if any(abs(a - b) > 1e-6 for a, b in zip(have, want)):
+        if any(abs(a - b) > _TRIVIAL_GOAL_TOLERANCE for a, b in zip(have, want)):
             return None
         return PlanResult(True, "start equals goal (no motion needed)",
                           trajectory=[start], cost=0.0)
@@ -626,7 +764,12 @@ class CuroboServerInterface(RobotInterface):
     def plan_batch(self, requests: list) -> list:
         planners = {r.planner for r in requests if r.planner is not None}
         for p in planners:
-            self.set_planner(p)
+            try:
+                self.set_planner(p)
+            except Exception:
+                self._session.invalidate()
+                raise
+            self._session.note_planner_sent(p)
         # Apply the goalsets' allowed links (spheres OFF) for the duration of
         # the solve and restore (spheres ON) right after — exception-safe.
         self._set_links_collision(requests, False)
@@ -681,6 +824,10 @@ class CuroboServerInterface(RobotInterface):
         ``_set_links_collision`` returns early when a request allows no links,
         so stages like ``return`` / ``open`` do not touch the spheres at all.
         """
+        # Driving may leave the server in any planner/collision state
+        # (segments replay under their cached plans' planners), so the sticky
+        # session is forgotten here and rebuilt by the next requests.
+        self._session.invalidate()
         self._ensure_planner(request.planner)
         if not self._exec_client.wait_for_server(timeout_sec=self._service_timeout):
             raise ServiceError("execute_trajectory action unavailable")
@@ -852,6 +999,7 @@ class CuroboServerInterface(RobotInterface):
             )
             ready = True
         if not ready:
+            self._session.invalidate()
             raise ServiceError(f"service '{client.srv_name}' unavailable")
         try:
             future = client.call_async(request)
@@ -861,37 +1009,56 @@ class CuroboServerInterface(RobotInterface):
             # caller handed it a plain message instead of the srv Request
             # wrapper. Label it here so it reads as a protocol bug, not
             # "plan call failed: TypeError()".
+            self._session.invalidate()
             raise ServiceError(f"{what} rejected client-side: {exc!r}") from None
-        return self._await(future, what, timeout)
+        try:
+            return self._await(future, what, timeout)
+        except Exception:
+            # Timeout, cancellation or server-side failure: the server may be
+            # left in any planner/collision state, so the sticky session is
+            # forgotten and the next request re-sends unconditionally.
+            self._session.invalidate()
+            raise
 
     @staticmethod
     def _await(future, what: str, timeout: float = _SERVICE_TIMEOUT):
-        """Block on an rclpy future without nested spinning.
+        """Block on an rclpy future without nested spinning and without polling.
 
         The task constructor executes inside an action-server callback on a
         worker thread of a MultiThreadedExecutor. ``rclpy.spin_until_future
         _complete`` must not be called there (the executor is already
-        spinning in another thread), so we block the worker thread instead:
-        the executor's remaining threads deliver the response and resolve the
-        future.
+        spinning in another thread), so the worker thread blocks on a
+        ``threading.Event`` instead: the future's done-callback sets it, and
+        the executor's remaining threads deliver the response. Completion
+        wakes the waiter immediately — there is no sleep-poll tick, so a fast
+        response costs microseconds, not one poll period.
+
+        No missed wakeups: ``add_done_callback`` fires even when the future
+        is already done (inline with no executor, via the spinning executor
+        otherwise), so a response landing between the ``done()`` check and
+        the callback registration still sets the event before ``wait()``.
 
         Jazzy's rclpy client/action futures do NOT accept a ``timeout``
         kwarg on ``Future.result()`` — calling it that way raises
         ``TypeError: Future.result() got an unexpected keyword argument
         'timeout'`` and killed every plan at the call boundary. The budget is
-        therefore enforced by polling ``done()`` against a monotonic
-        deadline; ``result()`` is called without arguments once the future is
-        resolved.
+        therefore the event wait below; ``result()`` is called without
+        arguments once the future is resolved.
         """
-        deadline = time.monotonic() + timeout
-        while not future.done():
-            if time.monotonic() >= deadline:
-                # Cancel the stale in-flight request so a later call_async on
-                # the same client isn't (a) blocked by it, or (b) implicitly
-                # canceled by rclpy's single-pending-request reuse.
-                future.cancel()
-                raise ServiceError(f"{what} timed out after {timeout}s") from None
-            time.sleep(0.02)
+        import threading
+
+        if future.done():
+            settled = True
+        else:
+            event = threading.Event()
+            future.add_done_callback(lambda _f: event.set())
+            settled = event.wait(timeout)
+        if not settled:
+            # Cancel the stale in-flight request so a later call_async on
+            # the same client isn't (a) blocked by it, or (b) implicitly
+            # canceled by rclpy's single-pending-request reuse.
+            future.cancel()
+            raise ServiceError(f"{what} timed out after {timeout}s") from None
         try:
             return future.result()
         except Exception as exc:  # rclpy client errors etc.

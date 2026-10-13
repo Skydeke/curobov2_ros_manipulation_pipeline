@@ -212,6 +212,41 @@ def throttle_curobo_mesh_cache_warnings(
     )
 
 
+def should_refresh_world(
+    *,
+    force: bool,
+    epoch: int,
+    last_pushed_epoch: int,
+    now: float,
+    last_push_time: float,
+    min_interval_s: float,
+) -> bool:
+    """Whether refresh_perception_world must rebuild + push (pure policy).
+
+    Analytic scene content is pushed eagerly at mutation time (add/remove/
+    clear/attach/detach all propagate synchronously through the world-changed
+    observer or direct pushes), so this gate is purely about ESDF freshness —
+    never about analytic currency. Skipping it can therefore never plan
+    against a stale object set, only against a bounded-stale ESDF in a
+    static cell:
+
+    - ``force`` (reactive servo, execute-path re-solve): today's behavior,
+      refresh whenever the epoch advanced.
+    - epoch unchanged since the last push: nothing integrated, skip.
+    - epoch advanced but the last push is younger than ``min_interval_s``:
+      skip (static cells gain nothing per depth frame).
+    - ``last_pushed_epoch < 0`` (never pushed): always refresh, so the first
+      request builds the baseline even inside the throttle window.
+    """
+    if last_pushed_epoch < 0:
+        return True
+    if force:
+        return epoch != last_pushed_epoch
+    if epoch == last_pushed_epoch:
+        return False
+    return (now - last_push_time) >= min_interval_s
+
+
 class UnifiedPlannerNode(Node):
     """Unified trajectory planning node with dynamic strategy switching (v2)."""
 
@@ -365,6 +400,13 @@ class UnifiedPlannerNode(Node):
         # and the cameras' combined frame rate.
 
         self.declare_parameter("collision_activation_distance", 0.025)
+        # Minimum seconds between ESDF rebuilds (refresh_perception_world).
+        # Camera frames integrate continuously, so without a bound every plan
+        # rebuilds the ESDF even in a static cell. Analytic mutations always
+        # push eagerly and bypass this; the bound only stales camera data,
+        # which is harmless while nothing moves. Reactive servo bypasses it
+        # per call (force=True) and always plans on fresh perception.
+        self.declare_parameter("esdf_refresh_min_interval", 2.0)
         self.declare_parameter("convergence_threshold", 0.01)
         self.declare_parameter("max_mpc_iterations", 1000)
         # Capture/replay CUDA graphs in the solvers (faster, but a captured
@@ -377,7 +419,7 @@ class UnifiedPlannerNode(Node):
         # buffers at build time and is baked into the CUDA graph, so changing
         # it at runtime requires a rebuild via update_motion_gen_config (same
         # caveat as max_batch_size). Read by ConfigWrapperMotion.
-        self.declare_parameter("max_goalset", 16)
+        self.declare_parameter("max_goalset", 1)
         # Batched-solve capacity: problems stacked into ONE plan_cspace call on
         # the trajectory_generation_batch surface (batch dim = problems × seed
         # dim = candidate trajectories). Cap sizes solver buffers at build time
@@ -625,6 +667,14 @@ class UnifiedPlannerNode(Node):
         # _store_pending_plan / _pending_plan_matches / _prune_plan_cache.
         self._pending_plan = []
         self._last_pushed_epoch = -1
+        # ESDF throttle state for refresh_perception_world (see
+        # should_refresh_world): monotonic time + ESDF compute cost of the
+        # last refresh that actually pushed.
+        self._last_esdf_push_time = 0.0
+        self._last_esdf_ms = 0.0
+        self._esdf_refresh_min_interval = float(
+            self.get_parameter("esdf_refresh_min_interval").value
+        )
 
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_motion)
@@ -972,15 +1022,37 @@ class UnifiedPlannerNode(Node):
         # primitives become meshes.
         return obstacle_manager.collision_world_scene_from(scene)
 
-    def refresh_perception_world(self):
+    def refresh_perception_world(self, force=False):
+        """Rebuild the ESDF and push the world iff it is stale.
+
+        Analytic scene content needs no check here: add/remove/clear/attach/
+        detach all push eagerly and synchronously through the world-changed
+        observer (or direct pushes), so the solvers already reflect every
+        mutation as of its service call's return. This gate is purely about
+        ESDF freshness — see should_refresh_world for the exact policy.
+        Reactive servo passes force=True (today's behavior); open-loop paths
+        share the throttle bound.
+        """
         epoch = getattr(self, "perception_epoch", 0)
-        if epoch == self._last_pushed_epoch:
-            return                                  # nothing integrated since the last push
+        if not should_refresh_world(
+            force=force,
+            epoch=epoch,
+            last_pushed_epoch=self._last_pushed_epoch,
+            now=time.monotonic(),
+            last_push_time=self._last_esdf_push_time,
+            min_interval_s=self._esdf_refresh_min_interval,
+        ):
+            self._last_esdf_ms = 0.0
+            return                                  # world already current
         obs = self.config_wrapper_motion.obstacle_manager
         with self.gpu_lock:
-            if obs.refresh_esdf():
+            _t_esdf = time.monotonic()
+            refreshed = obs.refresh_esdf()
+            self._last_esdf_ms = (time.monotonic() - _t_esdf) * 1e3
+            if refreshed:
                 self.update_all_solvers_world(obs.get_scene())
                 self._last_pushed_epoch = epoch
+                self._last_esdf_push_time = time.monotonic()
 
     def rebuild_solvers_for_cache_change(self):
         """Rebuild all active solvers after a collision-cache change.
@@ -1136,7 +1208,8 @@ class UnifiedPlannerNode(Node):
             self.get_logger().info(
                 f"[plan-perf] {planner.get_planner_name()}: "
                 f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
-                f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms "
+                f"(esdf_compute {self._last_esdf_ms:.1f} ms), "
                 f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
                 f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
             )
@@ -1896,13 +1969,19 @@ class UnifiedPlannerNode(Node):
 
     def _refresh_and_plan(self, planner, start_state, goal, config):
         """Runs ON a lane thread."""
-        self.refresh_perception_world()
+        # Execute-path re-solve after a cache miss: the previous attempt
+        # already failed, so pay for fresh perception rather than risk
+        # re-failing on a throttled world.
+        self.refresh_perception_world(force=True)
         with self._plan_lock():
             return planner.plan(start_state, goal, config, self.robot_context)
 
     def _refresh_and_plan_reactive(self, planner, start_state, goal, config):
         """Runs ON the reactive lane thread."""
-        self.refresh_perception_world()
+        # Servo planning must never run on throttled perception: force
+        # bypasses the ESDF throttle (but still skips when nothing
+        # integrated at all — same as today's early return).
+        self.refresh_perception_world(force=True)
         return planner.plan(start_state, goal, config, self.robot_context)
 
     def _execute_goal(self, goal_handle, goal, planner, result_msg):
