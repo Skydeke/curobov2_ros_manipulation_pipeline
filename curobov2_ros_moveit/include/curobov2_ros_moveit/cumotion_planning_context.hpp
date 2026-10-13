@@ -21,7 +21,13 @@
 #include <memory>
 #include <string>
 
+#if __has_include(<moveit/planning_interface/planning_interface.hpp>)
 #include "moveit/planning_interface/planning_interface.hpp"
+#define CUROBOV2_MOVEIT_JAZZY_API 1
+#else
+#include "moveit/planning_interface/planning_interface.h"
+#define CUROBOV2_MOVEIT_HUMBLE_API 1
+#endif
 
 #include "curobov2_ros_moveit/cumotion_interface.hpp"
 
@@ -46,9 +52,15 @@ public:
   {
   }
 
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+  bool solve(planning_interface::MotionPlanResponse & res) override;
+
+  bool solve(planning_interface::MotionPlanDetailedResponse & res) override;
+#else
   void solve(planning_interface::MotionPlanResponse & res) override;
 
   void solve(planning_interface::MotionPlanDetailedResponse & res) override;
+#endif
 
   bool terminate() override
   {

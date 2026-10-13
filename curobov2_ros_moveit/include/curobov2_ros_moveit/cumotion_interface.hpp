@@ -20,7 +20,11 @@
 
 #include <memory>
 
+#if __has_include(<moveit/planning_interface/planning_interface.hpp>)
 #include "moveit/planning_interface/planning_interface.hpp"
+#else
+#include "moveit/planning_interface/planning_interface.h"
+#endif
 #include "rclcpp/rclcpp.hpp"
 
 #include "curobov2_ros_moveit/cumotion_service_client.hpp"
