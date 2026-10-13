@@ -25,14 +25,36 @@
 #include <string>
 #include <vector>
 
+#if __has_include(<moveit/planning_interface/planning_interface.hpp>)
 #include "moveit/planning_interface/planning_interface.hpp"
+#else
+#include "moveit/planning_interface/planning_interface.h"
+#endif
+#if __has_include(<moveit/planning_scene/planning_scene.hpp>)
 #include "moveit/planning_scene/planning_scene.hpp"
+#else
+#include "moveit/planning_scene/planning_scene.h"
+#endif
 #include "moveit/planning_scene_interface/planning_scene_interface.h"
+#if __has_include(<moveit/robot_state/conversions.hpp>)
 #include "moveit/robot_state/conversions.hpp"
+#else
+#include "moveit/robot_state/conversions.h"
+#endif
 #include "builtin_interfaces/msg/duration.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
+
+#ifndef CUROBOV2_MOVEIT_HUMBLE_API
+#ifndef CUROBOV2_MOVEIT_JAZZY_API
+#if __has_include(<moveit/planning_interface/planning_interface.hpp>)
+#define CUROBOV2_MOVEIT_JAZZY_API 1
+#else
+#define CUROBOV2_MOVEIT_HUMBLE_API 1
+#endif
+#endif
+#endif
 
 namespace curobov2
 {
@@ -116,7 +138,11 @@ void CumotionInterface::solve(
   const auto plan_start = std::chrono::steady_clock::now();
   if (!service_client_->plan(request, dof_joint_names, req, res)) {
     RCLCPP_ERROR(node_->get_logger(), "Planning failed");
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+    response.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+#else
     response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+#endif
     planner_busy = false;
     return;
   }
@@ -124,22 +150,44 @@ void CumotionInterface::solve(
   if (!res.response.success) {
     RCLCPP_ERROR_STREAM(
       node_->get_logger(), "cuRobo planning failed: " << res.response.message);
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+    response.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+#else
     response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+#endif
     planner_busy = false;
     return;
   }
   RCLCPP_INFO(node_->get_logger(), "Trajectory success!");
 
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+  response.description_.push_back("cuRobo (curobo_ros generate_trajectory)");
+#else
   response.description.push_back("cuRobo (curobo_ros generate_trajectory)");
+#endif
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+  response.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+#else
   response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+#endif
+#ifdef CUROBOV2_MOVEIT_JAZZY_API
   response.planner_id = request.planner_id.empty() ? kAutoPlannerId : request.planner_id;
+#endif
   const auto plan_end = std::chrono::steady_clock::now();
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+  response.processing_time_.push_back(
+#else
   response.processing_time.push_back(
+#endif
     std::chrono::duration<double>(plan_end - plan_start).count());
 
   if (res.response.trajectory.empty()) {
     RCLCPP_ERROR(node_->get_logger(), "cuRobo returned an empty trajectory");
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+    response.error_code_.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+#else
     response.error_code.val = moveit_msgs::msg::MoveItErrorCodes::PLANNING_FAILED;
+#endif
     planner_busy = false;
     return;
   }
@@ -154,8 +202,13 @@ void CumotionInterface::solve(
     res.response.trajectory, res.response.dt);
   result_traj->setRobotTrajectoryMsg(robot_state, jt);
 
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+  response.trajectory_.clear();
+  response.trajectory_.push_back(result_traj);
+#else
   response.trajectory.clear();
   response.trajectory.push_back(result_traj);
+#endif
 
   planner_busy = false;
 }

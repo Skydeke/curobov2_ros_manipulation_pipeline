@@ -84,16 +84,16 @@ rclcpp::QoS descriptionQoS()
   // MTC TaskDisplay subscriber depths, verbatim: description 10,
   // statistics/solution 2, all transient_local.
   rclcpp::QoS qos(rclcpp::KeepLast(10));
-  qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
-  qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
+  qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
+  qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
   return qos;
 }
 
 rclcpp::QoS introspectionQoS()
 {
   rclcpp::QoS qos(rclcpp::KeepLast(2));
-  qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
-  qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
+  qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
+  qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
   return qos;
 }
 
@@ -342,8 +342,8 @@ TaskView::TaskView(TaskConstructorPanel* parent, rviz_common::properties::Proper
   // Transient-local like Task.publish: a trajectory display that subscribes
   // later still picks up the selected solution.
   rclcpp::QoS traj_qos(rclcpp::KeepLast(1));
-  traj_qos.reliability(RMW_QOS_POLICY_RELIABILITY_RELIABLE);
-  traj_qos.durability(RMW_QOS_POLICY_DURABILITY_TRANSIENT_LOCAL);
+  traj_qos.reliability(rclcpp::ReliabilityPolicy::Reliable);
+  traj_qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
   pub_solution_trajectory_ =
       node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(kTopicSolutionTrajectory,
                                                                       traj_qos);
@@ -768,7 +768,7 @@ void TaskView::ensureGetSolutionClient(const std::string& task_id)
   // MTC per-task naming: <base>/get_solution_<task_id> (introspection.cpp).
   const std::string name = std::string(kServiceGetSolution) + "_" + task_id;
   get_solution_client_ = node_->create_client<
-      curobo_task_constructor_interfaces::srv::GetSolution>(name, rclcpp::ServicesQoS(),
+      curobo_task_constructor_interfaces::srv::GetSolution>(name, rmw_qos_profile_services_default,
                                                              cb_group_);
   get_solution_task_id_ = task_id;
 }

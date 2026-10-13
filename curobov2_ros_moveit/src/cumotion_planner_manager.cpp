@@ -17,8 +17,16 @@
 
 #include "curobov2_ros_moveit/cumotion_planner_manager.hpp"
 
+#if __has_include(<moveit/planning_interface/planning_interface.hpp>)
 #include "moveit/planning_interface/planning_interface.hpp"
+#else
+#include "moveit/planning_interface/planning_interface.h"
+#endif
+#if __has_include(<moveit/planning_scene/planning_scene.hpp>)
 #include "moveit/planning_scene/planning_scene.hpp"
+#else
+#include "moveit/planning_scene/planning_scene.h"
+#endif
 #include "pluginlib/class_list_macros.hpp"
 
 #include "curobov2_ros_moveit/cumotion_planning_context.hpp"

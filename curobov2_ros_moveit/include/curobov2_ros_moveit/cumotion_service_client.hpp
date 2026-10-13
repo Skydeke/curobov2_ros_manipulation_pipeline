@@ -25,8 +25,16 @@
 #include <string>
 #include <vector>
 
+#if __has_include(<moveit/planning_interface/planning_interface.hpp>)
 #include "moveit/planning_interface/planning_interface.hpp"
+#else
+#include "moveit/planning_interface/planning_interface.h"
+#endif
+#if __has_include(<moveit/planning_scene/planning_scene.hpp>)
 #include "moveit/planning_scene/planning_scene.hpp"
+#else
+#include "moveit/planning_scene/planning_scene.h"
+#endif
 #include "rclcpp/rclcpp.hpp"
 
 #include "curobov2_ros_interfaces/srv/add_object.hpp"

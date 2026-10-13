@@ -22,6 +22,28 @@ namespace curobov2
 namespace manipulation
 {
 
+#ifdef CUROBOV2_MOVEIT_HUMBLE_API
+bool CumotionPlanningContext::solve(planning_interface::MotionPlanDetailedResponse & res)
+{
+  cumotion_interface_->solve(planning_scene_, request_, res);
+  return res.error_code_.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+}
+
+bool CumotionPlanningContext::solve(planning_interface::MotionPlanResponse & res)
+{
+  planning_interface::MotionPlanDetailedResponse res_detailed;
+  solve(res_detailed);
+
+  res.error_code_ = res_detailed.error_code_;
+
+  if (res.error_code_.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS) {
+    res.trajectory_ = res_detailed.trajectory_[0];
+    res.planning_time_ = res_detailed.processing_time_[0];
+  }
+
+  return res.error_code_.val == moveit_msgs::msg::MoveItErrorCodes::SUCCESS;
+}
+#else
 void CumotionPlanningContext::solve(planning_interface::MotionPlanDetailedResponse & res)
 {
   cumotion_interface_->solve(planning_scene_, request_, res);
@@ -39,6 +61,7 @@ void CumotionPlanningContext::solve(planning_interface::MotionPlanResponse & res
     res.planning_time = res_detailed.processing_time[0];
   }
 }
+#endif
 
 }  // namespace manipulation
 }  // namespace curobov2

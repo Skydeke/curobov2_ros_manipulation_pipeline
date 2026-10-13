@@ -161,7 +161,7 @@ bool CuroboTrajectoryDisplay::loadURDF()
   // next update() frame retries.
   if (!robot_description_sub_) {
     rclcpp::QoS qos(rclcpp::KeepLast(1));
-    qos.transient_local();
+    qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
     robot_description_sub_ = node->create_subscription<std_msgs::msg::String>(
       "/robot_description",
       qos,

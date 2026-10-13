@@ -11,6 +11,9 @@
 #include <rviz_common/validate_floats.hpp>
 
 #include <curobov2_ros_rviz/target_display.hpp>
+#if __has_include(<OgreSceneNode.h>)
+#include <OgreSceneNode.h>
+#endif
 
 namespace
 {
@@ -232,10 +235,27 @@ void TargetDisplay::createGizmo()
   auto node = ros_node_abstraction->get_raw_node();
 
   if (gizmo_frame_.empty()) {
-    gizmo_frame_ = context_->getFrameManager()->getFixedFrame();
-    if (gizmo_frame_.empty()) {
-      gizmo_frame_ = "base_link";
+    // The target pose is expressed in the robot base frame (the same frame
+    // the planner assumes), NOT in the RViz fixed frame: otherwise a moved
+    // mobile base makes the stored target drift away from the robot. The base
+    // frame name comes from the `base_link` parameter when available (matches
+    // the planner's notion of the base) and defaults to "base_link".
+    std::string base_frame;
+    auto ros_node_abstraction_param = context_->getRosNodeAbstraction().lock();
+    if (ros_node_abstraction_param) {
+      auto node = ros_node_abstraction_param->get_raw_node();
+      if (!node->has_parameter("base_link")) {
+        node->declare_parameter<std::string>("base_link", "base_link");
+      }
+      base_frame = node->get_parameter("base_link").get_parameter_value().get<std::string>();
     }
+    if (base_frame.empty()) {
+      base_frame = context_->getFrameManager()->getFixedFrame();
+    }
+    if (base_frame.empty()) {
+      base_frame = "base_link";
+    }
+    gizmo_frame_ = base_frame;
   }
 
   if (!gizmo_server_) {
@@ -592,17 +612,9 @@ void TargetDisplay::update(float wall_dt, float ros_dt)
     gizmo_active_ = false;
   }
 
-  // The fixed frame may only be set after the display loaded; rebind the
-  // gizmo so it lives in the real frame rather than a startup fallback.
-  if (gizmo_active_ && gizmo_server_) {
-    const std::string fixed = context_->getFrameManager()->getFixedFrame();
-    if (!fixed.empty() && fixed != gizmo_frame_) {
-      gizmo_server_->clear();
-      gizmo_server_->applyChanges();
-      gizmo_server_.reset();
-      gizmo_frame_.clear();
-    }
-  }
+  // The gizmo lives in the (possibly moving) robot base frame, so it must
+  // not be torn down when only the RViz fixed frame changes. The embedded
+  // interactive-marker client already re-targets to the fixed frame.
   if (gizmo_active_ && !gizmo_server_) {
     createGizmo();
   }
