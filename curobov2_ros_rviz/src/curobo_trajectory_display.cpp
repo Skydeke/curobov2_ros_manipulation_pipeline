@@ -9,6 +9,7 @@
 #include <OgreSceneNode.h>
 
 #include <rclcpp/time.hpp>
+#include <rclcpp/exceptions.hpp>
 #include <rviz_common/display_context.hpp>
 #include <rviz_common/logging.hpp>
 #include <rviz_common/properties/parse_color.hpp>
@@ -180,8 +181,17 @@ bool CuroboTrajectoryDisplay::loadURDF()
   // without robot_state_publisher:
   //   1) the rviz node's own `robot_description` parameter (rviz.launch.py),
   //   2) the URDF file that moveit_cumotion.launch.py writes to /tmp.
-  if (node->has_parameter("robot_description")) {
-    urdf_xml_ = node->get_parameter("robot_description").as_string();
+  try {
+    if (node->has_parameter("robot_description")) {
+      auto _rd_param = node->get_parameter("robot_description");
+      if (_rd_param.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
+        urdf_xml_ = _rd_param.as_string();
+      }
+    }
+  } catch (const rclcpp::exceptions::ParameterUninitializedException &) {
+    // RViz node exposes the parameter name but it is not initialised yet
+    // (seen on Humble); fall through to the /robot_description topic.
+  } catch (const std::exception &) {
   }
   if (urdf_xml_.empty()) {
     std::ifstream ifs("/tmp/kortex.urdf");
