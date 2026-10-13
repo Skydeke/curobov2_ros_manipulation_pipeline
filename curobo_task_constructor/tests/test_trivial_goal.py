@@ -25,6 +25,22 @@ def test_near_identity_within_tolerance_succeeds():
     assert res is not None and res.success
 
 
+def test_encoder_noise_level_still_trivial():
+    # Live joint readings sit ~1e-4..1e-3 off a constant goal (e.g. the
+    # finger at 0.001 vs requested 0.000): no-op legs must take the fast
+    # path instead of burning a full trajopt solve on a milliradian.
+    res = CuroboServerInterface._trivial_goal(
+        _req([3.14, 0.6, 0.0, -1.5, 0.0, -1.57, 0.0, 0.0],
+             [3.14, 0.6, 1e-4, -1.5, 0.0, -1.57, 0.0, 0.001]))
+    assert res is not None and res.success
+    assert len(res.trajectory) == 1
+
+
+def test_above_tolerance_falls_through():
+    assert CuroboServerInterface._trivial_goal(
+        _req([1.0, 2.0], [1.0 + 5e-3, 2.0])) is None
+
+
 def test_real_motion_falls_through_to_server():
     assert CuroboServerInterface._trivial_goal(
         _req([1.0, 2.5], [1.0, 2.0])) is None

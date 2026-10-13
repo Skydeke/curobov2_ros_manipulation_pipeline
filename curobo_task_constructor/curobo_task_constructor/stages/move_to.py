@@ -154,17 +154,20 @@ class MoveTo(PropagatingEitherWay):
         # tries fail live); only the cheapest is promoted downstream.
         from curobo_task_constructor.core.stage import Solution
         tried = []
-        for _ in range(self._attempts()):
-            result = self._try_plan(req, state, "move_to plan failed")
-            if result is None:
-                continue
-            end = state.clone(joint_state=result.last_state)
-            sol = Solution(
-                state, end, trajectory=result.trajectory,
-                cost=self._cost_of(result), comment=self._comment(result),
-                response=result.raw, plan_request=req)
-            self._consider(sol)
-            tried.append(sol)
+        # Allowance window around the whole attempt loop (see
+        # RobotInterface.allowance_scope); mock/offline robots no-op it.
+        with self.robot.allowance_scope([req]):
+            for _ in range(self._attempts()):
+                result = self._try_plan(req, state, "move_to plan failed")
+                if result is None:
+                    continue
+                end = state.clone(joint_state=result.last_state)
+                sol = Solution(
+                    state, end, trajectory=result.trajectory,
+                    cost=self._cost_of(result), comment=self._comment(result),
+                    response=result.raw, plan_request=req)
+                self._consider(sol)
+                tried.append(sol)
         if not tried:
             # Every failed try already recorded itself above (MTC: each
             # failed plan is a failed solution); nothing more to report.
@@ -190,20 +193,23 @@ class MoveTo(PropagatingEitherWay):
             self.params)
         from curobo_task_constructor.core.stage import Solution
         tried = []
-        for _ in range(self._attempts()):
-            result = self._try_plan(req, state, "move_to backward failed")
-            if result is None:
-                continue
-            if not result.trajectory:
-                self._fail(state, None, "move_to backward failed")
-                continue
-            start = state.clone(joint_state=result.trajectory[0])
-            sol = Solution(
-                start, state, trajectory=result.trajectory,
-                cost=self._cost_of(result), comment=self._comment(result),
-                response=result.raw, plan_request=req)
-            self._consider(sol)
-            tried.append(sol)
+        # Allowance window around the whole attempt loop (see
+        # RobotInterface.allowance_scope); mock/offline robots no-op it.
+        with self.robot.allowance_scope([req]):
+            for _ in range(self._attempts()):
+                result = self._try_plan(req, state, "move_to backward failed")
+                if result is None:
+                    continue
+                if not result.trajectory:
+                    self._fail(state, None, "move_to backward failed")
+                    continue
+                start = state.clone(joint_state=result.trajectory[0])
+                sol = Solution(
+                    start, state, trajectory=result.trajectory,
+                    cost=self._cost_of(result), comment=self._comment(result),
+                    response=result.raw, plan_request=req)
+                self._consider(sol)
+                tried.append(sol)
         if not tried:
             # Every failed try already recorded itself (see _try_plan).
             return

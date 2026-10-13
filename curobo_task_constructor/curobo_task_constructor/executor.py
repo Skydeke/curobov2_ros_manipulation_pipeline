@@ -901,14 +901,28 @@ def drive_solution_dict(robot, d, applied_ops=None,
             continue
         if progress_callback is not None:
             progress_callback(index, total, info)
+        traj = seg.get("trajectory", {}) or {}
+        points = list(traj.get("points", []) or [])
+        if len(points) <= 1:
+            # Trivial (no-motion) segment: the planner answered it without
+            # solving (see CuroboServerInterface._trivial_goal), so there is
+            # no cached trajectory to replay and nothing to drive — and a
+            # force_cached replay attempt would fail the whole chain on a
+            # cache miss for a zero-length motion. Scene ops still apply
+            # (below); progress already fired (above), so the panel still
+            # follows the chain.
+            results.append(PlanResult(
+                True, "trivial (no motion needed)"))
+            for op in _scene_ops_from_dict(diff.get("after", {}) or {}):
+                _apply(op[0], op[1])
+            continue
         result = robot.execute(req)
         if not result.success:
             results.append(result)
             return results, index, False
-        traj = seg.get("trajectory", {}) or {}
         planned = [
             JointStateStub(dict(zip(traj.get("joint_names", []), pt)))
-            for pt in (traj.get("points", []) or [])
+            for pt in points
         ]
         divergence = TaskExecutor._diverged_from_plan_dict(planned, result)
         if divergence is not None:

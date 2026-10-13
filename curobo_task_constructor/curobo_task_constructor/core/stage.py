@@ -735,26 +735,31 @@ class TrajectoryStage(PropagatingStage):
             # best seed while successful + failed rows sum to attempts.
             attempts = max(1, int(self.params.get("planning_attempts", 3)))
             tried = []
-            for _ in range(attempts):
-                try:
-                    result = self._timed_plan(req)
-                except Exception as exc:  # ServiceError etc.
-                    self._fail(start, None, f"plan call failed: {exc}")
-                    continue
-                if not result.success:
-                    self._fail(start, None, result.message or "plan failed")
-                    continue
-                self._note_plan_attempt()
-                end = self.make_end_state(start, result, raw=result)
-                if end is None:
-                    continue  # already recorded (e.g. straightness gate)
-                sol = Solution(
-                    start, end, trajectory=result.trajectory,
-                    cost=self._cost_of(result),
-                    comment=self._comment(req, result),
-                    response=result.raw, plan_request=req)
-                self._consider(sol)
-                tried.append(sol)
+            # One allowance window for the whole attempt loop (see
+            # RobotInterface.allowance_scope): the first OFF sends,
+            # nested plan() calls compose silently, the exit restores
+            # ON — 2 round trips per leg instead of 2 per attempt.
+            with self.robot.allowance_scope([req]):
+                for _ in range(attempts):
+                    try:
+                        result = self._timed_plan(req)
+                    except Exception as exc:  # ServiceError etc.
+                        self._fail(start, None, f"plan call failed: {exc}")
+                        continue
+                    if not result.success:
+                        self._fail(start, None, result.message or "plan failed")
+                        continue
+                    self._note_plan_attempt()
+                    end = self.make_end_state(start, result, raw=result)
+                    if end is None:
+                        continue  # already recorded (e.g. straightness gate)
+                    sol = Solution(
+                        start, end, trajectory=result.trajectory,
+                        cost=self._cost_of(result),
+                        comment=self._comment(req, result),
+                        response=result.raw, plan_request=req)
+                    self._consider(sol)
+                    tried.append(sol)
             if not tried:
                 continue
             best = min(tried, key=lambda s: s.cost)
