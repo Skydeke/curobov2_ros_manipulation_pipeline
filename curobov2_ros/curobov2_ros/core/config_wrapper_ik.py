@@ -70,7 +70,13 @@ class ConfigWrapperIK(ConfigWrapper):
         self.use_cuda_graph = resolve_use_cuda_graph(node)
         self.position_tolerance = 0.005
         self.orientation_tolerance = 0.05
-        self.self_collision_check = True
+        # Collision checking in the standalone solver (self + scene), read
+        # from the node's ``ik_collision_check`` param (default True). False
+        # = pure-kinematics IK matching the official MoveIt methodology
+        # (sceneless plugin call): solver built with self_collision_check=False
+        # and no scene/cache, world pushes become no-ops for it. Baked in at
+        # build time like num_ik_seeds (update_ik_config rebuild).
+        self.collision_check = self._resolve_collision_check(node)
 
         # Live solver state. The solver is created only on build() (startup
         # warmup or on-demand /warmup_ik); batch 0 means "not yet warmed up".
@@ -78,6 +84,7 @@ class ConfigWrapperIK(ConfigWrapper):
         self.ik_batch_size: int = 0
         self.ik_num_seeds: int = 0
         self.ik_use_cuda_graph: bool | None = None
+        self.ik_collision_check: bool | None = None
 
         self.ik_config_srv = node.create_service(
             Trigger,
@@ -108,6 +115,21 @@ class ConfigWrapperIK(ConfigWrapper):
             )
         return 32
 
+    def _resolve_collision_check(self, node) -> bool:
+        """Whether the standalone IK solver checks collisions.
+
+        Read from the node's ``ik_collision_check`` param (default True).
+        False gives a pure-kinematics solve (official MoveIt methodology):
+        no self-collision, no scene, no collision cache.
+        """
+        if node.has_parameter("ik_collision_check"):
+            return bool(
+                node.get_parameter("ik_collision_check")
+                .get_parameter_value()
+                .bool_value
+            )
+        return True
+
     def build(self, batch_size: int, num_seeds: int | None = None) -> None:
         """Create (or recreate) the IK solver for the given batch size/seeds."""
         if num_seeds is None:
@@ -127,15 +149,18 @@ class ConfigWrapperIK(ConfigWrapper):
         # parse for the whole node) — do not re-build from the YAML path.
         # num_seeds runs that many parallel optimisation trajectories per
         # pose in the batch, so GPU memory grows with batch x seeds.
+        # Collision mode resolves live (like num_seeds): a runtime param flip
+        # takes effect on the next build/rebuild without relaunch.
+        collision_check = self._resolve_collision_check(self.node)
         use_cuda_graph = resolve_use_cuda_graph(self.node)
         cfg = InverseKinematicsCfg.create(
             robot=self.robot_model_manager.robot_cfg,
-            scene_model=scene,
+            scene_model=scene if collision_check else None,
             num_seeds=num_seeds,
             position_tolerance=self.position_tolerance,
             orientation_tolerance=self.orientation_tolerance,
-            self_collision_check=self.self_collision_check,
-            collision_cache=self.collision_cache,
+            self_collision_check=collision_check,
+            collision_cache=self.collision_cache if collision_check else None,
             use_cuda_graph=use_cuda_graph,
             max_batch_size=max(1, batch_size),
         )
@@ -143,16 +168,19 @@ class ConfigWrapperIK(ConfigWrapper):
             "IK solver envelope: "
             f"use_cuda_graph={use_cuda_graph}, "
             f"num_ik_seeds={num_seeds}, "
+            f"collision_check={collision_check}, "
             f"batch_size={max(1, batch_size)}"
         )
         self.ik_solver = InverseKinematics(cfg)
         self.ik_batch_size = batch_size
         self.ik_num_seeds = num_seeds
         self.ik_use_cuda_graph = use_cuda_graph
+        self.ik_collision_check = collision_check
         # Keep the resolved tunables in sync with what was actually built, so
         # the next set_ik_config can tell a param change from a no-op.
         self.num_ik_seeds = num_seeds
         self.use_cuda_graph = use_cuda_graph
+        self.collision_check = collision_check
 
         # Warmup: solve a batch of random configs to prime CUDA kernels.
         q_sample = self.ik_solver.sample_configs(batch_size)
@@ -168,18 +196,20 @@ class ConfigWrapperIK(ConfigWrapper):
         if callable(sync) and sync():
             torch.cuda.synchronize()
 
-        # Push the real scene after the empty build. Best-effort: after a
-        # cache shrink the previous world may not fit the new cache — warn
-        # loudly and continue empty; the next world event (or an explicit
-        # world set) pushes a fitting world. Same-cache rebuilds (batch-size
-        # changes, startup) always fit, so those paths are unchanged.
-        try:
-            self.update_world(
-                self.obstacle_manager.primitives_only_scene())
-        except Exception as e:
-            self.node.get_logger().warn(
-                f"IK solver rebuilt empty: current world does not fit the new "
-                f"cache ({e}); push a fitting world before planning")
+        # Push the real scene after the empty build — collision mode only.
+        # Best-effort: after a cache shrink the previous world may not fit
+        # the new cache — warn loudly and continue empty; the next world
+        # event (or an explicit world set) pushes a fitting world.
+        # Same-cache rebuilds (batch-size changes, startup) always fit, so
+        # those paths are unchanged.
+        if collision_check:
+            try:
+                self.update_world(
+                    self.obstacle_manager.primitives_only_scene())
+            except Exception as e:
+                self.node.get_logger().warn(
+                    f"IK solver rebuilt empty: current world does not fit the new "
+                    f"cache ({e}); push a fitting world before planning")
 
         self.node.get_logger().info("IK solver ready")
 
@@ -188,9 +218,9 @@ class ConfigWrapperIK(ConfigWrapper):
 
         Called on demand via the `update_ik_config` service — the IK analogue
         of the motion wrapper's `update_motion_gen_config`: after
-        `ros2 param set ... num_ik_seeds` (or `use_cuda_graph`), triggering
-        this service rebuilds the solver from the new values without a
-        relaunch.
+        `ros2 param set ... num_ik_seeds` (or `use_cuda_graph`, or
+        `ik_collision_check`), triggering this service rebuilds the solver
+        from the new values without a relaunch.
         """
         # (Re)captures CUDA graphs, so the whole body must hold gpu_lock —
         # the same invariant as every other graph-capturing path in the node.
@@ -208,15 +238,16 @@ class ConfigWrapperIK(ConfigWrapper):
     def needs_rebuild(self, batch_size: int, num_seeds: int) -> bool:
         """Whether the live solver no longer matches the requested config.
 
-        Compares batch size, seed count, and the currently resolved CUDA-graph
-        mode (a `ros2 param set ... use_cuda_graph` flip) against the live
-        solver, so a solve can rebuild lazily instead of serving a stale
-        configuration.
+        Compares batch size, seed count, the currently resolved CUDA-graph
+        mode (a `ros2 param set ... use_cuda_graph` flip), and the collision
+        mode (an `ik_collision_check` flip) against the live solver, so a
+        solve can rebuild lazily instead of serving a stale configuration.
         """
         return (
             batch_size != self.ik_batch_size
             or num_seeds != self.ik_num_seeds
             or resolve_use_cuda_graph(self.node) != self.ik_use_cuda_graph
+            or self._resolve_collision_check(self.node) != self.ik_collision_check
         )
 
     def invalidate(self) -> None:
@@ -225,6 +256,7 @@ class ConfigWrapperIK(ConfigWrapper):
         self.ik_batch_size = 0
         self.ik_num_seeds = 0
         self.ik_use_cuda_graph = None
+        self.ik_collision_check = None
 
     def rebuild(self) -> None:
         """Recreate the IK solver after a collision-cache change.
@@ -259,8 +291,13 @@ class ConfigWrapperIK(ConfigWrapper):
         mode, and would raise on every world update under blox=0. The solver is
         built WITH ``collision_cache`` (see ``build``), so unlike
         ``FKServices`` it can accept the voxel layer.
+
+        No-op when the solver runs collision-free (``ik_collision_check``):
+        motion-leg world pushes must not touch a kinematics-only solver.
         """
         if self.ik_solver is None:
+            return
+        if self.ik_collision_check is False:
             return
         if scene is None:
             # Normalize primitives to solver-supported collision types

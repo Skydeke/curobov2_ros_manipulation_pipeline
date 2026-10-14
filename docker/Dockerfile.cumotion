@@ -55,7 +55,8 @@ RUN python3 -m pip install --ignore-installed \
   einops \
   hdbscan \
   "viser>=1" \
-  torchvision
+  torchvision \
+  bubblify
 
 # Someone is misusing pinning, for no good damn reason
 RUN git clone https://github.com/nitesh-subedi/ros2_numpy.git /tmp/ros2_numpy && \
