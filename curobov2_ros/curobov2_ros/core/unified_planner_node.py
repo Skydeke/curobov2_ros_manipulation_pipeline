@@ -442,6 +442,13 @@ class UnifiedPlannerNode(Node):
         # into solver buffers / the CUDA graph at build time (same caveat as
         # num_trajopt_seeds). Read by ConfigWrapperMotion and ConfigWrapperIK.
         self.declare_parameter("num_ik_seeds", 32)
+        # Collision checking in the standalone /ik, /ik_batch solver (self +
+        # scene). Default True = the deployment behavior. Set false (then
+        # trigger update_ik_config) for a pure-kinematics IK solve matching
+        # the official MoveIt methodology (sceneless plugin call): the solver
+        # is rebuilt with self_collision_check=False and no scene/cache, and
+        # world pushes become no-ops for it. The MotionPlanner is unaffected.
+        self.declare_parameter("ik_collision_check", True)
         # --- default kinematics warmup (IK solver + FK model) ---
         # IKServices/FKServices register their services in their constructors and
         # build nothing, so /ik, /ik_batch, /fk and /fk_batch all answer

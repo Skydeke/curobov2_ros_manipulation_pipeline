@@ -471,6 +471,62 @@ class TestLifecycle:
 
 
 # ---------------------------------------------------------------------------
+# Collision mode (ik_collision_check param)
+# ---------------------------------------------------------------------------
+
+
+class TestCollisionMode:
+    def test_default_is_collision_on(self, ctx):
+        """Param absent -> deployment behavior (self + scene collision)."""
+        ctx.wrapper.build(2)
+        cfg = ctx.created[0]
+        assert cfg["self_collision_check"] is True
+        assert cfg["scene_model"] is not None
+        assert cfg["collision_cache"] == {"cuboid": 1, "mesh": 0,
+                                          "voxel": None}
+        assert ctx.wrapper.ik_collision_check is True
+        assert ctx.wrapper.ik_solver.worlds == ["primitives-scene"]
+
+    def test_param_false_builds_kinematics_only(self, ctx):
+        ctx.node.set_param("ik_collision_check", _ParamValue(bool_value=False))
+        ctx.wrapper.build(2)
+        cfg = ctx.created[0]
+        assert cfg["self_collision_check"] is False
+        assert cfg["scene_model"] is None
+        assert cfg["collision_cache"] is None
+        assert ctx.wrapper.ik_collision_check is False
+        # No scene to push: warmup leaves the solver world-empty.
+        assert ctx.wrapper.ik_solver.worlds == []
+
+    def test_needs_rebuild_detects_collision_flip(self, ctx):
+        ctx.wrapper.build(4)
+        assert ctx.wrapper.needs_rebuild(4, 32) is False
+        ctx.node.set_param("ik_collision_check", _ParamValue(bool_value=False))
+        assert ctx.wrapper.needs_rebuild(4, 32) is True
+
+    def test_rebuild_reresolves_collision_flag(self, ctx):
+        ctx.wrapper.build(4)
+        ctx.node.set_param("ik_collision_check", _ParamValue(bool_value=False))
+        ctx.wrapper.rebuild()
+        assert len(ctx.created) == 2
+        assert ctx.created[1]["self_collision_check"] is False
+        assert ctx.wrapper.ik_batch_size == 4
+
+    def test_invalidate_resets_collision_flag(self, ctx):
+        ctx.wrapper.build(4)
+        ctx.wrapper.invalidate()
+        assert ctx.wrapper.ik_collision_check is None
+        assert ctx.wrapper.needs_rebuild(4, 32) is True
+
+    def test_update_world_noop_when_collision_off(self, ctx):
+        ctx.node.set_param("ik_collision_check", _ParamValue(bool_value=False))
+        ctx.wrapper.build(2)
+        ctx.wrapper.update_world("resolved-scene")
+        ctx.wrapper.update_world()
+        assert ctx.wrapper.ik_solver.worlds == []
+
+
+# ---------------------------------------------------------------------------
 # IKServices delegation
 # ---------------------------------------------------------------------------
 
