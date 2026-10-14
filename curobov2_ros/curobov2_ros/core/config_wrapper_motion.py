@@ -1,8 +1,9 @@
 """
 Config wrapper for the cuRobo v2 motion planner (`MotionPlanner`).
 
-IK is not wrapped here — it lives in ``core/ik_services.py``, built from the
-same shared context. MPC is built by ``MPCController`` from this wrapper.
+Standalone IK is wrapped by ``core/config_wrapper_ik.py`` (ConfigWrapperIK),
+adopted from this wrapper's shared context and served over ROS by
+``core/ik_services.py``. MPC is built by ``MPCController`` from this wrapper.
 
 v2 notes:
 - MotionGen/MpcSolver/IKSolver → MotionPlanner / ModelPredictiveControl / InverseKinematics.
@@ -141,7 +142,7 @@ class ConfigWrapperMotion(ConfigWrapper):
         Used for pose/goalset planning: each candidate goal pose is resolved
         into joint configurations with this many parallel IK seeds, and the
         standalone ``/ik`` / ``/ik_batch`` services use the SAME count (see
-        ``IKServices._resolve_num_seeds``) so both IK paths behave identically.
+        ``ConfigWrapperIK``) so both IK paths behave identically.
         Default 32 (cuRobo's default at ``max_batch_size == 1``). Baked into
         solver buffers / the CUDA graph at build time, so a runtime change
         takes effect only via the ``update_motion_gen_config`` rebuild (same

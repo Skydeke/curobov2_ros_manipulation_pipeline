@@ -55,9 +55,11 @@ class ConfigWrapper(ABC):
     - CameraSystemManager: Manages camera configuration and setup
     - RosServiceManager: Manages ROS services, publishers, and timers
 
-    ConfigWrapperMotion is its only concrete subclass. IK is NOT a
-    ConfigWrapper either: it lives in core/ik_services.py, built from the same
-    shared context.
+    ConfigWrapperMotion (trajectory generation) and ConfigWrapperIK
+    (standalone IK services) are its concrete subclasses, sharing one
+    robot/obstacles/scene/collision-cache context: the IK wrapper adopts the
+    motion wrapper's managers by reference rather than rebuilding them (see
+    config_wrapper_ik.py), so there is exactly one live context per node.
 
     The reactive (MPC) solver is NOT a ConfigWrapper: it is built by
     MPCController directly from the shared ConfigWrapperMotion context, so all
@@ -291,7 +293,8 @@ class ConfigWrapper(ABC):
 
 
     # ==================== Abstract Methods ====================
-    # These must be implemented by child classes (ConfigWrapperMotion, IK, MPC)
+    # These must be implemented by child classes (ConfigWrapperMotion,
+    # ConfigWrapperIK)
 
     @abstractmethod
     def update_world_config(self, node):

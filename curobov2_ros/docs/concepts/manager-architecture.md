@@ -63,7 +63,7 @@ Registers the obstacle/introspection services and the visualization publishers (
 
 ## Self-registering service groups
 
-Kinematics and attachment services live outside the five managers as small self-registering groups instantiated by the node: `IKServices`, `FKServices` (`ik_services.py`, `fk_services.py` — lazy solvers, built on `warmup_*`), and `AttachmentServices` (`attachment_services.py`).
+Kinematics and attachment services live outside the five managers as small self-registering groups instantiated by the node: `IKServices`, `FKServices` (`ik_services.py`, `fk_services.py` — lazy solvers, built on `warmup_*`), and `AttachmentServices` (`attachment_services.py`). The IK solver's build-time configuration lives in `ConfigWrapperIK` (`config_wrapper_ik.py`) — the same wrapper pattern as `ConfigWrapperMotion` — adopted from the motion wrapper's shared context; `IKServices` is the ROS service layer over it.
 
 ## Concurrency invariants
 
@@ -89,7 +89,7 @@ This is why there is no per-solver world synchronization anywhere else in the co
 
 1. Node declares its parameters (`unified_planner_node.py`).
 2. `RobotContext` is created (control strategy, ghost preview).
-3. `ConfigWrapperMotion` builds the five managers in order, then the shared `MotionPlanner`, then warms it up (this is the 25–35 s startup phase).
+3. `ConfigWrapperMotion` builds the five managers in order, then the shared `MotionPlanner`, then warms it up (this is the 25–35 s startup phase). `ConfigWrapperIK` is adopted from its context (no rebuild of managers).
 4. `AttachmentServices`, `IKServices`, `FKServices`, `PlannerManager` are attached.
 5. The `node_is_available` parameter flips to `true`; `generate_trajectory` and the action are ready.
 

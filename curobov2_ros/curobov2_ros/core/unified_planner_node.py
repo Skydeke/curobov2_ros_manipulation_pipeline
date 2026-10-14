@@ -62,6 +62,7 @@ from curobo.logging import setup_logger as setup_curobo_logger
 
 from curobov2_ros.robot.robot_context import RobotContext
 from curobov2_ros.core.config_wrapper_motion import ConfigWrapperMotion
+from curobov2_ros.core.config_wrapper_ik import ConfigWrapperIK
 from curobov2_ros.core.joint_order import (
     resolve_joint_targets,
     resolve_start_pose,
@@ -439,7 +440,7 @@ class UnifiedPlannerNode(Node):
         # standalone /ik, /ik_batch services read the SAME param — one seed
         # budget for both IK paths (previously hardcoded 32/20 split). Baked
         # into solver buffers / the CUDA graph at build time (same caveat as
-        # num_trajopt_seeds). Read by ConfigWrapperMotion and IKServices.
+        # num_trajopt_seeds). Read by ConfigWrapperMotion and ConfigWrapperIK.
         self.declare_parameter("num_ik_seeds", 32)
         # --- default kinematics warmup (IK solver + FK model) ---
         # IKServices/FKServices register their services in their constructors and
@@ -676,8 +677,13 @@ class UnifiedPlannerNode(Node):
             self.get_parameter("esdf_refresh_min_interval").value
         )
 
+        # Standalone IK solver config (solver lifecycle + `update_ik_config`
+        # rebuild service), sharing the motion wrapper's robot/scene/cache
+        # context — same pattern as ConfigWrapperMotion, one live context.
+        self.config_wrapper_ik = ConfigWrapperIK(self, self.config_wrapper_motion)
+
         # Shared IK — same Scene as MotionPlanner.
-        self.ik_services = IKServices(self, self.config_wrapper_motion)
+        self.ik_services = IKServices(self, self.config_wrapper_ik)
 
         # Reachability map (uniform grid IK on a plane) — reuses the IK solver.
         self.reachability_services = ReachabilityServices(
@@ -1090,8 +1096,8 @@ class UnifiedPlannerNode(Node):
                 self.config_wrapper_motion.set_motion_gen_config(self, None, None)
                 SinglePlanner.set_motion_planner(self.motion_planner)
 
-            # IK (only if it was initialized). IKServices reads the canonical
-            # (motion) cache directly, so no sync is needed.
+            # IK (only if it was initialized). ConfigWrapperIK reads the shared
+            # (motion) context directly, so no sync is needed.
             self.ik_services.rebuild()
 
             # FK keeps its own GPU model, so it only needs the rebuild when the
