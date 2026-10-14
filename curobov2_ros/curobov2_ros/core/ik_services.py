@@ -2,8 +2,10 @@
 """
 IK services for the unified planner node (v2).
 
-Provides a lazy-initialized IK solver that shares the obstacle manager
-and robot config of the trajectory planner.
+Thin ROS service layer over ``core/config_wrapper_ik.py`` (ConfigWrapperIK),
+which owns the solver's build-time configuration and lifecycle — the same
+split as the motion wrapper (ConfigWrapperMotion) and the planners that plan
+over it.
 
 Services exposed (prefixed with the node name):
   /<node>/warmup_ik  (WarmupIK) - init IK solver with given batch size (default 1)
@@ -23,9 +25,7 @@ import torch
 import std_msgs.msg
 from sensor_msgs.msg import JointState
 
-from curobo.types import Pose as CuroboPose, GoalToolPose, JointState as CuRoboJS
-from curobo.scene import Scene
-from curobo.inverse_kinematics import InverseKinematics, InverseKinematicsCfg
+from curobo.types import Pose as CuroboPose, GoalToolPose
 
 from curobov2_ros_interfaces.srv import Ik, IkBatch, WarmupIK
 from curobov2_ros.core.gpu_lanes import PRIO_KIN
@@ -33,24 +33,20 @@ from curobov2_ros.core.gpu_lanes import PRIO_KIN
 
 class IKServices:
     """
-    Manages the IK solver and its ROS services on an existing node.
+    ROS service layer for the standalone IK solver on an existing node.
 
     Depends on:
-    - config_wrapper.robot_config_file   (YAML path — v2 factories accept it directly)
-    - config_wrapper.obstacle_manager    (Scene, shared with MotionPlanner)
-    - config_wrapper.collision_cache     (single v2 cache integer)
+    - config_wrapper_ik (ConfigWrapperIK): solver lifecycle (build/rebuild/
+      world updates) and build-time tunables, sharing the motion wrapper's
+      robot/scene/collision-cache context.
 
     The solver is created only when warmup_ik is called.
     Obstacle updates are propagated via update_world().
     """
 
-    def __init__(self, node, config_wrapper):
+    def __init__(self, node, config_wrapper_ik):
         self._node = node
-        self._config = config_wrapper
-
-        self._ik_solver: InverseKinematics | None = None
-        self._ik_batch_size: int = 0  # 0 = not yet warmed up
-        self._ik_num_seeds: int = 0  # seeds of the current solver (0 = unset)
+        self._config = config_wrapper_ik
 
         # Serializes solves on the single shared solver: /ik, /ik_batch and the
         # reachability service (/generate_rm) can all arrive from different
@@ -58,9 +54,9 @@ class IKServices:
         # batch size) racing the first would corrupt the solver's state.
         self._solve_lock = threading.Lock()
 
-        # Device / dtype resolved from config_wrapper (set by RobotModelManager).
-        self._device = getattr(config_wrapper, "_device", torch.device("cuda"))
-        self._dtype = getattr(config_wrapper, "_ops_dtype", torch.float32)
+        # Device / dtype resolved from the wrapper (set by RobotModelManager).
+        self._device = getattr(config_wrapper_ik, "_device", torch.device("cuda"))
+        self._dtype = getattr(config_wrapper_ik, "_ops_dtype", torch.float32)
 
         name = node.get_name()
         node.create_service(WarmupIK, f"{name}/warmup_ik", self._warmup_ik_callback)
@@ -89,7 +85,7 @@ class IKServices:
         # Solver construction + warmup run CUDA kernels (solve for a batch
         # of random configs) — must not race a CUDA graph capture.
         with self._gpu_guard():
-            self._init(batch_size, num_seeds=num_seeds)
+            self._config.build(batch_size, num_seeds=num_seeds)
         return f"IK solver ready (batch_size={batch_size})"
 
     def _warmup_ik_callback(
@@ -107,6 +103,15 @@ class IKServices:
     # ------------------------------------------------------------------
     # Services
     # ------------------------------------------------------------------
+
+    @property
+    def _ik_solver(self):
+        """The live IK solver, owned by ConfigWrapperIK (compat accessor).
+
+        Kept so existing readers of the solver (e.g. the attached-obstacle
+        re-apply in ``ObstacleManager``) keep working unchanged.
+        """
+        return self._config.ik_solver
 
     @contextlib.contextmanager
     def _gpu_guard(self):
@@ -218,139 +223,31 @@ class IKServices:
     # ------------------------------------------------------------------
 
     def update_world(self, scene=None):
-        """Propagate obstacle changes to the IK solver. No-op if not initialized.
+        """Propagate obstacle changes to the IK solver (delegates to the wrapper).
 
         ``scene`` is the node's already-resolved solver scene from
-        ``update_all_solvers_world`` (normalized to cuboid/mesh/voxel, and
-        possibly degraded to primitives-only). It must be passed, because that
-        method is where the two ESDF-withholding decisions live —
-
-          * ``push_esdf_to_solvers:=false`` (diagnostic: solvers see analytic
-            primitives only), and
-          * ``collision_cache['voxel'] is None`` (``SetCollisionCache blox=0``,
-            where a voxel-carrying scene would raise "Voxel cache not
-            initialized" inside the solver's update_world).
-
-        Deriving the scene from the obstacle manager here instead would ignore
-        both decisions: /ik would keep seeing camera obstacles in diagnostic
-        mode, and would raise on every world update under blox=0. The solver is
-        built WITH ``collision_cache`` (see ``_init``), so unlike
-        ``FKServices`` it can accept the voxel layer.
+        ``update_all_solvers_world`` — see ``ConfigWrapperIK.update_world``
+        for why it must be passed, not re-derived here.
         """
-        if self._ik_solver is None:
-            return
-        if scene is None:
-            # Normalize primitives to solver-supported collision types
-            # (sphere/cylinder/capsule -> mesh), or they silently don't collide.
-            scene = self._config.obstacle_manager.collision_world_scene()
-        self._ik_solver.update_world(scene)
+        self._config.update_world(scene)
 
     def rebuild(self):
-        """Recreate the IK solver after a collision-cache change.
-
-        The collision cache is fixed at solver creation, so a cache change
-        requires a rebuild (reusing the last batch size; seeds re-resolve from
-        the current ``num_ik_seeds`` param). No-op if the solver was never
-        initialized.
-        """
-        if self._ik_solver is None:
-            return
-        self._init(max(1, self._ik_batch_size), num_seeds=None)
-        self._node.get_logger().info("IKServices: solver rebuilt after cache change")
+        """Recreate the IK solver after a collision-cache change (delegates)."""
+        self._config.rebuild()
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
     def _resolve_num_seeds(self) -> int:
-        """Shared per-pose IK seed budget, read from the node's ``num_ik_seeds``.
-
-        Mirrors the planner's internal IK (``ConfigWrapperMotion``): the
-        standalone ``/ik`` / ``/ik_batch`` services resolve a goal pose with
-        the SAME seed count the MotionPlanner's IK uses for pose/goalset
-        goals, so both IK paths behave identically. ``num_seeds`` / VRAM scale
-        as batch x seeds. Overridable per call via ``_solve(..., num_seeds=)``.
-        """
-        if self._node.has_parameter("num_ik_seeds"):
-            return max(
-                1,
-                int(
-                    self._node.get_parameter("num_ik_seeds")
-                    .get_parameter_value()
-                    .integer_value
-                ),
-            )
-        return 32
-
-    def _init(self, batch_size: int, num_seeds: int | None = None):
-        """Create (or recreate) the IK solver for the given batch size/seeds."""
-        if num_seeds is None:
-            num_seeds = self._resolve_num_seeds()
-        # Build against an EMPTY scene, never the live one: after a cache
-        # shrink the live world may not fit the new cache, and constructing
-        # against it raises "Cannot load N cuboids" (observed live, killing a
-        # benchmark rebuild). Empty always fits; the real scene is pushed
-        # right below (same primitives-only scene this used to embed).
-        scene = Scene()
-
-        self._node.get_logger().info(
-            f"Initializing IK solver (batch_size={batch_size}, num_seeds={num_seeds})..."
-        )
-
-        # Single shared curobo kinematic from RobotModelManager (one URDF
-        # parse for the whole node) — do not re-build from the YAML path.
-        # num_seeds runs that many parallel optimisation trajectories per
-        # pose in the batch, so GPU memory grows with batch x seeds. All
-        # callers use the same seed count (see solve_poses default).
-        cfg = InverseKinematicsCfg.create(
-            robot=self._config.robot_model_manager.robot_cfg,
-            scene_model=scene,
-            num_seeds=num_seeds,
-            position_tolerance=0.005,
-            orientation_tolerance=0.05,
-            self_collision_check=True,
-            collision_cache=self._config.collision_cache,
-            use_cuda_graph=False,
-            max_batch_size=max(1, batch_size),
-        )
-        self._ik_solver = InverseKinematics(cfg)
-        self._ik_batch_size = batch_size
-        self._ik_num_seeds = num_seeds
-
-        # Warmup: solve a batch of random configs to prime CUDA kernels.
-        q_sample = self._ik_solver.sample_configs(batch_size)
-        js = CuRoboJS.from_position(
-            q_sample, joint_names=self._ik_solver.kinematics.joint_names
-        )
-        kin_state = self._ik_solver.compute_kinematics(js)
-        goal = kin_state.tool_poses.as_goal()
-        self._ik_solver.solve_pose(goal_tool_poses=goal)
-        # CPU/GPU ordering bridge — off by default (torch_sync param), see
-        # node.torch_sync_enabled().
-        if self._node.torch_sync_enabled():
-            torch.cuda.synchronize()
-
-        # Push the real scene after the empty build (same primitives-only
-        # scene construction used to embed). Best-effort: after a cache
-        # shrink the previous world may not fit the new cache — warn loudly
-        # and continue empty; the next world event (or an explicit world set)
-        # pushes a fitting world. Same-cache rebuilds (batch-size changes,
-        # startup) always fit, so those paths are unchanged.
-        try:
-            self.update_world(
-                self._config.obstacle_manager.primitives_only_scene())
-        except Exception as e:
-            self._node.get_logger().warn(
-                f"IK solver rebuilt empty: current world does not fit the new "
-                f"cache ({e}); push a fitting world before planning")
-
-        self._node.get_logger().info("IK solver ready")
+        """Shared per-pose IK seed budget (delegates to the wrapper)."""
+        return self._config._resolve_num_ik_seeds(self._node)
 
     def _solve(self, poses, num_seeds: int | None = None):
         """
         Solve IK for a list of geometry_msgs/Pose.
-        Reinitializes the solver if the batch size or seed count has changed.
-        Returns (success: bool, result).
+        Reinitializes the solver if the batch size, seed count, or CUDA-graph
+        mode has changed. Returns (success: bool, result).
         """
         if num_seeds is None:
             num_seeds = self._resolve_num_seeds()
@@ -364,15 +261,14 @@ class IKServices:
         """Must run with ``_solve_lock`` held (see ``_solve``)."""
 
         n = len(poses)
-        if n != self._ik_batch_size or num_seeds != self._ik_num_seeds:
+        if self._config.needs_rebuild(n, num_seeds):
             try:
-                self._init(n, num_seeds=num_seeds)
+                self._config.build(n, num_seeds=num_seeds)
             except Exception as e:
                 self._node.get_logger().error(
                     f"IK reinit for batch_size={n}, num_seeds={num_seeds} failed: {e}"
                 )
-                self._ik_batch_size = 0
-                self._ik_num_seeds = 0
+                self._config.invalidate()
                 return False, None
 
         # v2 Pose quaternion is wxyz; ROS geometry_msgs is xyzw.
@@ -395,12 +291,11 @@ class IKServices:
             result = self._ik_solver.solve_pose(goal_tool_poses=goal)
         except Exception:
             try:
-                self._init(n, num_seeds=num_seeds)
+                self._config.build(n, num_seeds=num_seeds)
                 result = self._ik_solver.solve_pose(goal_tool_poses=goal)
             except Exception as e:
                 self._node.get_logger().error(f"IK solve failed: {e}")
-                self._ik_batch_size = 0
-                self._ik_num_seeds = 0
+                self._config.invalidate()
                 return False, None
 
         if self._node.torch_sync_enabled():

@@ -50,7 +50,7 @@ The startup planner is set by the `planner_type` parameter (default `classic`).
 
 ## One shared GPU context
 
-All solvers — `MotionPlanner`, `ModelPredictiveControl`, `InverseKinematics` — are built from the same `ConfigWrapperMotion` context: same robot model, same `Scene`, same collision caches, same perception ESDF. Consequences:
+All solvers — `MotionPlanner`, `ModelPredictiveControl`, `InverseKinematics` — share one GPU context rooted in `ConfigWrapperMotion`: same robot model, same `Scene`, same collision caches, same perception ESDF (`ConfigWrapperIK` adopts that context for the standalone IK solver). Consequences:
 
 - An obstacle added via `add_object` is immediately seen by planning, MPC, and IK alike.
 - `set_link_collision` affects every solver in one call.
