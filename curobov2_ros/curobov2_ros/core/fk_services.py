@@ -63,6 +63,9 @@ class FKServices:
 
         self._fk_model: Kinematics | None = None
         self._collision_checker: RobotCollisionChecker | None = None
+        # Warmup width: FK reallocates GPU buffers per new batch size, so a
+        # mismatch here warns (client should pad to constant width).
+        self._fk_batch: int | None = None
 
         # Resolve device/dtype from the node's tensor_args if present, else from
         # the config wrapper, else default to CUDA/float32.
@@ -107,6 +110,8 @@ class FKServices:
         take the same ``gpu_lock`` discipline around the CUDA work.
         """
         batch_size = max(1, int(batch_size))
+        if self._fk_model is not None:
+            return f"FK model already ready (batch_size={batch_size})"
         # Model construction + warmup batch run CUDA kernels — must not race a
         # CUDA graph capture (see _gpu_guard).
         with self._gpu_guard():
@@ -203,6 +208,19 @@ class FKServices:
             response.error_msg = String(data="FK batch: no joint states provided")
             return response
         qs = [self._positions_for_model(js) for js in request.joint_states]
+        # Normalize to the constant warmup width: the FK model reallocates
+        # GPU buffers on every new batch size, so a varying width grows VRAM
+        # monotonically. Pad with the last config (like ik_batch clients do)
+        # and trim the padded rows below. Oversize requests run as-is.
+        n = len(qs)
+        if self._fk_batch is not None and 0 < n < self._fk_batch:
+            qs = qs + [qs[-1]] * (self._fk_batch - n)
+        elif self._fk_batch is not None and n > self._fk_batch:
+            self._node.get_logger().warn(
+                f"FK batch size {n} exceeds warmup width {self._fk_batch}: "
+                "GPU buffers realloc",
+                throttle_duration_sec=60.0,
+            )
 
         def _job():
             ok, poses = self._compute_poses(qs)
@@ -224,6 +242,9 @@ class FKServices:
             response.error_msg = String(data="FK batch solve failed")
             return response
         poses, valid = out
+        # Trim padding rows (see above): only the first n entries belong to
+        # the request. No-op when nothing was padded.
+        poses, valid = poses[:n], valid[:n]
         response.poses = poses
         for v in valid:
             b = Bool()
@@ -304,14 +325,14 @@ class FKServices:
             f"Initializing FK model (batch_size={batch_size})..."
         )
 
-        # Build the FK model from the node's SINGLE shared curobo kinematic
-        # (robot_model_manager.robot_cfg), never from the YAML path — otherwise
-        # each service instantiates its own robot model (one URDF parse + one
-        # set of intermediate buffers per construction; cf.
-        # RobotModelManager docstring).
-        robot_cfg = self._config.robot_model_manager.robot_cfg
-        fk_model = Kinematics(robot_cfg.kinematics)
+        # Use the node's SINGLE shared GPU kinematics (robot_model_manager's
+        # kin_model, also used by the planners, IK and segmentation) — never
+        # construct a second Kinematics here: that re-parses the URDF,
+        # duplicates the "Converting continuous joint" warnings and doubles
+        # the model's GPU buffers.
+        fk_model = self._config.kin_model
         self._fk_model = fk_model
+        self._fk_batch = batch_size
 
         # Collision validator for FkBatch: sized from the shared collision_cache
         # so it holds exactly what the planners' does, and built against an
@@ -322,7 +343,10 @@ class FKServices:
         # NOTE: load_from_config has no voxel-cache knob at all (see
         # update_world), so the ESDF voxel layer is not double-counted here.
         scene = Scene()
-        robot_cfg_dict = self._config.config_manager.get_robot_config_dict()
+        # Pass the live RobotCfg object (not the YAML dict): out of a dict,
+        # load_from_config re-parses the URDF (duplicate "Converting
+        # continuous joint" warnings + a throwaway config); an instance
+        # passes through untouched.
         # Size the validator's obstacle cache from the shared collision_cache so
         # it holds exactly what the planners' does. load_from_config has no
         # voxel-cache knob at all (see update_world), and its n_cuboids/n_meshes
@@ -332,7 +356,7 @@ class FKServices:
         cache = self._obstacle_manager.collision_cache
         try:
             checker_cfg = RobotCollisionCheckerCfg.load_from_config(
-                robot_config=robot_cfg_dict,
+                robot_config=self._config.robot_model_manager.robot_cfg,
                 scene_model=scene,
                 device_cfg=DeviceCfg(device=self._device, dtype=self._dtype),
                 collision_activation_distance=0.001,
@@ -413,8 +437,8 @@ class FKServices:
 
         # ToolPose.position/quaternion: [B, H=1, L, 3/4]; take first tool frame.
         # v2 quaternion is wxyz; ROS geometry_msgs.Pose.orientation is xyzw.
-        positions = kin_state.tool_poses.position[:, 0, 0, :].cpu().numpy()
-        quaternions = kin_state.tool_poses.quaternion[:, 0, 0, :].cpu().numpy()
+        positions = kin_state.tool_poses.position[:, 0, 0, :].detach().cpu().numpy()
+        quaternions = kin_state.tool_poses.quaternion[:, 0, 0, :].detach().cpu().numpy()
 
         poses = []
         for pos, ori in zip(positions, quaternions):
@@ -444,7 +468,7 @@ class FKServices:
         )  # [B, 1, dof]
         try:
             mask = self._collision_checker.validate(q)  # [B, 1]
-            return mask.squeeze(1).cpu().tolist()
+            return mask.squeeze(1).detach().cpu().tolist()
         except Exception as e:
             self._node.get_logger().error(f"FK collision validation failed: {e}")
             return [True] * n

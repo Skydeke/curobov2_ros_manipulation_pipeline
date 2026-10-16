@@ -43,18 +43,67 @@ ros2 run curobov2_ros_extra build_curobo_config \
   --tool-frame tool0
 ```
 
+### Edit an existing config + bubblify
+
+```bash
+# Load adir, tune budgets + morphit refits interactively, save on exit.
+# The viewer has no Export button (it would write stray files): just press
+# Ctrl+C in this terminal when done. Only --output is written, with the
+# bubblify spheres merged in. cspace, lock_joints, extra links and all
+# other custom fields are preserved.
+ros2 run curobov2_ros_extra build_curobo_config \
+  --config /tmp/adir.curobo.yml \
+  --output /tmp/adir.curobo.yml \
+  --with-bubblify --bubblify-port 8080
+
+# Refit one link and recompute the collision matrix
+ros2 run curobov2_ros_extra build_curobo_config \
+  --config /tmp/adir.curobo.yml \
+  --refit-link j2n6s200_link_3 \
+  --output /tmp/adir.curobo.yml
+
+# Refit links with morphit (cuRobo builder path) and per-link budgets
+ros2 run curobov2_ros_extra build_curobo_config \
+  --config /tmp/adir.curobo.yml \
+  --refit-link j2n6s200_link_3 \
+  --budget j2n6s200_link_4=8 --budget j2n6s200_link_5=6 \
+  --fit-type morphit --iterations 200 \
+  --output /tmp/adir.curobo.yml
+
+# Merge spheres exported from the bubblify GUI back into the config
+ros2 run curobov2_ros_extra build_curobo_config \
+  --config /tmp/adir.curobo.yml \
+  --import-bubblify /tmp/robot_spherized.yml \
+  --output /tmp/adir.curobo.yml
+```
+
 ## Arguments
 
 | Argument | Description |
 |---|---|
-| `--urdf` | Path to URDF file |
-| `--asset-path` | Parent directory containing mesh dirs |
-| `--output` | Output YAML path (default: `curobo_config.yml`) |
-| `--tool-frame` | Tool frame name (default: `grasping_frame`) |
-| `--base-link` | Base link (auto-detected if omitted) |
+| `--urdf` | Path to URDF file (create mode) |
+| `--config` | Existing cuRobo yml config (edit mode; exactly one of `--urdf`/`--config`) |
+| `--asset-path` | Parent directory containing mesh dirs (required in create mode) |
+| `--output` | Output YAML path (default: `curobo_config.yml` in create mode, input path in edit mode) |
+| `--tool-frame` | Tool frame name (create mode, default: `grasping_frame`) |
 | `--sphere-density` | Sphere density multiplier (default: 1.0) |
+| `--fit-type` | Sphere fitting algorithm: `morphit` (default), `voxel`, `surface` |
+| `--iterations` | Optimization iterations for morphit fits (default: 200) |
+| `--coverage-weight` | MorphIt coverage loss weight (builder default when omitted) |
+| `--protrusion-weight` | MorphIt protrusion loss weight (builder default when omitted) |
 | `--num-collision-samples` | Collision matrix samples (default: 1000) |
-| `--visualize` | Start Viser viewer |
+| `--matrix-batch-size` | Collision matrix batch size; lower on CUDA OOM (default: 2000) |
+| `--refit-all` | Edit mode: refit spheres for all links |
+| `--refit-link LINK` | Edit mode: refit spheres for LINK with `--sphere-density` (repeatable) |
+| `--budget LINK=N` | Edit mode: refit LINK with an exact budget of N spheres (repeatable) |
+| `--recompute-matrix` | Edit mode: recompute collision matrix (implied by refit/import unless `--skip-matrix`) |
+| `--skip-matrix` | Edit mode: never recompute the collision matrix |
+| `--import-bubblify SPHERES_YML` | Edit mode: merge a bubblify-exported spheres yml |
+| `--with-bubblify` | Launch bubblify with MorphIt controls in its Sphere Editor (per-link budget up to 128, fit-type, iterations) plus a Save button with an editable path field; Save and Ctrl+C both write only the cuRobo yml with all custom fields preserved (matrix recomputed unless `--skip-matrix`; OOM-safe) |
+| `--bubblify-port` | Bubblify viser port (default: 8080) |
+| `--bubblify-show-collision` | Show collision meshes in bubblify |
+| `--visualize` | Start cuRobo Viser viewer |
+| `--viser-port` | cuRobo Viser viewer port (default: 8080) |
 
 ## Viser nodes
 

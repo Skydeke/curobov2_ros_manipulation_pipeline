@@ -449,6 +449,12 @@ class UnifiedPlannerNode(Node):
         # is rebuilt with self_collision_check=False and no scene/cache, and
         # world pushes become no-ops for it. The MotionPlanner is unaffected.
         self.declare_parameter("ik_collision_check", True)
+        # Levenberg-Marquardt seed generation in the standalone IK solver.
+        # Default True = upstream behavior. False skips the seed LM solve
+        # (proven per-solve VRAM retention in that stage, see repro_ik_leak.py:
+        # lm_on grows 1 tensor/solve, lm_off is flat); the main
+        # particle+LBFGS optimizers solve from random seeds instead.
+        self.declare_parameter("ik_use_lm_seed", True)
         # --- default kinematics warmup (IK solver + FK model) ---
         # IKServices/FKServices register their services in their constructors and
         # build nothing, so /ik, /ik_batch, /fk and /fk_batch all answer

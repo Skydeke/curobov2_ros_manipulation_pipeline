@@ -77,6 +77,7 @@ class ConfigWrapperIK(ConfigWrapper):
         # and no scene/cache, world pushes become no-ops for it. Baked in at
         # build time like num_ik_seeds (update_ik_config rebuild).
         self.collision_check = self._resolve_collision_check(node)
+        self.use_lm_seed = self._resolve_use_lm_seed(node)
 
         # Live solver state. The solver is created only on build() (startup
         # warmup or on-demand /warmup_ik); batch 0 means "not yet warmed up".
@@ -85,6 +86,7 @@ class ConfigWrapperIK(ConfigWrapper):
         self.ik_num_seeds: int = 0
         self.ik_use_cuda_graph: bool | None = None
         self.ik_collision_check: bool | None = None
+        self.ik_use_lm_seed: bool | None = None
 
         self.ik_config_srv = node.create_service(
             Trigger,
@@ -130,6 +132,19 @@ class ConfigWrapperIK(ConfigWrapper):
             )
         return True
 
+    def _resolve_use_lm_seed(self, node) -> bool:
+        """Whether the standalone IK solver runs LM seed generation.
+
+        Read from the node's ``ik_use_lm_seed`` param (default True).
+        """
+        if node.has_parameter("ik_use_lm_seed"):
+            return bool(
+                node.get_parameter("ik_use_lm_seed")
+                .get_parameter_value()
+                .bool_value
+            )
+        return True
+
     def build(self, batch_size: int, num_seeds: int | None = None) -> None:
         """Create (or recreate) the IK solver for the given batch size/seeds."""
         if num_seeds is None:
@@ -152,6 +167,7 @@ class ConfigWrapperIK(ConfigWrapper):
         # Collision mode resolves live (like num_seeds): a runtime param flip
         # takes effect on the next build/rebuild without relaunch.
         collision_check = self._resolve_collision_check(self.node)
+        use_lm_seed = self._resolve_use_lm_seed(self.node)
         use_cuda_graph = resolve_use_cuda_graph(self.node)
         cfg = InverseKinematicsCfg.create(
             robot=self.robot_model_manager.robot_cfg,
@@ -164,11 +180,14 @@ class ConfigWrapperIK(ConfigWrapper):
             use_cuda_graph=use_cuda_graph,
             max_batch_size=max(1, batch_size),
         )
+        # use_lm_seed is a dataclass default (True), not a create() kwarg.
+        cfg.use_lm_seed = use_lm_seed
         self.node.get_logger().info(
             "IK solver envelope: "
             f"use_cuda_graph={use_cuda_graph}, "
             f"num_ik_seeds={num_seeds}, "
             f"collision_check={collision_check}, "
+            f"use_lm_seed={use_lm_seed}, "
             f"batch_size={max(1, batch_size)}"
         )
         self.ik_solver = InverseKinematics(cfg)
@@ -176,11 +195,13 @@ class ConfigWrapperIK(ConfigWrapper):
         self.ik_num_seeds = num_seeds
         self.ik_use_cuda_graph = use_cuda_graph
         self.ik_collision_check = collision_check
+        self.ik_use_lm_seed = use_lm_seed
         # Keep the resolved tunables in sync with what was actually built, so
         # the next set_ik_config can tell a param change from a no-op.
         self.num_ik_seeds = num_seeds
         self.use_cuda_graph = use_cuda_graph
         self.collision_check = collision_check
+        self.use_lm_seed = use_lm_seed
 
         # Warmup: solve a batch of random configs to prime CUDA kernels.
         q_sample = self.ik_solver.sample_configs(batch_size)
@@ -218,9 +239,9 @@ class ConfigWrapperIK(ConfigWrapper):
 
         Called on demand via the `update_ik_config` service — the IK analogue
         of the motion wrapper's `update_motion_gen_config`: after
-        `ros2 param set ... num_ik_seeds` (or `use_cuda_graph`, or
-        `ik_collision_check`), triggering this service rebuilds the solver
-        from the new values without a relaunch.
+        `ros2 param set ... num_ik_seeds` (or `use_cuda_graph`,
+        `ik_collision_check`, `ik_use_lm_seed`), triggering this service
+        rebuilds the solver from the new values without a relaunch.
         """
         # (Re)captures CUDA graphs, so the whole body must hold gpu_lock —
         # the same invariant as every other graph-capturing path in the node.
@@ -248,6 +269,7 @@ class ConfigWrapperIK(ConfigWrapper):
             or num_seeds != self.ik_num_seeds
             or resolve_use_cuda_graph(self.node) != self.ik_use_cuda_graph
             or self._resolve_collision_check(self.node) != self.ik_collision_check
+            or self._resolve_use_lm_seed(self.node) != self.ik_use_lm_seed
         )
 
     def invalidate(self) -> None:
@@ -257,6 +279,7 @@ class ConfigWrapperIK(ConfigWrapper):
         self.ik_num_seeds = 0
         self.ik_use_cuda_graph = None
         self.ik_collision_check = None
+        self.ik_use_lm_seed = None
 
     def rebuild(self) -> None:
         """Recreate the IK solver after a collision-cache change.
