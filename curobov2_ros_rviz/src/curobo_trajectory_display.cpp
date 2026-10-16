@@ -122,7 +122,7 @@ void CuroboTrajectoryDisplay::reset()
   current_frac_ = 0.0;
   anim_time_ = 0.0;
   current_transforms_.clear();
-  trail_robots_.clear();
+  clearTrailRobots();
   if (robot_) {
     robot_->setVisible(false);
   }
@@ -274,9 +274,14 @@ void CuroboTrajectoryDisplay::loadRobotModel()
   }
 
   // Create rviz Robot (4th arg: parent Property*, nullptr — we don't use per-link
-  // toggle properties in the RViz tree).
+  // toggle properties in the RViz tree). Parented to a holder node carrying
+  // the URDF-root -> fixed offset (see updateRobotRoot): FK transforms are
+  // base-rooted but the scene renders in the fixed frame.
+  const auto root_link = urdf_model_->getRoot();
+  robot_root_frame_ = root_link ? root_link->name : "";
+  robot_root_ = scene_node_->createChildSceneNode();
   robot_ = std::make_unique<rviz_default_plugins::robot::Robot>(
-    scene_node_, context_, "cuRobo Robot", nullptr);
+    robot_root_, context_, "cuRobo Robot", nullptr);
   robot_->load(*urdf_model_, true, false);  // visual=true, collision=false
   robot_->setVisualVisible(true);
   robot_->setCollisionVisible(false);
@@ -306,7 +311,7 @@ void CuroboTrajectoryDisplay::updateTopic()
   anim_time_ = 0.0;
   current_transforms_.clear();
   waypoints_.clear();
-  trail_robots_.clear();
+  clearTrailRobots();
 
   if (!topic_property_->getStdString().empty()) {
     auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
@@ -593,8 +598,9 @@ void CuroboTrajectoryDisplay::rebuildTrail()
   const float alpha = alpha_property_->getFloat() * 0.4f;
   while (trail_robots_.size() < wanted.size()) {
     TrailRobot tr;
+    tr.node = scene_node_->createChildSceneNode();
     tr.robot = std::make_unique<rviz_default_plugins::robot::Robot>(
-      scene_node_, context_, "Trail", nullptr);
+      tr.node, context_, "Trail", nullptr);
     tr.robot->load(*urdf_model_, true, false);
     tr.robot->setVisualVisible(true);
     tr.robot->setCollisionVisible(false);
@@ -616,6 +622,52 @@ void CuroboTrajectoryDisplay::rebuildTrail()
     }
   }
   updateTrailVisibility();
+}
+
+void CuroboTrajectoryDisplay::clearTrailRobots()
+{
+  // Destroy each Robot before its holder: the Robot destructor only tears
+  // down the nodes it created itself.
+  for (auto & tr : trail_robots_) {
+    tr.robot.reset();
+    if (tr.node) {
+      scene_node_->removeAndDestroyChild(tr.node);
+      tr.node = nullptr;
+    }
+  }
+  trail_robots_.clear();
+}
+
+void CuroboTrajectoryDisplay::updateRobotRoot()
+{
+  // Root -> fixed offset for the base-rooted FK ghosts (main + trail share
+  // it). Refreshed every frame so a moving base carries its ghosts along.
+  // On lookup failure the previous offset is kept (stale placement beats a
+  // vanishing robot); only the status reflects the problem.
+  Ogre::Vector3 offset = Ogre::Vector3::ZERO;
+  Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
+  auto * fm = (context_ != nullptr) ? context_->getFrameManager() : nullptr;
+  if (!robot_root_frame_.empty() && fm != nullptr &&
+      robot_root_frame_ != fm->getFixedFrame())
+  {
+    rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
+    if (fm->getTransform(robot_root_frame_, stamp, offset, rotation)) {
+      setTransformOk();
+    } else {
+      setMissingTransformToFixedFrame(robot_root_frame_);
+      return;
+    }
+  }
+  if (robot_root_) {
+    robot_root_->setPosition(offset);
+    robot_root_->setOrientation(rotation);
+  }
+  for (auto & tr : trail_robots_) {
+    if (tr.node) {
+      tr.node->setPosition(offset);
+      tr.node->setOrientation(rotation);
+    }
+  }
 }
 
 void CuroboTrajectoryDisplay::updateTrailVisibility()
@@ -651,6 +703,9 @@ void CuroboTrajectoryDisplay::update(float wall_dt, float ros_dt)
     loadRobotModel();
     if (!robot_loaded_) {return;}
   }
+
+  // Root -> fixed offset for the FK ghosts (tracks a moving base).
+  updateRobotRoot();
 
   // Promote a pending trajectory whenever one is available — even mid-animation.
   // The ghost preview strategy publishes each plan exactly once on

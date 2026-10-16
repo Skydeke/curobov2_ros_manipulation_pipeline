@@ -429,6 +429,11 @@ void ReachabilityMapDisplay::loadRobotModel()
     return;
   }
 
+  // Root frame for the ghost holder offset (see updateSolutionRobotsRoot):
+  // the frame name comes from the loaded URDF itself, zero configuration.
+  const auto root_link = urdf_model_->getRoot();
+  robot_root_frame_ = root_link ? root_link->name : "";
+
   robot_loaded_ = true;
   setStatus(
     rviz_common::properties::StatusProperty::Ok, "Robot Model",
@@ -563,6 +568,12 @@ void ReachabilityMapDisplay::drainSolve()
   req->plane_size_y = plane_size_y_->getFloat();
   req->grid_size_x = static_cast<uint32_t>(grid_cells_x_->getInt());
   req->grid_size_y = static_cast<uint32_t>(grid_cells_y_->getInt());
+  // Fixed-frame coordinates (the gizmo lives in the fixed frame); the server
+  // resolves the plane into the base link via TF and returns the solved grid
+  // in this same frame for direct rendering. Before the marker exists the
+  // gizmo frame is still empty: fall back to the configured fixed frame.
+  req->frame_id = gizmo_frame_.empty() ?
+    context_->getFrameManager()->getFixedFrame() : gizmo_frame_;
 
   solve_inflight_.store(true);
   solve_pending_.store(false);
@@ -1347,6 +1358,36 @@ void ReachabilityMapDisplay::update(float wall_dt, float ros_dt)
   // Lazily load the URDF once the user actually wants solution ghosts.
   if (!robot_loaded_ && show_solutions_property_->getOptionInt() != 0) {
     loadRobotModel();
+  }
+
+  // Root -> fixed offset for the FK ghosts (tracks a moving base).
+  updateSolutionRobotsRoot();
+}
+
+void ReachabilityMapDisplay::updateSolutionRobotsRoot()
+{
+  // Same pattern as the trajectory display: FK is base-rooted, the scene is
+  // fixed-frame. On lookup failure the previous offset is kept (stale
+  // placement beats a vanishing robot); only the status reflects it.
+  Ogre::Vector3 offset = Ogre::Vector3::ZERO;
+  Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
+  auto * fm = (context_ != nullptr) ? context_->getFrameManager() : nullptr;
+  if (!robot_root_frame_.empty() && fm != nullptr &&
+      robot_root_frame_ != fm->getFixedFrame())
+  {
+    rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
+    if (fm->getTransform(robot_root_frame_, stamp, offset, rotation)) {
+      setTransformOk();
+    } else {
+      setMissingTransformToFixedFrame(robot_root_frame_);
+      return;
+    }
+  }
+  for (auto & entry : solution_robots_) {
+    if (entry.node) {
+      entry.node->setPosition(offset);
+      entry.node->setOrientation(rotation);
+    }
   }
 }
 

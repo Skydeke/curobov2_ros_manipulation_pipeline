@@ -224,13 +224,17 @@ private:
 
   // One ghost robot per solved cell, each under its own scene node so turning
   // "Show Solutions" off removes every Ogre object immediately, independent of
-  // Robot's own teardown.
+  // Robot's own teardown. The holder nodes also carry the URDF-root -> fixed
+  // offset (see updateSolutionRobotsRoot): FK is base-rooted but the scene
+  // renders in the fixed frame.
   struct SolutionRobot
   {
     Ogre::SceneNode * node = nullptr;
     std::unique_ptr<rviz_default_plugins::robot::Robot> robot;
   };
   std::vector<SolutionRobot> solution_robots_;
+  std::string robot_root_frame_;
+  void updateSolutionRobotsRoot();
   static constexpr size_t kMaxSolutionRobots = 120;
   // Sentinel for the "Arrows" cell style (must not collide with the
   // rviz_rendering::PointCloud::RenderMode enum values).

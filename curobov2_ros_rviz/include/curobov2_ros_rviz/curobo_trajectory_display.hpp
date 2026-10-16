@@ -92,17 +92,34 @@ private:
   std::string urdf_xml_;
   void loadRobotModel();
 
+  // --- Robot root placement ---
+  // FK link transforms are rooted at the URDF root (robot base) but scene
+  // nodes render in the RViz fixed frame, so without an offset the ghost
+  // sits at the fixed-frame origin whenever the base is elsewhere. Both the
+  // main robot and the trail ghosts hang under holder nodes carrying the
+  // root -> fixed offset, refreshed every frame (moving bases included).
+  // The frame name comes from the loaded URDF itself -- zero frame
+  // configuration, works for any trajectory source -- and the transform
+  // from the frame manager, mirroring syncSpheres().
+  Ogre::SceneNode * robot_root_ = nullptr;
+  std::string robot_root_frame_;
+  void updateRobotRoot();
+
   // --- Trail (ghost copies) ---
   // Grow-only pool (see rebuildTrail): ghosts share the single parsed URDF
   // model and are re-posed, never rebuilt, in steady operation.
   struct TrailRobot
   {
+    Ogre::SceneNode * node = nullptr;
     std::unique_ptr<rviz_default_plugins::robot::Robot> robot;
     int waypoint_index = -1;
   };
   std::vector<TrailRobot> trail_robots_;
   void rebuildTrail();
   void updateTrailVisibility();
+  /// Destroy the trail pool including its holder nodes (plain clear() would
+  /// leak the holders: the Robot destructor only destroys its own nodes).
+  void clearTrailRobots();
 
   // --- Interpolated pose for the current frame ---
   std::map<std::string, Eigen::Isometry3d> interpolateWaypoints(

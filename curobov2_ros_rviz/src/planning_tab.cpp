@@ -1,5 +1,7 @@
 #include "curobov2_ros_rviz/planning_tab.hpp"
 #include "curobov2_ros_interfaces/msg/goalset.hpp"
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 // Only startMpc() still talks to SetPlanner: it re-asserts MPC on the server
 // before opening the live-tracking loop. The trajectory-type DROPDOWN moved to
 // the Context tab, which owns the user's choice; this is not a user-facing
@@ -54,8 +56,13 @@ PlanningTab::PlanningTab(QWidget *parent)
       {"--ros-args", "--remap", "__node:=rviz_updata_parameters_node", "--"});
   node_ = std::make_shared<rclcpp::Node>("_", options);
 
-  // Declare base_link parameter with default value
-  node_->declare_parameter<std::string>("base_link", "base_0");
+  // Own TF buffer for the one-time tool-pose seed lookup (frame names travel
+  // with the tool message + the RViz fixed frame: zero frame configuration).
+  // RViz spins node_ on the background spinner below, which is also what
+  // pumps this listener.
+  seed_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+  seed_tf_listener_ =
+    std::make_shared<tf2_ros::TransformListener>(*seed_tf_buffer_, node_, false);
 
   // Bootstrap value only. The planner node is owned by the Context tab, which
   // pushes the real one in through setPlannerNode() as soon as CuroboPanel
@@ -208,9 +215,26 @@ void PlanningTab::createPlannerClients(const std::string &planner_node) {
       node_->create_client<curobov2_ros_interfaces::srv::SetPlanner>(
           planner_ns + "set_planner");
 
-  // Publisher streaming the live MPC goal towards the current target pose.
-  this->mpc_goal_pub_ = node_->create_publisher<geometry_msgs::msg::Pose>(
+  // Publisher streaming the live MPC goal towards the current target pose
+  // (stamped: the pose rides in the RViz fixed frame, see goalFrame()).
+  this->mpc_goal_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
       planner_ns + "mpc_goal", 10);
+
+  // Live tool pose (base frame) for one-shot seeding of pristine displays.
+  // Rebinding (planner switch) drops the cache and the seed latch: a new
+  // planner may drive a different robot.
+  {
+    std::lock_guard<std::mutex> lock(tool_pose_mutex_);
+    tool_pose_.reset();
+  }
+  seeded_display_ = nullptr;
+  this->tool_pose_sub_ =
+      node_->create_subscription<geometry_msgs::msg::PoseStamped>(
+          planner_ns + "current_tool_pose", 10,
+          [this](geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+            std::lock_guard<std::mutex> lock(tool_pose_mutex_);
+            tool_pose_ = msg;
+          });
 
   RCLCPP_INFO(node_->get_logger(),
               "PlanningTab clients bound to planner node '%s' (%s)",
@@ -700,6 +724,9 @@ void PlanningTab::sendMpcGoal() {
 
   curobov2_ros_interfaces::msg::Goalset gset;
   gset.poses.push_back(target_display_->getPose());
+  // Fixed-frame coordinates (the display is frame-dumb); the server resolves
+  // them into the base link via TF.
+  gset.frame_id = goalFrame();
   goal.goal.goalsets.push_back(gset);
 
   auto send_goal_options = rclcpp_action::Client<
@@ -737,7 +764,11 @@ void PlanningTab::streamMpcGoal() {
       p.orientation.y != l.orientation.y ||
       p.orientation.z != l.orientation.z || p.orientation.w != l.orientation.w;
   if (changed) {
-    mpc_goal_pub_->publish(p);
+    geometry_msgs::msg::PoseStamped stamped;
+    stamped.header.stamp = node_->now();
+    stamped.header.frame_id = goalFrame();
+    stamped.pose = p;
+    mpc_goal_pub_->publish(stamped);
     last_published_goal_ = p;
   }
 }
@@ -903,6 +934,26 @@ void PlanningTab::collectTargetDisplaysInGroup(
   }
 }
 
+std::string PlanningTab::goalFrame() const {
+  // Every pose this tab sends (goalsets, mpc_goal) is expressed in the RViz
+  // fixed frame: the primary source is the target gizmo's frame (bound to
+  // the fixed frame when the marker is created and rebound on change).
+  // Before the marker exists, fall back to the display context's fixed
+  // frame directly. Empty only when RViz itself has no fixed frame yet;
+  // the server then treats the pose as base-frame ("" convention).
+  if (target_display_) {
+    const std::string gizmo_frame = target_display_->getGizmoFrame();
+    if (!gizmo_frame.empty()) {
+      return gizmo_frame;
+    }
+  }
+  auto context = displayContext();
+  if (context && context->getFrameManager()) {
+    return context->getFrameManager()->getFixedFrame();
+  }
+  return "";
+}
+
 std::vector<curobov2_ros_interfaces::msg::Goalset>
 PlanningTab::buildGoalsets() {
   std::vector<curobov2_ros_interfaces::msg::Goalset> goalsets;
@@ -910,6 +961,9 @@ PlanningTab::buildGoalsets() {
   if (target_display_) {
     curobov2_ros_interfaces::msg::Goalset gset;
     gset.poses.push_back(target_display_->getPose());
+    // Fixed-frame coordinates (the display is frame-dumb); the server
+    // resolves them into the base link via TF.
+    gset.frame_id = goalFrame();
     goalsets.push_back(gset);
   }
   if (goalsets.empty()) {
@@ -1068,11 +1122,62 @@ bool PlanningTab::eventFilter(QObject *obj, QEvent *event) {
   return QObject::eventFilter(obj, event);
 }
 
+void PlanningTab::maybeSeedTargetFromTool() {
+  // One-shot seed: a freshly added TargetDisplay parks at its hardcoded
+  // default in the fixed frame, disconnected from the arm. Move it to the
+  // live tool pose exactly once, and only while it still shows the untouched
+  // default (any drag, typed value or saved config defeats the seed).
+  // Frame names travel with the data (tool message header + fixed frame):
+  // nothing here is configured with frame names.
+  if (!target_display_ || target_display_ == seeded_display_ ||
+      user_editing_pose_) {
+    return;
+  }
+  if (!target_display_->isDefaultPose()) {
+    seeded_display_ = target_display_;
+    return;
+  }
+  geometry_msgs::msg::PoseStamped::SharedPtr tool;
+  {
+    std::lock_guard<std::mutex> lock(tool_pose_mutex_);
+    tool = tool_pose_;
+  }
+  if (!tool || tool->header.frame_id.empty()) {
+    return;
+  }
+  const std::string fixed = goalFrame();
+  if (fixed.empty()) {
+    return;  // No fixed frame yet: leave the default, retry next poll.
+  }
+  if (fixed == tool->header.frame_id) {
+    target_display_->setPose(tool->pose);
+    seeded_display_ = target_display_;
+    return;
+  }
+  try {
+    const auto tf = seed_tf_buffer_->lookupTransform(
+        fixed, tool->header.frame_id, tf2::TimePointZero,
+        tf2::durationFromSec(0.5));
+    geometry_msgs::msg::PoseStamped out;
+    tf2::doTransform(*tool, out, tf);
+    target_display_->setPose(out.pose);
+  } catch (const tf2::TransformException & ex) {
+    RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "Target seed: cannot transform tool pose '%s' -> '%s': %s",
+        tool->header.frame_id.c_str(), fixed.c_str(), ex.what());
+    return;
+  }
+  seeded_display_ = target_display_;
+}
+
 void PlanningTab::updateMarkerPoseDisplay() {
   // Don't update if marker not found yet or if user is editing
   if (!target_display_ || user_editing_pose_) {
     return;
   }
+
+  maybeSeedTargetFromTool();
 
   auto pose = target_display_->getPose();
 

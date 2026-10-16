@@ -52,9 +52,13 @@ namespace curobov2_ros_rviz
  *    selectable Ogre objects and publishes drag feedback back to the server.
  *
  * No separate "Interactive Markers" display is needed in the RViz config.
- * The pose is expressed in the robot base frame (the `base_link` parameter,
- * matching the planner), and the marker is frame-locked (header.stamp == 0)
- * so it tracks a moving base and drag feedback arrives in the base frame.
+ *
+ * Frames: the gizmo, the Target Position/Orientation properties and the
+ * pose getPose()/setPose() exchange all live in the RViz fixed frame, so
+ * the marker stays world-anchored when a mobile base drives away. The
+ * display performs no frame conversion and owns no frame configuration:
+ * callers tag the pose with getGizmoFrame() (the fixed frame) and the
+ * server resolves it into the robot base link via TF.
  */
 class TargetDisplay : public rviz_common::Display
 {
@@ -64,8 +68,17 @@ public:
   ~TargetDisplay() override;
 
   // --- Panel interface (used by PlanningTab) ---
+  // Pose in the RViz fixed frame (see class docs): verbatim gizmo
+  // coordinates, tagged with getGizmoFrame() by the caller.
   geometry_msgs::msg::Pose getPose() const;
+  // Pose in the RViz fixed frame, written straight into the properties.
   void setPose(const geometry_msgs::msg::Pose & pose);
+  // Frame getPose()/setPose() are expressed in (== fixed frame once the
+  // marker was created; empty before that).
+  std::string getGizmoFrame() const;
+  // Whether the target still shows the untouched code default (used by the
+  // panel to one-shot seed a freshly added display at the live tool pose).
+  bool isDefaultPose() const;
 
 protected:
   void onInitialize() override;
@@ -123,7 +136,7 @@ private:
   static std::atomic<int> gizmo_instance_counter_;
   std::string gizmo_name_;
   std::string gizmo_frame_;
-  std::mutex gizmo_mutex_;
+  mutable std::mutex gizmo_mutex_;
   geometry_msgs::msg::Pose gizmo_feedback_pose_;
   bool gizmo_feedback_dirty_ = false;
   bool gizmo_sync_pending_ = false;

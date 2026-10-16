@@ -17,6 +17,13 @@ float64 plane_size_x
 float64 plane_size_y
 uint32 grid_size_x
 uint32 grid_size_y
+
+# TF frame the plane pose is expressed in; "" (or the robot base frame)
+# means no transform is needed. The server resolves every other frame into
+# the configured base link via TF before solving, and returns the solved
+# grid (metrics.goals / metrics.plane_pose) in this same frame so a viewer
+# can render it directly (SetMask.srv convention).
+string frame_id ""
 ---
 # Solver outcome. On a solver failure `success` is false, `message` explains,
 # and `metrics.goals` still carries the requested grid (all cells marked

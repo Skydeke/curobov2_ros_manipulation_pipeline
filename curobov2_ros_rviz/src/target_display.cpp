@@ -173,9 +173,13 @@ void TargetDisplay::fixedFrameChanged()
 }
 
 // ============================================================================
-// Panel interface
+// Panel interface (fixed-frame coordinates throughout)
 // ============================================================================
 
+// The gizmo, the Target Position/Orientation properties and target_pose_ all
+// live in the RViz fixed (gizmo) frame. The display performs no frame
+// conversion: callers tag the pose with getGizmoFrame() and the server
+// resolves it into the base link via TF.
 geometry_msgs::msg::Pose TargetDisplay::getPose() const
 {
   return target_pose_;
@@ -184,6 +188,26 @@ geometry_msgs::msg::Pose TargetDisplay::getPose() const
 void TargetDisplay::setPose(const geometry_msgs::msg::Pose & pose)
 {
   updatePoseProperties(pose);
+}
+
+std::string TargetDisplay::getGizmoFrame() const
+{
+  std::lock_guard<std::mutex> lock(gizmo_mutex_);
+  return gizmo_frame_;
+}
+
+bool TargetDisplay::isDefaultPose() const
+{
+  // Code defaults from onInitialize (and every shipped .rviz): must match
+  // exactly, or a pristine display is never recognised as seedable.
+  static constexpr double kX = 0.4;
+  static constexpr double kY = 0.0;
+  static constexpr double kZ = 0.4;
+  const auto & p = target_pose_;
+  return std::abs(p.position.x - kX) < 1e-9 &&
+    std::abs(p.position.y - kY) < 1e-9 &&
+    std::abs(p.position.z - kZ) < 1e-9 && p.orientation.x == 0.0 &&
+    p.orientation.y == 0.0 && p.orientation.z == 0.0 && p.orientation.w == 1.0;
 }
 
 // ============================================================================
@@ -298,13 +322,14 @@ void TargetDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & pose)
   visualization_msgs::msg::InteractiveMarker int_marker;
   int_marker.header.frame_id = gizmo_frame_;
   // Frame-locked marker (header.stamp == 0): RViz re-resolves gizmo_frame_ ->
-  // fixed every frame and returns drag feedback in gizmo_frame_. A timestamped
-  // marker (stamp == now()) freezes the base transform at creation, so a moved
-  // mobile base leaves the gizmo behind, and RViz returns feedback in the fixed
-  // frame, which gizmoFeedback() would then misinterpret as a base-frame pose
-  // (the "completely wrong once the base moved" bug). Per RViz docs the
+  // fixed every frame, so the gizmo stays world-anchored when a mobile base
+  // drives away, and drag feedback arrives in gizmo_frame_. A timestamped
+  // marker (stamp == now()) freezes the reference transform at creation, so a
+  // moved mobile base leaves the gizmo behind. Per RViz docs the
   // interactive-marker header stamp must be 0 to follow TF; the default-built
-  // header already is, so do NOT set it to now() here.
+  // header already is, so do NOT set it to now() here. The gizmo frame is the
+  // RViz fixed frame; getPose() returns these coordinates verbatim and the
+  // server resolves them into the base link via TF.
   int_marker.pose = pose;
   int_marker.scale = 1.0;
   int_marker.name = gizmo_name_;
@@ -389,9 +414,8 @@ void TargetDisplay::gizmoFeedback(
     gizmo_feedback_pose_ = feedback->pose;
     gizmo_feedback_dirty_ = true;
   }
-  // The marker is frame-locked, so feedback must arrive in gizmo_frame_ (the
-  // planner's base frame). A different frame means the marker got timestamped
-  // somewhere and the stored pose would be misinterpreted once the base moved.
+  // The marker is frame-locked, so feedback arrives in gizmo_frame_ (the RViz
+  // fixed frame). A different frame means the marker got timestamped somewhere.
   if (!feedback->header.frame_id.empty() && !frame.empty() &&
       feedback->header.frame_id != frame) {
     auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
@@ -399,7 +423,7 @@ void TargetDisplay::gizmoFeedback(
       auto node = ros_node_abstraction->get_raw_node();
       RCLCPP_WARN_THROTTLE(
         node->get_logger(), *node->get_clock(), 5000,
-        "Target gizmo feedback in '%s', expected base frame '%s'; "
+        "Target gizmo feedback in '%s', expected gizmo frame '%s'; "
         "marker should be frame-locked (stamp 0).",
         feedback->header.frame_id.c_str(), frame.c_str());
     }

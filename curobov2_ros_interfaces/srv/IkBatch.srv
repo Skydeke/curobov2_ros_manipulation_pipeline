@@ -1,5 +1,10 @@
 geometry_msgs/Pose[] poses
 
+# TF frame `poses` are expressed in; "" (or the robot base frame) means no
+# transform is needed. The server resolves every other frame into the
+# configured base link via TF before solving (SetMask.srv convention).
+string frame_id ""
+
 ---
 
 sensor_msgs/JointState[] joint_states

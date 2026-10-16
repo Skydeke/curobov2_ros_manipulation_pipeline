@@ -39,3 +39,9 @@ int8[] trajectory_constraints
 #  x1, y1, z1, ...]
 # (Note: historical field-name typo is preserved.)
 int8[] trajectories_contraints
+
+# TF frame `poses` are expressed in; "" (or the robot base frame) means no
+# transform is needed. The server resolves every other frame into the
+# configured base link via TF before planning (SetMask.srv convention).
+# Joint-space segments (target_joint_positions) are frame-free and ignore it.
+string frame_id ""

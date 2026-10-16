@@ -41,6 +41,7 @@ Response:
 | Field | Type | Meaning |
 |---|---|---|
 | `poses` | `geometry_msgs/Pose[]` | Candidate set: `1` = fixed waypoint, `N > 1` = resolved by cuRobo inside a single plan (capped by the `max_goalset` parameter) |
+| `frame_id` | `string` | TF frame `poses` are expressed in (`""` == robot base frame); the server resolves any other frame into the base link via TF |
 | `target_joint_positions` | `float64[]` | Joint-space target for this segment (dispatches to `plan_cspace`) |
 | `trajectory_constraints` | `int8[]` | `[theta_x, theta_y, theta_z, x, y, z]` hold flags applied to the whole path (v2 reads the first segment's) |
 | `trajectories_contraints` | `int8[]` | Flattened per-waypoint constraints (note: field name carries a historical typo; not honoured in v2) |
@@ -238,11 +239,11 @@ Types: `curobo_msgs/srv/WarmupIK`, `curobo_msgs/srv/WarmupFK`. Request: `batch_s
 
 ### `/unified_planner/ik`
 
-Type: `curobo_msgs/srv/Ik`. Request: `pose` (`geometry_msgs/Pose`, robot base frame). Response: `joint_states` (`sensor_msgs/JointState`), `joint_states_valid` (`std_msgs/Bool`), `error_msg` (`std_msgs/String`), `success`. The IK solve is collision-aware and shares the scene with the motion planner.
+Type: `curobo_msgs/srv/Ik`. Request: `pose` (`geometry_msgs/Pose`) plus `frame_id` (TF frame the pose is expressed in, `""` == robot base frame); the server resolves any other frame into the base link via TF before solving. Response: `joint_states` (`sensor_msgs/JointState`), `joint_states_valid` (`std_msgs/Bool`), `error_msg` (`std_msgs/String`), `success`. The IK solve is collision-aware and shares the scene with the motion planner.
 
 ### `/unified_planner/ik_batch`
 
-Type: `curobo_msgs/srv/IkBatch`. Same as `ik` with arrays: `poses[]` in, `joint_states[]` / `joint_states_valid[]` out. Poses are solved in parallel on the GPU.
+Type: `curobo_msgs/srv/IkBatch`. Same as `ik` with arrays: `poses[]` in, `joint_states[]` / `joint_states_valid[]` out, one shared `frame_id` for all poses. Poses are solved in parallel on the GPU.
 
 ### `/unified_planner/fk`
 
@@ -316,6 +317,7 @@ ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/Sen
 | `/mpc_predicted_path` | `nav_msgs/Path` | MPC active | Predicted end-effector path over the horizon |
 | `/mpc_goal_marker` | `visualization_msgs/Marker` | MPC active | Current MPC goal |
 | `/mpc_costs` | `curobo_msgs/msg/MpcCosts` | MPC active | Per-step cost and constraint breakdown |
+| `<node>/current_tool_pose` | `geometry_msgs/PoseStamped` | 1 Hz | Live tool pose in the base link (the frame `/ik_batch` solves for); the RViz panel one-shot seeds pristine target gizmos from it |
 
 The active control strategy adds its own topics, configured in the robot descriptor (`robots/<name>.yaml`). A deployment repo wires its own driver topics (e.g. a Kortex package: `/joint_trajectory_controller/joint_trajectory` published, `/joint_states` subscribed). The emulator strategy publishes `/emulator/joint_states` (`sensor_msgs/JointState`).
 
@@ -323,7 +325,7 @@ The active control strategy adds its own topics, configured in the robot descrip
 
 | Topic | Type | Notes |
 |---|---|---|
-| `/unified_planner/mpc_goal` | `geometry_msgs/Pose` | Live goal retargeting; ignored (with a warning) unless a reactive planner (MPC, retarget) is active |
+| `/unified_planner/mpc_goal` | `geometry_msgs/PoseStamped` | Live goal retargeting; pose in `header.frame_id` ("" == base), resolved into the base link server-side; ignored (with a warning) unless a reactive planner (MPC, retarget) is active |
 | raw depth topics (param `camera_topic`) | `sensor_msgs/Image` | e.g. `/depth_to_rgb/image_raw`, one entry per camera — consumed by each camera's robot-segmentation strategy (when segmented) |
 | masked depth topics (derived) | `sensor_msgs/Image` | segmented cameras: the mapper strategy subscribes to the derived masked output instead of the raw stream (raw `camera_topic` → `masked_depth` in the same directory) |
 | camera info topics (param `camera_info_topic`) | `sensor_msgs/CameraInfo` | Read once at startup (5 s wait) when the camera's `camera_intrinsics` is empty |

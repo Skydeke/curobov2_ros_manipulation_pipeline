@@ -28,6 +28,7 @@ from sensor_msgs.msg import JointState
 from curobo.types import Pose as CuroboPose, GoalToolPose
 
 from curobov2_ros_interfaces.srv import Ik, IkBatch, WarmupIK
+from curobov2_ros.core.frame_utils import resolve_poses_to_base
 from curobov2_ros.core.gpu_lanes import PRIO_KIN
 
 
@@ -163,8 +164,20 @@ class IKServices:
             response.error_msg.data = "IK not initialized. Call warmup_ik first."
             return response
 
+        # Server owns every transform: resolve the tagged frame ("" == base)
+        # into the configured base link before solving.
+        try:
+            poses = resolve_poses_to_base(
+                [request.pose], getattr(request, "frame_id", "") or "",
+                self._config.base_link,
+                getattr(self._node, "tf_buffer", None))
+        except RuntimeError as e:
+            response.success = False
+            response.error_msg.data = str(e)
+            return response
+
         def _job():
-            ok, result = self._solve([request.pose])
+            ok, result = self._solve(poses)
             if not ok:
                 return None
             js = JointState()
@@ -197,6 +210,18 @@ class IKServices:
             return response
 
         poses = list(request.poses)
+
+        # Server owns every transform: resolve the tagged frame ("" == base)
+        # into the configured base link before solving.
+        try:
+            poses = resolve_poses_to_base(
+                poses, getattr(request, "frame_id", "") or "",
+                self._config.base_link,
+                getattr(self._node, "tf_buffer", None))
+        except RuntimeError as e:
+            response.success = False
+            response.error_msg.data = str(e)
+            return response
 
         def _job():
             ok, result = self._solve(poses)
@@ -463,7 +488,10 @@ class IKServices:
     def solve_poses(self, poses, num_seeds: int | None = None):
         """Batch IK for a list of geometry_msgs/Pose (programmatic API).
 
-        Convenience wrapper used by the reachability service: returns the
+        ``poses`` must already be expressed in the robot base frame (unlike
+        the /ik_batch service, there is no frame tag here): the reachability
+        service resolves its plane via TF before building the grid it passes
+        in. Convenience wrapper used by the reachability service: returns the
         solved joint positions and per-pose convergence flags without building
         ROS service responses.
 

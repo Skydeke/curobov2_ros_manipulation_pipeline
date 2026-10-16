@@ -5,6 +5,9 @@
 // ROS2
 #include "rclcpp_action/rclcpp_action.hpp"
 #include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 #include <rclcpp/rclcpp.hpp>
 
 // Projet
@@ -283,11 +286,32 @@ private:
   std::string planner_node_;
 
   // MPC live-tracking members.
-  rclcpp::Publisher<geometry_msgs::msg::Pose>::SharedPtr mpc_goal_pub_;
+  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mpc_goal_pub_;
   bool mpc_active_;
   bool mpc_starting_;
   geometry_msgs::msg::Pose last_published_goal_;
   QTimer *mpc_goal_timer_;
+
+  // Live tool pose (server-published, base frame) used to one-shot seed a
+  // pristine TargetDisplay at the gripper instead of the hardcoded default.
+  // Rebuilt by createPlannerClients(), so switching planners resets both the
+  // cache and the per-display seed latch below.
+  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
+      tool_pose_sub_;
+  geometry_msgs::msg::PoseStamped::SharedPtr tool_pose_;
+  mutable std::mutex tool_pose_mutex_;
+  // Display already seeded (latch): reseeds only ever happen for a display
+  // that has not been seeded yet AND still shows the untouched default pose.
+  TargetDisplay *seeded_display_ = nullptr;
+  // Own TF buffer for the one-time base->fixed seed lookup (frame names come
+  // from the tool message + the RViz fixed frame: zero frame configuration).
+  std::shared_ptr<tf2_ros::Buffer> seed_tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> seed_tf_listener_;
+  /// Pose every outgoing goal is expressed in (RViz fixed frame); also the
+  /// seed target frame.
+  std::string goalFrame() const;
+  /// One-shot seed: move a pristine primary display to the live tool pose.
+  void maybeSeedTargetFromTool();
 
   // Trajectory type, pushed in by the Context tab (0 = Classic, 1 = MPC).
   // It decides whether on_generateAndSend_clicked() starts the live-tracking

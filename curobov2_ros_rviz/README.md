@@ -13,7 +13,7 @@ the end of each component for known limitations and roadmap items.
 ros2 launch curobov2_ros_rviz curobov2_ros_rviz.launch.py
 ```
 
-The launch forwards `planner_node_name` and `base_link` as node parameters.
+The launch forwards `planner_node_name` as a node parameter.
 Note that `planner_node_name` only takes effect if the running RViz node
 exposes it as a parameter; the value saved in the RViz config (the Curobo
 panel's Context tab) is what the panel actually uses, and it wins when both are
