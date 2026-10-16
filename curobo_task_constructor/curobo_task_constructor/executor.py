@@ -237,7 +237,13 @@ def _plan_request_from_dict(d) -> Optional[Any]:
             [str(n) for n in (start.get("name", None) or [])],
             [float(v) for v in (start.get("position", None) or [])])))
     return PlanRequest(goalsets=goalsets, start_pose=start_pose,
-                       planner=d.get("planner"))
+                       planner=d.get("planner"),
+                       cartesian_step_size=float(
+                           d.get("cartesian_step_size", 0.0) or 0.0),
+                       cartesian_min_fraction=float(
+                           d.get("cartesian_min_fraction", -1.0)),
+                       cartesian_precision=float(
+                           d.get("cartesian_precision", 0.0) or 0.0))
 
 
 class TaskExecutor:

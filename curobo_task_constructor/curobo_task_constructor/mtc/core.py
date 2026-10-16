@@ -42,6 +42,10 @@ EXECUTE_ACTION = "/curobo_task_constructor/execute_task_solution"
 EXECUTE_WAIT_SEC = 0.5
 
 PLANNER_CLASSIC = 0
+#: SetPlanner CARTESIAN (=3): the MTC ``solvers::CartesianPath`` backend. It
+#: plans a straight line through the axis-hold cost and enforces
+#: ``min_fraction`` server-side.
+PLANNER_CARTESIAN = 3
 PLANNER_JOINT_SPACE = 5
 
 
@@ -490,10 +494,16 @@ def _looks_like_node(obj: Any) -> bool:
 #: one that honours Cartesian axis holds. The mapping is explicit and total,
 #: so an unknown pipeline fails loudly instead of silently planning with
 #: whatever the server had selected last.
+#:
+#: ``cartes``/``cartesian`` map to CARTESIAN (the MTC ``solvers::CartesianPath``
+#: backend, SetPlanner=3) — the straight-line planner — NOT to CLASSIC. A
+#: ``PipelinePlanner(node, "cartes")`` therefore means "plan linearly", the
+#: same job MTC's CartesianPath solver does.
 PIPELINE_PLANNERS = {
     "classic": PLANNER_CLASSIC,
-    "cartes": PLANNER_CLASSIC,
-    "cartesian": PLANNER_CLASSIC,
+    "cartes": PLANNER_CARTESIAN,
+    "cartesian": PLANNER_CARTESIAN,
+    "cartesian_path": PLANNER_CARTESIAN,
     "pilz": PLANNER_CLASSIC,
     "pilz_industrial_motion_planner": PLANNER_CLASSIC,
     "mpc": 1,
@@ -507,15 +517,35 @@ PIPELINE_PLANNERS = {
 
 
 class CartesianPath(PlannerInterface):
-    """Linear interpolation between Cartesian poses (MTC CartesianPath).
+    """Straight-line Cartesian planning (MTC ``solvers::CartesianPath``).
 
-    Fails unless ``min_fraction`` of the path is feasible. cuRobo has no
-    Cartesian solver: a line is expressed as whole-path axis holds, and
-    ``min_fraction >= 1.0`` keeps the stage's straightness gate on while a
-    smaller fraction disables it (the free-space opt-out).
+    A faithful port of MoveIt Task Constructor's ``solvers::CartesianPath``.
+    MTC's solver interpolates a straight EEF path from the start to the goal
+    at ``step_size``, IK's + collision-checks every waypoint, and fails unless
+    at least ``min_fraction`` of the path is feasible. cuRobo has no such
+    solve mode, so this solver selects the server's **CARTESIAN** planner
+    (``SetPlanner.CARTESIAN``): the backend expresses the line as whole-path
+    axis holds (the ``ToolPoseCriteria`` cost), solves it, and enforces the
+    same ``min_fraction`` guarantee — the semantics live on the server, not in
+    a client-side gate.
+
+    Property surface mirrors MTC ``solvers::CartesianPath`` (cartesian_path.h /
+    cartesian_path.cpp):
+
+    - ``step_size``       (default 0.01 m) — EEF step between waypoints
+    - ``precision``       (``CartesianPrecision``) — linear-path tolerance
+    - ``min_fraction``    (default 1.0) — fraction of motion required for success
+    - ``max_cartesian_speed`` / ``cartesian_speed_limited_link`` — speed cap
+    - ``ik_frame``        (via ``setIKFrame``) — frame moved linearly
+    - inherited: ``setTimeout`` / ``setProperty`` /
+      ``setMaxVelocityScalingFactor`` / ``setMaxAccelerationScalingFactor`` /
+      ``properties`` / ``getPlannerId``.
+
+    Like MTC, ``setMaxVelocityScaling``/``setMaxAccelerationScaling`` and
+    ``setJumpThreshold`` are deprecated shims kept for call-site parity.
     """
 
-    wire_name = "classic"
+    wire_name = "cartesian"
 
     def __init__(
         self,
@@ -527,23 +557,36 @@ class CartesianPath(PlannerInterface):
         self.step_size = float(step_size)
         self.min_fraction = float(min_fraction)
         self.precision = precision or CartesianPrecision()
+        #: Max Cartesian speed cap (m/s); 0 = unlimited (MTC
+        #: ``max_cartesian_speed``). Carried for parity; the cuRobo backend
+        #: times its own trajectory.
         self.max_cartesian_speed = 0.0
+        #: Link whose speed the cap applies to (MTC
+        #: ``cartesian_speed_limited_link``).
         self.cartesian_speed_limited_link = ""
 
     def setStepSize(self, step_size: float) -> None:
+        """Set the step size between consecutive waypoints (m)."""
         self.step_size = float(step_size)
+        self.setProperty("step_size", self.step_size)
 
     def setPrecision(self, precision: CartesianPrecision) -> None:
+        """Set the precision of the linear path."""
         self.precision = precision
+        self.setProperty("precision", precision)
 
     def setMinFraction(self, min_fraction: float) -> None:
+        """Set the fraction of motion required for success."""
         self.min_fraction = float(min_fraction)
+        self.setProperty("min_fraction", self.min_fraction)
 
     def setIKFrame(self, *args) -> None:
-        """Set the IK frame (MTC ``CartesianPath::setIKFrame``).
+        """Set the frame to move linearly (MTC ``CartesianPath::setIKFrame``).
 
-        Accepts a link name (stored); pose forms are accepted and reduced
-        to their link where available.
+        Accepts a link name, or ``(pose[, link])``. Pose-only forms are
+        reduced to a stored property; a trailing link string wins. The cuRobo
+        backend solves for the tool link, so the frame is configured, not
+        re-targeted.
         """
         for arg in args:
             if isinstance(arg, str):
@@ -552,18 +595,40 @@ class CartesianPath(PlannerInterface):
         if args:
             self.setProperty("ik_frame", args[-1])
 
+    def setJumpThreshold(self, *args) -> None:
+        """Deprecated no-op (MTC ``CartesianPath::setJumpThreshold``).
+
+        MTC deprecated the jump threshold: the linear interpolator no longer
+        aborts on a joint-space jump. Accepted for call-site parity.
+        """
+
+    def setMaxVelocityScaling(self, *args) -> None:
+        """Deprecated alias for ``setMaxVelocityScalingFactor`` (MTC)."""
+        if args:
+            self.setMaxVelocityScalingFactor(args[0])
+
+    def setMaxAccelerationScaling(self, *args) -> None:
+        """Deprecated alias for ``setMaxAccelerationScalingFactor`` (MTC)."""
+        if args:
+            self.setMaxAccelerationScalingFactor(args[0])
+
     def getPlannerId(self) -> str:
         return "CartesianPath"
 
     def planner_key(self) -> int:
-        # Straight-line holds are honoured only by the classic planner.
-        return PLANNER_CLASSIC
+        # Straight-line planning is its own backend (SetPlanner CARTESIAN).
+        return PLANNER_CARTESIAN
 
     def extra_params(self) -> dict:
         params = dict(self._planner_properties)
         params.pop("timeout", None)
         params.setdefault("step_size", self.step_size)
         params.setdefault("min_fraction", self.min_fraction)
+        # Translational precision (m): the tolerance under which an interpolated
+        # waypoint counts as ON the line. ``self.precision`` is the source of
+        # truth even when ``setPrecision`` stored the CartesianPrecision object
+        # in the property bag (MTC parity), so coerce it back to a float here.
+        params["precision"] = float(self.precision.translational)
         return params
 
 
@@ -892,7 +957,8 @@ _DISPLAY_PROPERTIES = {
     "compute_ik": ("group", "eef", "max_solutions", "target_pose", "ik_frame",
                    "ignore_collisions", "timeout"),
     "generate_pose": ("pose", "timeout"),
-    "cartesian_path": ("goal", "hold", "check_straightness", "timeout"),
+    "cartesian_path": ("goal", "hold", "step_size", "min_fraction", "precision",
+                       "ik_frame", "timeout"),
     "modify_scene": ("add", "remove", "remove_all", "attach", "attach_link",
                      "detach", "detach_all", "allow_collisions", "timeout"),
 }
@@ -1920,6 +1986,11 @@ class Task:
         if self._preempted:
             self._preempted = False
             return MoveItErrorCode(MoveItErrorCode.FAILURE)
+        # A fresh plan burst must not trust a planner belief formed before a
+        # remote execute (or a sibling node) mutated the shared
+        # /curobo_server planner. Forget it here; the adapter's skip still
+        # removes the redundant repeats WITHIN this burst.
+        self._invalidate_planner_session()
         self.init()
         if self._executor is None or not self._executor._valid:
             return MoveItErrorCode(MoveItErrorCode.PLANNING_FAILED)
@@ -1985,15 +2056,36 @@ class Task:
             import rclpy
         except Exception:
             rclpy = None
-        if rclpy is None or not rclpy.ok():
-            # Offline path (no ROS): drive directly through the executor.
-            if self._executor is None:
-                raise RuntimeError("Task.execute() before plan()")
-            results = self._executor.execute(sol)
-            ok = bool(results) and all(r.success for r in results)
-            return MoveItErrorCode(
-                MoveItErrorCode.SUCCESS if ok else MoveItErrorCode.CONTROL_FAILED)
-        return self._execute_remote(sol)
+        try:
+            if rclpy is None or not rclpy.ok():
+                # Offline path (no ROS): drive directly through the executor.
+                if self._executor is None:
+                    raise RuntimeError("Task.execute() before plan()")
+                results = self._executor.execute(sol)
+                ok = bool(results) and all(r.success for r in results)
+                return MoveItErrorCode(
+                    MoveItErrorCode.SUCCESS if ok else MoveItErrorCode.CONTROL_FAILED)
+            return self._execute_remote(sol)
+        finally:
+            # The drive ran segments under their cached plans' planners (remote
+            # execute server, or the local executor) and may have left the
+            # shared /curobo_server on a different one; the next plan burst
+            # must re-assert its planner, so forget the belief here too.
+            self._invalidate_planner_session()
+
+    def _invalidate_planner_session(self) -> None:
+        """Forget any cached "planner already active" belief on the robot.
+
+        The adapter may skip a redundant ``SetPlanner`` round trip within one
+        burst, but a remote ``execute()`` (or a sibling node) mutates the
+        shared ``/curobo_server`` planner behind our back. Dropping the belief
+        is a no-op for interfaces that never cache (see
+        ``RobotInterface.invalidate_planner_session``).
+        """
+        robot = getattr(self, "robot", None)
+        forget = getattr(robot, "invalidate_planner_session", None)
+        if callable(forget):
+            forget()
 
     def _execute_remote(self, solution: Any):
         """Send a full Solution message through the ExecuteTaskSolution action.

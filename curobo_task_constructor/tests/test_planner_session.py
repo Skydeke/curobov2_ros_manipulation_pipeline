@@ -194,6 +194,18 @@ def test_wire_skips_identical_planner_repeats():
     assert [r.planner_type for r in iface._planner_client.requests] == [5, 0]
 
 
+def test_wire_invalidate_planner_session_resets_belief():
+    # A remote execute (or a sibling node) switches the shared /curobo_server
+    # planner behind our back, so the belief must be droppable: the next
+    # request re-asserts its planner even when it equals the last key sent.
+    iface = _make_iface()
+    iface._ensure_planner(5)
+    assert [r.planner_type for r in iface._planner_client.requests] == [5]
+    iface.invalidate_planner_session()
+    iface._ensure_planner(5)
+    assert [r.planner_type for r in iface._planner_client.requests] == [5, 5]
+
+
 def test_wire_skips_identical_collision_repeats():
     from curobo_task_constructor.core.robot import GoalsetSpec, PlanRequest
 

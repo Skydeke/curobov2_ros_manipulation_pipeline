@@ -11,13 +11,18 @@ from curobo_task_constructor.core.geom import (
 )
 from curobo_task_constructor.core.robot import GoalsetSpec, PlanRequest
 
-#: SetPlanner mirror (CLASSIC=0, MPC=1, BATCH=2, JOINT_SPACE=5, RETARGET=6).
-#: MULTIPOINT=4 was removed together with the old MultiPointPlanner server
-#: planner (the enum constant still exists in SetPlanner.srv for ABI).
+#: SetPlanner mirror (CLASSIC=0, MPC=1, BATCH=2, CARTESIAN=3, JOINT_SPACE=5,
+#: RETARGET=6). MULTIPOINT=4 was removed together with the old
+#: MultiPointPlanner server planner (the enum constant still exists in
+#: SetPlanner.srv for ABI). CARTESIAN is the MTC ``solvers::CartesianPath``
+#: backend: it plans a straight line via the axis-hold cost and enforces
+#: ``min_fraction``.
 PLANNER_KEYS = {
     "classic": 0,
     "mpc": 1,
     "batch": 2,
+    "cartesian": 3,
+    "cartes": 3,
     "joint_space": 5,
     "retarget": 6,
 }
@@ -60,10 +65,19 @@ def goalset_for_scene(scene, *, poses=None, joint_positions=None) -> GoalsetSpec
 
 
 def full_request(robot, start_joints, goalsets, params, planner=None) -> PlanRequest:
+    """Build a PlanRequest, folding in the leg's CartesianPath interpolation
+    options (MTC ``solvers::CartesianPath`` properties, put in the stage params
+    by ``core.CartesianPath.extra_params``). A stage built with any other
+    planner carries none of them, so the sentinels leave the server defaults
+    in place — and the server ignores them unless the Cartesian planner is
+    active."""
     return PlanRequest(
         start_pose=start_joints,
         goalsets=goalsets,
         planner=planner if planner is not None else planner_key(params),
+        cartesian_step_size=float(params.get("step_size", 0.0) or 0.0),
+        cartesian_min_fraction=float(params.get("min_fraction", -1.0)),
+        cartesian_precision=float(params.get("precision", 0.0) or 0.0),
     )
 
 

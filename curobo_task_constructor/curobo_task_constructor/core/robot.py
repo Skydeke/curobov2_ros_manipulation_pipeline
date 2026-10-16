@@ -38,11 +38,20 @@ class PlanRequest:
 
     ``start_pose`` is a JointStateLike — the state the task starts from. Each
     goalset is one segment; cuRobo solves the whole path in one call.
+
+    ``cartesian_*`` are the MTC ``solvers::CartesianPath`` interpolation
+    properties for this leg (mirror of ``TrajectoryGoal.cartesian_*``);
+    consumed only by the Cartesian planner (SetPlanner CARTESIAN). Sentinels:
+    ``cartesian_step_size <= 0`` and ``cartesian_precision <= 0`` mean the
+    planner default, ``cartesian_min_fraction < 0`` means the planner default.
     """
 
     goalsets: list = field(default_factory=list)
     start_pose: Any = None  # JointStateLike or None (server uses current)
     planner: Any = None  # planner key/int; None -> server default
+    cartesian_step_size: float = 0.0
+    cartesian_min_fraction: float = -1.0
+    cartesian_precision: float = 0.0
 
 
 @dataclass
@@ -141,6 +150,19 @@ class RobotInterface(ABC):
     @abstractmethod
     def set_planner(self, planner: Any) -> None:
         """Select the active cuRobo planner (SetPlanner)."""
+
+    def invalidate_planner_session(self) -> None:
+        """Forget any cached "planner already active" belief.
+
+        The adapter may skip a redundant ``SetPlanner`` round trip when it
+        believes the requested planner is already active. That belief is only
+        valid WITHIN one planning burst: the remote execute server replays a
+        solution through its OWN interface and mutates the shared
+        ``/curobo_server`` planner, and another node can switch it too. A
+        caller that is about to start a fresh burst — or that just finished a
+        remote execution — must forget the belief so the next request
+        re-asserts its planner. Default: no-op (interfaces that never cache).
+        """
 
     @abstractmethod
     def plan(self, request: PlanRequest) -> PlanResult:

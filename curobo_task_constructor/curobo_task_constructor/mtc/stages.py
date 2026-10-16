@@ -16,7 +16,10 @@ pipeline's trees carry on the wire.
 
 Deliberate extensions where cuRobo needs more than MTC: ``setGoals``
 (N-candidate fan-out in one goalset), ``MoveTo`` list-joint goals,
-``CartesianPath`` stage (``setRelative``/``setHold``/``setCheckStraightness``),
+``CartesianPath`` stage (delegates the MTC ``solvers::CartesianPath`` surface
+— ``setStepSize``/``setPrecision``/``setMinFraction``/``setIKFrame``/
+``setJumpThreshold`` — onto a backing ``core.CartesianPath`` and adds the
+cuRobo goal forms ``setRelative``/``setHold``),
 ``CurrentState`` attach predicates, ``remove_all``/``detach_all``,
 per-stage ``setCost`` ranking terms. ``ik_frame``/``path_constraints`` are
 accepted for compatibility and stored; the backend solves the tool link
@@ -583,11 +586,27 @@ class Connect(_MotionBase):
 
 
 class CartesianPath(_MotionBase):
-    """Straight-line solve with whole-path axis holds (MTC CartesianPath).
+    """Straight-line Cartesian solve (MTC ``solvers::CartesianPath``).
 
-    The hold is derived by the stage (pin every axis start and goal agree
-    on) unless ``setHold`` pins it explicitly; ``setCheckStraightness(False)``
-    is the free-space opt-out (the pick's last-resort strategy).
+    MTC's CartesianPath is a *solver*, not a stage: it interpolates a straight
+    EEF path from the start to the goal at ``step_size`` and fails when less
+    than ``min_fraction`` of that path is feasible. cuRobo has no Cartesian
+    solve mode, so this stage requests the line as whole-path axis holds (the
+    ``ToolPoseCriteria`` cost) and the server's CARTESIAN planner enforces
+    ``min_fraction``; there is no client-side gate.
+
+    The stage keeps MTC's solver surface — every ``setStepSize`` /
+    ``setPrecision`` / ``setMinFraction`` / ``setIKFrame`` /
+    ``setJumpThreshold`` call lands on the backing ``core.CartesianPath`` (and
+    on the wire params) — and adds the cuRobo goal forms
+    (``setGoal`` / ``setGoals`` / ``setRelative``) the server needs to know
+    where the line goes. ``setHold`` pins the held axes explicitly; without it
+    the stage derives the hold from the start pose and the goal.
+
+    ``setCheckStraightness`` is retained as a DEPRECATED alias: the server now
+    owns the partial-path guarantee via ``min_fraction``, so a ``False`` call
+    just clears the hold (the free-space opt-out) — using a non-Cartesian
+    planner for a free move is the faithful equivalent.
     """
 
     stage_type = "cartesian_path"
@@ -595,21 +614,80 @@ class CartesianPath(_MotionBase):
     def __init__(self, name: str = "cartesian", planner: Any = None,
                  planning_attempts: int = None):
         super().__init__(name, planner, planning_attempts)
-        self._straightness_explicit = False
 
-    def _common_params(self) -> dict:
-        params = super()._common_params()
-        # MTC min_fraction mapped onto the gate: a full-path requirement
-        # keeps stage enforcement on; anything less opts out (free space).
-        # An explicit setCheckStraightness call always wins.
-        if not self._straightness_explicit:
-            minimum = getattr(self.planner, "min_fraction", 1.0)
-            try:
-                params["check_straightness"] = float(minimum) >= 1.0
-            except (TypeError, ValueError):
-                params["check_straightness"] = True
-        return params
+    # ------------------------------------------------------------------
+    # MTC solvers::CartesianPath surface (delegated to the backing solver so
+    # the stage and the solver never disagree; params mirror it for the wire)
+    # ------------------------------------------------------------------
+    def _solver(self) -> Any:
+        """The backing ``core.CartesianPath`` when one was supplied."""
+        if callable(getattr(self.planner, "setStepSize", None)):
+            return self.planner
+        return None
 
+    def setStepSize(self, step_size: float) -> None:
+        """Set the step size between consecutive waypoints (m)."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setStepSize(step_size)
+        self.params["step_size"] = float(step_size)
+
+    def setPrecision(self, precision: Any) -> None:
+        """Set the precision of the linear path (``CartesianPrecision``)."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setPrecision(precision)
+        translational = getattr(precision, "translational", precision)
+        try:
+            self.params["precision"] = float(translational)
+        except (TypeError, ValueError):
+            pass
+
+    def setMinFraction(self, min_fraction: float) -> None:
+        """Set the fraction of motion required for success ([0, 1])."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setMinFraction(min_fraction)
+        self.params["min_fraction"] = float(min_fraction)
+
+    def setIKFrame(self, *args) -> None:
+        """Set the frame to move linearly (MTC ``CartesianPath::setIKFrame``)."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setIKFrame(*args)
+        for arg in args:
+            if isinstance(arg, str):
+                self.params["ik_frame"] = arg
+                return
+
+    def setJumpThreshold(self, *args) -> None:
+        """Deprecated no-op (MTC ``CartesianPath::setJumpThreshold``)."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setJumpThreshold(*args)
+
+    def setMaxVelocityScaling(self, *args) -> None:
+        """Deprecated alias for ``setMaxVelocityScalingFactor`` (MTC)."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setMaxVelocityScaling(*args)
+
+    def setMaxAccelerationScaling(self, *args) -> None:
+        """Deprecated alias for ``setMaxAccelerationScalingFactor`` (MTC)."""
+        solver = self._solver()
+        if solver is not None:
+            solver.setMaxAccelerationScaling(*args)
+
+    def getPlannerId(self) -> str:
+        """Name of the backing planner (MTC ``getPlannerId``)."""
+        solver = self._solver()
+        if solver is not None and callable(getattr(solver, "getPlannerId", None)):
+            return solver.getPlannerId()
+        return "CartesianPath"
+
+    # ------------------------------------------------------------------
+    # cuRobo goal forms
+    # ------------------------------------------------------------------
     def setGoal(self, goal: Any) -> None:
         pose = _pose_dict_of(goal)
         if pose is None:
@@ -629,11 +707,17 @@ class CartesianPath(_MotionBase):
             "x": float(x), "y": float(y), "z": float(z), "frame": str(frame)}}
 
     def setHold(self, hold) -> None:
+        """Pin the held axes explicitly (int8[6]; all-zero = free space)."""
         self.params["hold"] = [int(c) for c in (hold or [])]
 
     def setCheckStraightness(self, enabled: bool) -> None:
-        self._straightness_explicit = True
-        self.params["check_straightness"] = bool(enabled)
+        """Deprecated: the server owns straightness via ``min_fraction``.
+
+        Kept for older builders. ``False`` clears the hold (a free-space
+        move); ``True`` is a no-op (the derived hold already asks for a line).
+        """
+        if not enabled:
+            self.params["hold"] = [0, 0, 0, 0, 0, 0]
 
 
 class GeneratePose(_StageBase):

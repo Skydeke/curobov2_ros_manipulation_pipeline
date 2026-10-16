@@ -5,6 +5,7 @@ Two families share the same Strategy/Factory switch (SetPlanner / GetPlanners):
 
 Open-loop planners (plan a full trajectory, then execute) — base ``SinglePlanner``:
 - ClassicPlanner: single-shot pose planning
+- CartesianPlanner: straight-line pose planning (MTC CartesianPath)
 - JointSpacePlanner: joint-space planning
 
 Reactive controllers (closed-loop control loop) — base ``ReactiveController``:
@@ -19,6 +20,7 @@ from .trajectory_planner import TrajectoryPlanner, PlannerResult, ExecutionMode
 from .single_planner import SinglePlanner
 from .reactive_controller import ReactiveController
 from .classic_planner import ClassicPlanner
+from .cartesian_planner import CartesianPlanner
 from .mpc_planner import MPCController, MPCPlanner
 from .retarget_controller import RetargetController
 from .joint_space_planner import JointSpacePlanner
@@ -31,6 +33,7 @@ __all__ = [
     'SinglePlanner',
     'ReactiveController',
     'ClassicPlanner',
+    'CartesianPlanner',
     'MPCController',
     'MPCPlanner',
     'RetargetController',

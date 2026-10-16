@@ -909,7 +909,8 @@ class UnifiedPlannerNode(Node):
             self._warmup_mpc()
         elif planner_type in ("retarget", "motion_retargeting", "teleop"):
             self._warmup_reactive("retarget")
-        elif planner_type in ("classic", "joint_space", "motion_gen"):
+        elif planner_type in ("classic", "cartesian", "cartes", "joint_space",
+                              "motion_gen"):
             self._warmup_classic()
         else:
             self._warmup_classic()
