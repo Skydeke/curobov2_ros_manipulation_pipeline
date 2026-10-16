@@ -141,11 +141,20 @@ def _install_stubs(monkeypatch):
     ik_mod = types.ModuleType("curobo.inverse_kinematics")
     created_cfgs = []
 
+    class _FakeCfg:
+        """Mimics the curobo config object (kwarg access + attribute writes)."""
+
+        def __init__(self, kwargs):
+            self._kwargs = dict(kwargs)
+
+        def __getitem__(self, key):
+            return self._kwargs[key]
+
     class InverseKinematicsCfg:
         @staticmethod
         def create(**kwargs):
             created_cfgs.append(dict(kwargs))
-            return {"cfg": dict(kwargs)}
+            return _FakeCfg(kwargs)
 
     class _ToolPoses:
         def as_goal(self):
@@ -517,13 +526,37 @@ class TestCollisionMode:
         ctx.wrapper.invalidate()
         assert ctx.wrapper.ik_collision_check is None
         assert ctx.wrapper.needs_rebuild(4, 32) is True
-
     def test_update_world_noop_when_collision_off(self, ctx):
         ctx.node.set_param("ik_collision_check", _ParamValue(bool_value=False))
         ctx.wrapper.build(2)
         ctx.wrapper.update_world("resolved-scene")
         ctx.wrapper.update_world()
         assert ctx.wrapper.ik_solver.worlds == []
+
+
+# ---------------------------------------------------------------------------
+# LM seed mode (ik_use_lm_seed param)
+# ---------------------------------------------------------------------------
+
+
+class TestLmSeedMode:
+    def test_default_is_lm_seed_on(self, ctx):
+        """Param absent -> upstream behavior (LM seeds enabled)."""
+        ctx.wrapper.build(2)
+        assert ctx.wrapper.ik_use_lm_seed is True
+        assert ctx.wrapper.ik_solver.cfg.use_lm_seed is True
+
+    def test_param_false_disables_lm_seeds(self, ctx):
+        ctx.node.set_param("ik_use_lm_seed", _ParamValue(bool_value=False))
+        ctx.wrapper.build(2)
+        assert ctx.wrapper.ik_use_lm_seed is False
+        assert ctx.wrapper.ik_solver.cfg.use_lm_seed is False
+
+    def test_needs_rebuild_detects_lm_seed_flip(self, ctx):
+        ctx.wrapper.build(4)
+        assert ctx.wrapper.needs_rebuild(4, 32) is False
+        ctx.node.set_param("ik_use_lm_seed", _ParamValue(bool_value=False))
+        assert ctx.wrapper.needs_rebuild(4, 32) is True
 
 
 # ---------------------------------------------------------------------------
@@ -542,3 +575,18 @@ class TestServicesDelegation:
         services.rebuild()
         assert len(ctx.created) == 2
         assert services._resolve_num_seeds() == 32
+
+    def test_warmup_skips_identical_live_solver(self, ctx, monkeypatch):
+        """A second warmup with the same config must not rebuild (no double load)."""
+        services_mod = _fresh_import(monkeypatch, "curobov2_ros.core.ik_services")
+        services = services_mod.IKServices(ctx.node, ctx.wrapper)
+        assert services.warmup(4) == "IK solver ready (batch_size=4)"
+        assert services.warmup(4) == "IK solver already ready (batch_size=4)"
+        assert len(ctx.created) == 1
+
+    def test_warmup_rebuilds_on_changed_batch(self, ctx, monkeypatch):
+        services_mod = _fresh_import(monkeypatch, "curobov2_ros.core.ik_services")
+        services = services_mod.IKServices(ctx.node, ctx.wrapper)
+        assert services.warmup(4) == "IK solver ready (batch_size=4)"
+        assert services.warmup(8) == "IK solver ready (batch_size=8)"
+        assert len(ctx.created) == 2

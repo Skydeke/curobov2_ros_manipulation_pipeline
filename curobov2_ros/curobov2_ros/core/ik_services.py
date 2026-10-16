@@ -58,6 +58,13 @@ class IKServices:
         self._device = getattr(config_wrapper_ik, "_device", torch.device("cuda"))
         self._dtype = getattr(config_wrapper_ik, "_ops_dtype", torch.float32)
 
+        # VRAM telemetry: log allocated vs reserved every N solves so a
+        # monotonic nvidia-smi climb can be told apart from a real leak
+        # (allocated flat + reserved climbing = allocator caching).
+        self._dbg_calls = 0
+        self._dbg_prev_shapes = None
+        self._dbg_hunted = False
+
         name = node.get_name()
         node.create_service(WarmupIK, f"{name}/warmup_ik", self._warmup_ik_callback)
         node.create_service(Ik, f"{name}/ik", self._ik_callback)
@@ -82,6 +89,13 @@ class IKServices:
         batch the client asked for.
         """
         batch_size = max(1, int(batch_size))
+        if num_seeds is None:
+            num_seeds = self._resolve_num_seeds()
+        if (
+            self._config.ik_solver is not None
+            and not self._config.needs_rebuild(batch_size, num_seeds)
+        ):
+            return f"IK solver already ready (batch_size={batch_size})"
         # Solver construction + warmup run CUDA kernels (solve for a batch
         # of random configs) — must not race a CUDA graph capture.
         with self._gpu_guard():
@@ -154,9 +168,9 @@ class IKServices:
             if not ok:
                 return None
             js = JointState()
-            js.position = result.solution.cpu().numpy()[0][0].tolist()
+            js.position = result.solution.detach().cpu().numpy()[0][0].tolist()
             valid = std_msgs.msg.Bool()
-            valid.data = bool(result.success.cpu().numpy()[0][0])
+            valid.data = bool(result.success.detach().cpu().numpy()[0][0])
             return js, valid
 
         try:
@@ -188,8 +202,8 @@ class IKServices:
             ok, result = self._solve(poses)
             if not ok:
                 return None
-            sol = result.solution.cpu().numpy()
-            suc = result.success.cpu().numpy()
+            sol = result.solution.detach().cpu().numpy()
+            suc = result.success.detach().cpu().numpy()
             out = []
             for i in range(len(poses)):            # padded rows (if any) are ignored
                 js = JointState()
@@ -300,6 +314,150 @@ class IKServices:
 
         if self._node.torch_sync_enabled():
             torch.cuda.synchronize()
+        self._dbg_calls += 1
+        if self._dbg_calls % 500 == 0:
+            try:
+                import gc as _gc
+                import warnings as _warnings
+                from collections import Counter as _Counter
+
+                # gc.get_objects() touches lazy module aliases (e.g. a
+                # deprecated torch.distributed path) that spray FutureWarnings
+                # with our source line; silence them for the whole probe.
+                with _warnings.catch_warnings():
+                    _warnings.simplefilter("ignore")
+                    _objs_all = _gc.get_objects()
+
+                    alloc = torch.cuda.memory_allocated(self._device) / 1048576.0
+                    reserved = torch.cuda.memory_reserved(self._device) / 1048576.0
+
+                    shapes = _Counter()
+                    tensor_bytes = 0.0
+                    for _o in _objs_all:
+                        if isinstance(_o, torch.Tensor) and _o.is_cuda:
+                            shapes[(tuple(_o.shape), str(_o.dtype))] += 1
+                            tensor_bytes += _o.nelement() * _o.element_size()
+                    n_tensors = sum(shapes.values())
+                    del _objs_all
+                    # Decisive experiment: force a full collection and recount.
+                    # Drops to baseline => cyclic trash (fix = break the cycle
+                    # or periodic collect). Persists => rooted/C-held leak.
+                    _gc.collect()
+                    _n2 = 0
+                    _b2 = 0.0
+                    for _o in _gc.get_objects():
+                        if isinstance(_o, torch.Tensor) and _o.is_cuda:
+                            _n2 += 1
+                            _b2 += _o.nelement() * _o.element_size()
+                    _post = (
+                        f" post_gc_tensors={_n2} post_gc_bytes={_b2 / 1048576.0:.1f}MiB"
+                    )
+                growth = ""
+                if self._dbg_prev_shapes is not None:
+                    grown = {
+                        k: v - self._dbg_prev_shapes.get(k, 0)
+                        for k, v in shapes.items()
+                        if v - self._dbg_prev_shapes.get(k, 0) > 0
+                    }
+                    top = sorted(grown.items(), key=lambda kv: -kv[1])[:5]
+                    growth = f" grown_shapes={top}"
+                    # One-shot referrer hunt on the fastest-growing shape:
+                    # names the object keeping each solve's tensor alive.
+                    # NOTE: the gc.get_objects() list itself refers to every
+                    # object, so it is excluded by id to avoid self-report.
+                    if top and not self._dbg_hunted:
+                        self._dbg_hunted = True
+                        try:
+                            import types as _types
+
+                            _shape = top[0][0][0]
+                            with _warnings.catch_warnings():
+                                _warnings.simplefilter("ignore")
+                                _objs = _gc.get_objects()
+                            _self_id = id(_objs)
+                            for _o in _objs:
+                                if (
+                                    isinstance(_o, torch.Tensor)
+                                    and _o.is_cuda
+                                    and tuple(_o.shape) == _shape
+                                ):
+                                    _refs = [
+                                        _r
+                                        for _r in _gc.get_referrers(_o)
+                                        if id(_r) != _self_id
+                                    ]
+                                    # Exclude every probe-created container so
+                                    # only real holders are reported. NOTE: no
+                                    # slicing here: _refs[:k] would itself be a
+                                    # live list during the query below.
+                                    _probe_ids = {_self_id, id(_refs)}
+                                    _desc = []
+                                    _n = 0
+                                    for _i in range(len(_refs)):
+                                        if _n >= 6:
+                                            break
+                                        _r = _refs[_i]
+                                        _n += 1
+                                        if isinstance(_r, list):
+                                            _owners = {}
+                                            for _o2 in _gc.get_referrers(_r):
+                                                if id(_o2) in _probe_ids:
+                                                    continue
+                                                _k = type(_o2).__name__
+                                                _owners[_k] = _owners.get(_k, 0) + 1
+                                            _desc.append(
+                                                f"list(len={len(_r)},"
+                                                f"owners={_owners})"
+                                            )
+                                        elif isinstance(_r, _types.CellType):
+                                            from collections import Counter as _C2
+
+                                            _all = _C2()
+                                            for _o2 in _gc.get_referrers(_r):
+                                                if id(_o2) in _probe_ids:
+                                                    continue
+                                                _all[type(_o2).__name__] += 1
+                                            _fns = [
+                                                getattr(_f, "__qualname__", "?")
+                                                for _f in _gc.get_referrers(_r)
+                                                if isinstance(
+                                                    _f, _types.FunctionType
+                                                )
+                                                and id(_f) not in _probe_ids
+                                            ][:4]
+                                            _desc.append(
+                                                f"cell(all={dict(_all)},"
+                                                f"fns={_fns})"
+                                            )
+                                        elif isinstance(_r, dict):
+                                            _keys = [
+                                                k
+                                                for k, v in _r.items()
+                                                if v is _o
+                                            ][:3]
+                                            _desc.append(
+                                                f"dict(keys={_keys})"
+                                            )
+                                        else:
+                                            _desc.append(type(_r).__name__)
+                                    self._node.get_logger().info(
+                                        f"IK leak hunt shape={_shape}: "
+                                        f"{_desc}"
+                                    )
+                                    break
+                            del _objs
+                        except Exception:  # noqa: BLE001
+                            pass
+                self._dbg_prev_shapes = shapes
+                self._node.get_logger().info(
+                    f"IK gpu mem: allocated={alloc:.1f}MiB "
+                    f"reserved={reserved:.1f}MiB solves={self._dbg_calls} "
+                    f"live_cuda_tensors={n_tensors} "
+                    f"tensor_bytes={tensor_bytes / 1048576.0:.1f}MiB"
+                    f"{growth}{_post}"
+                )
+            except Exception:  # noqa: BLE001
+                pass
         return True, result
 
     def solve_poses(self, poses, num_seeds: int | None = None):
