@@ -10,6 +10,9 @@
 // Reached transitively via send_trajectory.hpp -> TrajectoryResult, but named
 // explicitly because result_callback reads its fields directly.
 #include "curobov2_ros_interfaces/msg/planning_stats.hpp"
+// Named explicitly for toReplayTrajectory() below (same reasoning: reached
+// transitively via trajectory_generation.hpp, but read field-by-field here).
+#include "curobov2_ros_interfaces/msg/trajectory_result.hpp"
 #include <QApplication>
 // This file creates QTimers (mpc_goal_timer_ and the readiness poll) and takes
 // &QTimer::timeout, so it needs the complete type. It was reaching it through
@@ -19,6 +22,38 @@
 #include <QThread>
 #include <QTimer>
 #include <cmath>
+
+namespace {
+
+// A planned TrajectoryResult -> the execute action's replay form.
+//
+// Execution is MTC-literal: the server drives exactly the plan it is handed and
+// never re-plans nor looks one up, so the panel re-packs the result it just
+// generated (and is displaying) into the action's replay trajectory. The wire
+// form of a result is sensor_msgs/JointState[] + a scalar dt; the replay field
+// wants JointTrajectoryPoints with time_from_start.
+trajectory_msgs::msg::JointTrajectory toReplayTrajectory(
+    const curobov2_ros_interfaces::msg::TrajectoryResult &result) {
+  trajectory_msgs::msg::JointTrajectory traj;
+  if (result.trajectory.empty()) {
+    return traj;
+  }
+  traj.joint_names = result.trajectory.front().name;
+  const double dt = result.dt;
+  for (std::size_t i = 0; i < result.trajectory.size(); ++i) {
+    trajectory_msgs::msg::JointTrajectoryPoint pt;
+    pt.positions = result.trajectory[i].position;
+    pt.velocities = result.trajectory[i].velocity;
+    const double sec = dt * static_cast<double>(i);
+    pt.time_from_start.sec = static_cast<int32_t>(sec);
+    pt.time_from_start.nanosec =
+        static_cast<uint32_t>((sec - std::floor(sec)) * 1e9);
+    traj.points.push_back(pt);
+  }
+  return traj;
+}
+
+}  // namespace
 
 namespace curobov2_ros_rviz {
 PlanningTab::PlanningTab(QWidget *parent)
@@ -381,31 +416,31 @@ void PlanningTab::updateTimeDilationFactor(double value) {
 }
 
 void PlanningTab::on_sendTrajectory_clicked() {
+  // Execution is MTC-literal: the server neither re-plans nor reuses a cached
+  // plan, so there is nothing to send unless this panel holds a generated
+  // trajectory. It does after a successful Generate -- and after
+  // Generate-and-Send, which chains into here once generation completes.
+  if (last_trajectory_.points.empty()) {
+    RCLCPP_ERROR(node_->get_logger(),
+                 "Send: no generated trajectory to replay; press Generate "
+                 "first");
+    return;
+  }
+  if (!action_ptr_) {
+    RCLCPP_ERROR(node_->get_logger(),
+                 "execute_trajectory action client not created yet");
+    return;
+  }
+
   auto goal_request =
       curobov2_ros_interfaces::action::SendTrajectory::Goal();
 
-  // REQUIRED for the open-loop path, and it used to be missing: the goal
-  // went out default-constructed, i.e. an empty goalsets entry -- the
-  // dsr01/world origin, inside the robot's own base.
-  //
-  // The panel relied on the server reusing the plan the "generate" button
-  // had just cached (allow_cached defaults to true). But that reuse is
-  // gated by _pending_plan_matches(), whose signature INCLUDES goalsets
-  // and compares positions to 1 mm (unified_planner_node.py
-  // _target_signature/_poses_match). Cached signature = the real marker
-  // pose, incoming goal = the origin -> guaranteed mismatch, so the server
-  // silently re-planned toward the robot's own base, burned its 10
-  // max_attempts, failed, and aborted the goal without logging anything.
-  // Net effect: "generate" returned a trajectory, "execute" did nothing.
-  //
-  // MPC never showed this because the reactive path gets its target from
-  // the /<planner>/mpc_goal topic (streamed at 10 Hz by this panel while
-  // MPC is active), which overrides the empty goalset. The open-loop path
-  // has no such second source -- the cache was its only route, and it was
-  // unreachable.
-  // Classic/MPC: a single goalset from the primary display.
-  // buildGoalsets() warns when no display exists.
+  // The goalset still describes the plan's target (a hint for the server's
+  // frame/planner context); what actually drives the arm is the replayed
+  // trajectory. buildGoalsets() warns when no display exists.
   goal_request.goal.goalsets = buildGoalsets();
+  goal_request.replay = true;
+  goal_request.replay_trajectory = last_trajectory_;
 
   auto send_goal_options = rclcpp_action::Client<
       curobov2_ros_interfaces::action::SendTrajectory>::SendGoalOptions();
@@ -596,10 +631,16 @@ void PlanningTab::generateTrajectoryAsync(std::function<void(bool)> on_done) {
                                    TrajectoryGeneration>::SharedFuture future) {
         bool success = false;
         std::string message;
+        // Built on the spin thread but published to the GUI thread below, so
+        // last_trajectory_ is only ever written and read on the GUI thread.
+        trajectory_msgs::msg::JointTrajectory replay;
         try {
           auto response = future.get();
           success = response->response.success;
           message = response->response.message;
+          if (success) {
+            replay = toReplayTrajectory(response->response);
+          }
         } catch (const std::exception &e) {
           message = e.what();
         }
@@ -609,9 +650,16 @@ void PlanningTab::generateTrajectoryAsync(std::function<void(bool)> on_done) {
           RCLCPP_ERROR(node_->get_logger(), "generate_trajectory failed: %s",
                        message.c_str());
         }
-        if (on_done) {
-          runOnGuiThread([on_done, success]() { on_done(success); });
-        }
+        runOnGuiThread([this, on_done, success, replay]() {
+          if (success) {
+            // Keep the plan for Send (and for the Generate-and-Send chain,
+            // which calls on_sendTrajectory_clicked below).
+            last_trajectory_ = replay;
+          }
+          if (on_done) {
+            on_done(success);
+          }
+        });
       });
 }
 
@@ -713,7 +761,6 @@ void PlanningTab::sendMpcGoal() {
   }
 
   auto goal = curobov2_ros_interfaces::action::SendTrajectory::Goal();
-  goal.allow_cached = false;
 
   // start_pose intentionally left EMPTY so the server resolves the start state
   // from robot_context.get_joint_pose() (the live, model-sized joint vector).

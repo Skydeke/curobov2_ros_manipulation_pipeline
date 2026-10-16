@@ -2,8 +2,8 @@
 #
 # Covers:
 # - planner switching (classic / MPC)
-# - open-loop "preview" cache: generate_trajectory caches a plan, the execute
-#   action reuses it (matching target), and clear_trajectory drops it
+# - open-loop generate (plan-only), and that an open-loop EXECUTE needs the
+#   caller to supply the trajectory it wants driven
 # - reactive (MPC): the execute action servos CONTINUOUSLY (does not self-
 #   terminate); it streams feedback and ends only on cancel (cancel_after)
 #
@@ -55,12 +55,13 @@ tests:
     data: {planner_type: 0}
     expect: {success: True}
 
-  # ---- Open-loop preview cache: generate (cache) -> execute (reuse) -> clear ----
+  # ---- Open-loop: generate (plan-only); execute requires a trajectory ----
 
   - name: "06 Generate trajectory classic preview"
     service: "/unified_planner/generate_trajectory"
     type: curobov2_ros_interfaces/srv/TrajectoryGeneration
-    # Computes + caches the trajectory for an explicit start/goal pair.
+    # Plans the trajectory for an explicit start/goal pair and returns its
+    # waypoints (no server-side cache: the caller re-uses them itself).
     # The srv nests the whole-task goal (TrajectoryGoal) under `request`.
     data:
       request:
@@ -75,13 +76,13 @@ tests:
     # `success` rides on the inner TrajectoryResult under `response`.
     expect: {response: {success: True}}
 
-  - name: "07 Execute classic cached"
+  - name: "07 Execute classic requires a trajectory"
     action: "/unified_planner/execute_trajectory"
     type: curobov2_ros_interfaces/action/SendTrajectory
-    # Same start+target as the preview -> the node REUSES the cached plan (no
-    # recompute) and the open-loop action terminates on its own. This run also
-    # drives the emulator onto the planner's active joints, so the reactive
-    # cases below read back a consistent DOF.
+    # Execution is MTC-literal: the open-loop path drives the trajectory the
+    # caller supplies (SendTrajectory.replay_trajectory) and never re-plans. A
+    # goal with no trajectory is therefore REFUSED, not silently re-solved --
+    # re-solving is how a multi-solution pose goal jumps IK branches mid-chain.
     # The action goal nests the whole-task goal (TrajectoryGoal) under `goal`;
     # the generator asserts on `result` (the embedded TrajectoryResult).
     data:
@@ -95,13 +96,7 @@ tests:
               - position: {x: 0.0255, y: 0.1521, z: 0.8555}
                 orientation: {x: -0.8049, y: -0.3629, z: -0.4516, w: 0.1288}
     timeout: 90.0
-    expect: {success: True}
-
-  - name: "08 Clear trajectory"
-    service: "/unified_planner/clear_trajectory"
-    type: std_srvs/srv/Trigger
-    data: {}
-    expect: {success: True}
+    expect: {success: False}
 
   # ---- Reactive (MPC): continuous servoing, ends only on cancel ----
 

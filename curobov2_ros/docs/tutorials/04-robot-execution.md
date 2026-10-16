@@ -51,15 +51,15 @@ ros2 service call /unified_planner/set_robot_strategy curobo_msgs/srv/SetRobotSt
   "{robot_strategy: 'emulator'}"
 ```
 
-Typical workflow: plan and execute on `emulator`, inspect the motion, then switch to `joint_speed` and run the *same* action goal on hardware.
+Typical workflow: plan and execute on `emulator`, inspect the motion, then switch to `joint_speed` and replay the *same* trajectory on hardware — the plan you validated on the emulator is exactly the one the robot runs.
 
 ## Executing
 
-Execution always goes through the action ([Tutorial 1](01-first-trajectory.md), [ROS Interfaces](../concepts/ros-interfaces.md)):
+Execution always goes through the action ([Tutorial 1](01-first-trajectory.md), [ROS Interfaces](../concepts/ros-interfaces.md)). It drives the trajectory you hand it **verbatim** (MTC parity — no server-side cache, no re-solve), so an open-loop goal must carry the waypoints `generate_trajectory` returned as `replay: true` + `replay_trajectory` (see Tutorial 1). Reactive planners (MPC/retarget) need no trajectory: they ignore `replay` and servo live, so this CLI form is enough to drive them:
 
 ```bash
 ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
+  "{goal: {goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}}" --feedback
 ```
 
 Feedback carries `state`, `step_progression`, and the streamed `joint_command`. Cancel the goal to stop; the strategy's `stop_robot()` halts streaming.

@@ -122,6 +122,18 @@ class RobotInterface(ABC):
         Default: nothing known to be attached."""
         return []
 
+    def invalidate_scene_cache(self) -> None:
+        """Drop any cached scene query so the next read asks the server.
+
+        Necessary when the scene was mutated by ANOTHER process: a task run
+        through the ``ExecuteTaskSolution`` action applies its scene ops in the
+        EXECUTING node, so this interface's own mutation-invalidation never
+        fires and a read-back (scene verification) could answer from a reply
+        taken before the mutation. Default: no-op — an interface that does not
+        cache has nothing to drop.
+        """
+        return None
+
     # ----- kinematics --------------------------------------------------
     @abstractmethod
     def fk(self, joint_state: Any, link: Optional[str] = None) -> Any:
@@ -174,8 +186,17 @@ class RobotInterface(ABC):
         return [self.plan(r) for r in requests]
 
     @abstractmethod
-    def execute(self, request: PlanRequest) -> PlanResult:
-        """Plan and drive the arm (SendTrajectory action)."""
+    def execute(self, request: PlanRequest, trajectory) -> PlanResult:
+        """Drive one segment (SendTrajectory action).
+
+        ``trajectory`` (MTC ``Task::execute`` parity): the pre-validated
+        trajectory — ``{"joint_names", "points", "velocities"}`` — to replay
+        VERBATIM. MTC's ExecuteTaskSolution drives each SubTrajectory's stored
+        RobotTrajectory and never re-derives it, so the adapter streams exactly
+        this instead of letting the server re-match or re-solve the
+        ``request``'s goal. There is no cache-reuse path: the caller always
+        supplies the trajectory it validated.
+        """
 
     def allowance_scope(self, requests):
         """Hold a collision allowance OFF across nested planning calls.

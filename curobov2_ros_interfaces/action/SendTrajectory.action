@@ -2,9 +2,18 @@
 # (TrajectoryGoal → TrajectoryResult), not mirrored by hand.  Feedback keeps
 # the classic per-step fields (state / step_progression / error) that the
 # execution feedback timeline carries (§5: "feedback: unchanged").
-TrajectoryGoal goal              # start_pose + goalsets
-bool allow_cached                # reuse a matching, non-expired pre-planned trajectory
-bool force_cached                # ON: a cache miss FAILS instead of re-solving
+TrajectoryGoal goal              # start_pose + goalsets (planner context; never re-planned)
+
+# MTC parity (ExecuteTaskSolution): MTC drives each SubTrajectory's stored
+# RobotTrajectory VERBATIM — it never re-derives the plan, so there is no cache
+# to miss and no IK branch to jump. The caller fills this from the validated
+# plan it already holds (the trajectory it was shown), and the server stages +
+# streams it as-is; `goal` is then only a hint (the planner still comes from
+# SetPlanner). There is NO cache-reuse / re-solve execute path: an open-loop
+# execution with no trajectory is an error, not a silent re-plan. Reactive
+# (MPC/retarget) planners ignore `replay` and servo live instead.
+bool replay
+trajectory_msgs/JointTrajectory replay_trajectory
 ---
 TrajectoryResult result          # success / message / trajectory / stats / collisions
 ---

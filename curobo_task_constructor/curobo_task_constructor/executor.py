@@ -37,20 +37,14 @@ from curobo_task_constructor.graph.spec import StageSpec
 
 __all__ = ["TaskExecutor", "EXECUTE_CONTINUITY_TOLERANCE"]
 
-#: Largest per-joint difference (rad) tolerated between a segment's PLANNED
-#: endpoint and the endpoint that was actually driven before the chain is
-#: declared broken. See ``TaskExecutor._diverged_from_plan``.
-#:
-#: This is about chain CONTINUITY, not trajectory identity: a re-solve may
-#: legitimately wobble through free space, but it has to still start and end
-#: where the plan said, or the next segment's baked ``start_pose`` is wrong.
-#: ``0.01 rad`` is the same value as the MoveIt pipeline's
-#: ``allowed_start_tolerance`` (iki_kortex_moveit_config/config/
-#: moveit_controllers.yaml): one start-agreement number for both stacks, so a
-#: chain refuses to drive on to a segment in a configuration that MoveIt would
-#: likewise refuse to plan from. It sits far above encoder/servo noise and far
-#: below the fraction of a joint's range that choosing a different IK branch
-#: moves (the failure this was added for was ~1.7 rad on one joint).
+#: The start-agreement number the whole pipeline shares: 0.01 rad. Kept here
+#: as the reference value because it is ALSO what the controller must enforce
+#: before it accepts a replayed trajectory (``allowed_start_tolerance`` in
+#: iki_kortex_moveit_config/config/moveit_controllers.yaml). The cuRobo
+#: executor no longer compares endpoints itself — MTC ``Task::execute`` replays
+#: the stored ``RobotTrajectory`` verbatim and lets the controller's start
+#: tolerance reject a replay whose first point is not where the arm is. This
+#: constant documents that shared number.
 EXECUTE_CONTINUITY_TOLERANCE = 0.01
 
 
@@ -76,6 +70,31 @@ def _max_joint_delta(a, b) -> float:
     if n == 0:
         return 0.0
     return max(abs(x - y) for x, y in zip(pa[:n], pb[:n]))
+
+
+def _replay_trajectory_dict(waypoints) -> Optional[dict]:
+    """Pack a solved segment's waypoints for verbatim replay.
+
+    MTC parity: ``Task::execute`` hands each sub-trajectory's stored
+    ``RobotTrajectory`` to the controller and never re-derives it. The cuRobo
+    adapter hands the same thing to the server as ``{"joint_names", "points",
+    "velocities"}`` so ``SendTrajectory`` can stage and stream exactly these
+    waypoints (``replay``) instead of re-matching a planning goal against the
+    server's trajectory cache. Returns ``None`` when there is no trajectory
+    (a mutation leaf, whose drive is skipped upstream)."""
+    wps = list(waypoints or [])
+    if not wps:
+        return None
+    names: list = []
+    points: list = []
+    velocities: list = []
+    for wp in wps:
+        if not names:
+            names = [str(n) for n in (getattr(wp, "name", None) or [])]
+        points.append(_joint_positions(wp))
+        vel = getattr(wp, "velocity", None)
+        velocities.append([float(v) for v in vel] if vel else [])
+    return {"joint_names": names, "points": points, "velocities": velocities}
 
 
 def _pose_to_dict(pose) -> Optional[dict]:
@@ -155,8 +174,19 @@ def _object_spec_from_dict(d) -> Any:
 
 
 def _scene_ops_to_dict(ops) -> dict:
-    """Materialization deltas -> MTC scene_diff-shaped dict."""
+    """Materialization deltas -> MTC scene_diff-shaped dict.
+
+    ``remove_all``/``detach_all`` have no MTC counterpart (a PlanningScene diff
+    is name-keyed — there is no wildcard REMOVE), so they ride two extra
+    boolean keys rather than being dropped. Dropping them is NOT harmless: the
+    scene-setup task clears the world with ``remove_all`` (and releases any
+    stale attach with ``detach_all``), and a name-keyed diff cannot say
+    "everything", so the executing adapter would re-add onto the previous
+    cycle's world — where every ``add_object`` is refused as a duplicate and
+    the scene is left stale forever.
+    """
     added, removed, attached, detached = [], [], None, None
+    remove_all = detach_all = False
     for kind, payload in (ops or []):
         if kind == "add":
             added.append(_object_spec_to_dict(payload))
@@ -166,20 +196,35 @@ def _scene_ops_to_dict(ops) -> dict:
             attached = str(payload)
         elif kind == "detach":
             detached = None if payload is None else str(payload)
+        elif kind == "remove_all":
+            remove_all = True
+        elif kind == "detach_all":
+            detach_all = True
     return {"added": added, "removed": removed,
-            "attached": attached, "detached": detached}
+            "attached": attached, "detached": detached,
+            "remove_all": remove_all, "detach_all": detach_all}
 
 
 def _scene_ops_from_dict(d) -> list:
-    """MTC scene_diff-shaped dict -> (kind, payload) op list, in order."""
+    """MTC scene_diff-shaped dict -> (kind, payload) op list, in order.
+
+    Clear-all comes FIRST: ``detach_all`` then ``remove_all`` must precede the
+    adds (and the named removes), or the world they clear would be the one just
+    built in the same batch.
+    """
+    d = d or {}
     ops = []
-    for spec in ((d or {}).get("added", None) or []):
-        ops.append(("add", _object_spec_from_dict(spec)))
-    for name in ((d or {}).get("removed", None) or []):
+    if d.get("detach_all"):
+        ops.append(("detach_all", None))
+    if d.get("remove_all"):
+        ops.append(("remove_all", None))
+    for name in (d.get("removed", None) or []):
         ops.append(("remove", str(name)))
-    if (d or {}).get("detached") is not None:
+    for spec in (d.get("added", None) or []):
+        ops.append(("add", _object_spec_from_dict(spec)))
+    if d.get("detached") is not None:
         ops.append(("detach", str(d["detached"])))
-    if (d or {}).get("attached") is not None:
+    if d.get("attached") is not None:
         ops.append(("attach", str(d["attached"])))
     return ops
 
@@ -479,10 +524,12 @@ class TaskExecutor:
                 cancel_event=None) -> list:
         """Play back one solution: materialize each segment's scene delta on
         the curobo server in chain order, then drive each motion segment
-        (SendTrajectory). The server replays the segment's PLANNED trajectory
-        from its multi-entry cache — every chain segment was cached at plan
-        time, so execution reproduces the validated plan; only a genuine miss
-        (cache cleared, TTL expired, world mutated) falls back to re-solving.
+        (SendTrajectory). MTC ``Task::execute`` parity: a segment is driven
+        from the trajectory this ``Solution`` ALREADY carries — the caller
+        passes the segment's PLANNED waypoints and the server streams them
+        verbatim (``replay``), so there is no cache lookup, no re-solve, and a
+        multi-solution pose goal cannot pick a different IK branch mid-chain
+        than the one that was planned, collision-checked and displayed.
         Returns the list of drive results.
 
         ``progress_callback`` fires with each driven segment's stage name
@@ -491,15 +538,12 @@ class TaskExecutor:
         ``cancel_event`` (threading.Event, MTC preempt) stops the chain
         between segments; the returned list is truncated like a failure.
 
-        The chain STOPS at the first segment that does not land where the plan
-        said it would - either because the drive failed, or because the server
-        did not use the cached plan and re-solved into a different trajectory
-        (see ``_diverged_from_plan``). The remaining segments are not driven,
-        because every one of them carries a ``start_pose`` baked from the
-        PLANNED end state of its predecessor, so a chain that has already
-        drifted is a chain whose remaining requests are anchored to poses the
-        arm was never asked to be at. Driving them anyway is how one bad
-        segment becomes a self-collision three segments later.
+        The chain STOPS at the first segment whose drive failed. The remaining
+        segments each carry a ``start_pose`` baked from the PLANNED end state of
+        their predecessor, so continuing past a failure drives requests anchored
+        to poses the arm never reached. Start-state agreement (the arm actually
+        being where a replay assumes) is the controller's job, enforced by
+        ``allowed_start_tolerance`` — exactly where MoveIt puts it.
 
         The returned list is truncated at the failure, so the caller's
         zip-with-motion-leaves pairs each result with the leaf that produced
@@ -516,57 +560,14 @@ class TaskExecutor:
                 continue
             if progress_callback is not None:
                 progress_callback(getattr(leaf.stage, "name", ""))
-            result = self.robot.execute(leaf.plan_request)
+            result = self.robot.execute(
+                leaf.plan_request,
+                trajectory=_replay_trajectory_dict(leaf.trajectory))
             if not result.success:
                 results.append(result)
                 break
-            divergence = self._diverged_from_plan(leaf, result)
-            if divergence is not None:
-                results.append(PlanResult(
-                    False, divergence, trajectory=result.trajectory))
-                break
             results.append(result)
         return results
-
-    @staticmethod
-    def _diverged_from_plan(leaf: Solution, result: PlanResult):
-        """Did the executed trajectory differ from the planned one?
-
-        Only the two ENDPOINTS are compared, and that is deliberate. A
-        re-solve from the same start to the same goal is free to take a
-        different path through free space - trajopt is stochastic - and a
-        different path is not a defect. What the chain depends on is only
-        where each segment BEGINS and ENDS: the next segment's request
-        ``start_pose`` is the planned end of this one. If either endpoint
-        moved, the rest of the chain is anchored to poses that no longer
-        describe where the arm is, and continuing is what turns a small
-        mismatch into a runaway.
-
-        Returns an error message, or None when the endpoints agree.
-
-        The comparison is against ``leaf.trajectory``, the waypoints this
-        segment produced at PLAN time, which the Solution carries. That is the
-        trajectory the caller was shown and that collision checking accepted -
-        so a mismatch here is precisely the execution/display divergence, and
-        it is detectable without any protocol change.
-        """
-        planned = leaf.trajectory
-        driven = result.trajectory
-        if not planned or not driven:
-            # Nothing to compare: a mutation leaf, or a result that carried no
-            # trajectory. Not evidence of divergence.
-            return None
-        for label, want, got in (("start", planned[0], driven[0]),
-                                 ("end", planned[-1], driven[-1])):
-            delta = _max_joint_delta(want, got)
-            if delta > EXECUTE_CONTINUITY_TOLERANCE:
-                name = getattr(leaf.stage, "name", "<unnamed>")
-                return (f"cache miss: '{name}' was re-solved and its {label} "
-                        f"state moved {delta:.3f} rad from the plan "
-                        f"(> {EXECUTE_CONTINUITY_TOLERANCE} rad); the rest of "
-                        f"the chain is anchored to the planned trajectory and "
-                        f"was not executed")
-        return None
 
     def _apply_op(self, kind: str, payload) -> None:
         key = (kind, payload.name if kind == "add" else payload)
@@ -776,15 +777,24 @@ class TaskExecutor:
     def _leaf_trajectory_dict(self, leaf: Solution) -> dict:
         traj = list(getattr(leaf, "trajectory", None) or [])
         names = list(getattr(traj[0], "name", []) or []) if traj else []
+        points, velocities = [], []
+        for wp in traj:
+            points.append(
+                [float(v) for v in (getattr(wp, "position", []) or [])])
+            vel = getattr(wp, "velocity", None) or []
+            velocities.append([float(v) for v in vel])
         return {
             "info": self._solution_info_dict(leaf),
             "execution_info": {"controller_names": []},
+            # MTC parity: the sub-trajectory carries the waypoints themselves so
+            # execute can replay them verbatim. Velocities ride along when the
+            # solver produced them (the wire JointState already carries them);
+            # the open-loop streamer tapers/clamps them, so an empty list is a
+            # benign "derive from positions".
             "trajectory": {
                 "joint_names": [str(n) for n in names],
-                "points": [
-                    [float(v) for v in (getattr(wp, "position", []) or [])]
-                    for wp in traj
-                ],
+                "points": points,
+                "velocities": velocities,
             },
             # Filled by _chain_trajectory_dicts (chain-position folding).
             "scene_diff": {"before": _scene_ops_to_dict([]),
@@ -798,13 +808,13 @@ class TaskExecutor:
         """Drive a deserialized solution (see ``solution_to_dict``).
 
         Rebuilds each motion segment's PlanRequest + scene ops and drives
-        them exactly like :meth:`execute` (same continuity guard). Returns
-        (results, failed_stage_name); ``failed_stage_name`` is "" on success
-        and names the leaf stage (MTC reports per-sub-trajectory progress
-        through the action feedback instead).
+        them exactly like :meth:`execute`: MTC ``Task::execute`` parity, each
+        segment is replayed from the validated trajectory the solution carries
+        (never re-solved). Returns (results, failed_stage_name);
+        ``failed_stage_name`` is "" on success and names the leaf stage (MTC
+        reports per-sub-trajectory progress through the action feedback
+        instead).
         """
-        from curobo_task_constructor.core.state import JointStateStub
-
         self._applied_ops = []
         # MTC maps sub-trajectory ids back to stage names through the task;
         # same here: names come from this executor's own stage tree.
@@ -829,24 +839,6 @@ class TaskExecutor:
                 if 0 <= failed_index < len(segments) else {})
         return results, names.get(int(info.get("stage_id", -1) or -1), "")
 
-    @staticmethod
-    def _diverged_from_plan_dict(planned, result):
-        """Endpoint continuity guard for deserialized segments (see
-        ``_diverged_from_plan``)."""
-        driven = getattr(result, "trajectory", None) or []
-        if not planned or not driven:
-            return None
-        for label, want, got in (("start", planned[0], driven[0]),
-                                 ("end", planned[-1], driven[-1])):
-            delta = _max_joint_delta(want, got)
-            if delta > EXECUTE_CONTINUITY_TOLERANCE:
-                return (f"cache miss: re-solved {label} state moved "
-                        f"{delta:.3f} rad from the plan "
-                        f"(> {EXECUTE_CONTINUITY_TOLERANCE} rad); the rest of "
-                        f"the chain is anchored to the planned trajectory and "
-                        f"was not executed")
-        return None
-
 
 def drive_solution_dict(robot, d, applied_ops=None,
                         progress_callback=None, cancel_event=None) -> tuple:
@@ -854,8 +846,12 @@ def drive_solution_dict(robot, d, applied_ops=None,
 
     The execute action server (another process, no stage tree) drives a
     received Solution this way: scene ops apply through ``robot`` in chain
-    order and each motion segment replays its ``replay_goal`` via
-    ``robot.execute`` (cuRobo cache replay, never a re-solve).
+    order and each motion segment replays its own VALIDATED waypoints via
+    ``robot.execute(req, trajectory=...)`` — MTC ``Task::execute`` parity, the
+    server streams the segment's stored trajectory verbatim (``replay``), so
+    there is no cache lookup, no re-solve, and no way for a multi-solution pose
+    goal to jump IK branch mid-chain. ``req`` is still sent for the planner
+    switch and its ``allowed_collisions``.
 
     ``progress_callback`` fires as ``(index, total, info)`` per driven
     motion segment (MTC's sub_id/sub_no feedback). ``applied_ops`` collects
@@ -864,7 +860,6 @@ def drive_solution_dict(robot, d, applied_ops=None,
     ``failed_index`` is None on success.
     """
     from curobo_task_constructor.core.robot import PlanResult
-    from curobo_task_constructor.core.state import JointStateStub
 
     if applied_ops is None:
         applied_ops = []
@@ -910,30 +905,18 @@ def drive_solution_dict(robot, d, applied_ops=None,
         traj = seg.get("trajectory", {}) or {}
         points = list(traj.get("points", []) or [])
         if len(points) <= 1:
-            # Trivial (no-motion) segment: the planner answered it without
+            # Trivial (no-motion) segment: the planner answers these without
             # solving (see CuroboServerInterface._trivial_goal), so there is
-            # no cached trajectory to replay and nothing to drive — and a
-            # force_cached replay attempt would fail the whole chain on a
-            # cache miss for a zero-length motion. Scene ops still apply
-            # (below); progress already fired (above), so the panel still
-            # follows the chain.
+            # nothing to drive. Scene ops still apply (below); progress already
+            # fired (above), so the panel still follows the chain.
             results.append(PlanResult(
                 True, "trivial (no motion needed)"))
             for op in _scene_ops_from_dict(diff.get("after", {}) or {}):
                 _apply(op[0], op[1])
             continue
-        result = robot.execute(req)
+        result = robot.execute(req, trajectory=traj)
         if not result.success:
             results.append(result)
-            return results, index, False
-        planned = [
-            JointStateStub(dict(zip(traj.get("joint_names", []), pt)))
-            for pt in points
-        ]
-        divergence = TaskExecutor._diverged_from_plan_dict(planned, result)
-        if divergence is not None:
-            results.append(PlanResult(False, divergence,
-                                      trajectory=result.trajectory))
             return results, index, False
         for op in _scene_ops_from_dict(diff.get("after", {}) or {}):
             _apply(op[0], op[1])

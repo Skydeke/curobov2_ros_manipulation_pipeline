@@ -4,9 +4,10 @@ Planning is local (in-process, like MoveIt: ``core.Task.plan()`` publishes
 introspection itself); this node only executes. It hosts the
 ``execute_task_solution`` action at ``/curobo_task_constructor/``: the goal
 carries a full ``Solution`` message, whose sub-trajectories drive in order
-with no replanning — each segment's ``replay_goal`` replays the validated
-plan from the curobo_server trajectory cache (a miss fails instead of
-re-solving), and each segment's scene ops apply in chain order first.
+with no replanning — MTC ``Task::execute`` parity, each segment's stored
+``RobotTrajectory`` is replayed verbatim (``SendTrajectory`` ``replay``), so
+there is no trajectory-cache lookup and no re-solve, and each segment's scene
+ops apply in chain order first.
 
 Result is a ``moveit_msgs/MoveItErrorCodes`` (SUCCESS, INVALID_MOTION_PLAN
 for an unusable goal, CONTROL_FAILED for a failed drive, PREEMPTED on

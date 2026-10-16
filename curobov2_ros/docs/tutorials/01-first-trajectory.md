@@ -63,16 +63,20 @@ Things to try:
 
 ## 4. Execute it
 
-Planning and execution are separate. Execution goes through the `execute_trajectory` action; on the emulator the "robot" is simulated, so this is always safe:
+Planning and execution are separate. Execution goes through the `execute_trajectory` action, and it drives the trajectory you hand it **verbatim** — the way MTC drives a stored `RobotTrajectory`. There is no server-side cache and no re-solve, so an open-loop goal must carry the waypoints `generate_trajectory` returned, as `replay: true` + `replay_trajectory`:
 
-```bash
-ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
+```
+goal:
+  goalsets: [...]                 # planner context (the target)
+replay: true
+replay_trajectory:                # the waypoints from step 3
+  joint_names: [...]
+  points: [{positions: [...], velocities: [...], time_from_start: {...}}, ...]
 ```
 
-Because the goal matches the plan you just generated (and `allow_cached` defaults to `true`), the action reuses the cached trajectory instead of re-planning, then streams it. Feedback shows `state: EXECUTING` and `step_progression` climbing from 0 to 1; the main RViz robot follows.
+The RViz panel's **Generate** then **Send** buttons do exactly this for you — Send replays the plan it just generated and is displaying. On the emulator the "robot" is simulated, so this is always safe.
 
-You can also skip step 3 entirely — the action plans by itself when there is no cached trajectory.
+Feedback shows `state: EXECUTING` and `step_progression` climbing from 0 to 1; the main RViz robot follows. An open-loop goal sent with **no** trajectory is refused rather than silently re-planned — re-solving is how a multi-solution pose goal jumps IK branches. (Reactive planners — MPC, retarget — need no trajectory: they ignore `replay` and servo live.)
 
 ## 5. Add an obstacle and re-plan
 

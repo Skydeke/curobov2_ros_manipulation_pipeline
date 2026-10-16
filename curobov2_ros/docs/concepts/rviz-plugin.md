@@ -142,7 +142,7 @@ Planned trajectories are replayed by a translucent "preview" robot (namespace `p
 2. Drag the arrow to a reachable pose.
 3. **Generate Trajectory** — check the preview robot's path.
 4. Adjust obstacles or the pose as needed; regenerate.
-5. **Send Trajectory** to execute (on the emulator first — see [Tutorial 4](../tutorials/04-robot-execution.md)).
+5. **Send Trajectory** to execute — Send replays exactly the trajectory Generate produced (there is no server-side cache or re-solve), so press Generate first. Try it on the emulator first — see [Tutorial 4](../tutorials/04-robot-execution.md).
 
 ![Organized RViz layout](img/rviz_organized.png)
 

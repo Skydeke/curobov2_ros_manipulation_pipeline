@@ -1,20 +1,26 @@
-"""Chain-continuity: a task must not drive a chain that has already drifted.
+"""Execution replays each segment's own validated trajectory.
 
-A Task is planned as a chain of segments and then executed one at a time.
-Each segment's request carries a ``start_pose`` baked in at PLAN time - the
-planned end state of the segment before it. The server re-solves from scratch
-whenever its single-slot trajectory cache misses, and ``_resolve_start_state``
-prefers the request's ``start_pose`` over the arm's live pose.
+A Task is planned as a chain of segments and then executed one segment at a
+time. MTC ``Task::execute`` parity: each segment is driven from the trajectory
+the ``Solution`` ALREADY carries (see ``executor._replay_trajectory_dict``), so
+the server streams exactly those waypoints — there is no goal re-match against
+the server's trajectory cache. A multi-solution pose goal therefore CANNOT land
+on a different IK branch than the one that was planned, collision-checked and
+displayed, which is the failure the old client-side chain-continuity guard
+existed to catch.
 
-So once one segment fails to land where the plan said, every remaining request
-in the chain is anchored to a pose the arm was never asked to be at. Each
-re-solve then compounds it: the measured failure walked joint_2 from 0.600 to
-1.4529 to 2.240 across the `return` and `open` drives and ended in a genuine
-self-collision with the goal state clear, so nothing could plan out of it.
+The old guard compared the driven trajectory against the plan and aborted the
+chain on any endpoint mismatch. That guard was the wrong fix: it fired on a
+legitimate re-solve (whose endpoints a stochastic trajopt is free to move), not
+on a real defect — and MTC's execute never second-guesses the controller this
+way. Start-state agreement (the arm actually being where a replay assumes) is
+the controller's ``allowed_start_tolerance`` check, exactly where MoveIt puts
+it, so the cuRobo executor no longer duplicates it.
 
 These are behaviour tests, not AST guards: ``executor`` imports no torch or
-curobo, so the real code runs here. What is pinned is that the chain stops and
-reports, rather than driving on.
+curobo, so the real code runs here. What is pinned is (a) that each segment's
+OWN waypoints are handed to the drive, and (b) that the chain still STOPS at the
+first segment whose drive failed.
 """
 
 from __future__ import annotations
@@ -24,21 +30,18 @@ from dataclasses import dataclass, field
 from types import SimpleNamespace
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from curobo_task_constructor.core.robot import PlanResult  # noqa: E402
 from curobo_task_constructor.core.stage import Solution  # noqa: E402
-from curobo_task_constructor.executor import (  # noqa: E402
-    EXECUTE_CONTINUITY_TOLERANCE,
-    TaskExecutor,
-)
+from curobo_task_constructor.executor import TaskExecutor  # noqa: E402
 
 
 @dataclass
 class FakeJointState:
     position: list = field(default_factory=list)
+    velocity: list = field(default_factory=list)
+    name: list = field(default_factory=list)
 
 
 @dataclass
@@ -48,27 +51,28 @@ class FakeStage:
 
 @dataclass
 class FakeRobot:
-    """Replays a scripted trajectory per segment, recording the calls."""
+    """Records each drive and returns a scripted result per segment."""
     driven: list = field(default_factory=list)
-    #: index -> trajectory to return (list of waypoints, each a list of joints)
-    script: dict = field(default_factory=dict)
-    #: index -> PlanResult to return instead of a success
+    #: trajectory dict handed to each execute() call, in drive order.
+    replayed: list = field(default_factory=list)
+    #: index -> PlanResult to return instead of a success.
     fail_at: dict = field(default_factory=dict)
 
-    def execute(self, request):
+    def execute(self, request, trajectory):
         i = len(self.driven)
         self.driven.append(request)
+        self.replayed.append(trajectory)
         if i in self.fail_at:
             return self.fail_at[i]
-        traj = self.script.get(i, [])
-        return PlanResult(True, "ok",
-                          trajectory=[FakeJointState(list(w)) for w in traj])
+        return PlanResult(True, "ok", trajectory=[])
 
 
-def _leaf(name, traj, *, request=True):
+def _leaf(name, traj, *, request=True, joint_names=("j0", "j1")):
+    wps = [FakeJointState(list(w), [], list(joint_names))
+           for w in traj] if traj else None
     return Solution(
         start=None, end=None,
-        trajectory=[FakeJointState(list(w)) for w in traj] if traj else None,
+        trajectory=wps,
         plan_request=object() if request else None,
         stage=FakeStage(name),
     )
@@ -94,20 +98,70 @@ def _executor(robot) -> TaskExecutor:
     return ex
 
 
-A = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-B = [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.0]
-C = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0]
+A = [0.0] * 8
+B = [0.5] * 8
+C = [1.0] * 8
+
+
+# ------------------------------------------------------------- verbatim replay
+
+def test_each_segment_replays_its_own_waypoints():
+    """The core of the MTC model: the segment's OWN trajectory is driven."""
+    robot = FakeRobot()
+    sol = _chain(_leaf("return", [A, B]), _leaf("open", [B, C]))
+    results = _executor(robot).execute(sol)
+
+    assert [r.success for r in results] == [True, True]
+    assert robot.replayed[0]["points"] == [A, B]
+    assert robot.replayed[1]["points"] == [B, C]
+
+
+def test_replay_carries_the_joint_names():
+    robot = FakeRobot()
+    sol = _chain(_leaf("return", [A, B], joint_names=("j0", "j1", "j2")))
+    _executor(robot).execute(sol)
+    assert robot.replayed[0]["joint_names"] == ["j0", "j1", "j2"]
+
+
+def test_replay_carries_velocities_when_the_solver_produced_them():
+    """A RobotTrajectory carries speeds; they must reach the streamer (it
+    clamps/taper them) rather than being silently dropped to positions-only."""
+    robot = FakeRobot()
+    sol = _chain(_leaf("return", [A, B]))
+    sol.children[0].trajectory[0].velocity = [0.1] * 8
+    _executor(robot).execute(sol)
+    assert robot.replayed[0]["velocities"][0] == [0.1] * 8
+    assert robot.replayed[0]["velocities"][1] == []
+
+
+def test_a_server_that_reports_other_waypoints_is_not_a_client_failure():
+    """The old guard aborted here; the replay model does not compare.
+
+    The caller drives what it SENT. If the arm was not where the trajectory
+    starts, the controller's ``allowed_start_tolerance`` refuses it — MTC does
+    not have the executor re-derive and compare the plan.
+    """
+    robot = FakeRobot()
+    calls = []
+
+    def _other(request, trajectory=None):
+        calls.append(trajectory)
+        return PlanResult(True, "ok", trajectory=[FakeJointState(C)])
+
+    robot.execute = _other
+    sol = _chain(_leaf("return", [A, B]), _leaf("open", [B, C]))
+    results = _executor(robot).execute(sol)
+
+    assert [r.success for r in results] == [True, True]
+    assert len(calls) == 2
 
 
 # ---------------------------------------------------------------- chain stops
 
 def test_a_failed_drive_stops_the_chain():
-    """The pre-existing behaviour this replaces drove every segment anyway.
-
-    So a failed `close_0` was still followed by `attach_0` - fitting the
-    collision geometry of an object the gripper had not grasped - and then by
-    the retreat, the return and the release.
-    """
+    """The pre-existing behaviour this keeps: a failed `close_0` must not be
+    followed by `attach_0` - fitting collision geometry for an object the
+    gripper never grasped - nor by the retreat, return and release."""
     robot = FakeRobot(fail_at={0: PlanResult(False, "close failed")})
     sol = _chain(_leaf("close_0", [A, B]), _leaf("attach_0", [B, C]))
     results = _executor(robot).execute(sol)
@@ -118,27 +172,8 @@ def test_a_failed_drive_stops_the_chain():
     assert "close failed" in results[0].message
 
 
-def test_a_diverged_segment_stops_the_chain():
-    """The case this was added for.
-
-    Segment 0 planned to end at B, and the re-solve ended it somewhere else.
-    Segment 1's baked start_pose is B, so driving it now would ask the arm to
-    plan from a pose it is not in - and that mismatch compounds.
-    """
-    robot = FakeRobot(script={0: [A, C], 1: [C, A]})
-    sol = _chain(_leaf("return", [A, B]), _leaf("open", [B, C]))
-    results = _executor(robot).execute(sol)
-
-    assert len(robot.driven) == 1, "must not drive 'open' after 'return' diverged"
-    assert len(results) == 1
-    assert not results[0].success
-    assert "cache miss" in results[0].message
-    assert "return" in results[0].message
-
-
-def test_a_chain_that_lands_where_planned_runs_to_the_end():
-    """The check must not fire on the good path, or nothing ever executes."""
-    robot = FakeRobot(script={0: [A, B], 1: [B, C]})
+def test_a_chain_that_all_succeed_runs_to_the_end():
+    robot = FakeRobot()
     sol = _chain(_leaf("return", [A, B]), _leaf("open", [B, C]))
     results = _executor(robot).execute(sol)
 
@@ -146,101 +181,15 @@ def test_a_chain_that_lands_where_planned_runs_to_the_end():
     assert [r.success for r in results] == [True, True]
 
 
-# ------------------------------------------------------- what counts as drift
-
-def test_only_the_endpoints_are_compared():
-    """A different path through free space is not a defect.
-
-    trajopt is stochastic, so a re-solve may wiggle between the same two
-    points. What the chain depends on is only where each segment begins and
-    ends, so a wholly different MIDDLE must not trip the check.
-    """
-    wiggly = [A, [0.9] * 8, B]
-    robot = FakeRobot(script={0: wiggly})
-    sol = _chain(_leaf("return", [A, B]))
+def test_a_mutation_leaf_without_a_request_is_skipped():
+    """A scene-only (mutation) leaf carries no plan_request and no drive."""
+    robot = FakeRobot()
+    sol = _chain(_leaf("allow_0", None, request=False),
+                 _leaf("return", [A, B]))
     results = _executor(robot).execute(sol)
 
     assert len(robot.driven) == 1
-    assert results[0].success, results[0].message
-
-
-def test_a_moved_start_is_caught_too():
-    """The original bug was a stale START, not a stale end.
-
-    The re-solve was anchored to the plan-time start pose while the arm was
-    elsewhere, and cuRobo answered with a different IK branch - same tool pose,
-    completely different joints. A check that only looked at the end state
-    would have missed every instance of it.
-    """
-    robot = FakeRobot(script={0: [B, B]})
-    sol = _chain(_leaf("return", [A, B]))
-    results = _executor(robot).execute(sol)
-
-    assert not results[0].success
-    assert "start" in results[0].message
-
-
-def test_drift_just_under_the_tolerance_is_tolerated():
-    """The tolerance is a real boundary, not decoration.
-
-    Without this, any change to the constant would silently turn every
-    execution into a failure, and the test suite would still pass.
-    """
-    just_under = [x + EXECUTE_CONTINUITY_TOLERANCE * 0.9 for x in A]
-    robot = FakeRobot(script={0: [just_under, B]})
-    sol = _chain(_leaf("return", [A, B]))
-    assert _executor(robot).execute(sol)[0].success
-
-
-def test_drift_just_over_the_tolerance_is_caught():
-    just_over = [x + EXECUTE_CONTINUITY_TOLERANCE * 1.1 for x in A]
-    robot = FakeRobot(script={0: [just_over, B]})
-    sol = _chain(_leaf("return", [A, B]))
-    assert not _executor(robot).execute(sol)[0].success
-
-
-def test_a_short_waypoint_is_compared_over_the_joints_it_has():
-    """A 7-DOF arm group against an 8-joint arm is a real request shape.
-
-    ``_resolve_start_state`` pads a short start pose from the live pose, so
-    the comparison has to tolerate a short waypoint the same way rather than
-    raising or reporting a spurious delta against a missing joint.
-    """
-    robot = FakeRobot(script={0: [A[:7], B[:7]]})
-    sol = _chain(_leaf("return", [A[:7], B[:7]]))
-    assert _executor(robot).execute(sol)[0].success
-
-
-def test_a_result_with_no_trajectory_is_not_treated_as_drift():
-    """Absent evidence is not evidence of divergence.
-
-    A trajectory-less result is how a non-motion leaf reports; treating it as a
-    mismatch would fail every scene-only chain.
-    """
-    robot = FakeRobot()
-    robot.execute = lambda request: PlanResult(True, "ok", trajectory=[])
-    sol = _chain(_leaf("return", [A, B]))
-    assert _executor(robot).execute(sol)[0].success
-
-
-def test_plain_lists_are_accepted_as_waypoints():
-    """Waypoints arrive as JointState messages, but tests and the raw
-    responses hand back plain lists; both must compare."""
-    from curobo_task_constructor.executor import _max_joint_delta
-    assert _max_joint_delta([0.0, 0.0], [0.0, 0.1]) == pytest.approx(0.1)
-    assert _max_joint_delta(FakeJointState([0.0]), FakeJointState([0.2])) == \
-        pytest.approx(0.2)
-
-
-# ------------------------------------------------------------------ reporting
-
-def test_the_failure_names_the_stage_that_broke_the_chain():
-    """The caller reports `failed_stage_name` from the failing result, and the
-    orchestrator's recovery ladder keys off it."""
-    robot = FakeRobot(script={0: [A, C]})
-    sol = _chain(_leaf("return_to_perception", [A, B]))
-    results = _executor(robot).execute(sol)
-    assert "return_to_perception" in results[0].message
+    assert results[0].success
 
 
 def test_scene_ops_before_the_broken_segment_still_applied():
@@ -258,24 +207,10 @@ def test_scene_ops_before_the_broken_segment_still_applied():
     sol = _chain(_leaf("allow_0", [A, B]),
                  _leaf("return", [A, B]),
                  _leaf("open", [B, C]))
-    ex = _executor(Robot(script={1: [A, C]}))
+    ex = _executor(Robot(fail_at={1: PlanResult(False, "boom")}))
     # The "add" payload is a spec object, not a bare name - _apply_op keys on
     # payload.name, so a string would not be a faithful stand-in.
     spec = SimpleNamespace(name="object_0")
     sol.children[0].scene_ops = [("add", spec)]
     ex.execute(sol)
     assert applied == [spec]
-
-
-def test_the_continuity_tolerance_is_moveits_allowed_start_tolerance():
-    """One start-agreement number for the whole pipeline: 0.01 rad.
-
-    ``iki_kortex_moveit_config/config/moveit_controllers.yaml`` sets
-    ``allowed_start_tolerance: 0.01``. A curobo chain must refuse to drive a
-    segment from a configuration that differs more than that from where the
-    previous segment anchored it - the same wall the MoveIt stack enforces
-    before it plans. A larger value here would let a segment land where the
-    plan was not and have the next one drive anyway, which is the measured
-    failure this whole module exists to pin.
-    """
-    assert EXECUTE_CONTINUITY_TOLERANCE == pytest.approx(0.01)

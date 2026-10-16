@@ -33,6 +33,34 @@ enum Column
   COL_COUNT
 };
 
+/// A planned TrajectoryResult -> the execute action's replay form.
+///
+/// Execution is MTC-literal: the server drives exactly the plan it is handed
+/// and never re-plans nor looks one up, so this tab re-packs the result it just
+/// generated into the action's replay trajectory. The wire form of a result is
+/// sensor_msgs/JointState[] + a scalar dt; the replay field wants
+/// JointTrajectoryPoints with time_from_start.
+trajectory_msgs::msg::JointTrajectory toReplayTrajectory(
+  const curobov2_ros_interfaces::msg::TrajectoryResult & result)
+{
+  trajectory_msgs::msg::JointTrajectory traj;
+  if (result.trajectory.empty()) {
+    return traj;
+  }
+  traj.joint_names = result.trajectory.front().name;
+  const double dt = result.dt;
+  for (std::size_t i = 0; i < result.trajectory.size(); ++i) {
+    trajectory_msgs::msg::JointTrajectoryPoint pt;
+    pt.positions = result.trajectory[i].position;
+    pt.velocities = result.trajectory[i].velocity;
+    const double sec = dt * static_cast<double>(i);
+    pt.time_from_start.sec = static_cast<int32_t>(sec);
+    pt.time_from_start.nanosec = static_cast<uint32_t>((sec - std::floor(sec)) * 1e9);
+    traj.points.push_back(pt);
+  }
+  return traj;
+}
+
 /// Bounds of a row, or a null QPointF for a joint the model reports no limit for.
 /// Absent bounds are what make such a row plain text and not draggable, rather
 /// than a bar spanning a made-up range.
@@ -651,21 +679,68 @@ void JointsTab::sendTarget()
     setStatus(tr("execute_trajectory action not available"));
     return;
   }
+  if (trajectory_client_ == nullptr || !trajectory_client_->service_is_ready()) {
+    setStatus(tr("generate_trajectory service not available"));
+    return;
+  }
 
-  curobov2_ros_interfaces::action::SendTrajectory::Goal goal;
-  goal.goal.goalsets.resize(1);
+  // Execution is MTC-literal: the server neither re-plans nor reuses a cached
+  // plan, so plan FIRST and replay the result verbatim. (This is the open-loop
+  // path; a reactive planner has no waypoints to stream and the server will
+  // refuse the replay.)
+  auto request =
+    std::make_shared<curobov2_ros_interfaces::srv::TrajectoryGeneration::Request>();
+  request->request.goalsets.resize(1);
   for (double v : targetVector(tree_)) {
-    goal.goal.goalsets[0].target_joint_positions.push_back(v);
+    request->request.goalsets[0].target_joint_positions.push_back(v);
   }
 
   setStatus(tr("planning + executing to the target configuration..."));
-  rclcpp_action::Client<curobov2_ros_interfaces::action::SendTrajectory>::SendGoalOptions
-    options;
-  options.goal_response_callback = [this](
-    rclcpp_action::ClientGoalHandle<
-      curobov2_ros_interfaces::action::SendTrajectory>::SharedPtr handle)
-  { onGoalResponse(handle); };
-  action_client_->async_send_goal(goal, options);
+  trajectory_client_->async_send_request(
+    request,
+    [this](
+      rclcpp::Client<curobov2_ros_interfaces::srv::TrajectoryGeneration>::
+        SharedFuture future)
+    {
+      bool success = false;
+      QString message;
+      trajectory_msgs::msg::JointTrajectory replay;
+      try {
+        auto result = future.get();
+        success = result->response.success;
+        message = QString::fromStdString(result->response.message);
+        if (success) {
+          replay = toReplayTrajectory(result->response);
+        }
+      } catch (const std::exception & e) {
+        message = QString::fromStdString(e.what());
+      }
+      if (!success) {
+        runOnGuiThread([this, message]() {
+          setStatus(tr("execute plan FAILED: %1").arg(message));
+        });
+        return;
+      }
+      runOnGuiThread([this, replay]() {
+        // The plan landed; keep it and drive exactly it.
+        last_trajectory_ = replay;
+        curobov2_ros_interfaces::action::SendTrajectory::Goal goal;
+        goal.goal.goalsets.resize(1);
+        for (double v : targetVector(tree_)) {
+          goal.goal.goalsets[0].target_joint_positions.push_back(v);
+        }
+        goal.replay = true;
+        goal.replay_trajectory = last_trajectory_;
+
+        rclcpp_action::Client<
+          curobov2_ros_interfaces::action::SendTrajectory>::SendGoalOptions options;
+        options.goal_response_callback = [this](
+          rclcpp_action::ClientGoalHandle<
+            curobov2_ros_interfaces::action::SendTrajectory>::SharedPtr handle)
+        { onGoalResponse(handle); };
+        action_client_->async_send_goal(goal, options);
+      });
+    });
 }
 
 void JointsTab::onGoalResponse(
