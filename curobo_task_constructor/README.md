@@ -90,13 +90,15 @@ deliberate — orientation is **all-or-nothing** (a partial orientation hold is
 not expressible in six slots), and with several candidates the hold is the
 **intersection** over all of them, so it stays correct whichever one wins.
 
-The hold is a soft cost, so `check_straightness` reproduces the
-reference's partial-path guarantee client-side for the legs that ask for it
-(the pick's line-constrained legs set it; the free-space strategy opts out):
-one `Fk.srv` batch over the whole trajectory, fail the stage when the tool
-strays more than `straightness_tol` (default 0.01 m) from the segment. A failure
-is not fatal — it propagates to the enclosing `Fallbacks`, which is how the
-reference pipeline reached the next candidate after rejecting a Cartesian solve.
+The hold is a soft cost, so the partial-path guarantee lives on the planner:
+the `core.CartesianPath` solver selects **CARTESIAN** (`SetPlanner.CARTESIAN`),
+which measures how far along the straight segment the solved trajectory
+actually stayed and rejects the solve when less than `min_fraction` of it is on
+the line — MoveIt's `computeCartesianPath` verdict, message included. A
+rejection propagates to the enclosing `Fallbacks`, which is how the reference
+pipeline reached the next candidate after rejecting a Cartesian solve. A
+free-space move is simply an empty hold planned by a non-Cartesian planner (or
+`min_fraction: 0`); there is no client-side gate.
 
 This stage is **forward-only**: the hold comes from the start pose, so a
 backward (end-seeded) move would need a two-pass plan.
@@ -107,8 +109,9 @@ backward (end-seeded) move would need a two-pass plan.
   oversized goalset outright rather than truncating it, so the per-stage
   candidate count must stay `<= max_goalset`. The buffer costs memory
   proportionally; the launch file defaults it to 8.
-- `trajectory_constraints` is honoured **only** by `ClassicPlanner`.
-  `JointSpacePlanner` ignores it.
+- `trajectory_constraints` is honoured by the **CARTESIAN** planner
+  (`SetPlanner.CARTESIAN`, the `core.CartesianPath` backend) and by
+  `ClassicPlanner`. `JointSpacePlanner` ignores it.
 - `MULTIPOINT` (4) is reserved-but-unimplemented in `SetPlanner.srv`, as is
   `BATCH` (2). `max_goalset` caps **candidates within one goalset**, not
   waypoints — a multipoint path is one goalset with one pose per waypoint, and

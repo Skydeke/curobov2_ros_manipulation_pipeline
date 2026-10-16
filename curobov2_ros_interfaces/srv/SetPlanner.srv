@@ -4,6 +4,7 @@
 uint8 CLASSIC = 0
 uint8 MPC = 1
 uint8 BATCH = 2
+uint8 CARTESIAN = 3
 uint8 MULTIPOINT = 4
 uint8 JOINT_SPACE = 5
 uint8 RETARGET = 6

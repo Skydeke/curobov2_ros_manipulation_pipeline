@@ -9,6 +9,7 @@ and manage their lifecycle.
 from typing import Dict, Optional
 from .trajectory_planner import TrajectoryPlanner
 from .classic_planner import ClassicPlanner
+from .cartesian_planner import CartesianPlanner
 from .mpc_planner import MPCController
 from .retarget_controller import RetargetController
 from .joint_space_planner import JointSpacePlanner
@@ -31,6 +32,7 @@ class PlannerFactory:
     _PLANNER_CATALOG = [
         ('classic',     ClassicPlanner,    0, 'Classic'),
         ('mpc',         MPCController,      1, 'MPC'),
+        ('cartesian',   CartesianPlanner,  3, 'Cartesian'),
         ('joint_space', JointSpacePlanner, 5, 'Joint Space'),
         ('retarget',    RetargetController, 6, 'Motion Retargeting'),
     ]
@@ -39,6 +41,9 @@ class PlannerFactory:
     _PLANNER_REGISTRY = {key: cls for key, cls, _, _ in _PLANNER_CATALOG}
     _PLANNER_REGISTRY.update({
         'motion_gen':               ClassicPlanner,  # Alias
+        'cartes':                   CartesianPlanner,  # Alias (MTC spelling)
+        'cartesian_path':           CartesianPlanner,  # Alias (MTC solver name)
+
         'model_predictive_control': MPCController,    # Alias
         'motion_retargeting':       RetargetController,  # Alias
         'teleop':                   RetargetController,  # Alias

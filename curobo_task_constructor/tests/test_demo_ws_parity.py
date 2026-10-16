@@ -50,6 +50,49 @@ def test_cartesian_planner_mtc_call_shape():
     cart.setIKFrame("grasping_frame")
     assert cart.min_fraction == 1.0
     assert cart.getPlannerId() == "CartesianPath"
+    # MTC solvers::CartesianPath property defaults (cartesian_path.cpp).
+    assert core.CartesianPath().step_size == 0.01
+    assert core.CartesianPath().min_fraction == 1.0
+    assert core.CartesianPath().precision.translational == 0.001
+    # The solver IS the CARTESIAN backend (SetPlanner=3), not a classic alias.
+    assert cart.wire_name == "cartesian"
+    assert cart.planner_key() == core.PLANNER_CARTESIAN
+    params = cart.extra_params()
+    assert params["step_size"] == 0.01
+    assert params["min_fraction"] == 1.0
+    assert params["precision"] == 0.01  # the CartesianPrecision set above
+    # Deprecated MTC shims are accepted (no-ops / aliases).
+    cart.setJumpThreshold(5.0)
+    cart.setMaxVelocityScaling(0.4)
+    cart.setMaxAccelerationScaling(0.4)
+    assert cart.max_velocity_scaling_factor == 0.4
+    assert cart.max_acceleration_scaling_factor == 0.4
+
+
+def test_cartesian_path_stage_delegates_the_solver_surface():
+    """``stages.CartesianPath`` exposes the MTC ``CartesianPath`` solver methods
+    and lands every one of them on the backing ``core.CartesianPath``."""
+    solver = core.CartesianPath()
+    stage = stages.CartesianPath("descend", solver)
+    stage.setStepSize(0.02)
+    stage.setMinFraction(0.75)
+    stage.setPrecision(core.CartesianPrecision(0.005, 0.05, 0.01))
+    stage.setIKFrame("tool_link")
+    stage.setJumpThreshold(5.0)  # deprecated no-op
+    assert solver.step_size == 0.02
+    assert solver.min_fraction == 0.75
+    assert solver.precision.translational == 0.005
+    assert solver.properties()["ik_frame"] == "tool_link"
+    assert stage.getPlannerId() == "CartesianPath"
+    # The wire params mirror the solver and select the CARTESIAN backend.
+    common = stage._common_params()
+    assert common["planner"] == "cartesian"
+    assert common["min_fraction"] == 0.75
+    assert common["precision"] == 0.005
+    assert common["step_size"] == 0.02
+    # Deprecated setCheckStraightness(False) still means "free space".
+    stage.setCheckStraightness(False)
+    assert stage.params["hold"] == [0, 0, 0, 0, 0, 0]
 
 
 def test_move_to_mtc_call_shape():

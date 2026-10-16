@@ -268,13 +268,15 @@ def test_free_space_strategy_sends_no_hold_at_all():
     # all-zero hold == "no axis is pinned" == the old free pose goal
     assert descend.plan_request.goalsets[0].trajectory_constraints == \
         [0, 0, 0, 0, 0, 0]
-    # the gate is off for it, or it would reject its own bowed solve
-    assert descend.stage.params["check_straightness"] is False
+    # no min_fraction: the free-space leg runs on the classic planner, so
+    # there is no straight line for the CARTESIAN solver to guarantee
+    assert "min_fraction" not in descend.stage.params
 
 
 def test_a_bowed_descent_falls_through_to_the_next_strategy():
-    """cuRobo's hold is soft, so the straightness gate is what actually
-    enforces the line — and a rejection must reach the fallbacks."""
+    """cuRobo's hold is soft, so the CARTESIAN planner's ``min_fraction`` is
+    what actually enforces the line — and a rejection must reach the
+    fallbacks."""
     # the only strategy is line-constrained, so the pick cannot be solved
     robot, ex = _executor(strategies=STRATEGIES[:1], bow=0.04)
     assert not ex.plan()

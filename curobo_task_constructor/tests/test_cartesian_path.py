@@ -277,10 +277,9 @@ def test_cartesian_path_relative_goal_can_ride_the_hand_frame():
     assert end_xyz[2] - start_xyz[2] == pytest.approx(0.10, abs=1e-6)
 
 
-def test_cartesian_path_accepts_a_bowed_path():
-    """The hold is a soft cost: cuRobo may leave the line when that is cheaper,
-    and the client no longer rejects a bowed solve. A bowed descent is the
-    optimizer's answer, not a failure to fall through on."""
+def test_cartesian_path_without_a_line_guarantee_accepts_a_bowed_path():
+    """No CartesianPath solver -> no min_fraction to meet, so a bowed solve is
+    the optimizer's answer, not a failure to fall through on."""
     robot = _robot(bow=0.03)  # 3 cm of bow
     goal = _vertical_goal(robot, 0.05)
     _, ex = _plan([_stage("cartesian_path", "descend",
@@ -289,8 +288,42 @@ def test_cartesian_path_accepts_a_bowed_path():
     assert ex.best() is not None
 
 
-def test_cartesian_path_straightness_gate_feeds_the_fallbacks():
-    """A rejected variant must let the NEXT sibling grasp candidate run."""
+def test_cartesian_planner_min_fraction_rejects_a_bowed_path():
+    """The CARTESIAN solver owns the partial-path guarantee now (MTC
+    ``computeCartesianPath``): a solve that bows off the line is rejected on the
+    server, and the enclosing Fallbacks advances to the next sibling."""
+    robot = _robot(bow=0.03)
+    goal = _vertical_goal(robot, 0.05)
+    _, ex = _plan([_stage("cartesian_path", "descend", {
+        "goal": {"pose": goal}, "planner": "cartesian", "min_fraction": 1.0,
+    })], robot)
+    assert not ex.plan()
+    assert robot.last_cartesian_fraction is not None
+    assert robot.last_cartesian_fraction < 1.0
+
+
+def test_cartesian_planner_min_fraction_accepts_a_straight_path():
+    robot = _robot(bow=0.0)
+    goal = _vertical_goal(robot, 0.05)
+    _, ex = _plan([_stage("cartesian_path", "descend", {
+        "goal": {"pose": goal}, "planner": "cartesian", "min_fraction": 1.0,
+    })], robot)
+    assert ex.plan()
+    assert robot.last_cartesian_fraction == pytest.approx(1.0)
+
+
+def test_cartesian_planner_min_fraction_zero_disables_the_guarantee():
+    """min_fraction 0 is the MTC "accept any fraction" opt-out."""
+    robot = _robot(bow=0.03)
+    goal = _vertical_goal(robot, 0.05)
+    _, ex = _plan([_stage("cartesian_path", "descend", {
+        "goal": {"pose": goal}, "planner": "cartesian", "min_fraction": 0.0,
+    })], robot)
+    assert ex.plan()
+
+
+def test_cartesian_planner_rejection_feeds_the_fallbacks():
+    """A rejected line leg must let the NEXT sibling candidate run."""
     robot = _robot(bow=0.0)
     x, y, z = _tool_xyz(robot)
 
@@ -299,7 +332,7 @@ def test_cartesian_path_straightness_gate_feeds_the_fallbacks():
             _stage("cartesian_path", "descend",
                    {"goal": {"pose": {"x": x, "y": y, "z": z - dz,
                                       **IDENTITY_Q}},
-                    "planner": "classic"}),
+                    "planner": "cartesian", "min_fraction": 1.0}),
         ])
 
     _, ex = _plan([_container("fallbacks", "candidates",
@@ -309,11 +342,13 @@ def test_cartesian_path_straightness_gate_feeds_the_fallbacks():
     assert ex.best() is not None
 
 
-def test_cartesian_path_straightness_gate_can_be_disabled():
+def test_cartesian_path_has_no_client_side_straightness_gate():
+    """The old ``check_straightness`` gate is gone: a bowed solve with no
+    CartesianPath planner is accepted and no FK round trip is made."""
     robot = _robot(bow=0.03)
     goal = _vertical_goal(robot, 0.05)
     _, ex = _plan([_stage("cartesian_path", "descend", {
-        "goal": {"pose": goal}, "check_straightness": False})], robot)
+        "goal": {"pose": goal}, "check_straightness": True})], robot)
     assert ex.plan()
     assert ex.best() is not None
     assert robot.fk_batch_calls == 0

@@ -102,8 +102,9 @@ class MockCuroboServer(RobotInterface):
         ``{name: [x, y, z]}`` (identity orientation).
 
         ``bow`` injects that many metres of lateral deviation at mid-path on
-        Cartesian (axis-held) goalsets, so the ``cartesian_path`` straightness
-        gate can be exercised on both the accept and the reject branch.
+        Cartesian (axis-held) goalsets, so the CARTESIAN planner's
+        ``min_fraction`` guarantee can be exercised on both the accept and the
+        reject branch.
         ``winner_index`` is which candidate of a multi-pose goalset the server
         "picks" (the real server reports this through ``selected_goal_index``).
         """
@@ -147,6 +148,10 @@ class MockCuroboServer(RobotInterface):
         self.batch_calls = 0
         self.fk_batch_calls = 0
         self.last_hold: list = []  # trajectory_constraints of the last solve
+        #: Achieved straight-line fraction of the last Cartesian solve (None
+        #: when the request carried no line), the mock's analogue of the
+        #: server's CartesianPlanner fraction guarantee.
+        self.last_cartesian_fraction = None
         #: One entry per goalset of every plan() call, in solve order, so a
         #: test can assert the hold of a *particular* stage rather than only
         #: the last one.
@@ -256,6 +261,9 @@ class MockCuroboServer(RobotInterface):
         result_names = names
         trajectory = [start]
         selected: list = []
+        # (start_pos, goal_pos) of the LAST straight-line goalset, so the
+        # fraction guarantee can be measured on the final trajectory.
+        line_segment = None
 
         def stub(pos):
             return JointStateStub(names=result_names, positions=pos)
@@ -283,6 +291,7 @@ class MockCuroboServer(RobotInterface):
                 # gate has a failing branch to catch.
                 p0 = fk_positions(dict(zip(names, a)))
                 p1 = _xyz(poses[self._winner(poses)])
+                line_segment = (p0, p1)
                 seed = dict(zip(names, a))
                 n = self.n_steps
                 for k in range(1, n + 1):
@@ -313,6 +322,30 @@ class MockCuroboServer(RobotInterface):
         self.last_hold = self._hold_of(
             (getattr(request, "goalsets", []) or [None])[0]) \
             if getattr(request, "goalsets", None) else []
+
+        # The CARTESIAN planner's partial-path guarantee (MTC
+        # solvers::CartesianPath): when the request carries an explicit
+        # min_fraction and asked for a straight line, reject the solve unless
+        # the tool stayed on the segment for at least that fraction of the
+        # trajectory. This is what the server-side CartesianPlanner does, so a
+        # client-side straightness gate is unnecessary.
+        min_fraction = float(getattr(request, "cartesian_min_fraction", -1.0))
+        if line_segment is not None and min_fraction >= 0.0:
+            precision = float(getattr(request, "cartesian_precision", 0.0) or 0.0)
+            if precision <= 0.0:
+                precision = 0.001
+            fraction = self._line_fraction(
+                trajectory, names, line_segment[0], line_segment[1], precision)
+            self.last_cartesian_fraction = fraction
+            if fraction + 1e-9 < min_fraction:
+                return PlanResult(
+                    False,
+                    "CartesianPath: min_fraction not met. Achieved: "
+                    f"{fraction:.6f}",
+                )
+        else:
+            self.last_cartesian_fraction = None
+
         return PlanResult(
             success=True,
             message="ok",
@@ -325,6 +358,35 @@ class MockCuroboServer(RobotInterface):
             raw="mock-trajectory-result",
             selected_goal_index=selected,
         )
+
+    @staticmethod
+    def _line_fraction(trajectory, names, start_pos, goal_pos,
+                       precision) -> float:
+        """Contiguous prefix of the trajectory within ``precision`` of the line.
+
+        The mock's equivalent of MoveIt's ``computeCartesianPath`` return: the
+        first waypoint that leaves the start->goal segment ends the feasible
+        prefix, so a solve that bows off the line scores below 1.0.
+        """
+        if not trajectory:
+            return 1.0
+        on_line = 0
+        for state in trajectory:
+            pos = list(getattr(state, "position", []) or [])
+            tool = fk_positions(dict(zip(names, pos)))
+            ab = [goal_pos[i] - start_pos[i] for i in range(3)]
+            ap = [tool[i] - start_pos[i] for i in range(3)]
+            denom = sum(v * v for v in ab)
+            if denom < 1e-18:
+                dist = math.sqrt(sum(v * v for v in ap))
+            else:
+                t = max(0.0, min(1.0, sum(x * y for x, y in zip(ap, ab)) / denom))
+                dist = math.sqrt(sum((ap[i] - t * ab[i]) ** 2 for i in range(3)))
+            if dist <= precision:
+                on_line += 1
+            else:
+                break
+        return on_line / len(trajectory)
 
     def plan_batch(self, requests: list) -> list:
         self.batch_calls += 1

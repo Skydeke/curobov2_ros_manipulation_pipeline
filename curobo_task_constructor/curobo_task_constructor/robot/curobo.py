@@ -600,6 +600,17 @@ class CuroboServerInterface(RobotInterface):
         self._planner_active = True
         self._active_planner = int(planner)
 
+    def invalidate_planner_session(self) -> None:
+        """Forget the sticky "planner already active" belief (see robot.py).
+
+        The ``_ensure_planner`` skip is only sound WITHIN one planning burst:
+        a remote ``task.execute()`` drives the solution through the execute
+        server's OWN interface, which mutates the shared ``/curobo_server``
+        planner, and a sibling node may switch it too. Dropping the belief
+        makes the next request re-assert its planner unconditionally.
+        """
+        self._session.invalidate()
+
     def _ensure_planner(self, planner) -> None:
         """Make sure the requested planner is the server's current one.
 
@@ -939,6 +950,18 @@ class CuroboServerInterface(RobotInterface):
             goal.start_pose = self._to_joint_msg(request.start_pose)
         for gs in request.goalsets or []:
             goal.goalsets.append(self._to_goalset(gs))
+        # MTC CartesianPath interpolation options (consumed by the CARTESIAN
+        # planner; ignored by every other planner). Sentinels are passed
+        # through verbatim — the server fills in its own defaults.
+        goal.cartesian_step_size = float(
+            getattr(request, "cartesian_step_size", 0.0) or 0.0
+        )
+        goal.cartesian_min_fraction = float(
+            getattr(request, "cartesian_min_fraction", -1.0)
+        )
+        goal.cartesian_precision = float(
+            getattr(request, "cartesian_precision", 0.0) or 0.0
+        )
         return goal
 
     @staticmethod
