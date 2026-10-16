@@ -144,6 +144,9 @@ class MockCuroboServer(RobotInterface):
         self.attached = set()
         self.world_ops = []  # ("add"|"remove"|"attach"|"detach", name)
         self.executed = []  # PlanRequests driven via execute()
+        #: Trajectory dicts replayed verbatim via execute(req, trajectory=...)
+        #: (MTC Task::execute parity). One entry per driven motion segment.
+        self.replayed: list = []
         self.plan_calls = 0
         self.batch_calls = 0
         self.fk_batch_calls = 0
@@ -392,9 +395,28 @@ class MockCuroboServer(RobotInterface):
         self.batch_calls += 1
         return [self.plan(r) for r in requests]
 
-    def execute(self, request: PlanRequest) -> PlanResult:
+    def execute(self, request: PlanRequest, trajectory) -> PlanResult:
         self.executed.append(request)
-        return self.plan(request)
+        if trajectory is None:
+            # MTC parity: execution drives a SUPPLIED plan — no cache to miss,
+            # no re-solve. The real server refuses an open-loop execute with no
+            # trajectory, so the mock does too.
+            return PlanResult(False, "no trajectory to replay")
+        # Replay (MTC Task::execute parity): the server streams the caller's
+        # validated waypoints verbatim, so the driven trajectory IS exactly what
+        # was sent — no goal re-match, no cache lookup, no re-solve (and so no
+        # IK-branch jump for a multi-solution pose goal).
+        self.replayed.append(trajectory)
+        names = [str(n) for n in (trajectory.get("joint_names") or [])]
+        points = list(trajectory.get("points") or [])
+        vels = list(trajectory.get("velocities") or [])
+        waypoints = []
+        for i, pt in enumerate(points):
+            wp = JointStateStub(names=names, positions=list(pt))
+            if i < len(vels) and vels[i]:
+                wp.velocity = [float(v) for v in vels[i]]
+            waypoints.append(wp)
+        return PlanResult(True, "replayed", trajectory=waypoints)
 
     # ------------------------------------------------------------------
     # scene

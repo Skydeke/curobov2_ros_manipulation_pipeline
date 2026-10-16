@@ -27,7 +27,6 @@ from curobov2_ros_interfaces.srv import SetPlanner
 from curobov2_ros_interfaces.srv import TrajectoryGeneration
 from curobov2_ros_interfaces.srv import SetRobotStrategy
 from curobov2_ros_interfaces.action import SendTrajectory
-from std_srvs.srv import Trigger
 
 @launch_testing.ready_to_test_action_timeout(90.0)
 @pytest.mark.launch_test
@@ -246,14 +245,8 @@ class GeneratedTestSuite(unittest.TestCase):
             f"Field 'success' doesn't match expected value"
         )
 
-    def test_07_execute_classic_cached(self):
-        """07 Execute classic cached"""
-
-        # Storage for feedback messages
-        self.received_feedback = []
-
-        def feedback_callback(feedback_msg):
-            self.received_feedback.append(feedback_msg.feedback)
+    def test_07_execute_classic_requires_a_trajectory(self):
+        """07 Execute classic requires a trajectory"""
 
         # Create action client
         client = ActionClient(self.node, SendTrajectory, '/unified_planner/execute_trajectory')
@@ -263,11 +256,12 @@ class GeneratedTestSuite(unittest.TestCase):
         if not client.wait_for_server(timeout_sec=timeout):
             self.fail(f"Action server '/unified_planner/execute_trajectory' not available after {timeout}s")
 
-        # Create and send the goal
+        # Create and send a goal with NO replay trajectory: the open-loop
+        # execute path must refuse rather than silently re-solve.
         goal = SendTrajectory.Goal()
         set_message_fields(goal, {'goal': {'start_pose': {'name': ['panda_joint1', 'panda_joint2', 'panda_joint3', 'panda_joint4', 'panda_joint5', 'panda_joint6', 'panda_joint7'], 'position': [0.0, -1.3, 0.0, -2.5, 0.0, 1.5, 0.8], 'velocity': [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}, 'goalsets': [{'poses': [{'position': {'x': 0.0255, 'y': 0.1521, 'z': 0.8555}, 'orientation': {'x': -0.8049, 'y': -0.3629, 'z': -0.4516, 'w': 0.1288}}]}]}})
 
-        send_future = client.send_goal_async(goal, feedback_callback=feedback_callback)
+        send_future = client.send_goal_async(goal)
         rclpy.spin_until_future_complete(self.node, send_future, timeout_sec=timeout)
 
         goal_handle = send_future.result()
@@ -287,42 +281,7 @@ class GeneratedTestSuite(unittest.TestCase):
 
         self.assertEqual(
             result.success,
-            True,
-            f"Field 'success' doesn't match expected value"
-        )
-
-    def test_08_clear_trajectory(self):
-        """08 Clear trajectory"""
-
-        # Create service client
-        client = self.node.create_client(Trigger, '/unified_planner/clear_trajectory')
-
-        # Wait for service to be available
-        timeout = 10.0
-        if not client.wait_for_service(timeout_sec=timeout):
-            self.fail(f"Service '/unified_planner/clear_trajectory' not available after {timeout}s")
-
-        # Create request
-        request = Trigger.Request()
-        set_message_fields(request, {})
-
-        # Call service
-        future = client.call_async(request)
-        rclpy.spin_until_future_complete(self.node, future, timeout_sec=timeout)
-
-        # Check if call completed
-        if not future.done():
-            self.fail("Service call to '/unified_planner/clear_trajectory' timed out")
-
-        # Get response
-        response = future.result()
-        if response is None:
-            self.fail("Service call to '/unified_planner/clear_trajectory' failed")
-
-
-        self.assertEqual(
-            response.success,
-            True,
+            False,
             f"Field 'success' doesn't match expected value"
         )
 

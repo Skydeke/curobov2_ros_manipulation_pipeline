@@ -232,5 +232,30 @@ def test_scene_diff_round_trip():
         assert back["attached"] == "box"
         assert back["added"][0]["name"] == "box"
         assert back["added"][0]["pose"]["x"] == 0.5
+        # A name-keyed diff that never asked to clear anything stays off.
+        assert back["remove_all"] is False and back["detach_all"] is False
+    finally:
+        _remove_stubs(mods)
+
+
+def test_scene_diff_round_trips_the_clear_all_ops():
+    """remove_all/detach_all ride a reserved id: PlanningScene has no wildcard
+    REMOVE, and a dropped clear leaves the scene-setup task re-adding onto the
+    previous cycle's objects (every add refused as a duplicate)."""
+    mods = _install_stubs()
+    try:
+        from curobo_task_constructor import msg_convert
+        diff = {"added": [], "removed": [], "attached": None, "detached": None,
+                "remove_all": True, "detach_all": True}
+        msg = msg_convert.scene_diff_to_msg(diff)
+        assert msg.world.collision_objects[0].id == \
+            msg_convert.SCENE_CLEAR_ALL_ID
+        assert msg.robot_state.attached_collision_objects[0].object.id == \
+            msg_convert.SCENE_CLEAR_ALL_ID
+        back = msg_convert.msg_to_scene_diff(msg)
+        assert back["remove_all"] is True and back["detach_all"] is True
+        # The marker is not a real object: nothing lands in the name lists.
+        assert back["removed"] == [] and back["detached"] is None
+        assert back["added"] == []
     finally:
         _remove_stubs(mods)

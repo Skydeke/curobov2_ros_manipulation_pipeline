@@ -87,10 +87,6 @@ ros2 service call /unified_planner/set_planner curobo_msgs/srv/SetPlanner "{plan
 
 Type: `curobo_msgs/srv/GetPlanners` (empty request). Returns `planner_names` (display names), `planner_ids` (matching `SetPlanner` enum IDs), `current_planner_name`, `current_planner_id`, `success`.
 
-### `/unified_planner/clear_trajectory`
-
-Type: `std_srvs/srv/Trigger`. Clears the cached trajectory and the RViz preview.
-
 ### `/unified_planner/update_motion_gen_config`
 
 Type: `std_srvs/srv/Trigger`. Rebuilds the motion-planning solver from the current ROS parameters. Call it after changing build-time parameters such as `voxel_size`, `collision_activation_distance`, or `interpolation_dt` at runtime. The rebuild is blocking (roughly 20 s, warmup dominates).
@@ -276,14 +272,13 @@ Type: `curobo_msgs/srv/GetRobotStrategies` (empty request). Returns `strategy_na
 
 Type: `curobo_msgs/action/SendTrajectory`. The unified "plan (or reuse) and execute" entry point. One goal at a time; a second goal is rejected while one is active.
 
-Goal (mirrors `TrajectoryGeneration`; the active planner decides which fields it consumes):
+Goal:
 
 | Field | Type | Notes |
 |---|---|---|
-| `start_pose` | `sensor_msgs/JointState` | Empty = current state |
-| `goalsets` | `Goalset[]` | One segment per waypoint; `poses` = candidate set (Classic resolves, Multi-point loops, MPC/Retarget require exactly one pose), `target_joint_positions` = joint-space segment |
-| `allow_cached` | `bool` (default `true`) | Reuse a matching, non-expired trajectory from a previous `generate_trajectory` call |
-| `force_cached` | `bool` (default `false`) | When `true` and no matching cached trajectory exists, FAIL instead of re-solving — the caller only ever drives a trajectory it validated. A cache miss with a live chain means conditions changed (cache cleared, TTL expired, world mutated); re-solving blindly is how a multi-solution pose goal jumps IK branches mid-chain |
+| `goal` | `TrajectoryGoal` | The target: `start_pose` (empty = current state) + `goalsets` (one segment per waypoint; `poses` = candidate set, `target_joint_positions` = joint-space segment). For an open-loop execution this is only context — the driven waypoints come from `replay_trajectory` |
+| `replay` | `bool` (default `false`) | Drive `replay_trajectory` verbatim, the way MTC drives a stored `RobotTrajectory`, instead of servoing a live target |
+| `replay_trajectory` | `trajectory_msgs/JointTrajectory` | The validated plan to drive. REQUIRED for open-loop execution: there is no server-side cache and no re-solve, so an open-loop goal carrying no trajectory is refused. Reactive (MPC/retarget) planners ignore `replay` and servo live |
 
 Feedback (status is carried only here — there is no separate status topic):
 
@@ -297,12 +292,15 @@ Feedback (status is carried only here — there is no separate status topic):
 
 Result: `success`, `message`, and collision diagnostics `start_state_collisions`/`end_state_collisions` (StateCollisions, mirrors the srv; populated on failure).
 
-With an **open-loop** planner (classic, multi-point, joint-space) the action plans once, streams the trajectory, and succeeds when it ends. With a **closed-loop** planner (MPC, retarget) the action keeps running and servoing; retarget the goal live via `/unified_planner/mpc_goal`, and stop by cancelling the goal.
+With an **open-loop** planner (classic, joint-space) the action drives the caller's `replay_trajectory` — the plan is never re-derived, exactly like MTC's `ExecuteTaskSolution` driving each `SubTrajectory`'s stored `RobotTrajectory`. A goal that carries no trajectory is refused, so the caller always supplies the exact motion that runs. With a **closed-loop** planner (MPC, retarget) the action keeps running and servoing; retarget the goal live via `/unified_planner/mpc_goal`, and stop by cancelling the goal.
 
 ```bash
+# Reactive (MPC/retarget): servo toward a pose — no trajectory needed.
 ros2 action send_goal /unified_planner/execute_trajectory curobo_msgs/action/SendTrajectory \
-  "{goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}" --feedback
+  "{goal: {goalsets: [{poses: [{position: {x: 0.5, y: 0.2, z: 0.4}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}]}]}}" --feedback
 ```
+
+For an **open-loop** planner, call `generate_trajectory` first, then send the returned waypoints back as `replay: true` + `replay_trajectory` (the RViz panel's Generate-then-Send and the task-constructor client both do exactly this).
 
 ## Topics
 

@@ -9,6 +9,7 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 #include <rclcpp/rclcpp.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 // Projet
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
@@ -317,6 +318,13 @@ private:
   // It decides whether on_generateAndSend_clicked() starts the live-tracking
   // MPC stream; the dropdown and the user's choice both live on Context.
   uint8_t trajectory_type_;
+
+  // The plan from the last successful generate_trajectory call, in the
+  // execute action's replay form. Execution is MTC-literal: the server never
+  // re-plans nor looks the plan up, so the panel keeps the plan it generated
+  // (and is displaying) and replays it VERBATIM. Empty => nothing to send.
+  // Written and read on the GUI thread only (see generateTrajectoryAsync).
+  trajectory_msgs::msg::JointTrajectory last_trajectory_;
 
   // SetPlanner client, used by startMpc() ONLY, to re-assert MPC on the server
   // before opening the live-tracking loop. It is not a user-facing control --

@@ -30,6 +30,19 @@ except Exception:  # pragma: no cover - exotic envs without yaml
     yaml = None
 
 
+#: Reserved collision-object id carrying the "clear the whole world" /
+#: "release whatever is attached" scene ops across the wire. ``moveit_msgs``'
+#: PlanningScene is a NAME-KEYED diff (there is no wildcard REMOVE), so the
+#: clear-all ops — which the in-process executor applies as the robot's
+#: ``remove_all_objects()`` / ``detach_object(None)`` — need their own marker
+#: to survive the message round trip. A generic PlanningScene consumer reads it
+#: as a plain REMOVE of an unknown id, i.e. a no-op; ``msg_to_scene_diff``
+#: recognizes it and restores the boolean op. Without it a scene-setup task
+#: cannot clear the server world, its re-adds are refused as duplicate names,
+#: and the pipeline plans against the previous cycle's objects forever.
+SCENE_CLEAR_ALL_ID = "__curobo_clear_all__"
+
+
 # ----------------------------------------------------------------------
 # dict -> ROS messages
 # ----------------------------------------------------------------------
@@ -73,11 +86,14 @@ def solution_info_to_msg(info: dict, msg_cls=None):
 
 
 def joint_trajectory_to_msg(names, points, msg_cls=None, point_cls=None,
-                            dt: float = 0.05):
+                            dt: float = 0.05, velocities=None):
     """(names, point-lists) -> RobotTrajectory joint_trajectory.
 
     Timing is display-only (the curobo server retimes on execution);
-    ``dt`` spacing matches the trajectory display default.
+    ``dt`` spacing matches the trajectory display default. ``velocities``
+    (optional, one list per point) rides along so a replayed trajectory reaches
+    the server with the solver's own joint speeds — MTC's RobotTrajectory
+    carries them and the open-loop streamer clamps/tapers them.
     """
     if msg_cls is None or point_cls is None:
         from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
@@ -85,9 +101,12 @@ def joint_trajectory_to_msg(names, points, msg_cls=None, point_cls=None,
         point_cls = JointTrajectoryPoint
     msg = msg_cls()
     msg.joint_names = [str(n) for n in (names or [])]
+    vels = list(velocities or [])
     for i, pt in enumerate(points or []):
         point = point_cls()
         point.positions = [float(v) for v in (pt or [])]
+        if i < len(vels) and vels[i]:
+            point.velocities = [float(v) for v in vels[i]]
         total = float(i) * float(dt)
         sec = int(total)
         point.time_from_start.sec = sec
@@ -145,11 +164,16 @@ def _pose_to_msg(pose, msg_cls=None):
 
 
 def scene_diff_to_msg(diff: dict, msg_cls=None):
-    """scene_diff dict ({added, removed, attached, detached}) -> PlanningScene.
+    """scene_diff dict -> PlanningScene.
 
-    Detach is the one convention without an MTC counterpart: an attached
-    object entry whose ``operation`` is REMOVE detaches that id (the server
-    treats an empty ``link_names`` the same way).
+    Two conventions have no MTC counterpart and ride reserved ids:
+
+    - Detach: an attached object entry whose ``operation`` is REMOVE detaches
+      that id (the server treats an empty ``link_names`` the same way).
+    - Clear-all: ``remove_all`` / ``detach_all`` become a REMOVE of
+      ``SCENE_CLEAR_ALL_ID`` in the world / attached lists (a name-keyed diff
+      has no wildcard REMOVE). They are emitted FIRST so the message reads
+      "clear, then add".
     """
     if msg_cls is None:
         from moveit_msgs.msg import PlanningScene
@@ -158,6 +182,16 @@ def scene_diff_to_msg(diff: dict, msg_cls=None):
     msg = msg_cls()
     msg.is_diff = True
     diff = diff or {}
+    if diff.get("remove_all"):
+        clear = CollisionObject()
+        clear.id = SCENE_CLEAR_ALL_ID
+        clear.operation = CollisionObject.REMOVE
+        msg.world.collision_objects.append(clear)
+    if diff.get("detach_all"):
+        entry = AttachedCollisionObject()
+        entry.object.id = SCENE_CLEAR_ALL_ID
+        entry.object.operation = CollisionObject.REMOVE
+        msg.robot_state.attached_collision_objects.append(entry)
     for spec in (diff.get("added", None) or []):
         msg.world.collision_objects.append(
             _collision_object(spec.get("name", ""), spec,
@@ -184,10 +218,17 @@ def scene_diff_to_msg(diff: dict, msg_cls=None):
 
 def _merge_scene_diff(before: dict, after: dict) -> dict:
     """Net scene effect of a segment (before + after ops, display order)."""
-    merged = {"added": [], "removed": [], "attached": None, "detached": None}
+    merged = {"added": [], "removed": [], "attached": None, "detached": None,
+              "remove_all": False, "detach_all": False}
     for part in (before or {}, after or {}):
         merged["added"].extend(part.get("added", None) or [])
         merged["removed"].extend(part.get("removed", None) or [])
+        # A clear-all in either half applies to the whole segment, so it
+        # latches rather than overwriting.
+        merged["remove_all"] = merged["remove_all"] or bool(
+            part.get("remove_all"))
+        merged["detach_all"] = merged["detach_all"] or bool(
+            part.get("detach_all"))
         if part.get("attached") is not None:
             merged["attached"] = part["attached"]
             merged["detached"] = None
@@ -215,7 +256,8 @@ def sub_trajectory_to_msg(seg: dict, msg_cls=None):
     robot_traj = RobotTrajectory()
     robot_traj.joint_trajectory = joint_trajectory_to_msg(
         traj.get("joint_names", None) or [],
-        traj.get("points", None) or [])
+        traj.get("points", None) or [],
+        velocities=traj.get("velocities", None) or [])
     msg.trajectory = robot_traj
     diff = seg.get("scene_diff", {}) or {}
     msg.scene_diff = scene_diff_to_msg(
@@ -297,6 +339,10 @@ def msg_to_joint_trajectory(msg) -> dict:
         "joint_names": [str(n) for n in (getattr(jt, "joint_names", []) or [])],
         "points": [[float(v) for v in (getattr(pt, "positions", []) or [])]
                    for pt in (getattr(jt, "points", []) or [])],
+        # MTC parity: velocities ride the RobotTrajectory and are replayed as
+        # sent. Empty when the producing solver did not populate them.
+        "velocities": [[float(v) for v in (getattr(pt, "velocities", []) or [])]
+                       for pt in (getattr(jt, "points", []) or [])],
     }
 
 
@@ -388,12 +434,17 @@ def _byte_to_int(value, default=0) -> int:
 def msg_to_scene_diff(msg) -> dict:
     """PlanningScene -> scene_diff dict (inverse of scene_diff_to_msg)."""
     from moveit_msgs.msg import CollisionObject
-    out = {"added": [], "removed": [], "attached": None, "detached": None}
+    out = {"added": [], "removed": [], "attached": None, "detached": None,
+           "remove_all": False, "detach_all": False}
     world = getattr(msg, "world", None)
     for co in (getattr(world, "collision_objects", []) or []):
         op = _byte_to_int(getattr(co, "operation", None), 0)
         if op == _byte_to_int(CollisionObject.REMOVE):
-            out["removed"].append(str(getattr(co, "id", "")))
+            name = str(getattr(co, "id", ""))
+            if name == SCENE_CLEAR_ALL_ID:
+                out["remove_all"] = True
+            else:
+                out["removed"].append(name)
             continue
         spec = {"name": str(getattr(co, "id", "")), "shape": "cuboid",
                 "pose": None, "dimensions": None, "mesh_path": None,
@@ -419,7 +470,10 @@ def msg_to_scene_diff(msg) -> dict:
         name = str(getattr(obj, "id", ""))
         op = _byte_to_int(getattr(obj, "operation", None), 0)
         if op == _byte_to_int(CollisionObject.REMOVE):
-            out["detached"] = name
+            if name == SCENE_CLEAR_ALL_ID:
+                out["detach_all"] = True
+            else:
+                out["detached"] = name
         else:
             out["attached"] = name
     return out
@@ -440,7 +494,8 @@ def msg_to_sub_trajectory(msg) -> dict:
         "scene_diff": {
             "before": msg_to_scene_diff(getattr(msg, "scene_diff", None)),
             "after": {"added": [], "removed": [], "attached": None,
-                      "detached": None},
+                      "detached": None, "remove_all": False,
+                      "detach_all": False},
         },
         "replay_goal": _load_yaml(getattr(msg, "replay_goal_yaml", "")),
     }

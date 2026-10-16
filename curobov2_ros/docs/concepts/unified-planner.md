@@ -60,9 +60,18 @@ All solvers — `MotionPlanner`, `ModelPredictiveControl`, `InverseKinematics` �
 
 IK and FK are hosted by the same node but initialized **lazily**: call `warmup_ik` / `warmup_fk` (with a batch size) before the first `ik` / `fk` call. IK is collision-aware and shares the scene; FK is purely kinematic. Details and examples: [Tutorial 6](../tutorials/06-ik-fk-services.md), field reference: [ROS Interfaces](ros-interfaces.md).
 
-## Trajectory caching
+## Open-loop execution (MTC parity)
 
-`generate_trajectory` caches every planned open-loop trajectory in a multi-entry cache (bounded by `trajectory_cache_size`, expired by `trajectory_cache_ttl`). A subsequent `execute_trajectory` goal with `allow_cached: true` (the default) and a matching target replays the cached entry instead of re-planning — this is what makes the RViz "Generate" then "Send" workflow cheap. The cache is per-segment, so a multi-segment chain executes the trajectory it planned for EACH segment rather than re-solving them one by one (a fresh solve of a multi-solution pose goal is free to pick the other IK branch, which is precisely the divergence the task-constructor's chain-continuity check exists to catch). Setting `force_cached: true` on the goal turns any cache miss into an explicit failure instead of a fallback re-solve. `clear_trajectory` empties the cache and the preview.
+Execution is verbatim. An open-loop `execute_trajectory` goal carries the
+trajectory the caller validated (`replay_trajectory`) and the server stages and
+streams exactly those waypoints — it never re-plans, and there is no cache to
+miss. This is MTC's model: `ExecuteTaskSolution` drives each `SubTrajectory`'s
+stored `RobotTrajectory` as-is, so a multi-solution pose goal can never jump to
+the other IK branch between the plan the operator saw and the motion that runs.
+The task constructor plans a chain segment by segment and replays each segment's
+plan; the RViz Generate-then-Send button does the same with the trajectory it
+just generated. An open-loop goal that carries no trajectory is refused.
+Reactive planners (MPC/retarget) ignore `replay` and servo live.
 
 ## Source files
 
@@ -82,5 +91,5 @@ curobo_ros/planners/
 
 - [Architecture](architecture.md) — how the planner layer fits the whole node
 - [MPC Implementation](mpc-implementation.md) — the closed-loop path in depth
-- [Parameters](parameters.md) — `planner_type`, `mpc_*`, `retarget_*`, `trajectory_cache_ttl`
+- [Parameters](parameters.md) — `planner_type`, `mpc_*`, `retarget_*`
 - [Tutorial 5](../tutorials/05-mpc-planner.md) — hands-on MPC

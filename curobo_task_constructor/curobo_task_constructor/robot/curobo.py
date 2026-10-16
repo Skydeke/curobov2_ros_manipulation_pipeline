@@ -804,48 +804,33 @@ class CuroboServerInterface(RobotInterface):
         finally:
             self._set_links_collision(requests, True)
 
-    def execute(self, request: PlanRequest) -> PlanResult:
-        """Drive one segment: SendTrajectory, which replays the matching
-        cached (pre-planned) trajectory when it can and re-solves on a miss.
+    def execute(self, request: PlanRequest, trajectory) -> PlanResult:
+        """Drive one segment (SendTrajectory action).
 
-        The goalset's ``allowed_collisions`` is applied here exactly as in
-        ``plan`` / ``plan_batch``. It has to be: the wire ``Goalset`` carries
-        no collision concept, so this adapter's ``set_link_collision`` call is
-        the ONLY way the server ever learns that e.g. the finger spheres may
-        touch the grasped object. The server's execute path replays the
-        cached plan whenever the request matches one — with the multi-entry
-        trajectory cache, EVERY segment of a chain hits, so the driven
-        trajectory is the validated plan rather than a fresh solve (a fresh
-        solve of a multi-solution pose goal is free to pick the OTHER IK
-        branch, which is exactly the divergence the chain-continuity check
-        exists to catch). Only a genuine miss (cache cleared, TTL expired,
-        world mutated) falls back to re-solving, against whatever sphere state
-        is current — with the spheres restored, a grasp close that planned
-        cleanly (spheres off) fails its goal state with "finger -> object"
-        contacts that the plan itself proved were acceptable.
+        MTC ``Task::execute`` parity: the caller passes the segment's VALIDATED
+        joint waypoints and the server stages+streams them verbatim
+        (``replay``) — no cache lookup, no re-solve, so a multi-solution pose
+        goal cannot jump IK branch mid-chain. ``request`` is still sent for the
+        planner (a SetPlanner switch selects the executor) and its
+        ``allowed_collisions`` (the wire Goalset has no collision concept, so
+        this adapter's ``set_link_collision`` is the only way the server learns
+        the finger spheres may touch the grasped object).
 
-        ``force_cached`` stays OFF: the task-constructor prefers the graceful
-        re-solve fallback on a genuine miss. Callers that demand "replay or
-        fail" can set it on the action goal directly.
-
-        The window here is wider than in ``plan``: the allowance is held off for
-        the whole physical motion, not just the solve. That is correct for a
-        grasp — the fingers legitimately stay against the object from the
-        descent until the retreat ends — and inert everywhere else, because
-        ``_set_links_collision`` returns early when a request allows no links,
-        so stages like ``return`` / ``open`` do not touch the spheres at all.
+        ``allowed_collisions`` is held off for the whole physical motion, not
+        just the solve: correct for a grasp (the fingers legitimately stay
+        against the object until the retreat ends) and inert elsewhere, because
+        ``_set_links_collision`` returns early when a request allows no links.
         """
-        # Driving may leave the server in any planner/collision state
-        # (segments replay under their cached plans' planners), so the sticky
-        # session is forgotten here and rebuilt by the next requests.
+        # Driving may leave the server in any planner/collision state, so the
+        # sticky session is forgotten here and rebuilt by the next requests.
         self._session.invalidate()
         self._ensure_planner(request.planner)
         if not self._exec_client.wait_for_server(timeout_sec=self._service_timeout):
             raise ServiceError("execute_trajectory action unavailable")
         goal = SendTrajectory.Goal()
         goal.goal = self._to_goal(request)
-        goal.allow_cached = True
-        goal.force_cached = True  # never re-solve during execution; cache miss = failure
+        goal.replay = True
+        goal.replay_trajectory = self._to_joint_trajectory_msg(trajectory)
         self._set_links_collision([request], False)
         try:
             gh = self._await(
@@ -941,6 +926,16 @@ class CuroboServerInterface(RobotInterface):
         """
         self._scene_objects_queried = False
 
+    def invalidate_scene_cache(self) -> None:
+        """Public form of ``_invalidate_scene_cache`` (``RobotInterface``).
+
+        A task's scene ops are materialized by the EXECUTE SERVER's process, so
+        none of this interface's own mutation-invalidation fires when they
+        land; a caller that must read the post-execution world (a scene
+        verification) has to drop the cache itself.
+        """
+        self._invalidate_scene_cache()
+
     # ------------------------------------------------------------------
     # conversions
     # ------------------------------------------------------------------
@@ -970,6 +965,33 @@ class CuroboServerInterface(RobotInterface):
         js.name = list(getattr(joint_state, "name", []))
         js.position = [float(p) for p in (getattr(joint_state, "position", []) or [])]
         return js
+
+    @staticmethod
+    def _to_joint_trajectory_msg(trajectory):
+        """A validated solution segment -> ``trajectory_msgs/JointTrajectory``.
+
+        MTC parity: the segment's waypoints travel with the execute request so
+        the server can stream them verbatim. ``trajectory`` is the solution
+        dict form ``{"joint_names", "points", "velocities"}``; ``points`` are
+        the joint positions per waypoint, ``velocities`` (optional) the matching
+        joint velocities. Timing is NOT carried: the open-loop streamer stamps
+        ``time_from_start`` from its own ``dt`` (see
+        ``JointSpeedStrategy.send_trajectrory``), exactly as it does for a fresh
+        plan, so the replay is paced identically to the original solve.
+        """
+        from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+
+        msg = JointTrajectory()
+        msg.joint_names = [str(n) for n in (trajectory.get("joint_names") or [])]
+        points = list(trajectory.get("points") or [])
+        velocities = list(trajectory.get("velocities") or [])
+        for i, pt in enumerate(points):
+            p = JointTrajectoryPoint()
+            p.positions = [float(v) for v in (pt or [])]
+            if i < len(velocities) and velocities[i]:
+                p.velocities = [float(v) for v in velocities[i]]
+            msg.points.append(p)
+        return msg
 
     def _to_goalset(self, gs: GoalsetSpec) -> Goalset:
         g = Goalset()

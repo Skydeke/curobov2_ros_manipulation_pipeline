@@ -10,12 +10,11 @@ moveit_msgs/RobotTrajectory trajectory
 # planning scene of end state as diff w.r.t. start state
 moveit_msgs/PlanningScene scene_diff
 
-# curobo backend necessity (no MTC counterpart): the validated plan is
-# replayed from the curobo_server trajectory cache, whose key is the
-# segment's planning goal (start joints + goalset poses/joint targets).
-# Waypoints alone cannot reproduce that key, and re-solving instead would
-# let a multi-candidate goal pick another IK branch mid-chain. This YAML
-# carries the segment's planning goal (start_pose, goalsets, planner key,
-# allowed-collision links) plus its scene ops; a cache miss fails the
-# execution (force_cached) instead of re-solving.
+# curobo backend necessity (no MTC counterpart): ``trajectory`` above now
+# carries the full validated plan and is replayed verbatim (MTC
+# ExecuteTaskSolution parity), but the adapter still needs the segment's
+# planning goal for the PLANNER switch (SetPlanner) and its allowed-collision
+# links — neither of which the waypoints express. This YAML carries that
+# planning goal (start_pose, goalsets, planner key, allowed-collision links)
+# plus its scene ops.
 string replay_goal_yaml

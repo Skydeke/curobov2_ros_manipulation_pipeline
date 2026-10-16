@@ -8,6 +8,7 @@
 #include <curobov2_ros_interfaces/srv/set_joint_locks.hpp>
 #include <curobov2_ros_interfaces/srv/trajectory_generation.hpp>
 #include <curobov2_ros_interfaces/action/send_trajectory.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <rviz_common/config.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
@@ -141,6 +142,11 @@ private:
     trajectory_client_;
   rclcpp_action::Client<curobov2_ros_interfaces::action::SendTrajectory>::SharedPtr
     action_client_;
+  // The plan from the last successful generate_trajectory call, in the execute
+  // action's replay form. Execution is MTC-literal: the server never re-plans
+  // nor looks a plan up, so sendTarget() plans first and replays this verbatim.
+  // Written and read on the GUI thread only (see sendTarget()).
+  trajectory_msgs::msg::JointTrajectory last_trajectory_;
   // ClientGoalHandle has no nested GoalHandle typedef: it IS the goal handle
   // type, and its pointer alias is SharedPtr. (Client<ActionT>::GoalHandle does
   // exist, because ClientBase declares one; ClientGoalHandle<ActionT> does not.)

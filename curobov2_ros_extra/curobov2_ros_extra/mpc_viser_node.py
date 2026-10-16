@@ -275,7 +275,6 @@ class MpcViserNode(Node):
         p.orientation.y = float(quat[2])
         p.orientation.z = float(quat[3])
         goal.goalsets = [Goalset(poses=[p])]
-        goal.allow_cached = False
 
         self._set_status('Starting MPC...')
         self._servo_active = True

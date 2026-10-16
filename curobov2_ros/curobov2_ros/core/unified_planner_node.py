@@ -94,6 +94,26 @@ from curobov2_ros.planners import (
     SinglePlanner,
 )
 
+
+class ReplayTrajectory:
+    """A caller-supplied trajectory carried for verbatim replay.
+
+    MTC parity (``ExecuteTaskSolution``): the task-constructor's solution
+    already holds each sub-trajectory's validated waypoints, so execution is a
+    replay rather than a plan. ``SinglePlanner.replay`` / ``_stage_trajectory``
+    read only ``joint_names`` plus the ``position``/``velocity``/
+    ``acceleration`` tensors, so a wire trajectory needs no cuRobo round trip —
+    just these fields, shaped ``[T, D]`` (one row per waypoint), the same rank
+    ``_stage_trajectory`` flattens down to.
+    """
+
+    def __init__(self, joint_names, position, velocity=None, acceleration=None):
+        self.joint_names = list(joint_names or [])
+        self.position = position
+        self.velocity = velocity
+        self.acceleration = acceleration
+
+
 # cuRobo logs through Python's `logging` module ('curobo' logger) which the
 # node configures at startup; by default its messages are plain. Color them
 # with the same level palette rclpy uses so `[WARNING] [curobo] ...` lines
@@ -567,29 +587,10 @@ class UnifiedPlannerNode(Node):
         self.declare_parameter("retarget_position_weight", 1.0)
         self.declare_parameter("retarget_orientation_weight", 1.0)
         self.declare_parameter("retarget_use_mpc", False)
-        # Lifetime (s) of a pre-planned (preview) trajectory cached by
-        # generate_trajectory and reused by the execute action.
-        self.declare_parameter("trajectory_cache_ttl", 30.0)
-        # Max open-loop trajectories kept in the reuse cache. Multi-entry so
-        # EVERY segment of a chain is replayable at execute time (see
-        # _store_pending_plan); this cap bounds the GPU-side trajectory tensors
-        # a long multi-task run accumulates between TTL prunes.
-        self.declare_parameter("trajectory_cache_size", 64)
-        # How far the arm may have strayed from the state a request says it
-        # starts in, for a cache MISS in the execute path to be trusted. See
-        # _check_execution_start_drift. 0.01 rad matches the MoveIt pipeline's
-        # `allowed_start_tolerance` (iki_kortex_moveit_config/config/
-        # moveit_controllers.yaml): the curobo chain must not accept a start
-        # state that MoveIt would have refused to plan from - one number for
-        # the wall, whichever planner is behind it. It absorbs ordinary
-        # encoder/servo noise and stays far under the fraction of a joint's
-        # range that a wrong IK branch moves.
-        self.declare_parameter("execution_start_tolerance", 0.01)
-        # Drift below this (but above 0) is reported and allowed: ordinary
-        # servo tracking error, where re-solving from the arm's ACTUAL pose is
-        # exactly the right thing to do. Sits an order of magnitude below the
-        # refuse tier, as before.
-        self.declare_parameter("execution_start_warn_drift", 0.005)
+        # Open-loop execution is MTC-literal: the caller always supplies the
+        # trajectory it validated (SendTrajectory.replay_trajectory), so there
+        # is no preview cache to serve and no re-solve path to guard. See
+        # _execute_goal.
 
         # Single shared context for every solver (robot + obstacles + scene +
         # collision cache). The MPC solver is built lazily from this same context.
@@ -679,16 +680,6 @@ class UnifiedPlannerNode(Node):
         # Registers its own attach_object/detach_object services.
         self.attachment_services = AttachmentServices(self, self.config_wrapper_motion)
 
-        # Cached open-loop plans from generate_trajectory (preview) calls,
-        # reused by the execute action when a target matches. MULTI-entry now:
-        # one entry per planned segment (keyed by target signature, holding
-        # that segment's trajectory), because a chain executes segment-by-
-        # segment and a single slot could only ever serve the LAST segment
-        # planned - the rest re-solved at execute time, and a re-solve of a
-        # multi-solution pose goal can pick the OTHER IK branch (the exact
-        # divergence the chain-continuity check exists to catch). See
-        # _store_pending_plan / _pending_plan_matches / _prune_plan_cache.
-        self._pending_plan = []
         self._last_pushed_epoch = -1
         # ESDF throttle state for refresh_perception_world (see
         # should_refresh_world): monotonic time + ESDF compute cost of the
@@ -769,12 +760,6 @@ class UnifiedPlannerNode(Node):
             GetPlanners,
             f"{self.get_name()}/get_planners",
             self.get_planners_callback,
-            callback_group=MutuallyExclusiveCallbackGroup(),
-        )
-        self.clear_trajectory_srv = self.create_service(
-            Trigger,
-            f"{self.get_name()}/clear_trajectory",
-            self.clear_trajectory_callback,
             callback_group=MutuallyExclusiveCallbackGroup(),
         )
         self.clear_voxel_map_srv = self.create_service(
@@ -1188,14 +1173,6 @@ class UnifiedPlannerNode(Node):
             # srv-level StateCollisions siblings mirror the embedded ones.
             response.start_state_collisions = result.start_state_collisions
             response.end_state_collisions = result.end_state_collisions
-
-            # Open-loop caching now lives inside _plan_trajectory_goal (it is
-            # shared by the batch surfaces too), so every planned segment lands
-            # in the multi-entry cache. Reactive controllers have no
-            # trajectory to cache, and a reactive solve invalidates any cached
-            # open-loop plan.
-            if not planner.is_open_loop():
-                self._pending_plan = []
             return response
         except Exception as e:
             self.get_logger().error(f"Trajectory generation error: {e}")
@@ -1261,12 +1238,6 @@ class UnifiedPlannerNode(Node):
             )
 
             self._fill_result_insight(result_msg, planner, goal, result, start_state)
-            # Every successful open-loop plan lands in the multi-entry cache
-            # here (single srv AND the batch surfaces, which reuse this path):
-            # a chain executing later replays each planned segment instead of
-            # re-solving it. See _store_pending_plan.
-            if result_msg.success and planner.is_open_loop():
-                self._store_pending_plan(start_state, goal)
             return result_msg
 
         except Exception as e:
@@ -1336,11 +1307,6 @@ class UnifiedPlannerNode(Node):
                 result_msg = self._fill_result_insight(
                     TrajectoryResult(), planner, g, r, s
                 )
-                # Each batched problem keeps its OWN trajectory: the
-                # planner's planned_trajectory slot ends up holding only the
-                # last problem's after plan_batch, so store per-result.
-                if result_msg.success and planner.is_open_loop():
-                    self._store_pending_plan(s, g, traj=getattr(r, "trajectory", None))
                 response_msgs.append(result_msg)
             return response_msgs
         except Exception as e:
@@ -1564,24 +1530,18 @@ class UnifiedPlannerNode(Node):
             trajectory_msgs.append(waypoint)
         return trajectory_msgs, dt, n_waypoints
 
-    def _fill_reused_trajectory(
-        self, result_msg: TrajectoryResult, planner, traj=None
+    def _fill_replayed_trajectory(
+        self, result_msg: TrajectoryResult, planner, traj
     ) -> None:
-        """Fill trajectory/dt on a cache-hit execute from the replayed plan.
+        """Fill trajectory/dt on a replay execute from the trajectory driven.
 
-        With the multi-entry cache a hit can replay a MID-chain segment,
-        whose plan is no longer the planner's own slot (``planned_trajectory``
-        only ever holds the last segment planned), so the replaying entry's
-        trajectory is passed in; it falls back to the planner slot for the
-        single-segment preview workflow. That trajectory IS what gets driven,
-        and it has to reach the caller's TrajectoryResult for the same reason
-        the re-solve path fills arrays: the executor's chain-continuity check
-        compares the plan-time endpoints against the DRIVEN trajectory, and a
-        result without waypoints is skipped as "nothing to compare" - which
-        would let a bad reuse drive a chain silently.
+        That trajectory IS what gets driven, and it has to reach the caller's
+        TrajectoryResult for the same reason a fresh plan fills arrays: the
+        executor's chain-continuity check compares the plan-time endpoints
+        against the DRIVEN trajectory, and a result without waypoints is
+        skipped as "nothing to compare" - which would let a bad replay drive a
+        chain silently.
         """
-        if traj is None:
-            traj = getattr(planner, "planned_trajectory", None)
         if traj is None or getattr(traj, "position", None) is None:
             return
         waypoints, dt, n = self._result_trajectory(planner, traj)
@@ -1757,34 +1717,6 @@ class UnifiedPlannerNode(Node):
         c.max_waypoint_error = float(row.get("max_waypoint_error", 0.0))
         c.solve_time = float(row.get("solve_time", 0.0))
         return c
-
-    @staticmethod
-    def _result_meta_from_planner(planner) -> dict:
-        """Planner-layer metadata block from the planner's CURRENT per-plan attrs.
-
-        Used when the execute action reuses a cached preview plan: the
-        planner's selected-index / status / tally attrs still hold the values
-        the preview plan() call wrote (the signature matched, so they describe
-        exactly the plan being executed).
-        """
-        meta = {}
-        for key, attr in (
-            ("selected_goal_index", "_selected_goal_indexes"),
-            ("selected_seed_index", "_selected_seed_index"),
-            ("waypoint_status", "_waypoint_status"),
-        ):
-            val = getattr(planner, attr, None)
-            if val is not None:
-                meta[key] = list(val)
-        tally = getattr(planner, "_candidate_tally", None)
-        if tally:
-            meta["candidates_generated"] = int(tally.get("generated", 0))
-            meta["candidates_solved"] = int(tally.get("solved", 0))
-            meta["candidates_pruned"] = int(tally.get("pruned", 0))
-        considered = getattr(planner, "_considered_rows", None)
-        if considered:
-            meta["considered"] = list(considered)
-        return meta
 
     @staticmethod
     def _goalset_joint_target(request):
@@ -1987,8 +1919,9 @@ class UnifiedPlannerNode(Node):
     def execute_callback(self, goal_handle):
         """Unified 'generate + execute' action for every controller.
 
-        Open-loop: reuse a matching cached (preview) trajectory or plan one, then
-        execute it to completion (terminates on its own).
+        Open-loop: replay the caller-supplied trajectory (SendTrajectory.replay
+        + replay_trajectory) to completion (terminates on its own). There is no
+        cache and no re-solve: the caller always supplies the validated plan.
         Reactive: set the goal then servo continuously; terminates only on cancel
         or error, signalling `on_target` through the action feedback.
 
@@ -2013,15 +1946,6 @@ class UnifiedPlannerNode(Node):
             with self._goal_lock:
                 self._goal_active = False
 
-    def _refresh_and_plan(self, planner, start_state, goal, config):
-        """Runs ON a lane thread."""
-        # Execute-path re-solve after a cache miss: the previous attempt
-        # already failed, so pay for fresh perception rather than risk
-        # re-failing on a throttled world.
-        self.refresh_perception_world(force=True)
-        with self._plan_lock():
-            return planner.plan(start_state, goal, config, self.robot_context)
-
     def _refresh_and_plan_reactive(self, planner, start_state, goal, config):
         """Runs ON the reactive lane thread."""
         # Servo planning must never run on throttled perception: force
@@ -2030,9 +1954,140 @@ class UnifiedPlannerNode(Node):
         self.refresh_perception_world(force=True)
         return planner.plan(start_state, goal, config, self.robot_context)
 
+    def _replay_trajectory_from_msg(self, msg):
+        """``trajectory_msgs/JointTrajectory`` -> a replayable trajectory.
+
+        Positions are required; velocities are optional and zero-filled per
+        column when absent, the same way ``_stage_trajectory`` already tolerates
+        a trajectory missing velocity/acceleration. Rows are built on the node's
+        tensor device/dtype so the active-joint projection matches a freshly
+        planned trajectory.
+        """
+        names = [str(n) for n in (getattr(msg, "joint_names", None) or [])]
+        points = list(getattr(msg, "points", None) or [])
+        if not points:
+            return None
+        pos_rows = [list(getattr(p, "positions", None) or []) for p in points]
+        if not pos_rows or not pos_rows[0]:
+            return None
+        width = len(pos_rows[0])
+
+        def _fit(row):
+            row = [float(v) for v in row]
+            return (row + [0.0] * (width - len(row)))[:width]
+
+        position = torch.tensor(
+            [_fit(r) for r in pos_rows],
+            dtype=self.tensor_args.dtype, device=self.tensor_args.device,
+        )
+        velocities = [list(getattr(p, "velocities", None) or []) for p in points]
+        velocity = None
+        if any(velocities):
+            velocity = torch.tensor(
+                [_fit(v) for v in velocities],
+                dtype=self.tensor_args.dtype, device=self.tensor_args.device,
+            )
+        return ReplayTrajectory(names, position, velocity)
+
+    def _execute_replay(self, goal_handle, replay_msg, planner, result_msg, t_total):
+        """Stage and stream a caller-supplied trajectory verbatim.
+
+        MTC ``ExecuteTaskSolution`` parity: the solution already carries each
+        sub-trajectory's validated waypoints, so the server replays them instead
+        of re-matching or re-solving a goal. There is no trajectory-cache lookup
+        here — the waypoints ARE the plan — so a multi-solution pose goal cannot
+        land on a different IK branch than the one that was planned, and the
+        reported trajectory is exactly what was driven.
+        """
+        result_msg.result = TrajectoryResult()
+        if not getattr(planner, "is_open_loop", None) or not planner.is_open_loop():
+            msg = (f"{planner.get_planner_name()} cannot replay a supplied "
+                   f"trajectory (only open-loop planners stream waypoints)")
+            self.get_logger().error(msg)
+            result_msg.result.success = False
+            result_msg.result.message = msg
+            goal_handle.abort()
+            return result_msg
+
+        traj = self._replay_trajectory_from_msg(replay_msg)
+        if traj is None:
+            msg = "replay: empty trajectory"
+            self.get_logger().error(msg)
+            result_msg.result.success = False
+            result_msg.result.message = msg
+            goal_handle.abort()
+            return result_msg
+
+        self.get_logger().info(
+            f"Executing with {planner.get_planner_name()} "
+            f"(replayed {len(replay_msg.points)} waypoints, no re-plan)"
+        )
+        success = planner.replay(traj, self.robot_context, goal_handle)
+
+        # Cancel takes precedence over the planner's return value.
+        if goal_handle.is_cancel_requested:
+            result_msg.result.success = False
+            result_msg.result.message = "Execution canceled"
+            goal_handle.canceled()
+            return result_msg
+
+        result_msg.result.success = bool(success)
+        result_msg.result.message = (
+            "Execution completed" if success else "Execution failed"
+        )
+        # Report the trajectory that was driven (viz + the caller's own view of
+        # what executed). It IS the supplied one, so this is exact, not a guess.
+        self.lane_plan.call(
+            self._fill_replayed_trajectory, result_msg.result, planner, traj,
+            prio=PRIO_PLAN,
+        )
+        if success:
+            goal_handle.succeed()
+        else:
+            goal_handle.abort()
+        self.get_logger().info(
+            f"[plan-perf] {planner.get_planner_name()} (replay path): "
+            f"end_to_end {(time.monotonic() - t_total) * 1e3:.1f} ms"
+        )
+        return result_msg
+
     def _execute_goal(self, goal_handle, goal, planner, result_msg):
         _t_total = time.monotonic()
         try:
+            # MTC Task::execute parity: an open-loop segment carries its own
+            # validated waypoints, so there is nothing to plan and nothing to
+            # look up — and no way to land on a different IK branch than the one
+            # that was planned. This runs before goal validation because a
+            # replay needs no goalset. A reactive controller has no waypoints to
+            # replay; it servos its own goal live below.
+            replay_msg = getattr(goal_handle.request, "replay_trajectory", None)
+            has_replay = (
+                bool(getattr(goal_handle.request, "replay", False))
+                and replay_msg is not None and len(replay_msg.points) > 0
+            )
+            if has_replay:
+                self._setup_planner(planner)
+                return self._execute_replay(
+                    goal_handle, replay_msg, planner, result_msg, _t_total)
+
+            if planner.is_open_loop():
+                # There is no trajectory cache to fall back on: an open-loop
+                # execute must be GIVEN the trajectory. Re-planning here would
+                # discard the plan the caller validated and displayed, and a
+                # multi-solution pose goal is free to return the other IK
+                # branch — the exact divergence this pipeline exists to avoid.
+                msg = (
+                    f"{planner.get_planner_name()}: open-loop execution needs a "
+                    "supplied trajectory (replay_trajectory); re-planning during "
+                    "execute is not supported"
+                )
+                self.get_logger().error(msg)
+                result_msg.result = TrajectoryResult()
+                result_msg.result.success = False
+                result_msg.result.message = msg
+                goal_handle.abort()
+                return result_msg
+
             ok, reason = self._check_goal_request(planner, goal)
             if not ok:
                 self.get_logger().error(f"Invalid execution goal: {reason}")
@@ -2050,184 +2105,61 @@ class UnifiedPlannerNode(Node):
             self._setup_planner(planner)
             _t_setup = time.monotonic()
 
-            result = None
-            if planner.is_open_loop():
-                reuse = bool(
-                    getattr(goal_handle.request, "allow_cached", True)
-                ) and self.lane_plan.call(
-                    self._pending_plan_matches, start_state, goal, prio=PRIO_PLAN
-                )
-                if reuse:
-                    _t_reuse = time.monotonic()
-                    self.get_logger().info(
-                        f"[plan-perf] Reusing cached (pre-planned) trajectory "
-                        f"(setup {(_t_reuse - _t_total) * 1e3:.1f} ms TOTAL)"
-                    )
-                else:
-                    # The plan that was displayed and validated is about to be
-                    # discarded and re-solved from scratch. The re-solve is
-                    # anchored to the request's start_pose, which was baked in
-                    # when the chain was PLANNED - so if the arm is not there
-                    # now, the trajectory produced is a different one, not a
-                    # re-run of the one that was checked. That is the
-                    # execution/display mismatch, and it is silent: the goal
-                    # succeeds, the controller reports success, and only the
-                    # joint values disagree. Refuse rather than drive it.
-                    if bool(getattr(goal_handle.request, "force_cached", False)):
-                        # force_cached: the caller demands the validated plan
-                        # and forbids a fresh solve here. With the multi-entry
-                        # cache every chain segment has a matching entry, so a
-                        # miss means the conditions genuinely changed (cache
-                        # cleared, TTL expired, world mutated) - driving a
-                        # fresh solve is exactly the IK-branch jump this
-                        # pipeline exists to avoid. Fail loudly instead.
-                        msg = (
-                            "force_cached: no matching cached trajectory "
-                            "for this target; refusing to re-solve"
-                        )
-                        self.get_logger().error(f"{planner.get_planner_name()}: {msg}")
-                        result_msg.result = TrajectoryResult()
-                        result_msg.result.success = False
-                        result_msg.result.message = msg
-                        goal_handle.abort()
-                        return result_msg
-                    drift_ok, drift_msg = self._check_execution_start_drift(goal)
-                    if not drift_ok:
-                        self.get_logger().error(drift_msg)
-                        result_msg.result = TrajectoryResult()
-                        result_msg.result.success = False
-                        result_msg.result.message = drift_msg
-                        goal_handle.abort()
-                        return result_msg
-                    result = self.lane_plan.call(
-                        self._refresh_and_plan, planner, start_state, goal, config, prio=PRIO_PLAN)
-                    _t_world = _t_setup
-                    _t_plan = time.monotonic()
-                    self.get_logger().info(
-                        f"[plan-perf] {planner.get_planner_name()} (execute path): "
-                        f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
-                        f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
-                        f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
-                        f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
-                    )
-                    if not result.success:
-                        self.lane_plan.call(
-                            self._fill_result_insight,
-                            result_msg.result,
-                            planner,
-                            goal,
-                            result,
-                            start_state,
-                            fill_arrays=False,
-                            prio=PRIO_PLAN,
-                        )
-                        self.get_logger().error(
-                            f"Planning failed in execute path: {result.message}\n"
-                            + self._format_collision_feedback(
-                                result_msg.result.start_state_collisions,
-                                result_msg.result.end_state_collisions,
-                            )
-                        )
-                        result_msg.result.success = False
-                        result_msg.result.message = f"Planning failed: {result.message}"
-                        goal_handle.abort()
-                        return result_msg
-                # A hit CONSUMED its entry; a miss re-solved this target, which
-                # supersedes its plan-time entry. Either way the arm is no
-                # longer where that plan's start_pose says — keep every
-                # OTHER segment's entry for the rest of the chain.
-                self.lane_plan.call(
-                    self._drop_pending_plan, start_state, goal, entry=reuse, prio=PRIO_PLAN
-                )
-            else:
-                # Reactive: (re)set the goal on the solver before servoing.
-                result = self.lane_reactive.call(self._refresh_and_plan_reactive, planner, start_state, goal, config, prio=PRIO_REACTIVE)
-                _t_world = _t_setup
-                self.get_logger().info(f"Planning with {planner.get_planner_name()}")
-                _t_plan = time.monotonic()
-                self.get_logger().info(
-                    f"[plan-perf] {planner.get_planner_name()} (execute path): "
-                    f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
-                    f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
-                    f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
-                    f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
-                )
-                if not result.success:
-                    self.lane_reactive.call(
-                        self._fill_result_insight,
-                        result_msg.result,
-                        planner,
-                        goal,
-                        result,
-                        start_state,
-                        fill_arrays=False,
-                        prio=PRIO_REACTIVE,
-                    )
-                    self.get_logger().error(
-                        f"Planning failed in execute path: {result.message}\n"
-                        + self._format_collision_feedback(
-                            result_msg.result.start_state_collisions,
-                            result_msg.result.end_state_collisions,
-                        )
-                    )
-                    result_msg.result.success = False
-                    result_msg.result.message = f"Planning failed: {result.message}"
-                    goal_handle.abort()
-                    return result_msg
-
-            if result is not None:
-                # Winner-per-waypoint insight + stats for the fresh plan, plus
-                # the trajectory that is about to be driven. This must not be
-                # fill_arrays=False: the re-solve can move the endpoints from
-                # what the plan-time solve produced, and the executor's
-                # chain-continuity check needs those DRIVEN endpoints. A result
-                # with no waypoints reads as "nothing to compare" there, and
-                # the chain silently drives on into segments anchored to the
-                # old end state - which is the bug this trajectory reporting
-                # exists to stop.
-                self.lane_plan.call(
+            # Reactive: (re)set the goal on the solver before servoing.
+            result = self.lane_reactive.call(
+                self._refresh_and_plan_reactive, planner, start_state, goal,
+                config, prio=PRIO_REACTIVE,
+            )
+            _t_world = _t_setup
+            self.get_logger().info(f"Planning with {planner.get_planner_name()}")
+            _t_plan = time.monotonic()
+            self.get_logger().info(
+                f"[plan-perf] {planner.get_planner_name()} (execute path): "
+                f"node_setup(start-state+config+planner-setup+lock) {(_t_setup - _t_total) * 1e3:.1f} ms, "
+                f"world_refresh(ESDF+world-push) {(_t_world - _t_setup) * 1e3:.1f} ms, "
+                f"planner_plan(=curobo_solve+finalize) {(_t_plan - _t_world) * 1e3:.1f} ms, "
+                f"end_to_end {(_t_plan - _t_total) * 1e3:.1f} ms"
+            )
+            if not result.success:
+                self.lane_reactive.call(
                     self._fill_result_insight,
                     result_msg.result,
                     planner,
                     goal,
                     result,
                     start_state,
-                    fill_arrays=True,
-                    prio=PRIO_PLAN,
+                    fill_arrays=False,
+                    prio=PRIO_REACTIVE,
                 )
-            else:
-                # Reused a matching cached preview: report the planner's own
-                # (preview-plan) insight fields and the replayed trajectory.
-                # Same reasoning: a cache hit replays exactly the cached plan,
-                # so the executor must be able to verify where it is driving,
-                # or an off-spec reuse is indistinguishable from a clean one.
-                meta = self._result_meta_from_planner(planner)
-                self._fill_insight_fields(
-                    result_msg.result,
-                    goal,
-                    meta,
-                    planner,
-                    success=True,
-                    message="Execution completed",
-                    start_state=start_state,
+                self.get_logger().error(
+                    f"Planning failed in execute path: {result.message}\n"
+                    + self._format_collision_feedback(
+                        result_msg.result.start_state_collisions,
+                        result_msg.result.end_state_collisions,
+                    )
                 )
-                self.lane_plan.call(
-                    self._fill_reused_trajectory,
-                    result_msg.result, planner, reuse["trajectory"], prio=PRIO_PLAN,
-                )
+                result_msg.result.success = False
+                result_msg.result.message = f"Planning failed: {result.message}"
+                goal_handle.abort()
+                return result_msg
+
+            # Winner-per-waypoint insight + stats for the fresh plan, plus the
+            # trajectory that is about to be driven.
+            self.lane_plan.call(
+                self._fill_result_insight,
+                result_msg.result,
+                planner,
+                goal,
+                result,
+                start_state,
+                fill_arrays=True,
+                prio=PRIO_PLAN,
+            )
 
             self.get_logger().info(f"Executing with {planner.get_planner_name()}")
-            if result is not None:
-                # Freshly solved (re-solve or reactive): plan() already staged
-                # it into robot_context's command buffer.
-                success = planner.execute(self.robot_context, goal_handle)
-            else:
-                # Replayed cache entry: the planner's slot and the command
-                # buffer only hold the LAST segment planned, which for a
-                # mid-chain hit is NOT this segment — stage it then stream.
-                success = planner.replay(
-                    reuse["trajectory"], self.robot_context, goal_handle
-                )
+            # Freshly solved (reactive): plan() already staged it into
+            # robot_context's command buffer.
+            success = planner.execute(self.robot_context, goal_handle)
 
             # Cancel takes precedence over the planner's return value.
             if goal_handle.is_cancel_requested:
@@ -2726,8 +2658,6 @@ class UnifiedPlannerNode(Node):
         # pose keeps its historical meaning: already in active-DOF order.
         model_names = self.robot_context.description.joint_names
         start_joint_pose = resolve_start_pose(start_pose, model_names, current)
-            # A short start pose (e.g. the MoveIt arm group sends only its 7
-            # DOF) pads the trailing DOF (wrist-mounted gripper) from the
         # A short start pose (e.g. the MoveIt arm group sends only its 7
         # DOF) pads the trailing DOF (wrist-mounted gripper) from the
         # robot's current pose so the planner always gets a full-DOF
@@ -2753,286 +2683,6 @@ class UnifiedPlannerNode(Node):
             )
         )
         return start_joint_pose, start_state
-
-    def _check_execution_start_drift(self, goal):
-        """Is the arm still where this goal says it starts?
-
-        Only meaningful on the re-solve path. On a cache hit the signature
-        already pins the start state, so a hit means the arm has not moved and
-        there is nothing to compare. On a miss the request's ``start_pose`` is
-        the plan-time pose, and ``_resolve_start_state`` prefers it over the
-        arm's real one ("Using start position from request") - so a stale pose
-        silently anchors the new solve to a configuration the arm is not in.
-        cuRobo then finds a different IK branch, and the trajectory that gets
-        driven is not the trajectory that was planned and displayed.
-
-        Two outcomes, because the two situations mean opposite things:
-
-          * small drift - ordinary servo tracking error. The arm really is
-            slightly off, re-solving from where it actually is is the correct
-            response, and the new plan IS the right plan. Warn, proceed.
-          * large drift - the arm is somewhere the chain never put it (an
-            earlier segment failed, was skipped, or the arm was moved
-            externally). Re-solving produces a trajectory unrelated to the
-            validated one. Refuse, and leave the arm where it is so the caller
-            can recover deliberately rather than inherit a mystery motion.
-
-        Returns ``(ok, message)``; ``message`` is the log/error text.
-        """
-        start_pose = getattr(goal, "start_pose", None)
-        if start_pose is None or len(start_pose.position) == 0:
-            # No start_pose in the goal: the planner is already anchored to the
-            # arm's live pose, so there is nothing stale to catch.
-            return True, ""
-        try:
-            requested = [float(x) for x in start_pose.position]
-            current = [float(x) for x in self.robot_context.get_joint_pose()]
-        except (TypeError, RuntimeError, ValueError) as exc:
-            # A tensor that will not convert is not evidence of drift. Do not
-            # turn a type problem into a refused motion.
-            self.get_logger().warn(
-                f"Could not compare requested start pose against the arm's "
-                f"actual pose ({exc}); trusting the request."
-            )
-            return True, ""
-
-        # A short start pose (e.g. a 7-DOF arm group) is padded from the live
-        # pose in _resolve_start_state, so pad the same way before comparing.
-        n = min(len(requested), len(current))
-        if n == 0:
-            return True, ""
-        requested, current = requested[:n], current[:n]
-        deltas = [abs(a - b) for a, b in zip(requested, current)]
-        worst = max(range(n), key=deltas.__getitem__)
-        drift = deltas[worst]
-        fmt = lambda v: [f"{x:.3f}" for x in v]  # noqa: E731
-        where = (
-            f"joint {worst}: requested {requested[worst]:.3f} rad, "
-            f"arm is at {current[worst]:.3f} rad ({drift:.3f} rad off)"
-        )
-
-        warn = (
-            self.get_parameter("execution_start_warn_drift")
-            .get_parameter_value()
-            .double_value
-        )
-        tol = (
-            self.get_parameter("execution_start_tolerance")
-            .get_parameter_value()
-            .double_value
-        )
-        if drift > tol:
-            return False, (
-                f"Refusing to re-solve for execution: the arm is {drift:.3f} rad "
-                f"from the start state this goal was planned from, over the "
-                f"{tol:.3f} rad execution_start_tolerance. The cached plan "
-                f"missed (scene or cache state changed) and re-solving from the "
-                f"planned start pose would drive a trajectory that is not the "
-                f"one that was planned. Requested {fmt(requested)}, actual "
-                f"{fmt(current)}; worst {where}."
-            )
-        if drift > warn:
-            self.get_logger().warn(
-                f"Execute re-solve with {drift:.3f} rad of start-pose drift "
-                f"(within tolerance {tol:.3f}, warn above {warn:.3f}). "
-                f"Re-solving from the arm's actual pose; worst {where}."
-            )
-        return True, ""
-
-    def _prune_plan_cache(self):
-        """Drop expired entries and bound the pool's size (oldest first).
-
-        Called on store and on lookup, so an expired entry is never handed
-        out and a long multi-task run cannot accumulate entries between TTL
-        prunes. Bounded by ``trajectory_cache_size`` (default 64), far more
-        than any single chain's segment count.
-        """
-        ttl = (
-            self.get_parameter("trajectory_cache_ttl")
-            .get_parameter_value()
-            .double_value
-        )
-        cap = (
-            self.get_parameter("trajectory_cache_size")
-            .get_parameter_value()
-            .integer_value
-        )
-        now = time.monotonic()
-        alive = [e for e in self._pending_plan if (now - e["stamp"]) <= ttl]
-        if len(alive) > cap:
-            alive = alive[-cap:]
-        self._pending_plan = alive
-
-    def _store_pending_plan(self, start_state, req, traj=None):
-        """Cache a just-planned open-loop trajectory for execute-time reuse.
-
-        Multi-entry, keyed by target signature, so EVERY segment of a chain
-        is replayable. The single-slot predecessor only ever knew the LAST
-        segment planned, so a mid-chain execute always missed and re-solved —
-        and a re-solve of a multi-solution pose goal is free to pick the
-        OTHER IK branch, which is exactly the divergence the chain-continuity
-        check exists to catch. Each entry keeps the trajectory itself: the
-        planner's ``planned_trajectory`` slot is overwritten by the next
-        segment's solve before that segment executes.
-        """
-        if traj is None:
-            planner = self.planner_manager.get_current_planner()
-            traj = getattr(planner, "planned_trajectory", None)
-        self._prune_plan_cache()
-        self._pending_plan.append(
-            {
-                "planner": self.planner_manager.get_current_planner_type(),
-                "signature": self._target_signature(start_state, req),
-                "stamp": time.monotonic(),
-                "trajectory": traj,
-            }
-        )
-
-    def _pending_plan_matches(self, start_state, req):
-        """The fresh cached plan entry matching this target, or None.
-
-        Returns the whole entry (with its stored trajectory), not a bool:
-        the execute action replays THAT trajectory. The signature includes
-        the start state, so a match also proves the arm has not drifted from
-        the plan.
-        """
-        self._prune_plan_cache()
-        sig = self._target_signature(start_state, req)
-        planner_key = self.planner_manager.get_current_planner_type()
-        for entry in self._pending_plan:
-            if entry["planner"] != planner_key:
-                continue
-            if self._signatures_match(entry["signature"], sig):
-                return entry
-        return None
-
-    def _drop_pending_plan(self, start_state, req, entry=None):
-        """Drop plan-cache entries that execution consumed or superseded.
-
-        A replay CONSUMES its entry (identity drop) so a later identical
-        request cannot replay a trajectory the arm has already driven. A
-        re-solve supersedes the plan-time entry for the same target
-        (signature drop): the arm is now on the re-solved path, and replaying
-        the old plan anchored to a stale ``start_pose`` would strand the
-        chain somewhere the plan never validated. Either way only THIS
-        segment's entries go; the rest of the chain's stay replayable.
-        """
-        if entry:
-            self._pending_plan = [e for e in self._pending_plan if e is not entry]
-            return
-        sig = self._target_signature(start_state, req)
-        planner_key = self.planner_manager.get_current_planner_type()
-        self._pending_plan = [
-            e
-            for e in self._pending_plan
-            if e["planner"] != planner_key
-            or not self._signatures_match(e["signature"], sig)
-        ]
-
-    @staticmethod
-    def _pose_tuple(p):
-        return (
-            p.position.x,
-            p.position.y,
-            p.position.z,
-            p.orientation.w,
-            p.orientation.x,
-            p.orientation.y,
-            p.orientation.z,
-        )
-
-    def _target_signature(self, start_state, req) -> dict:
-        start = [float(x) for x in start_state.position[0].cpu().tolist()]
-        goalsets = [
-            [self._pose_tuple(p) for p in g.poses]
-            for g in (getattr(req, "goalsets", None) or [])
-        ]
-        # Joint targets are per-segment (Goalset.target_joint_positions); each
-        # entry stays aligned with its goalset ([] for Cartesian segments).
-        # The NAMES are part of the key: a name-keyed goal and a nameless one
-        # that happen to hold the same numbers must not share a cache entry,
-        # because the node resolves them differently.
-        joints = [
-            [float(x) for x in (getattr(g, "target_joint_positions", None) or [])]
-            for g in (getattr(req, "goalsets", None) or [])
-        ]
-        joint_names = [
-            [str(n) for n in (getattr(g, "target_joint_names", None) or [])]
-            for g in (getattr(req, "goalsets", None) or [])
-        ]
-        # Planning options shape the plan (waypoint_tolerance gates waypoint
-        # status, log_considered_trajectories gates the considered rows), so a
-        # cache reuse must not cross an options boundary.
-        opts = getattr(req, "options", None)
-        return {
-            "start": start,
-            "goalsets": goalsets,
-            "target_joints": joints,
-            "target_joint_names": joint_names,
-            "options": (
-                (
-                    float(getattr(opts, "waypoint_tolerance", 0.0)),
-                    bool(getattr(opts, "log_considered_trajectories", False)),
-                )
-                if opts is not None
-                else (0.0, False)
-            ),
-        }
-
-    @staticmethod
-    def _poses_match(a, b, pos_tol, ori_tol) -> bool:
-        if a is None and b is None:
-            return True
-        if a is None or b is None:
-            return False
-        if any(abs(a[i] - b[i]) > pos_tol for i in range(3)):
-            return False
-        dot = sum(a[3 + i] * b[3 + i] for i in range(4))
-        return (1.0 - abs(dot)) < ori_tol
-
-    def _signatures_match(
-        self, a, b, pos_tol=1e-3, ori_tol=1e-2, joint_tol=1e-3
-    ) -> bool:
-        # Options must be identical (exact tuple equality); a signature stored
-        # before options were part of the signature has no key -> None != a
-        # tuple, so that cache never replays across the migration boundary.
-        if a.get("options") != b.get("options"):
-            return False
-        if len(a["start"]) != len(b["start"]) or any(
-            abs(x - y) > joint_tol for x, y in zip(a["start"], b["start"])
-        ):
-            return False
-        aj, bj = a["target_joints"], b["target_joints"]
-        if len(aj) != len(bj):
-            return False
-        for aj_seg, bj_seg in zip(aj, bj):
-            if len(aj_seg) != len(bj_seg):
-                return False
-            if any(abs(x - y) > joint_tol for x, y in zip(aj_seg, bj_seg)):
-                return False
-        ag, bg = a["goalsets"], b["goalsets"]
-        if len(ag) != len(bg):
-            return False
-        for gset_a, gset_b in zip(ag, bg):
-            if len(gset_a) != len(gset_b):
-                return False
-            if any(
-                not self._poses_match(x, y, pos_tol, ori_tol)
-                for x, y in zip(gset_a, gset_b)
-            ):
-                return False
-        return True
-
-    def clear_trajectory_callback(self, request, response):
-        """Discard every cached (preview) trajectory on user request."""
-        had = bool(self._pending_plan)
-        self._pending_plan = []
-        response.success = True
-        response.message = (
-            "Cached trajectory cleared" if had else "No cached trajectory"
-        )
-        self.get_logger().info(response.message)
-        return response
 
     def clear_voxel_map_callback(self, request, response):
         """Clear ONLY the dynamic (depth-derived) voxel channel.
