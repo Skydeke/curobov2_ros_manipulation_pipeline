@@ -31,7 +31,12 @@ The plugin registers three components (`rviz2_plugin.xml`):
 `TargetDisplay` shows a draggable 6-DOF target in the 3D view. The Planning
 tab's pose spin boxes (X/Y/Z, roll/pitch/yaw) stay synchronized
 with the target in both directions: drag the marker or type coordinates,
-whichever is easier. The pose is expressed in the robot base frame.
+whichever is easier. The pose is expressed in the RViz fixed frame; the
+panel tags outgoing goals with that frame and the server resolves them
+into the robot base link via TF. A freshly added display spawns at its
+default pose — the panel moves it to the live tool pose (from the
+planner's `current_tool_pose` topic) exactly once, until you drag it,
+type into it, or load a config with saved values.
 
 The display is planner-agnostic — all planner/MPC logic lives in the panel.
 

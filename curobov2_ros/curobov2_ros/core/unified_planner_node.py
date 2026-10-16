@@ -31,6 +31,8 @@ import traceback
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import rclpy
+import rclpy.duration
+import rclpy.time
 import torch
 from rclpy.action import ActionServer
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup, ReentrantCallbackGroup
@@ -39,6 +41,8 @@ from rclpy.node import Node
 
 from sensor_msgs.msg import JointState as JointStateMsg
 from std_srvs.srv import Trigger
+from geometry_msgs.msg import PoseStamped as PoseStampedMsg
+from tf2_ros import Buffer, TransformListener
 from curobov2_ros_interfaces.srv import (
     TrajectoryGeneration,
     TrajectoryGenerationBatch,
@@ -73,6 +77,11 @@ from curobov2_ros.core.collision_distance import (
     _attributed_self_collisions,
 )
 from curobov2_ros.core.attachment_services import AttachmentServices
+from curobov2_ros.core.frame_utils import (
+    apply_transform,
+    resolve_poses_to_base,
+    resolve_to_base,
+)
 from curobov2_ros.core.ik_services import IKServices
 from curobov2_ros.core.fk_services import FKServices
 from curobov2_ros.core.reachability_services import ReachabilityServices
@@ -698,6 +707,14 @@ class UnifiedPlannerNode(Node):
         # Shared IK — same Scene as MotionPlanner.
         self.ik_services = IKServices(self, self.config_wrapper_ik)
 
+        # Node TF buffer for server-side frame resolution: every pose-carrying
+        # request arrives tagged with its frame (Goalset/Ik/IkBatch/
+        # GenerateRM frame_id, mpc_goal header) and is resolved into the
+        # configured base link here, so clients (RViz) send fixed-frame
+        # coordinates and own no frame configuration themselves.
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
         # Reachability map (uniform grid IK on a plane) — reuses the IK solver.
         self.reachability_services = ReachabilityServices(
             self, self.config_wrapper_motion, self.ik_services
@@ -779,14 +796,23 @@ class UnifiedPlannerNode(Node):
             callback_group=ReentrantCallbackGroup(),
         )
 
-        from geometry_msgs.msg import Pose as PoseMsg
-
         self.mpc_goal_sub = self.create_subscription(
-            PoseMsg,
+            PoseStampedMsg,
             f"{self.get_name()}/mpc_goal",
             self.mpc_goal_callback,
             10,
         )
+
+        # Live tool pose for RViz seeding: a freshly added TargetDisplay parks
+        # at its hardcoded default in the fixed frame, disconnected from the
+        # arm. The panel seeds pristine displays from this topic (one shot).
+        # Base frame, TF-resolved server-side; fixed-frame conversion happens
+        # in the panel, which owns the fixed frame.
+        self.tool_pose_pub = self.create_publisher(
+            PoseStampedMsg, f"{self.get_name()}/current_tool_pose", 10)
+        self._tool_pose_logged = False
+        self.tool_pose_timer = self.create_timer(
+            1.0, self._publish_tool_pose_callback)
 
         self.get_logger().info(
             "Unified planner ready with initial planner: "
@@ -2288,23 +2314,33 @@ class UnifiedPlannerNode(Node):
 
         This is the ROS mapping of cuRobo's continuous `update_goal_tool_poses`:
         the active reactive controller retargets on its next loop iteration.
+        The stamped pose arrives in the sender's frame (RViz sends fixed-frame
+        coordinates); it is resolved into the configured base link here.
         """
         planner = self.planner_manager.get_current_planner()
         if isinstance(planner, ReactiveController):
+            try:
+                pose = resolve_to_base(
+                    msg.pose, msg.header.frame_id or "",
+                    self.config_wrapper_motion.base_link, self.tf_buffer)
+            except RuntimeError as e:
+                self.get_logger().warn(
+                    f"Reactive goal dropped ({e})", throttle_duration_sec=5.0)
+                return
             planner.set_live_goal(
                 [
-                    msg.position.x,
-                    msg.position.y,
-                    msg.position.z,
-                    msg.orientation.w,
-                    msg.orientation.x,
-                    msg.orientation.y,
-                    msg.orientation.z,
+                    pose.position.x,
+                    pose.position.y,
+                    pose.position.z,
+                    pose.orientation.w,
+                    pose.orientation.x,
+                    pose.orientation.y,
+                    pose.orientation.z,
                 ]
             )
             self.get_logger().debug(
                 f"Reactive goal updated from topic: "
-                f"[{msg.position.x:.3f}, {msg.position.y:.3f}, {msg.position.z:.3f}]"
+                f"[{pose.position.x:.3f}, {pose.position.y:.3f}, {pose.position.z:.3f}]"
             )
         else:
             name = planner.get_planner_name() if planner is not None else "none"
@@ -2312,6 +2348,38 @@ class UnifiedPlannerNode(Node):
                 f"Received reactive goal but current planner is {name} - goal ignored",
                 throttle_duration_sec=5.0,
             )
+
+    def _publish_tool_pose_callback(self):
+        """Publish the live tool pose (base frame) for RViz target seeding.
+
+        The tool frame is the same frame /ik_batch solves for
+        (solver kinematics tool_frames[0]), so a seeded gizmo marks exactly
+        what the planner would drive to. Silent until TF + solver are ready.
+        """
+        from geometry_msgs.msg import Pose as PoseMsg
+
+        solver = self.ik_services._ik_solver
+        if solver is None:
+            return
+        try:
+            tool_frame = solver.kinematics.tool_frames[0]
+            base_link = self.config_wrapper_motion.base_link
+            tf = self.tf_buffer.lookup_transform(
+                base_link, tool_frame, rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=0.2))
+        except Exception:  # noqa: BLE001 - TF/solver not ready yet; retry next tick
+            return
+        msg = PoseStampedMsg()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = base_link
+        # Pose of the tool frame origin == the transform applied to identity.
+        msg.pose = apply_transform(PoseMsg(), tf)
+        self.tool_pose_pub.publish(msg)
+        if not self._tool_pose_logged:
+            self._tool_pose_logged = True
+            self.get_logger().info(
+                f"Publishing live tool pose on current_tool_pose "
+                f"(frame '{base_link}', tool '{tool_frame}')")
 
     def get_planners_callback(
         self, request: GetPlanners.Request, response: GetPlanners.Response
@@ -2385,7 +2453,7 @@ class UnifiedPlannerNode(Node):
                     f"{planner_name}: requires exactly one goalset entry with a "
                     f"single pose, got {len(goalsets)} set(s) of sizes {sizes}"
                 )
-            return True, None
+            return self._resolve_goalset_frames(planner_name, goalsets)
 
         max_goalset = (
             self.get_parameter("max_goalset").get_parameter_value().integer_value
@@ -2396,6 +2464,30 @@ class UnifiedPlannerNode(Node):
                 f"max_goalset={max_goalset} (per-segment cap; the goalset buffer "
                 f"is sized at solver build)"
             )
+        return self._resolve_goalset_frames(planner_name, goalsets)
+
+    def _resolve_goalset_frames(self, planner_name, goalsets):
+        """Normalize validated Cartesian goalsets into the base frame.
+
+        Server owns every transform: each goalset arrives tagged with its
+        frame (Goalset.frame_id, "" == base). Non-base goalsets are resolved
+        into the configured base link via TF and marked base, so every
+        planner below reads base-frame poses. Joint-space goalsets are
+        frame-free and untouched. A failed lookup rejects the request
+        instead of solving in the wrong frame.
+        """
+        try:
+            base_link = self.config_wrapper_motion.base_link
+            for g in goalsets:
+                poses = list(getattr(g, "poses", []) or [])
+                if not poses:
+                    continue
+                g.poses = resolve_poses_to_base(
+                    poses, getattr(g, "frame_id", "") or "", base_link,
+                    self.tf_buffer)
+                g.frame_id = ""
+        except RuntimeError as e:
+            return False, f"{planner_name}: {e}"
         return True, None
 
     def _setup_planner(self, planner):

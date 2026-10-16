@@ -42,6 +42,9 @@ set(dependencies_pkgs
   geometry_msgs
   visualization_msgs
   interactive_markers
+  tf2
+  tf2_ros
+  tf2_geometry_msgs
   nav2_msgs
   sensor_msgs
   trajectory_msgs

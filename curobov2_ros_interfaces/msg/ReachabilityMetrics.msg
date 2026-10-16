@@ -6,6 +6,10 @@
 # joint configuration itself so a viewer can render the full robot at the
 # selected cells.
 #
+# header.frame_id is the frame the request plane arrived in (GenerateRM
+# frame_id, "" echoed as the robot base frame): plane_pose and goals are
+# expressed in it so a viewer can render them directly without its own TF.
+#
 # Per-cell fields reuse the same message types as the Ik / IkBatch services:
 # joint_states / joint_states_valid mirror IkBatch's response exactly.
 std_msgs/Header header

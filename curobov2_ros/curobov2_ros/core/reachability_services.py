@@ -26,6 +26,7 @@ from sensor_msgs.msg import JointState
 
 from curobov2_ros_interfaces.srv import GenerateRM
 from curobov2_ros_interfaces.msg import ReachabilityMetrics
+from curobov2_ros.core.frame_utils import apply_transform, get_transform
 
 # Cap on the total number of grid cells solved per request. The IK solver is
 # created with max_batch_size == grid size and allocates per-batch buffers, so
@@ -101,16 +102,48 @@ class ReachabilityServices:
                               response: GenerateRM.Response):
         t0 = time.perf_counter()
         try:
+            base_link = self._config.base_link
+            # Server owns every transform: the plane arrives tagged with its
+            # frame (RViz sends fixed-frame coordinates). Resolve it into the
+            # base link, solve there, and return the grid in the request
+            # frame so a viewer renders it directly ("\" == base: no-op).
+            req_frame = getattr(request, "frame_id", "") or base_link
+            plane_req = Pose()
+            plane_req.position.x = request.plane_position_x
+            plane_req.position.y = request.plane_position_y
+            plane_req.position.z = request.plane_position_z
+            plane_req.orientation.x = request.plane_orientation_x
+            plane_req.orientation.y = request.plane_orientation_y
+            plane_req.orientation.z = request.plane_orientation_z
+            plane_req.orientation.w = request.plane_orientation_w
+            if req_frame != base_link:
+                tf_buffer = getattr(self._node, "tf_buffer", None)
+                if tf_buffer is None:
+                    raise RuntimeError(
+                        f"cannot transform '{req_frame}' -> '{base_link}': "
+                        "no TF buffer")
+                plane_base = apply_transform(
+                    plane_req, get_transform(tf_buffer, base_link, req_frame))
+            else:
+                plane_base = plane_req
+
             gx, gy = self._grid_size(request)
-            goals = self._build_goals(request, gx, gy)
+            goals = self._build_goals(
+                plane_base, request.plane_size_x, request.plane_size_y,
+                gx, gy)
             # solve_poses() runs on the shared 'kin' lane (see IKServices._on_lane),
             # so it never races an open-loop plan's CUDA graph capture.
             # solve_poses() uses the same default seed count as /ik & /ik_batch.
             ok, positions, flags, joint_names = self._ik_services.solve_poses(goals)
 
+            if req_frame != base_link:
+                tf_back = get_transform(
+                    getattr(self._node, "tf_buffer"), req_frame, base_link)
+                goals = [apply_transform(g, tf_back) for g in goals]
+
             metrics = ReachabilityMetrics()
             metrics.header.stamp = self._node.get_clock().now().to_msg()
-            metrics.header.frame_id = self._config.base_link
+            metrics.header.frame_id = req_frame
             metrics.map_id = self._map_id
             self._map_id += 1
 
@@ -181,35 +214,38 @@ class ReachabilityServices:
         return gx, gy
 
     @staticmethod
-    def _build_goals(request, gx: int, gy: int):
-        """World-frame tool poses for every grid cell, row-major (x fastest).
+    def _build_goals(plane: Pose, size_x: float, size_y: float,
+                     gx: int, gy: int):
+        """Base-frame tool poses for every grid cell, row-major (x fastest).
 
-        The plane's local XY spans [-size/2, size/2]; the local Z axis is the
-        plane's normal. Every cell's tool is the plane frame composed with
-        +90deg about its local Y axis: the tool frame[0] (grasping_frame) is a
-        90-deg-offset frame on the flange whose +X is the physical axis the
-        end effector visibly extends along, so tool +X points INTO the plane
-        (along -normal). Mimicking an IK-goal call in the tool frame, this is
-        the "inverse" tool-frame goal: solve_pose() then lands the solved
-        robot's end effector pointing at the plane, matching the arrows.
+        ``plane`` is the grid origin already resolved into the base frame;
+        sizes are the plane extents in metres. The plane's local XY spans
+        [-size/2, size/2]; the local Z axis is the plane's normal. Every
+        cell's tool is the plane frame composed with +90deg about its local
+        Y axis: the tool frame[0] (grasping_frame) is a 90-deg-offset frame
+        on the flange whose +X is the physical axis the end effector visibly
+        extends along, so tool +X points INTO the plane (along -normal).
+        Mimicking an IK-goal call in the tool frame, this is the "inverse"
+        tool-frame goal: solve_pose() then lands the solved robot's end
+        effector pointing at the plane, matching the arrows.
         """
         quat = _normalize_quat((
-            request.plane_orientation_w,
-            request.plane_orientation_x,
-            request.plane_orientation_y,
-            request.plane_orientation_z))
+            plane.orientation.w,
+            plane.orientation.x,
+            plane.orientation.y,
+            plane.orientation.z))
         rot = _quat_to_matrix(quat)
         # +90deg about the plane's local Y: rotates the plane frame so tool
         # +X (the grasping_frame's physical pointing axis) maps to the plane's
         # -Z / inward normal. Ry(90): (x,y,z) -> (-z,y,x).
         tool_quat = _quat_multiply(
             quat, (math.cos(math.pi / 4.0), 0.0, math.sin(math.pi / 4.0), 0.0))
-        origin = np.array([request.plane_position_x,
-                           request.plane_position_y,
-                           request.plane_position_z], dtype=np.float64)
+        origin = np.array([plane.position.x,
+                           plane.position.y,
+                           plane.position.z], dtype=np.float64)
 
-        hx = request.plane_size_x / 2.0
-        hy = request.plane_size_y / 2.0
+        hx = size_x / 2.0
+        hy = size_y / 2.0
         us = np.linspace(-hx, hx, gx, dtype=np.float64) \
             if gx > 1 else np.zeros(1, dtype=np.float64)
         vs = np.linspace(-hy, hy, gy, dtype=np.float64) \

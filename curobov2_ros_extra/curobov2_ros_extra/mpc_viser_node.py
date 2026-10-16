@@ -56,7 +56,7 @@ class MpcViserNode(Node):
 
     The target is set by dragging the control frame. A ``SetPlanner`` call
     selects the MPC (reactive) controller, a ``SendTrajectory`` action starts
-    the continuous servo loop, and ``Pose`` messages on the mpc_goal topic
+    the continuous servo loop, and ``PoseStamped`` messages on the mpc_goal topic
     retarget it live. The server's joint commands (action feedback) are rendered.
     """
 
@@ -105,9 +105,11 @@ class MpcViserNode(Node):
         )
         self._action_client = ActionClient(self, SendTrajectory, f'{prefix}/execute_trajectory')
 
-        # Live MPC goal: publishing a Pose retargets the active reactive loop.
-        from geometry_msgs.msg import Pose as PoseMsg
-        self._goal_pub = self.create_publisher(PoseMsg, f'{prefix}/mpc_goal', 10)
+        # Live MPC goal: publishing a stamped pose retargets the active
+        # reactive loop. Viser-world coordinates coincide with the robot
+        # base frame, so the header stays empty ("" == base convention).
+        from geometry_msgs.msg import PoseStamped as PoseStampedMsg
+        self._goal_pub = self.create_publisher(PoseStampedMsg, f'{prefix}/mpc_goal', 10)
 
         self._js_sub = self.create_subscription(
             JointState, '/joint_states', self._on_js, 10
@@ -237,14 +239,15 @@ class MpcViserNode(Node):
         if self._last_goal_key == key:
             return
         self._last_goal_key = key
-        msg = Pose()
-        msg.position.x = float(pos[0])
-        msg.position.y = float(pos[1])
-        msg.position.z = float(pos[2])
-        msg.orientation.w = float(quat[0])
-        msg.orientation.x = float(quat[1])
-        msg.orientation.y = float(quat[2])
-        msg.orientation.z = float(quat[3])
+        msg = PoseStampedMsg()
+        msg.header.frame_id = ""
+        msg.pose.position.x = float(pos[0])
+        msg.pose.position.y = float(pos[1])
+        msg.pose.position.z = float(pos[2])
+        msg.pose.orientation.w = float(quat[0])
+        msg.pose.orientation.x = float(quat[1])
+        msg.pose.orientation.y = float(quat[2])
+        msg.pose.orientation.z = float(quat[3])
         self._goal_pub.publish(msg)
 
     def _start_servo(self):

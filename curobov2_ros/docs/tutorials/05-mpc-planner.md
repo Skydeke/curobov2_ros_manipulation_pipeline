@@ -38,8 +38,8 @@ Watch the feedback: `state` goes `PLANNING` → `TRACKING`, `position_error` shr
 While the action is running, publish a new pose:
 
 ```bash
-ros2 topic pub --once /unified_planner/mpc_goal geometry_msgs/msg/Pose \
-  "{position: {x: 0.5, y: -0.3, z: 0.5}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}"
+ros2 topic pub --once /unified_planner/mpc_goal geometry_msgs/msg/PoseStamped \
+  "{header: {frame_id: 'base_link'}, pose: {position: {x: 0.5, y: -0.3, z: 0.5}, orientation: {x: 0.0, y: 1.0, z: 0.0, w: 0.0}}}"
 ```
 
 The robot bends its current motion toward the new goal without stopping. Publish continuously (e.g. from a perception node tracking an object) and the arm follows. Messages on `mpc_goal` are ignored (with a warning) when no reactive planner is active.

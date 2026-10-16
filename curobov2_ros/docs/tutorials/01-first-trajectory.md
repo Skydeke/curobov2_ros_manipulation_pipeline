@@ -36,7 +36,7 @@ The robot model (supplied via `robot_config_file`) defines your workspace: joint
 - y: −0.5 to 0.5 m
 - z: 0.1 to 0.8 m (above the base)
 
-Orientation is a quaternion in the base frame. `{x: 0, y: 1, z: 0, w: 0}` points the tool straight down — a good default for tabletop poses.
+Orientation is a quaternion in the goal's frame. `{x: 0, y: 1, z: 0, w: 0}` points the tool straight down — a good default for tabletop poses. Each goalset carries a `frame_id` (TF frame the poses are expressed in, `""` == robot base frame); the server resolves any other frame into the base link via TF, so RViz clients send fixed-frame coordinates.
 
 ## 3. Generate a trajectory
 

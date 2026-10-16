@@ -139,7 +139,7 @@ Reactive control reuses the **unified** interface — no dedicated action:
 - `generate_trajectory` → sets the reactive goal (`plan()`); returns no trajectory.
 - `execute_trajectory` (`SendTrajectory` action) → drives the control loop with
   feedback / cancellation.
-- `mpc_goal` topic (`geometry_msgs/Pose`) → live retargeting during execution; this
+- `mpc_goal` topic (`geometry_msgs/PoseStamped`) → live retargeting during execution; this
   is the ROS mapping of cuRobo's continuous `update_goal_tool_poses`. Each accepted
   retarget also re-seeds the optimizer toward the new goal's joint state
   (`_reseed_toward_goal` → `update_seed_trajectory_from_goal_state`): otherwise
