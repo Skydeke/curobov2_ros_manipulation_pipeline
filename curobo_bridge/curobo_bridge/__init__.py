@@ -1097,6 +1097,19 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
         except AttributeError:
             pass
     entry["collision_cache"] = cfg.get("collision_cache")
+    # PORT: obstacle_manager.collision_cache["voxel"] is None - SetCollisionCache
+    # blox=0 builds the solvers with NO voxel storage. A scene carrying an ESDF
+    # layer then raises inside update_world ("Cannot load 1 voxel grids, max
+    # cache size is 0"), so world_push degrades to primitives-only exactly like
+    # unified_planner_node.update_all_solvers_world does.
+    _voxel = (cfg.get("collision_cache") or {}).get("voxel")
+    _disabled = bool(_voxel) and int((_voxel or {}).get("layers", 1) or 0) <= 0
+    entry["voxel_cache_disabled"] = _disabled
+    if _disabled:
+        print(
+            "[curobo_bridge] voxel collision cache disabled (SetCollisionCache "
+            "blox=0): solvers see analytic primitives ONLY, no camera obstacles",
+            flush=True)
     planner.warmup()
     entry["motion_planner"] = planner
     # PORT: config_wrapper_motion.set_motion_gen_config tail - a freshly built
@@ -1499,7 +1512,14 @@ def robot_model_rebuild_locks(handle: int, lock_json: str) -> None:
     entry = _REGISTRY[handle]
     locks = json.loads(lock_json)
     from curobo.kinematics import KinematicsCfg
-    resolved = entry.get("resolved_config", entry["robot_config_file"])
+    # NB: entry["robot_config_file"] is NOT recorded (the build stores the
+    # RESOLVED path); an eager .get(default) here raised KeyError on every
+    # joint-lock change. Resolve lazily and say so if neither is on record.
+    resolved = entry.get("resolved_config") or entry.get("robot_config_file")
+    if not resolved:
+        raise ValueError(
+            "robot_model_rebuild_locks: no resolved robot config on record; "
+            "build the robot model first")
     # Empty locks -> rebuild from the YAML's OWN lock_joints (restore).
     kin_cfg = KinematicsCfg.from_robot_yaml_file(resolved, lock_joints=locks) if locks \
         else KinematicsCfg.from_robot_yaml_file(resolved)
@@ -1510,7 +1530,22 @@ def robot_model_rebuild_locks(handle: int, lock_json: str) -> None:
     entry["kin"] = Kinematics(robot_cfg.kinematics)
     entry["joint_names"] = list(entry["kin"].joint_names)
     entry["dof"] = int(entry["kin"].get_dof())
-    entry["lock_joints"] = dict(locks)
+    if locks:
+        entry["lock_joints"] = dict(locks)
+    else:
+        # Restore: the model now carries the YAML's OWN lock_joints, and
+        # joint_limits() reports this map - so report the YAML's values, not
+        # an empty override (which would claim nothing is locked while the
+        # model has them baked in).
+        try:
+            import yaml as _yaml
+            with open(resolved) as _fh:
+                _cfg = _yaml.safe_load(_fh) or {}
+            _kin = ((_cfg.get("robot_cfg") or {}).get("kinematics") or {})
+            entry["lock_joints"] = {
+                str(k): float(v) for k, v in (_kin.get("lock_joints") or {}).items()}
+        except Exception:
+            entry["lock_joints"] = {}
     entry["motion_planner"] = None
     entry["ik"] = None
 
@@ -2844,6 +2879,14 @@ def world_push(handle: int) -> bool:
     scene = entry.get("scene")
     if scene is None:
         return False
+    # PORT: unified_planner_node.update_all_solvers_world's
+    # `collision_cache["voxel"] is None` branch - degrade to analytic primitives
+    # (no camera obstacles) rather than raise on every world update.
+    if entry.get("voxel_cache_disabled"):
+        import copy
+
+        scene = copy.copy(scene)     # shallow: share the primitive buckets
+        scene.voxel = None
     pushed = False
     mp = entry.get("motion_planner")
     if mp is not None:
