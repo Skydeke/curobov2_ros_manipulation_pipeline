@@ -67,7 +67,8 @@ PlanningTab::PlanningTab(QWidget *parent)
       last_displayed_y_{std::numeric_limits<double>::quiet_NaN()},
       last_displayed_z_{std::numeric_limits<double>::quiet_NaN()},
       planner_node_{"unified_planner"}, mpc_goal_pub_{nullptr},
-      mpc_active_{false}, mpc_starting_{false}, mpc_goal_timer_{nullptr}
+      mpc_active_{false}, mpc_starting_{false}, mpc_goal_timer_{nullptr},
+      readiness_timer_{nullptr}
       // Init list order must match declaration order (trajectory_type_ is
       // declared above set_planner_client_ in the header) or -Wreorder fires.
       ,
@@ -125,10 +126,10 @@ PlanningTab::PlanningTab(QWidget *parent)
   // distinction matters during the planner's ~90s GPU warmup).
   setPlannerReady(false);
 
-  QTimer *readinessTimer = new QTimer(this);
-  connect(readinessTimer, &QTimer::timeout, this,
+  readiness_timer_ = new QTimer(this);
+  connect(readiness_timer_, &QTimer::timeout, this,
           &PlanningTab::pollPlannerReady);
-  readinessTimer->start(250);
+  readiness_timer_->start(250);
 
   // Connect pose spinboxes to apply changes in real-time
   // Use valueChanged to update immediately when user changes value (arrows,
@@ -285,6 +286,13 @@ void PlanningTab::setPlannerReady(bool ready) {
     return;
   }
   planner_ready_ = ready;
+
+  // Poll quickly only while the planner is coming up; once it has answered,
+  // back the probe off to 1 Hz. The timer could be null during construction
+  // (setPlannerReady(false) is called before the timer is created), so guard.
+  if (readiness_timer_) {
+    readiness_timer_->setInterval(ready ? 1000 : 250);
+  }
 
   ui_->doubleSpinBoxTimeDilationFactor->setEnabled(ready);
   updateActionButtons();

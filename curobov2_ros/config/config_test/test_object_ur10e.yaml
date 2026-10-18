@@ -95,7 +95,7 @@ tests:
     # logs a warning -- see AttachmentServices.attach).
     # timeout=90: attach triggers motion planner warmup if not yet done (~25s
     # idle, ~37s throttled), on top of MorphIt's stochastic sphere-fit retries
-    # -- this is the known flake documented in docs/getting-started/testing.md.
+    # -- this is a known flake.
     data: {object_name: "cube2"}
     timeout: 90.0
     expect: {success: True, message: "Attached 'cube2'"}

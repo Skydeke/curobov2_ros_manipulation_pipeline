@@ -292,6 +292,11 @@ private:
   bool mpc_starting_;
   geometry_msgs::msg::Pose last_published_goal_;
   QTimer *mpc_goal_timer_;
+  // Readiness poll. Runs at 250 ms until the planner first answers, then backs
+  // off to 1 s: a warmup-time poll needs to be quick, but a confirmed-ready
+  // planner does not need probing four times a second for the rest of the
+  // session.
+  QTimer *readiness_timer_;
 
   // Live tool pose (server-published, base frame) used to one-shot seed a
   // pristine TargetDisplay at the gripper instead of the hardcoded default.

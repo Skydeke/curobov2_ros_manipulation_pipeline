@@ -132,6 +132,8 @@ void CuroboTrajectoryDisplay::reset()
   }
   spheres_got_message_ = false;
   sphere_active_count_ = 0;
+  live_spheres_.clear();
+  playback_spheres_.clear();
   for (auto & sv : sphere_pool_) {
     if (sv.node) {
       sv.node->setVisible(false);
@@ -344,6 +346,8 @@ void CuroboTrajectoryDisplay::updateCollisionTopic()
   }
   spheres_got_message_ = false;
   sphere_active_count_ = 0;
+  live_spheres_.clear();
+  playback_spheres_.clear();
   for (auto & sv : sphere_pool_) {
     if (sv.node) {
       sv.node->setVisible(false);
@@ -410,7 +414,8 @@ void CuroboTrajectoryDisplay::applySpheres(const std::vector<SphereDatum> & data
   for (size_t i = 0; i < data.size(); ++i) {
     SphereVisual & sv = sphere_pool_[i];
     const SphereDatum & d = data[i];
-    sv.node->setPosition(d.pos);
+    // Position is set by poseSpheres() every frame (the object rides the
+    // trajectory); here we only carry the scale/colour.
     sv.shape->setScale(Ogre::Vector3(d.sx, d.sy, d.sz));
     sv.shape->setColor(d.r, d.g, d.b, d.a);
     sv.attached = d.attached;
@@ -436,39 +441,6 @@ void CuroboTrajectoryDisplay::syncSpheres()
   spheres_got_message_ = true;
   deleteStatus("Collision Spheres");
 
-  // The array carries no header of its own; every sphere marker shares the
-  // robot base frame. Transform to the fixed frame once per message, the way
-  // the voxel display does, rather than once per sphere.
-  std::string frame;
-  rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
-  for (const auto & marker : msg->markers) {
-    if (marker.action == visualization_msgs::msg::Marker::ADD &&
-      !marker.header.frame_id.empty())
-    {
-      frame = marker.header.frame_id;
-      stamp = rclcpp::Time(marker.header.stamp);
-      break;
-    }
-  }
-
-  Ogre::Vector3 offset = Ogre::Vector3::ZERO;
-  Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
-  if (!frame.empty() && context_ != nullptr && context_->getFrameManager() != nullptr &&
-    frame != context_->getFrameManager()->getFixedFrame())
-  {
-    if (context_->getFrameManager()->getTransform(frame, stamp, offset, rotation)) {
-      setTransformOk();
-    } else {
-      setMissingTransformToFixedFrame(frame);
-      for (auto & sv : sphere_pool_) {
-        if (sv.node) {
-          sv.node->setVisible(false);
-        }
-      }
-      return;
-    }
-  }
-
   // Grow-only pool (same reasoning as the trail ghosts): the sphere count per
   // message is stable in steady operation, so creating on demand and merely
   // hiding the surplus keeps every frame allocation-free.
@@ -490,11 +462,11 @@ void CuroboTrajectoryDisplay::syncSpheres()
   }
 
   // Attached objects only: robot collision spheres are deliberately not
-  // shown. Spheres are symmetric: orientation is irrelevant, only the
-  // translation (rotated into the fixed frame) plus the message's own scale
-  // and colour. Colours arrive decided (blue attached, red colliding) and
-  // are used verbatim.
-  std::vector<SphereDatum> data;
+  // shown. Spheres are symmetric, so only the centre (and the message's own
+  // scale/colour) matters; positions are resolved every frame by poseSpheres()
+  // so a link-relative object rides the ghost. Colours arrive decided (blue
+  // attached, red colliding) and are used verbatim.
+  std::vector<SphereDatum> live;
   for (const auto & marker : msg->markers) {
     if (marker.action != visualization_msgs::msg::Marker::ADD ||
       marker.type != visualization_msgs::msg::Marker::SPHERE ||
@@ -503,11 +475,11 @@ void CuroboTrajectoryDisplay::syncSpheres()
       continue;
     }
     SphereDatum d;
-    const Ogre::Vector3 local(
+    d.local = Ogre::Vector3(
       static_cast<float>(marker.pose.position.x),
       static_cast<float>(marker.pose.position.y),
       static_cast<float>(marker.pose.position.z));
-    d.pos = rotation * local + offset;
+    d.frame = marker.header.frame_id;
     d.sx = static_cast<float>(marker.scale.x);
     d.sy = static_cast<float>(marker.scale.y);
     d.sz = static_cast<float>(marker.scale.z);
@@ -515,10 +487,64 @@ void CuroboTrajectoryDisplay::syncSpheres()
     d.g = marker.color.g;
     d.b = marker.color.b;
     d.a = marker.color.a;
-    d.attached = (marker.ns == "attached_spheres");
-    data.push_back(d);
+    d.attached = true;
+    live.push_back(d);
   }
-  applySpheres(data);
+
+  live_spheres_ = live;
+  // Latch rule (see header): refresh the playback set from the live one while
+  // attached, or when nothing is animating; mid playback a detach keeps the
+  // last attached set so the preview's restore does not empty the hand.
+  if (!animating_ || !live_spheres_.empty()) {
+    playback_spheres_ = live_spheres_;
+  }
+  applySpheres(playback_spheres_);
+  poseSpheres();
+}
+
+void CuroboTrajectoryDisplay::poseSpheres()
+{
+  const size_t active = std::min(sphere_active_count_, sphere_pool_.size());
+  Ogre::Vector3 offset = Ogre::Vector3::ZERO;
+  Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
+  std::string resolved_frame;
+  for (size_t i = 0; i < active; ++i) {
+    SphereVisual & sv = sphere_pool_[i];
+    if (!sv.node || i >= playback_spheres_.size()) {continue;}
+    const SphereDatum & d = playback_spheres_[i];
+    const auto fk = current_transforms_.find(d.frame);
+    if (fk != current_transforms_.end()) {
+      // The server publishes the grasped object in the frame of the URDF link
+      // it is fixed to; FK that link at the current waypoint and translate
+      // root -> fixed (the sphere nodes are not under robot_root_).
+      const Eigen::Vector3d p = fk->second * Eigen::Vector3d(
+        d.local.x, d.local.y, d.local.z);
+      sv.node->setPosition(robot_root_offset_ + robot_root_rotation_ *
+        Ogre::Vector3(static_cast<float>(p.x()),
+          static_cast<float>(p.y()), static_cast<float>(p.z())));
+      continue;
+    }
+    // Non-link frame (or no trajectory loaded yet): live transform.
+    auto * fm = (context_ != nullptr) ? context_->getFrameManager() : nullptr;
+    if (d.frame.empty() || fm == nullptr || d.frame == fm->getFixedFrame()) {
+      sv.node->setPosition(d.local);
+      continue;
+    }
+    if (d.frame != resolved_frame) {
+      rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
+      if (!fm->getTransform(d.frame, stamp, offset, rotation)) {
+        // No FK for this link and no live transform: drawing at the link-frame
+        // coordinates would put a ball at a meaningless spot, so hide it (a
+        // later message re-shows it via updateSpheresVisibility()).
+        setMissingTransformToFixedFrame(d.frame);
+        sv.node->setVisible(false);
+        continue;
+      }
+      setTransformOk();
+      resolved_frame = d.frame;
+    }
+    sv.node->setPosition(rotation * d.local + offset);
+  }
 }
 
 // ============================================================================
@@ -662,6 +688,8 @@ void CuroboTrajectoryDisplay::updateRobotRoot()
     robot_root_->setPosition(offset);
     robot_root_->setOrientation(rotation);
   }
+  robot_root_offset_ = offset;
+  robot_root_rotation_ = rotation;
   for (auto & tr : trail_robots_) {
     if (tr.node) {
       tr.node->setPosition(offset);
@@ -755,6 +783,14 @@ void CuroboTrajectoryDisplay::update(float wall_dt, float ros_dt)
 
   if (promoted) {
     robot_->setVisible(true);
+    // Re-evaluate the attached object for the new trajectory: the latch below
+    // holds it across a detach *mid playback*, but a fresh trajectory must
+    // start from the live state, or a move planned after the place would
+    // inherit the previous transport's object (the new plan can arrive while
+    // the old one is still animating).
+    playback_spheres_ = live_spheres_;
+    applySpheres(playback_spheres_);
+    poseSpheres();
     // Rebuild ghost trail for the new trajectory
     rebuildTrail();
   }
@@ -810,6 +846,9 @@ void CuroboTrajectoryDisplay::update(float wall_dt, float ros_dt)
   // refreshed each frame so no link is ever left in rviz's error state.
   CuroboLinkUpdater updater(current_transforms_);
   robot_->update(updater);
+  // Re-pose the grasped object for the waypoint just computed so it rides the
+  // ghost (syncSpheres() only re-poses when a new sphere message arrives).
+  poseSpheres();
   updateTrailVisibility();
 }
 

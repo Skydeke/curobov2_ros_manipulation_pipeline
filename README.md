@@ -78,8 +78,6 @@ docker compose -f docker/compose_benchmark.yaml up
 
 ## Documentation
 
-- `curobov2_ros/docs/` — user guide (concepts, getting started, tutorials); the tunable node parameters
-  (including the plan-time `max_attempts` the benchmark re-pins) are in `docs/concepts/parameters.md`.
 - `curobov2_ros_extra/README.md` — the cuRobo benchmarks reproduction in
   depth: one-shot compose run, the full `curobo_benchmark` CLI, solver
   envelope, timing attribution, and the honest receipt.

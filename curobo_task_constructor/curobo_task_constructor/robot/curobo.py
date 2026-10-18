@@ -270,6 +270,14 @@ class CuroboServerInterface(RobotInterface):
         self._scene_objects_at: float = 0.0
         self._scene_objects_queried: bool = False
 
+        #: Plan-time scene preview (see `plan_scene`): the attach state the
+        #: current plan burst has previewed on the shared server, and the state
+        #: it must be restored to when the burst ends. ``_plan_scene_active``
+        #: is True only between the first `plan_scene` and `end_plan_scene`.
+        self._plan_scene_active: bool = False
+        self._plan_scene_original: list = []
+        self._plan_scene_attached = None
+
     def _client(self, srv_cls, name):
         # Creation is non-blocking — the node starts even when the curobo
         # server is down, and per-call `wait_for_service` in `_call` reports
@@ -896,9 +904,14 @@ class CuroboServerInterface(RobotInterface):
         self._call(self._remove_all_client, Trigger.Request())
         self._invalidate_scene_cache()
 
-    def attach_object(self, name: str) -> bool:
+    def attach_object(self, name: str, joint_state=None) -> bool:
         req = AttachObject.Request()
         req.object_name = name
+        if joint_state is not None:
+            # The grasp pose: the payload's spheres are fitted at this
+            # configuration, so they land in the flange frame where the object
+            # is actually picked (see AttachObject.srv).
+            req.joint_state = self._to_joint_msg(joint_state)
         res = self._call(self._attach_client, req)
         if res.success:
             # attach keeps the object LISTED (it is disabled by name, not
@@ -936,6 +949,49 @@ class CuroboServerInterface(RobotInterface):
         """
         self._invalidate_scene_cache()
 
+    def plan_scene(self, scene, joint_state=None) -> None:
+        """Reconcile the server's attach state to ``scene`` for planning.
+
+        See ``RobotInterface.plan_scene``. The shared ``/curobo_server`` holds
+        one attach state; a plan burst previews the scene each leg must be
+        solved in (MTC applies ``ModifyPlanningScene`` to the planning scene at
+        compute time). The pre-burst attach state is captured on the first call
+        and restored by ``end_plan_scene``, so the preview never leaks into the
+        executing node's chain-ordered scene ops.
+        """
+        if scene is None:
+            return
+        if not self._plan_scene_active:
+            self._plan_scene_active = True
+            self._plan_scene_original = list(self.get_attached_objects() or [])
+            self._plan_scene_attached = None
+        desired = getattr(scene, "attached_object", None)
+        if desired == self._plan_scene_attached:
+            return
+        if self._plan_scene_attached is not None:
+            self.detach_object(self._plan_scene_attached)
+        if desired is not None:
+            self.attach_object(desired, joint_state=joint_state)
+        self._plan_scene_attached = desired
+
+    def end_plan_scene(self) -> None:
+        """Restore the attach state captured by ``plan_scene``.
+
+        Called at the end of a plan burst (``TaskExecutor.plan``). Detaches the
+        previewed object and re-attaches whatever was attached before, so
+        execution starts from the task's base scene and materializes its scene
+        ops in chain order. No-op when ``plan_scene`` never ran.
+        """
+        if not self._plan_scene_active:
+            return
+        if self._plan_scene_attached is not None:
+            self.detach_object(self._plan_scene_attached)
+            self._plan_scene_attached = None
+        for name in self._plan_scene_original:
+            self.attach_object(name)
+        self._plan_scene_active = False
+        self._plan_scene_original = []
+
     # ------------------------------------------------------------------
     # conversions
     # ------------------------------------------------------------------
@@ -950,9 +1006,6 @@ class CuroboServerInterface(RobotInterface):
         # through verbatim — the server fills in its own defaults.
         goal.cartesian_step_size = float(
             getattr(request, "cartesian_step_size", 0.0) or 0.0
-        )
-        goal.cartesian_min_fraction = float(
-            getattr(request, "cartesian_min_fraction", -1.0)
         )
         goal.cartesian_precision = float(
             getattr(request, "cartesian_precision", 0.0) or 0.0

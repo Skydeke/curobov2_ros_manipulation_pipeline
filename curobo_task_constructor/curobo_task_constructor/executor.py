@@ -11,10 +11,15 @@ Lifecycle (Sec. 3 of the plan):
                   == false) and never computed.
 3. ``plan()``   — drive the tree depth-first: generators seed first,
                   propagators extend, connectors run last (they are the
-                  combinatorially expensive ones). Because every stage
-                  CONSUMES its pulls on compute and pushes are keyed-deduped,
-                  the loop ``while any(s.can_compute())`` terminates on its
-                  own; ``max_iterations`` is only a belt-and-braces guard.
+                  combinatorially expensive ones). Each motion leg reconciles
+                  the shared server's scene to the ``SceneDiff`` it carries, so
+                  a leg after a grasp plans with the object already attached
+                  (MTC applies ``ModifyPlanningScene`` at compute time); the
+                  pre-plan scene is restored when the burst ends. Because every
+                  stage CONSUMES its pulls on compute and pushes are
+                  keyed-deduped, the loop ``while any(s.can_compute())``
+                  terminates on its own; ``max_iterations`` is only a
+                  belt-and-braces guard.
 4. ``rank()``   — full root solutions ranked by accumulated cost.
 5. ``execute()``— apply the winning solution's scene deltas in chain order,
                   then re-solve + drive each motion segment (SendTrajectory).
@@ -285,8 +290,6 @@ def _plan_request_from_dict(d) -> Optional[Any]:
                        planner=d.get("planner"),
                        cartesian_step_size=float(
                            d.get("cartesian_step_size", 0.0) or 0.0),
-                       cartesian_min_fraction=float(
-                           d.get("cartesian_min_fraction", -1.0)),
                        cartesian_precision=float(
                            d.get("cartesian_precision", 0.0) or 0.0))
 
@@ -464,18 +467,28 @@ class TaskExecutor:
         if not self._valid:
             return False
         iterations = 0
-        while any(s.can_compute() for s in self.root.subtree_stages()):
-            self.root.run_compute()
-            iterations += 1
-            if progress_callback is not None:
-                progress_callback()
-            if self.root.solutions:
-                # First complete root solution: stop re-connecting / re-solving
-                # the trailing chain (see docstring). Return the first full
-                # solution — best() ranks it later.
-                break
-            if max_iterations and iterations >= max_iterations:
-                break
+        try:
+            while any(s.can_compute() for s in self.root.subtree_stages()):
+                self.root.run_compute()
+                iterations += 1
+                if progress_callback is not None:
+                    progress_callback()
+                if self.root.solutions:
+                    # First complete root solution: stop re-connecting / re-solving
+                    # the trailing chain (see docstring). Return the first full
+                    # solution — best() ranks it later.
+                    break
+                if max_iterations and iterations >= max_iterations:
+                    break
+        finally:
+            # Planning previewed scene changes on the shared server (e.g. the
+            # grasped object attached for the legs after the grasp). Restore
+            # the pre-plan scene so execution materializes its scene ops in
+            # chain order from the task's own base scene instead of inheriting
+            # the last leg's preview.
+            restore = getattr(self.robot, "end_plan_scene", None)
+            if callable(restore):
+                restore()
         return bool(self.root.solutions)
 
     def rank(self) -> list:

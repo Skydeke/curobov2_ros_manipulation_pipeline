@@ -107,6 +107,12 @@ class _BatchSession:
         if not self._jobs:
             return
         requests = [req for _, _, req in self._jobs]
+        # Alternatives feed every child the SAME start states, so their
+        # requests share one scene; reconcile the server to it once before the
+        # batched solve (see RobotInterface.plan_scene).
+        self.robot.plan_scene(
+            getattr(requests[0], "scene", None),
+            getattr(requests[0], "start_pose", None))
         results = self.robot.plan_batch(requests)
         for (stage, start, req), result in zip(self._jobs, results):
             stage.commit_result(start, req, result)

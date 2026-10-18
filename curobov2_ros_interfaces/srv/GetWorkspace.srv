@@ -1,0 +1,49 @@
+# GetWorkspace.srv — read the planner's collision workspace (the Mapper
+# TSDF/ESDF grid extent), the curobo analogue of MoveIt's Context-tab
+# "Workspace" group.
+#
+# WHY THIS EXISTS
+#   cuRobo has no planning database, but it does have ONE well-defined
+#   workspace: the Mapper's TSDF/ESDF grid, a box of size `extent` centred at
+#   `center` in the robot config's base frame. Everything the cameras can
+#   observe — and therefore every voxel that becomes collision geometry for the
+#   solvers — lives inside that box, and the wireframe published on
+#   <node>/mapper_workspace draws exactly it. This service reports the two
+#   numbers the launch file used to be the only home for, so a UI can show and
+#   edit them instead of reading a YAML.
+#
+# READ-ONLY AND CHEAP
+#   Touches no solver and rebuilds nothing (it reads the values in force), so it
+#   is safe to poll. A size change (SetWorkspace) is NOT cheap: it rebuilds the
+#   Mapper and every solver, like set_collision_cache.
+
+# --- Request (empty: pure query) ---
+---
+
+# --- Response ---
+bool success
+string message
+
+# Frame the box is expressed in (the robot config's kinematics.base_link).
+string frame_id
+
+# Box centre, [x, y, z] in frame_id (the launch file's `mapper_grid_center`).
+# Always reported, even with no Mapper: the box is what the
+# `mapper_workspace` wireframe draws and what a later Mapper would be built on,
+# so it is a real, configured value — not a made-up default.
+float64[] center
+
+# Box size, [x, y, z] in frame_id, metres (the launch file's
+# `mapper_extent_xyz`). Always reported; see `center`.
+float64[] extent
+
+# ESDF voxel size (m) the grid is rasterised at; the collision world cannot
+# resolve detail finer than one voxel (the launch file's `voxel_size`).
+float64 voxel_size
+
+# True when a Mapper actually exists (a camera or laser feeds it). When false
+# the server plans against analytic obstacles only: `center`/`extent` still
+# describe the drawn box, but a workspace edit moves the box and its marker
+# without touching any collision geometry — the panel says so rather than
+# pretending the edit did something.
+bool perception_active

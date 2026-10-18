@@ -149,7 +149,8 @@ class MoveTo(PropagatingEitherWay):
             goalset = goalset_for_scene(state.scene, poses=pose_goals)
         else:
             goalset = goalset_for_scene(state.scene, joint_positions=joint_goal)
-        req = full_request(self.robot, state.joint_state, [goalset], self.params)
+        req = full_request(self.robot, state.joint_state, [goalset], self.params,
+                           scene=state.scene)
         # Every try is stored and published the moment it solves (like failed
         # tries fail live); only the cheapest is promoted downstream.
         from curobo_task_constructor.core.stage import Solution
@@ -190,7 +191,7 @@ class MoveTo(PropagatingEitherWay):
                 state.scene,
                 joint_positions=list(getattr(state.joint_state, "position", [])
                                      or []))],
-            self.params)
+            self.params, scene=state.scene)
         from curobo_task_constructor.core.stage import Solution
         tried = []
         # Allowance window around the whole attempt loop (see

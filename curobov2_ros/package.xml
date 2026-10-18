@@ -3,29 +3,35 @@
 <package format="3">
   <name>curobov2_ros</name>
   <version>1.0.0</version>
-  <description>GPU-accelerated motion planning for ROS 2, powered by cuRobo.</description>
+  <description>GPU-accelerated motion planning for ROS 2, powered by cuRobo (C++ server).</description>
   <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2.0</license>
 
-  <test_depend>ament_copyright</test_depend>
-  <test_depend>ament_flake8</test_depend>
-  <test_depend>ament_pep257</test_depend>
-  <test_depend>python3-pytest</test_depend>
-  <test_depend>ros2_test_compose</test_depend>
-  <test_depend>launch_testing</test_depend>
-  <test_depend>rosidl_runtime_py</test_depend>
+  <!-- The package is the C++ server (UD-6 / Q5): runtime + core + component. -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
 
+  <!-- C++ build deps (folded from curobo_runtime / curobo_core / component). -->
+  <build_depend>pybind11_vendor</build_depend>
+  <build_depend>python3-dev</build_depend>
+  <depend>eigen</depend>
+  <depend>rclcpp</depend>
+  <depend>rclcpp_action</depend>
+  <depend>rclcpp_components</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>control_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>nav2_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>builtin_interfaces</depend>
+  <depend>tf2_ros</depend>
+  <depend>tf2</depend>
+  <depend>curobov2_ros_interfaces</depend>
+
+  <!-- Runtime / launch deps (kept from the Python package). -->
   <exec_depend>rclpy</exec_depend>
-  <exec_depend>std_msgs</exec_depend>
-  <exec_depend>std_srvs</exec_depend>
-  <exec_depend>sensor_msgs</exec_depend>
-  <exec_depend>trajectory_msgs</exec_depend>
-  <exec_depend>visualization_msgs</exec_depend>
-  <exec_depend>nav_msgs</exec_depend>
-  <exec_depend>builtin_interfaces</exec_depend>
-  <exec_depend>tf2_ros</exec_depend>
-  <!-- Lancés par gen_traj.launch.py : les deux publishers inconditionnellement,
-       rviz2 via rviz_visualization.launch.py quand gui:=true (le défaut). -->
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>joint_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
@@ -38,19 +44,17 @@
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>curobo</exec_depend>
 
-  <depend>geometry_msgs</depend>
-  <depend>curobov2_ros_interfaces</depend>
-  <depend>curobo</depend>
-
-  <!--
-    Not declared as rosdep exec_depends: `torch` and `curobo` (cuRobo v0.8.x).
-    Neither has a standard rosdep key in this workspace's rosdistro; install
-    them per the README prerequisites (CUDA-enabled PyTorch + cuRobo v0.8.x)
-    before running this package.
-  -->
+  <test_depend>ament_cmake_gtest</test_depend>
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>ros2_test_compose</test_depend>
+  <test_depend>launch_testing</test_depend>
+  <test_depend>rosidl_runtime_py</test_depend>
 
   <export>
-    <build_type>ament_python</build_type>
+    <build_type>ament_cmake</build_type>
   </export>
 </package>

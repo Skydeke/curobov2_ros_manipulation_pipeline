@@ -12,9 +12,7 @@
 #include <rviz_common/validate_floats.hpp>
 
 #include <curobov2_ros_rviz/target_display.hpp>
-#if __has_include(<OgreSceneNode.h>)
 #include <OgreSceneNode.h>
-#endif
 
 namespace
 {

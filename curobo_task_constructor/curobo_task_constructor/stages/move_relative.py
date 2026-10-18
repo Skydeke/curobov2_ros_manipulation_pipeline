@@ -118,7 +118,8 @@ class MoveRelative(PropagatingEitherWay):
             by_name[joint] += delta
         goal = [by_name[n] for n in names] if names else list(by_name.values())
         goalset = goalset_for_scene(state.scene, joint_positions=goal)
-        req = full_request(self.robot, state.joint_state, [goalset], self.params)
+        req = full_request(self.robot, state.joint_state, [goalset], self.params,
+                           scene=state.scene)
         try:
             self._note_plan_attempt()
             result = self._timed_plan(req)
@@ -147,7 +148,8 @@ class MoveRelative(PropagatingEitherWay):
             goal = GoalsetSpec(poses=[pose_to_any(target, getattr(self.robot, "pose_cls", None))],
                                allowed_collisions=allowed,
                                trajectory_constraints=self._hold(pose, target))
-            req = full_request(self.robot, state.joint_state, [goal], self.params)
+            req = full_request(self.robot, state.joint_state, [goal], self.params,
+                               scene=state.scene)
             try:
                 self._note_plan_attempt()
                 result = self._timed_plan(req)
@@ -176,7 +178,8 @@ class MoveRelative(PropagatingEitherWay):
         start_positions = [by_name.get(n, 0.0) - offsets.get(n, 0.0) for n in names]
         goalset = goalset_for_scene(
             state.scene, joint_positions=list(positions))
-        req = full_request(self.robot, None, [goalset], self.params)
+        req = full_request(self.robot, None, [goalset], self.params,
+                           scene=state.scene)
         # Seed the solve from the offset-back joints by issuing the request
         # with that start pose: rebuild with explicit start.
         from curobo_task_constructor.core.state import JointStateStub
@@ -238,7 +241,8 @@ class MoveRelative(PropagatingEitherWay):
                 getattr(state.joint_state, "position", []) or []),
                 allowed_collisions=allowed,
                 trajectory_constraints=self._hold(start_pose, pose))
-            req = full_request(self.robot, seed, [goal], self.params)
+            req = full_request(self.robot, seed, [goal], self.params,
+                               scene=state.scene)
             try:
                 self._note_plan_attempt()
                 result = self._timed_plan(req)
