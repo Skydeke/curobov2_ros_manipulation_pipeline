@@ -11,10 +11,12 @@
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <rviz_common/config.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <std_msgs/msg/string.hpp>
 
 #include "curobov2_ros_rviz/node_spinner.hpp"
 
 #include <QHash>
+#include <QPair>
 #include <QString>
 #include <QStringList>
 #include <QVector>
@@ -22,7 +24,9 @@
 
 #include <functional>
 #include <memory>
+#include <mutex>
 
+class QComboBox;
 class QLabel;
 class QPushButton;
 class QTreeWidget;
@@ -60,6 +64,20 @@ namespace curobov2_ros_rviz
 ///  * `kinematics.lock_joints`, fetched with the cspace from the read-only
 ///    `get_joint_info` service, reported in the status line, plus a "Clear locks"
 ///    button that drops the override and rebuilds the model.
+///  * a "Named pose:" combo of the robot's SRDF `<group_state>` named poses
+///    (home, retract, vertical, open, close for the kortex). MoveIt exposes the
+///    same thing as the "Goal State" combo on its Planning tab; here it belongs
+///    on the Joints tab because these are JOINT configurations, i.e. exactly the
+///    target column this tab already owns and plans to. Selecting one writes the
+///    named joints into the target column BY NAME (a pose names its joints, and
+///    the cspace may not contain all of them); a joint the pose does NOT name
+///    falls back to the live /joint_states value, so a subset state like the
+///    gripper's "close" leaves the arm where it is rather than holding a stale
+///    target. This keeps the combo compatible with the bar/slider and with
+///    Plan / Plan + send on the same request. The SRDF is
+///    read from the rviz node's `robot_description_semantic` parameter — which
+///    rviz.launch.py passes even though no MoveIt node runs — with the latched
+///    `/robot_description_semantic` topic as a fallback.
 ///
 /// A locked joint is pinned OUT of the cspace, so it has no row here and cannot
 /// be commanded — the panel says so explicitly rather than silently dropping
@@ -68,6 +86,18 @@ namespace curobov2_ros_rviz
 class JointsTab : public QWidget
 {
   Q_OBJECT
+
+public:
+  /// A named pose from the robot's SRDF (`<group_state>`): the pose name, the
+  /// group it belongs to, and the joint values it pins, each by joint NAME (the
+  /// cspace index is not known until get_joint_info answers, and the pose's
+  /// joints may be a superset of the cspace's, so names are the only stable key).
+  struct NamedPose
+  {
+    QString name;
+    QString group;
+    QVector<QPair<QString, double>> joints;
+  };
 
 public:
   explicit JointsTab(QWidget * parent = nullptr);
@@ -101,6 +131,7 @@ private Q_SLOTS:
   void refreshJointInfo();
   void setTargetsFromCurrent();
   void zeroTargets();
+  void onNamedPoseChosen(int index);
   void checkTarget();
   void clearLocks();
   void planTarget();
@@ -128,6 +159,16 @@ private:
   QTreeWidgetItem * rowFor(const QString & joint) const;
   void rebuildRows(const QStringList & names, const QVector<double> & lower,
                    const QVector<double> & upper);
+  /// Load the robot's named poses from the rviz node's
+  /// `robot_description_semantic` parameter, falling back to the latched
+  /// `/robot_description_semantic` topic (see the class comment). Idempotent:
+  /// once poses are found it stops trying.
+  void loadNamedPoses();
+  /// Parse the `<group_state>` elements of an SRDF document into named_poses_
+  /// and repopulate named_pose_combo_.
+  void parseNamedPoses(const QString & srdf_xml);
+  /// Write the joints of named_poses_[index] into the target column, by name.
+  void applyNamedPose(int index);
 
   rclcpp::Node::SharedPtr node_;
   QString planner_node_ = QStringLiteral("curobo_server");
@@ -169,7 +210,17 @@ private:
   QVector<double> pending_targets_;
   /// Live positions by joint NAME (not index: the kortex sim publishes the
   /// finger joint first, so /joint_states order is NOT the cspace order).
+  /// Written on the GUI thread only (the drain in onJointState).
   QHash<QString, double> current_;
+  /// Coalescing buffer for /joint_states. The subscription fires on rviz's
+  /// spinner thread far faster than the tree can be repainted, so readings are
+  /// merged here (under joint_state_mutex_) and at most one GUI-thread drain is
+  /// queued at a time; that drain swaps this into current_ and repaints once.
+  /// Without it, a 100 Hz publisher queues a full-tree rewrite per message, all
+  /// of which the GUI thread then has to run to keep up with.
+  QHash<QString, double> pending_current_;
+  bool joint_state_posted_ = false;
+  std::mutex joint_state_mutex_;
 
   QTreeWidget * tree_ = nullptr;
   QLabel * status_ = nullptr;
@@ -178,6 +229,15 @@ private:
   QPushButton * stop_button_ = nullptr;
   QPushButton * check_button_ = nullptr;
   QPushButton * clear_locks_button_ = nullptr;
+
+  /// Named poses from the robot's SRDF, in document order (empty until loaded).
+  QVector<NamedPose> named_poses_;
+  /// True once loadNamedPoses() has found a usable SRDF; then the 2 s retry in
+  /// refreshJointInfo() stops re-reading it.
+  bool named_poses_loaded_ = false;
+  /// Fallback SRDF source: the latched /robot_description_semantic topic.
+  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr srdf_sub_;
+  QComboBox * named_pose_combo_ = nullptr;
 
   bool goal_active_ = false;
   bool cspace_known_ = false;

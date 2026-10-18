@@ -461,7 +461,7 @@ like any other dataset.
   *webpage* run switches the running server's torque mode itself — stock
   `set_parameters` (`load_dynamics`, `robot_payload_mass`) + the
   `update_motion_gen_config` trigger rebuilds the MotionPlanner from them
-  (see `docs/concepts/parameters.md`; the launch-time flags below are only
+  (the node's ROS parameters; the launch-time flags below are only
   the initial state). Standalone legs can still do it explicitly:
   `curobo_benchmark ros --use-dynamics --mass 3.0 ...` after launch-time
   `load_dynamics:=true robot_payload_mass:=3.0`. Per the accepted "server

@@ -96,8 +96,15 @@ void SceneObjectsTab::initialize(rclcpp::Node::SharedPtr node)
 
   // Poll, so an object added by the task constructor, the grasp orchestrator or
   // a `ros2 service call` appears without the operator doing anything.
+  // Visibility-gated: the reply only paints a hidden list, so while this tab is
+  // not shown the 2 s service round-trip and the list rebuild are skipped.
   auto * timer = new QTimer(this);
-  connect(timer, &QTimer::timeout, this, &SceneObjectsTab::refreshObjects);
+  connect(timer, &QTimer::timeout, this, [this]()
+  {
+    if (isVisible()) {
+      refreshObjects();
+    }
+  });
   timer->start(2000);
 }
 

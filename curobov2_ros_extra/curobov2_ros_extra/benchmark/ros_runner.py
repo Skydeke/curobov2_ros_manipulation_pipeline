@@ -180,7 +180,7 @@ class RosBenchmarkRunner(Node):
         node parameters through the stock ``set_parameters`` service and then
         triggers ``update_motion_gen_config`` (``std_srvs/Trigger`` — the same
         build-time-parameter path as ``max_goalset`` / ``num_trajopt_seeds``,
-        see docs/concepts/parameters.md) to rebuild the MotionPlanner from
+        the node's ROS parameters) to rebuild the MotionPlanner from
         them. No new wire schema: both services are standard ROS2 interfaces.
 
         Idempotent: the server's current parameter values are queried first,

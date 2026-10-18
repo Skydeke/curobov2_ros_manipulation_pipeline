@@ -206,3 +206,46 @@ def test_pick_place_rejects_attached_object_at_current_state():
     robot.attached.add(OBJECT)  # object already attached to the gripper
     assert ex.init()
     assert not ex.plan()  # current state refuses to seed the task
+
+
+def test_plan_attaches_the_grasped_object_for_the_legs_after_the_grasp():
+    """MTC parity: a ``ModifyPlanningScene`` attach reaches the planning scene
+    at COMPUTE time, so the legs after the grasp are planned with the object
+    already in hand — not only at execution time.
+
+    The shared curobo server holds that scene, so the planner previews the
+    attach (fitted at the grasp pose) during a plan burst and restores the
+    pre-plan scene when the burst ends, leaving execution to materialize its
+    own ops in chain order.
+    """
+    robot, ex = _executor()
+    assert ex.init() and ex.plan()
+
+    # The planner attached the object. Before the fix it only ever reached the
+    # server at execute time, so ``plan_scene_ops`` stayed empty and every
+    # post-grasp leg was planned against a bare world.
+    assert ("attach", OBJECT) in robot.plan_scene_ops
+
+    # Fitted at the grasp pose: the first previewed attach uses the start of
+    # the first leg planned after the attach leaf (the lift), which is where
+    # the grasp completed.
+    leaves = ex.flatten_leaves(ex.best())
+    attach_leaf = next(l for l in leaves if l.stage.name == "attach object")
+    grasp = [float(p) for p in attach_leaf.end.joint_state.position]
+    assert robot.plan_attach_states, "no plan-time attach was recorded"
+    assert robot.plan_attach_states[0] == pytest.approx(grasp)
+
+    # Legs before the grasp planned with an empty hand; a later leg planned
+    # with the object in hand.
+    assert any(OBJECT not in snap for snap in robot.plan_attach_snapshots)
+    assert any(OBJECT in snap for snap in robot.plan_attach_snapshots)
+
+    # The preview is undone at the end of the burst: the server is back to the
+    # task's base scene (empty hand) before execution starts.
+    assert robot.attached == set()
+
+    # Execution is unchanged: the executor materializes attach then detach in
+    # chain order.
+    assert ex.execute(ex.best())
+    ops = [kind for (kind, _) in robot.world_ops if kind in ("attach", "detach")]
+    assert ops == ["attach", "detach"]

@@ -1,0 +1,50 @@
+# SetWorkspace.srv — move/resize the planner's collision workspace (the Mapper
+# TSDF/ESDF grid extent).
+#
+# WHAT IT CHANGES
+#   `extent`/`center` are the launch file's `mapper_extent_xyz` /
+#   `mapper_grid_center`. Setting them:
+#     * updates the two ROS parameters (so a later read sees what is in force),
+#     * rebuilds the Mapper to the new grid (dropping the TSDF/ESDF currently
+#       integrated — the old voxels no longer cover the requested box),
+#     * resizes the solvers' voxel collision cache to match, which rebuilds
+#       every solver (~20 s, the same build-time property as
+#       set_collision_cache),
+#     * republishes the wireframe on <node>/mapper_workspace so the drawn box
+#       and the collision world move together.
+#
+#   An empty list for either field means "leave that one unchanged", so one call
+#   can move the centre and keep the size (or vice versa). The response always
+#   echoes the values actually in force afterwards, so a caller never has to
+#   remember what it sent.
+#
+# GUARDS
+#   Refused while an execution goal is active (a ~20 s blocking rebuild is not
+#   safe against an in-progress trajectory) — same guard as set_collision_cache
+#   and set_joint_locks. When perception is inactive (use_mapper=False, or no
+#   camera/laser configured) the values and the marker still move, but there is
+#   no Mapper to rebuild; `perception_active` reports which case applied.
+
+# --- Request ---
+# New box centre, [x, y, z] in the base frame. Empty => unchanged.
+float64[] center
+
+# New box size, [x, y, z] in the base frame, metres (all > 0).
+# Empty => unchanged.
+float64[] extent
+
+---
+
+# --- Response ---
+bool success
+string message
+
+# Values in force after the call (never the request verbatim — the server's
+# answer is the truth a UI should display).
+string frame_id
+float64[] center
+float64[] extent
+float64 voxel_size
+
+# See GetWorkspace.srv: whether a Mapper exists to have been rebuilt.
+bool perception_active

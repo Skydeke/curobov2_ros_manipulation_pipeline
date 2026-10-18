@@ -589,24 +589,24 @@ class CartesianPath(_MotionBase):
     """Straight-line Cartesian solve (MTC ``solvers::CartesianPath``).
 
     MTC's CartesianPath is a *solver*, not a stage: it interpolates a straight
-    EEF path from the start to the goal at ``step_size`` and fails when less
-    than ``min_fraction`` of that path is feasible. cuRobo has no Cartesian
-    solve mode, so this stage requests the line as whole-path axis holds (the
-    ``ToolPoseCriteria`` cost) and the server's CARTESIAN planner enforces
-    ``min_fraction``; there is no client-side gate.
+    EEF path from the start to the goal at ``step_size`` and reports the
+    fraction of that path it reached. cuRobo has no Cartesian solve mode, so
+    this stage requests the line as whole-path axis holds (the
+    ``ToolPoseCriteria`` cost) and the server's CARTESIAN planner solves it;
+    there is no client-side gate, and no fractional-path gate server-side
+    either (it was removed -).
 
     The stage keeps MTC's solver surface — every ``setStepSize`` /
-    ``setPrecision`` / ``setMinFraction`` / ``setIKFrame`` /
+    ``setPrecision`` / ``setIKFrame`` /
     ``setJumpThreshold`` call lands on the backing ``core.CartesianPath`` (and
     on the wire params) — and adds the cuRobo goal forms
     (``setGoal`` / ``setGoals`` / ``setRelative``) the server needs to know
     where the line goes. ``setHold`` pins the held axes explicitly; without it
     the stage derives the hold from the start pose and the goal.
 
-    ``setCheckStraightness`` is retained as a DEPRECATED alias: the server now
-    owns the partial-path guarantee via ``min_fraction``, so a ``False`` call
-    just clears the hold (the free-space opt-out) — using a non-Cartesian
-    planner for a free move is the faithful equivalent.
+    ``setCheckStraightness`` is retained as a DEPRECATED alias: a ``False``
+    call just clears the hold (the free-space opt-out) — using a
+    non-Cartesian planner for a free move is the faithful equivalent.
     """
 
     stage_type = "cartesian_path"
@@ -642,13 +642,6 @@ class CartesianPath(_MotionBase):
             self.params["precision"] = float(translational)
         except (TypeError, ValueError):
             pass
-
-    def setMinFraction(self, min_fraction: float) -> None:
-        """Set the fraction of motion required for success ([0, 1])."""
-        solver = self._solver()
-        if solver is not None:
-            solver.setMinFraction(min_fraction)
-        self.params["min_fraction"] = float(min_fraction)
 
     def setIKFrame(self, *args) -> None:
         """Set the frame to move linearly (MTC ``CartesianPath::setIKFrame``)."""
@@ -711,7 +704,7 @@ class CartesianPath(_MotionBase):
         self.params["hold"] = [int(c) for c in (hold or [])]
 
     def setCheckStraightness(self, enabled: bool) -> None:
-        """Deprecated: the server owns straightness via ``min_fraction``.
+        """Deprecated: the hold already asks for a line.
 
         Kept for older builders. ``False`` clears the hold (a free-space
         move); ``True`` is a no-op (the derived hold already asks for a line).

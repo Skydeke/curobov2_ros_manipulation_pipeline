@@ -9,7 +9,7 @@ z]``) which the server turns into ``ToolPoseCriteria`` and scores on every
 non-terminal waypoint. Holding every axis on which the start and the goal agree
 therefore leaves the optimizer no choice but the segment between them. That is
 the whole mechanism, and it is what replaces MoveIt's
-``computeCartesianPath(step=0.01, min_fraction=0.95, jump_threshold=5.0)``.
+``computeCartesianPath(step=0.01, jump_threshold=5.0)``.
 
 Three goal forms, matching the three ways a reference Cartesian stage is
 written:
@@ -34,15 +34,17 @@ The hold vector is derived from the start pose, which is not known until the
 plan runs, so a backward (end-seeded) cartesian move would need a two-pass
 plan. Place this stage after a stage that writes a joint state.
 
-Straightness is the planner's job
----------------------------------
-The hold is a soft cost, and the CARTESIAN planner that backs this stage owns
-the partial-path guarantee: it measures how far along the straight segment the
-solved trajectory actually stayed and rejects the solve when less than
-``min_fraction`` of it is on the line (the MTC ``computeCartesianPath``
-contract, message included). So there is no client-side straightness gate
-here — one solve, one verdict, on the server. The rejection propagates to the
-enclosing ``Fallbacks``, which is how the pipeline reaches the next strategy.
+Straightness is the hold's job
+-----------------------------
+The hold is a soft cost and it is the whole mechanism: holding the axes on
+which the start and the goal agree keeps an axis-aligned leg on its segment.
+A diagonal leg leaves the position axes free, so its straightness is whatever
+the solve's optimum happens to be, and nothing checks it — the server's
+fractional-path gate was removed
+because it could never measure a real plan. There is no client-side
+straightness gate either, so a Cartesian leg's rejection can no longer come
+from straightness; use ``Fallbacks`` on other grounds if the pipeline needs
+to reach the next strategy.
 """
 
 from __future__ import annotations
@@ -136,11 +138,11 @@ class CartesianPath(TrajectoryStage):
             allowed_collisions=(start.scene.all_allowed_links()
                                 if start.scene is not None else []),
             trajectory_constraints=self._hold(start_pose, targets))
-        return full_request(self.robot, start.joint_state, [goalset], self.params)
+        return full_request(self.robot, start.joint_state, [goalset], self.params,
+                            scene=start.scene)
 
     def make_end_state(self, start: InterfaceState, result, raw=None):
-        # The CARTESIAN planner already rejected any solve that strayed off the
-        # line (min_fraction), so an arrived result is accepted as-is.
+        # An arrived result is accepted as-is (there is no straightness gate).
         return start.clone(joint_state=result.last_state)
 
     def _comment(self, req: PlanRequest, result) -> str:

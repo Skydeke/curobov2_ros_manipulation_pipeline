@@ -77,6 +77,15 @@ RUN apt-get update && apt-get install -y --reinstall \
   ros-jazzy-moveit-msgs && \
   rm -rf /var/lib/apt/lists/*
 
+# --- C++ port build dependencies ---
+# pybind11 (embedded interpreter) and Eigen come from Ubuntu universe; the CUDA
+# base image does not have universe enabled by default.
+RUN add-apt-repository -y universe && \
+  apt-get update && apt-get install -y --no-install-recommends \
+  pybind11-dev \
+  libeigen3-dev \
+  && rm -rf /var/lib/apt/lists/*
+
 # --- cuRobo v2: dependencies FIRST, sources LAST ---
 COPY curobo/requirements.txt /tmp/curobo_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/curobo_requirements.txt
@@ -87,6 +96,9 @@ COPY curobov2_ros_interfaces ${ROS_WS}/src/curobov2_ros_interfaces
 COPY curobov2_ros_moveit ${ROS_WS}/src/curobov2_ros_moveit
 COPY curobov2_ros_rviz ${ROS_WS}/src/curobov2_ros_rviz
 COPY curobov2_ros_extra ${ROS_WS}/src/curobov2_ros_extra
+
+# --- C++ port: the bridge (the C++ server now lives inside curobov2_ros, cpp/) ---
+COPY curobo_bridge ${ROS_WS}/src/curobo_bridge
 
 # --- task-constructor packages
 COPY curobo_task_constructor_interfaces ${ROS_WS}/src/curobo_task_constructor_interfaces
@@ -111,4 +123,5 @@ RUN source /opt/ros/jazzy/setup.bash && \
   curobov2_ros curobov2_ros_moveit \
   curobov2_ros_rviz curobov2_ros_extra \
   curobo_task_constructor_interfaces \
-  curobo_task_constructor curobo_task_constructor_rviz
+  curobo_task_constructor curobo_task_constructor_rviz \
+  curobo_bridge

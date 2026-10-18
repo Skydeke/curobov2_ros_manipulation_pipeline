@@ -7,6 +7,7 @@
 #include <limits>
 
 #include <QAbstractItemView>
+#include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
@@ -14,10 +15,12 @@
 #include <QLabel>
 #include <QPointF>
 #include <QPushButton>
+#include <QStringList>
 #include <QTimer>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
+#include <QXmlStreamReader>
 
 namespace curobov2_ros_rviz
 {
@@ -123,6 +126,31 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
 {
   auto * layout = new QVBoxLayout(this);
   layout->setContentsMargins(4, 4, 4, 4);
+
+  // MoveIt's Joints tab itself has no named-pose control: its "Goal State"
+  // combo lives on the Planning tab. curobo's named poses are JOINT
+  // configurations, which is exactly what this tab's target column holds, so the
+  // control is here: a combo that seeds the target column from the robot's SRDF
+  // <group_state> entries (home, retract, vertical, open, close for the kortex).
+  // Selecting one never plans or sends anything — it edits the request, exactly
+  // like "Set from current" / Zero below, so Plan / Plan + send stay the only
+  // things that can move the robot.
+  auto * preset_row = new QHBoxLayout();
+  preset_row->addWidget(new QLabel(tr("Named pose:"), this));
+  named_pose_combo_ = new QComboBox(this);
+  named_pose_combo_->setToolTip(
+    tr("Named joint configurations from the robot's SRDF (its <group_state> "
+       "entries). Selecting one writes its joints into the target column BY "
+       "NAME; a joint the pose does not name falls back to the current "
+       "/joint_states value, and a joint the cspace does not contain (e.g. one "
+       "that is locked) is reported, not dropped silently. This only edits the "
+       "target — use Plan / Plan + send to act on it."));
+  named_pose_combo_->addItem(tr("— select a named pose —"));
+  // Gated until an SRDF has been parsed (see loadNamedPoses): an empty combo is
+  // a truthful "no named poses available", not a control that does nothing.
+  named_pose_combo_->setEnabled(false);
+  preset_row->addWidget(named_pose_combo_, 1);
+  layout->addLayout(preset_row);
 
   // MoveIt's Joints tab, reproduced from the ground up rather than approximated.
   // Its whole layout is:
@@ -237,6 +265,10 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
   status_->setWordWrap(true);
   layout->addWidget(status_);
 
+  connect(
+    named_pose_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+    &JointsTab::onNamedPoseChosen);
+
   setButtonsEnabled();
 }
 
@@ -273,11 +305,41 @@ void JointsTab::initialize(rclcpp::Node::SharedPtr node)
 
   setPlannerNode(planner_node_);
 
+  // Named poses come from the robot's SRDF, not from the planner. rviz.launch.py
+  // passes `robot_description_semantic` as a node parameter even though no
+  // MoveIt node runs, so the parameter is the primary source (loadNamedPoses);
+  // the latched topic is the fallback for a setup that publishes it instead
+  // (move_group's planning-scene monitor does). Both paths converge on
+  // parseNamedPoses().
+  rclcpp::QoS srdf_qos(rclcpp::KeepLast(1));
+  srdf_qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
+  srdf_sub_ = node_->create_subscription<std_msgs::msg::String>(
+    "/robot_description_semantic", srdf_qos,
+    [this](std_msgs::msg::String::ConstSharedPtr msg)
+    {
+      if (named_poses_loaded_) {
+        return;  // already parsed from the parameter
+      }
+      const QString xml = QString::fromStdString(msg->data);
+      // Fires on rviz's spinner thread; parseNamedPoses touches the combo.
+      runOnGuiThread([this, xml]() { parseNamedPoses(xml); });
+    },
+    sub_options);
+  loadNamedPoses();
+
   // Poll the cspace: it is read-only and cheap (it reads the parsed kinematics
   // model, touches no solver), so a 2 s poll is cheap insurance against
   // missing the very first response while the planner is still warming up.
+  // Visibility-gated: while the tab is hidden the timer still ticks but the
+  // service call and the row rebuild are skipped, which is the whole point of
+  // the poll -- there is nobody to see the rows.
   auto * info_timer = new QTimer(this);
-  connect(info_timer, &QTimer::timeout, this, &JointsTab::refreshJointInfo);
+  connect(info_timer, &QTimer::timeout, this, [this]()
+  {
+    if (isVisible()) {
+      refreshJointInfo();
+    }
+  });
   info_timer->start(2000);
 }
 
@@ -334,6 +396,12 @@ void JointsTab::setButtonsEnabled()
 
 void JointsTab::refreshJointInfo()
 {
+  // Retry the SRDF read here too: the parameter can be the only source and it
+  // might not have been in place at initialize() time. Idempotent and cheap
+  // (both early-return once poses are loaded).
+  if (!named_poses_loaded_) {
+    loadNamedPoses();
+  }
   if (joint_info_client_ == nullptr || !joint_info_client_->service_is_ready()) {
     return;
   }
@@ -468,14 +536,39 @@ void JointsTab::onJointState(const sensor_msgs::msg::JointState::ConstSharedPtr 
   // Match BY NAME. The kortex sim publishes the finger joint FIRST, so
   // /joint_states order is not the cspace order and indexing into the tree by
   // position would silently show the wrong value on the wrong joint.
-  QHash<QString, double> reading;
-  for (size_t i = 0; i < msg->name.size() && i < msg->position.size(); ++i) {
-    reading.insert(QString::fromStdString(msg->name[i]), msg->position[i]);
+  //
+  // COALESCED, not one GUI update per message. This callback runs on rviz's
+  // spinner thread and a joint-state publisher can run at ~100 Hz, while the
+  // GUI thread has to repaint the whole tree per update; letting every message
+  // queue its own rewrite makes the GUI fall behind and the displayed positions
+  // lag. The readings are merged into pending_current_ under the mutex, and only
+  // ONE drain is queued at a time (joint_state_posted_), so the GUI thread sees
+  // the newest value of every joint and does a single repaint for a burst.
+  {
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    for (size_t i = 0; i < msg->name.size() && i < msg->position.size(); ++i) {
+      pending_current_.insert(QString::fromStdString(msg->name[i]), msg->position[i]);
+    }
+    if (joint_state_posted_) {
+      return;  // a drain is already queued; it will pick these up
+    }
+    joint_state_posted_ = true;
   }
 
   runOnGuiThread(
-    [this, reading]()
+    [this]()
     {
+      QHash<QString, double> reading;
+      {
+        std::lock_guard<std::mutex> lock(joint_state_mutex_);
+        reading.swap(pending_current_);
+        joint_state_posted_ = false;
+      }
+      // The swap REPLACES current_ with everything seen since the last drain;
+      // a joint absent from this burst keeps its previous value in current_ only
+      // if it was also absent from the burst, which for a full-state publisher
+      // never happens. Matches the old "current_ = reading" semantics for the
+      // incremental case without dropping joints the burst did not mention.
       current_ = reading;
       for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
         auto * item = tree_->topLevelItem(i);
@@ -515,6 +608,193 @@ void JointsTab::zeroTargets()
     setTarget(tree_->topLevelItem(i), 0.0);
   }
   setStatus(tr("targets zeroed"));
+}
+
+void JointsTab::loadNamedPoses()
+{
+  if (named_poses_loaded_ || node_ == nullptr) {
+    return;
+  }
+
+  // Source 1: the rviz node's `robot_description_semantic` parameter, which
+  // rviz.launch.py sets from moveit_config.robot_description_semantic (so it is
+  // present even though no MoveIt node is running). Launch parameters are
+  // usually OVERRIDES rather than declared parameters, and which accessor sees
+  // them differs (rclcpp exposes undeclared overrides through
+  // get_parameter_overrides(); get_parameter() throws
+  // ParameterUninitializedException). Try the override map first, then the
+  // declared parameter, so both layouts work.
+  QString srdf;
+  try {
+    const auto & overrides =
+      node_->get_node_parameters_interface()->get_parameter_overrides();
+    const auto it = overrides.find("robot_description_semantic");
+    if (it != overrides.end() &&
+        it->second.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
+      srdf = QString::fromStdString(it->second.get<std::string>());
+    }
+  } catch (const std::exception &) {
+    // No override map, or an unexpected type: fall through to the declared
+    // parameter and then the topic.
+  }
+  if (srdf.isEmpty() && node_->has_parameter("robot_description_semantic")) {
+    try {
+      const auto param = node_->get_parameter("robot_description_semantic");
+      if (param.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
+        srdf = QString::fromStdString(param.as_string());
+      }
+    } catch (const std::exception &) {
+      // Uninitialised (override present but not declared): the topic fallback
+      // is the remaining source.
+    }
+  }
+
+  if (!srdf.isEmpty()) {
+    parseNamedPoses(srdf);
+  }
+}
+
+void JointsTab::parseNamedPoses(const QString & srdf_xml)
+{
+  if (named_poses_loaded_ || srdf_xml.isEmpty()) {
+    return;
+  }
+
+  // <group_state name="home" group="manipulator"> <joint name="joint_1"
+  // value="0"/> ... </group_state>. QXmlStreamReader is already linked in
+  // through QtCore, so parsing the couple of attributes needed here needs no
+  // new dependency (and no SRDF library).
+  QVector<NamedPose> poses;
+  QXmlStreamReader reader(srdf_xml);
+  NamedPose current;
+  bool in_pose = false;
+  // .toString() rather than holding the raw QStringRef: Qt6 removed QStringRef
+  // (name()/attributes().value() return QStringView there), so the version-
+  // agnostic form is the one that compiles on both Qt5 and Qt6.
+  while (!reader.atEnd()) {
+    reader.readNext();
+    const QString tag = reader.name().toString();
+    if (reader.isStartElement()) {
+      if (tag == QLatin1String("group_state")) {
+        current = NamedPose();
+        current.name = reader.attributes().value("name").toString();
+        current.group = reader.attributes().value("group").toString();
+        in_pose = !current.name.isEmpty();
+      } else if (in_pose && tag == QLatin1String("joint")) {
+        const QString joint = reader.attributes().value("name").toString();
+        bool ok = false;
+        const double value = reader.attributes().value("value").toString().toDouble(&ok);
+        if (ok && !joint.isEmpty()) {
+          current.joints.append(qMakePair(joint, value));
+        }
+      }
+    } else if (reader.isEndElement() && tag == QLatin1String("group_state")) {
+      // A state with no joints (or a group state for a group we cannot use) is
+      // not a goal we could ever set, so it is not offered.
+      if (in_pose && !current.joints.isEmpty()) {
+        poses.append(current);
+      }
+      in_pose = false;
+    }
+  }
+  if (reader.hasError() || poses.isEmpty()) {
+    return;  // not an SRDF, or no usable named poses: stay disabled/empty
+  }
+
+  named_poses_ = poses;
+  named_poses_loaded_ = true;
+
+  named_pose_combo_->blockSignals(true);
+  named_pose_combo_->clear();
+  named_pose_combo_->addItem(tr("— select a named pose —"));
+  for (const NamedPose & pose : named_poses_) {
+    // The group is shown because two groups can share a state name in general
+    // (the kortex ones do not, but nothing prevents it).
+    named_pose_combo_->addItem(
+      pose.group.isEmpty() ? pose.name
+                           : tr("%1  [%2]").arg(pose.name, pose.group));
+  }
+  named_pose_combo_->setCurrentIndex(0);
+  named_pose_combo_->blockSignals(false);
+  named_pose_combo_->setEnabled(true);
+}
+
+void JointsTab::onNamedPoseChosen(int index)
+{
+  if (index <= 0) {
+    return;  // the placeholder row, or a cleared combo
+  }
+  applyNamedPose(index - 1);
+}
+
+void JointsTab::applyNamedPose(int index)
+{
+  if (index < 0 || index >= named_poses_.size()) {
+    return;
+  }
+  const NamedPose & pose = named_poses_[index];
+  if (tree_->topLevelItemCount() == 0) {
+    setStatus(
+      tr("named pose '%1' needs the cspace — waiting for get_joint_info")
+        .arg(pose.name));
+    return;
+  }
+
+  // Index the pose by joint NAME: an SRDF group state names only the joints it
+  // pins, so its joints are a SUBSET of the cspace, and the SRDF's order need
+  // not match the cspace's.
+  QHash<QString, double> pose_values;
+  for (const QPair<QString, double> & joint : pose.joints) {
+    pose_values.insert(joint.first, joint.second);
+  }
+
+  int from_pose = 0;
+  int from_current = 0;
+  QStringList no_reading;
+  QStringList absent;
+  // Walk the TREE (== cspace), not the pose, so every joint the target actually
+  // holds is considered: a joint the pose does NOT name falls back to the live
+  // /joint_states value rather than silently keeping whatever target was staged
+  // before. That is what MoveIt does with a goal state's unnamed joints, and it
+  // is what makes selecting "close" (a 1-joint gripper state) leave the arm
+  // where it is instead of holding some stale arm target.
+  for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+    QTreeWidgetItem * item = tree_->topLevelItem(i);
+    const QString joint = item->text(COL_JOINT);
+    const auto pose_it = pose_values.constFind(joint);
+    if (pose_it != pose_values.constEnd()) {
+      setTarget(item, pose_it.value());
+      ++from_pose;
+      continue;
+    }
+    const auto current_it = current_.constFind(joint);
+    if (current_it != current_.constEnd()) {
+      setTarget(item, current_it.value());
+      ++from_current;
+    } else {
+      no_reading << joint;
+    }
+  }
+  // A pose joint with no row is pinned OUT of the cspace (e.g. locked):
+  // reported, never dropped silently.
+  for (const QPair<QString, double> & joint : pose.joints) {
+    if (rowFor(joint.first) == nullptr) {
+      absent << joint.first;
+    }
+  }
+
+  QString message =
+    tr("named pose '%1': %2 joint(s) from the pose, %3 from the current state")
+      .arg(pose.name)
+      .arg(from_pose)
+      .arg(from_current);
+  if (!no_reading.isEmpty()) {
+    message += tr("; no reading, left unchanged: %1").arg(no_reading.join(", "));
+  }
+  if (!absent.isEmpty()) {
+    message += tr("; not in the cspace (locked?): %1").arg(absent.join(", "));
+  }
+  setStatus(message);
 }
 
 namespace

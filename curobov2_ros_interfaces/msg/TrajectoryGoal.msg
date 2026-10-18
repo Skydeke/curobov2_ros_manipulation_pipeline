@@ -32,13 +32,9 @@ Goalset[] goalsets
 #
 #   cartesian_step_size     max EEF translation between interpolated waypoints
 #                           (m). <= 0 -> planner default (0.01).
-#   cartesian_min_fraction  required feasible fraction of the linear path in
-#                           [0, 1]. < 0 -> planner default (1.0). 0 accepts
-#                           any path (free-space opt-out).
 #   cartesian_precision     translational tolerance (m) under which an
 #                           interpolated waypoint counts as ON the line.
 #                           <= 0 -> planner default (0.001, MTC
 #                           CartesianPrecision.translational).
 float64 cartesian_step_size
-float64 cartesian_min_fraction
 float64 cartesian_precision

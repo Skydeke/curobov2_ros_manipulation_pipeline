@@ -6,9 +6,12 @@ if(NOT CMAKE_C_STANDARD)
   set(CMAKE_C_STANDARD 99)
 endif()
 
-# Default to C++20
+# Default to C++17. Both Humble (GCC 11) and Jazzy build rviz itself as C++17,
+# so matching that is the portable choice; C++20 was an unnecessary floor that
+# only the developer's own toolchain happened to meet. Overridable from the
+# command line (-DCMAKE_CXX_STANDARD=20) for anyone who wants it.
 if(NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 20)
+  set(CMAKE_CXX_STANDARD 17)
 endif()
 
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -26,6 +29,15 @@ find_package(ament_cmake REQUIRED)
 find_package(pluginlib REQUIRED)
 find_package(rviz_common REQUIRED)
 
+# Qt: prefers Qt5, because rviz_common links Qt5 on BOTH Humble and Jazzy (its
+# own extras call find_package(Qt5) explicitly), and pulling in Qt6 alongside it
+# would put two Qt generations in one process. Qt6 is selected only when Qt5 is
+# not installed, so this still builds against a Qt6 rviz. The version is then
+# threaded through Qt${QT_VERSION_MAJOR} everywhere below (wrap_ui, wrap_cpp,
+# ::Widgets) instead of a hard-coded Qt5.
+find_package(QT NAMES Qt5 Qt6 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets)
+
 set(dependencies_pkgs
   rclcpp
   rclcpp_action
@@ -36,9 +48,6 @@ set(dependencies_pkgs
   rviz_common
   rviz_rendering
   rviz_default_plugins
-  Qt5Core
-  Qt5Gui
-  Qt5Widgets
   geometry_msgs
   visualization_msgs
   interactive_markers
@@ -133,23 +142,35 @@ set(${PROJECT_NAME}_UIS
 )
 
 # Generate header for ui
-qt5_wrap_ui(${PROJECT_NAME}_UIS_H ${${PROJECT_NAME}_UIS})
-qt5_wrap_cpp(${PROJECT_NAME}_MOCS ${${PROJECT_NAME}_HDRS})
+# CMake does not expand variables in a COMMAND name, so the wrap function has to
+# be selected with an explicit branch rather than written as
+# qt${QT_VERSION_MAJOR}_wrap_ui.
+if(QT_VERSION_MAJOR EQUAL 6)
+  qt6_wrap_ui(${PROJECT_NAME}_UIS_H ${${PROJECT_NAME}_UIS})
+  qt6_wrap_cpp(${PROJECT_NAME}_MOCS ${${PROJECT_NAME}_HDRS})
+else()
+  qt5_wrap_ui(${PROJECT_NAME}_UIS_H ${${PROJECT_NAME}_UIS})
+  qt5_wrap_cpp(${PROJECT_NAME}_MOCS ${${PROJECT_NAME}_HDRS})
+endif()
 
 add_library(${library_name} SHARED
   ${${PROJECT_NAME}_SRCS}
   ${${PROJECT_NAME}_UIS_H}
   ${${PROJECT_NAME}_MOCS} 
 )
-target_link_libraries(${library_name} Qt5::Widgets rviz_common::rviz_common rviz_default_plugins::rviz_default_plugins urdf::urdf
+target_link_libraries(${library_name} Qt${QT_VERSION_MAJOR}::Widgets rviz_common::rviz_common rviz_default_plugins::rviz_default_plugins urdf::urdf
   Eigen3::Eigen)
 ament_target_dependencies(${library_name} ${dependencies_pkgs})
 
 # CuroboPanel embeds another rviz panel inside a tab widget, so an undefined
 # vtable or a missing PLUGINLIB_EXPORT_CLASS symbol would otherwise surface only
 # as an opaque "undefined symbol" when rviz dlopens this library. Let the linker
-# name the symbol at build time instead.
-target_link_options(${library_name} PRIVATE "-Wl,--no-undefined")
+# name the symbol at build time instead. --no-undefined is ELF/GNU-ld (and
+# lld/clang) only, so it is guarded rather than applied unconditionally: on
+# macOS the flag does not exist and would fail the build.
+if(NOT APPLE)
+  target_link_options(${library_name} PRIVATE "-Wl,--no-undefined")
+endif()
 
 # I prefer the Qt signals and slots to avoid defining "emit", "slots",
 # etc because they can conflict with boost signals, so define QT_NO_KEYWORDS here

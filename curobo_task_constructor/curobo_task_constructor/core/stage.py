@@ -416,7 +416,15 @@ class Stage(ABC):
         each, so each call ticks the stage clock live instead of only at
         pass end. run_compute subtracts the accounted share, so the total
         stays exactly the wall duration (never double-counted).
+
+        The server's scene is reconciled to the request's scene first, so the
+        leg is planned with whatever an earlier stage attached (MTC applies
+        ``ModifyPlanningScene`` to the planning scene before the motion is
+        planned). Cheap and idempotent: a leg whose scene already matches costs
+        one attribute check.
         """
+        self.robot.plan_scene(
+            getattr(req, "scene", None), getattr(req, "start_pose", None))
         started = time.perf_counter()
         try:
             return self.robot.plan(req)

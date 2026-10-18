@@ -1,5 +1,13 @@
 # Request: name of an existing scene obstacle to attach to the robot flange.
 string object_name
+
+# Joint configuration the payload's collision spheres are fitted at. This is
+# the pose the grasp completes at, so the fitted geometry is captured in the
+# flange frame exactly where the object is picked. Leave empty (the default)
+# to fit at the robot's CURRENT joint state, which is only correct when the
+# arm really is at the grasp pose (the classic "grasp then attach" call).
+sensor_msgs/JointState joint_state
+
 ---
 # Response fields
 bool success

@@ -43,8 +43,7 @@ EXECUTE_WAIT_SEC = 0.5
 
 PLANNER_CLASSIC = 0
 #: SetPlanner CARTESIAN (=3): the MTC ``solvers::CartesianPath`` backend. It
-#: plans a straight line through the axis-hold cost and enforces
-#: ``min_fraction`` server-side.
+#: plans a straight line through the axis-hold cost.
 PLANNER_CARTESIAN = 3
 PLANNER_JOINT_SPACE = 5
 
@@ -521,20 +520,19 @@ class CartesianPath(PlannerInterface):
 
     A faithful port of MoveIt Task Constructor's ``solvers::CartesianPath``.
     MTC's solver interpolates a straight EEF path from the start to the goal
-    at ``step_size``, IK's + collision-checks every waypoint, and fails unless
-    at least ``min_fraction`` of the path is feasible. cuRobo has no such
-    solve mode, so this solver selects the server's **CARTESIAN** planner
+    at ``step_size``, IK's + collision-checks every waypoint, and reports the
+    fraction of the path it reached. cuRobo has no such solve mode, so this
+    solver selects the server's **CARTESIAN** planner
     (``SetPlanner.CARTESIAN``): the backend expresses the line as whole-path
-    axis holds (the ``ToolPoseCriteria`` cost), solves it, and enforces the
-    same ``min_fraction`` guarantee — the semantics live on the server, not in
-    a client-side gate.
+    axis holds (the ``ToolPoseCriteria`` cost) and solves it. The fractional-
+    path guarantee was removed - the backend never enforced it (its own
+    measurement could not run against a real plan).
 
     Property surface mirrors MTC ``solvers::CartesianPath`` (cartesian_path.h /
     cartesian_path.cpp):
 
     - ``step_size``       (default 0.01 m) — EEF step between waypoints
     - ``precision``       (``CartesianPrecision``) — linear-path tolerance
-    - ``min_fraction``    (default 1.0) — fraction of motion required for success
     - ``max_cartesian_speed`` / ``cartesian_speed_limited_link`` — speed cap
     - ``ik_frame``        (via ``setIKFrame``) — frame moved linearly
     - inherited: ``setTimeout`` / ``setProperty`` /
@@ -550,12 +548,10 @@ class CartesianPath(PlannerInterface):
     def __init__(
         self,
         step_size: float = 0.01,
-        min_fraction: float = 1.0,
         precision: CartesianPrecision = None,
     ):
         super().__init__()
         self.step_size = float(step_size)
-        self.min_fraction = float(min_fraction)
         self.precision = precision or CartesianPrecision()
         #: Max Cartesian speed cap (m/s); 0 = unlimited (MTC
         #: ``max_cartesian_speed``). Carried for parity; the cuRobo backend
@@ -574,11 +570,6 @@ class CartesianPath(PlannerInterface):
         """Set the precision of the linear path."""
         self.precision = precision
         self.setProperty("precision", precision)
-
-    def setMinFraction(self, min_fraction: float) -> None:
-        """Set the fraction of motion required for success."""
-        self.min_fraction = float(min_fraction)
-        self.setProperty("min_fraction", self.min_fraction)
 
     def setIKFrame(self, *args) -> None:
         """Set the frame to move linearly (MTC ``CartesianPath::setIKFrame``).
@@ -623,7 +614,6 @@ class CartesianPath(PlannerInterface):
         params = dict(self._planner_properties)
         params.pop("timeout", None)
         params.setdefault("step_size", self.step_size)
-        params.setdefault("min_fraction", self.min_fraction)
         # Translational precision (m): the tolerance under which an interpolated
         # waypoint counts as ON the line. ``self.precision`` is the source of
         # truth even when ``setPrecision`` stored the CartesianPrecision object
@@ -957,7 +947,7 @@ _DISPLAY_PROPERTIES = {
     "compute_ik": ("group", "eef", "max_solutions", "target_pose", "ik_frame",
                    "ignore_collisions", "timeout"),
     "generate_pose": ("pose", "timeout"),
-    "cartesian_path": ("goal", "hold", "step_size", "min_fraction", "precision",
+    "cartesian_path": ("goal", "hold", "step_size", "precision",
                        "ik_frame", "timeout"),
     "modify_scene": ("add", "remove", "remove_all", "attach", "attach_link",
                      "detach", "detach_all", "allow_collisions", "timeout"),

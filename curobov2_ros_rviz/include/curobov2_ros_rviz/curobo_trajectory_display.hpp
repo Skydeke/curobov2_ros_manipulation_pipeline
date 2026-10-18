@@ -12,6 +12,9 @@
 #include <Eigen/Core>
 #include <Eigen/Geometry>
 
+#include <OgreVector3.h>
+#include <OgreQuaternion.h>
+
 #include <rclcpp/rclcpp.hpp>
 #include <rviz_common/display.hpp>
 #include <rviz_rendering/objects/shape.hpp>
@@ -55,6 +58,16 @@ namespace curobov2_ros_rviz
  * element owns the grasp visualisation (robot, trail, attached object).
  * Colours come from the message (blue attached, red colliding), so the
  * display never reinterprets what the server decided.
+ *
+ * The object RIDES the planned trajectory: the server publishes its spheres
+ * in the frame of the URDF link it is fixed to (e.g. grasping_frame), and the
+ * display forward-kinematics that link at the current playback waypoint, so
+ * the grasped payload moves with the ghost gripper. A detach observed mid
+ * playback (e.g. the plan-time preview restoring the scene) does not yank it
+ * out of the hand; between trajectories the live state wins, so a move planned
+ * after the place shows nothing. Because every display draws its own copy,
+ * switch "Show Attached" off on all but one when several trajectory displays
+ * are visible (their overlays would otherwise z-fight).
  *
  * No MoveIt dependency.
  */
@@ -100,9 +113,14 @@ private:
   // root -> fixed offset, refreshed every frame (moving bases included).
   // The frame name comes from the loaded URDF itself -- zero frame
   // configuration, works for any trajectory source -- and the transform
-  // from the frame manager, mirroring syncSpheres().
+  // from the frame manager, mirroring poseSpheres().
   Ogre::SceneNode * robot_root_ = nullptr;
   std::string robot_root_frame_;
+  /// Root -> fixed offset, refreshed by updateRobotRoot() and reused by
+  /// syncSpheres() to place the attached object on the ghost (FK transforms
+  /// are base-rooted; the sphere nodes are not children of robot_root_).
+  Ogre::Vector3 robot_root_offset_ = Ogre::Vector3::ZERO;
+  Ogre::Quaternion robot_root_rotation_ = Ogre::Quaternion::IDENTITY;
   void updateRobotRoot();
 
   // --- Trail (ghost copies) ---
@@ -185,12 +203,29 @@ private:
   /// surplus.
   struct SphereDatum
   {
-    Ogre::Vector3 pos = Ogre::Vector3::ZERO;
+    /// Sphere centre in `frame` (a robot link for the grasped object, else the
+    /// publisher's base frame); resolved to the RViz fixed frame by
+    /// poseSpheres() every frame so a link-relative object rides the ghost.
+    Ogre::Vector3 local = Ogre::Vector3::ZERO;
+    std::string frame;
     float sx = 0.0f, sy = 0.0f, sz = 0.0f;
     float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.5f;
     bool attached = false;
   };
   void applySpheres(const std::vector<SphereDatum> & data);
+  /// Resolve every pooled sphere's position for the current frame: FK the
+  /// owning link when it is part of the displayed trajectory, else the live
+  /// transform. Called each frame so the grasped object tracks playback.
+  void poseSpheres();
+
+  // --- Attached-object latch ---
+  // `live_spheres_` is the last message's attached set (empty once detached);
+  // `playback_spheres_` is what the current trajectory draws. They differ only
+  // mid playback: a detach then (the plan-time preview restoring the scene)
+  // must not empty the ghost's hand, while promoting a fresh trajectory
+  // re-syncs from the live set so a move planned after the place draws nothing.
+  std::vector<SphereDatum> live_spheres_;
+  std::vector<SphereDatum> playback_spheres_;
 
   // --- Subscriber (URDF topic, always `/robot_description`) ---
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_description_sub_;

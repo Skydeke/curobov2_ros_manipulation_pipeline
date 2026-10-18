@@ -35,7 +35,8 @@ class Connect(ConnectingStage):
         goalset = GoalsetSpec(
             target_joint_positions=list(getattr(e.joint_state, "position", []) or []),
             allowed_collisions=sorted(allowed))
-        req = full_request(self.robot, s.joint_state, [goalset], self.params)
+        req = full_request(self.robot, s.joint_state, [goalset], self.params,
+                           scene=s.scene)
         try:
             self._note_plan_attempt()
             result = self._timed_plan(req)

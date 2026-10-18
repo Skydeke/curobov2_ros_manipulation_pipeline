@@ -92,13 +92,10 @@ not expressible in six slots), and with several candidates the hold is the
 
 The hold is a soft cost, so the partial-path guarantee lives on the planner:
 the `core.CartesianPath` solver selects **CARTESIAN** (`SetPlanner.CARTESIAN`),
-which measures how far along the straight segment the solved trajectory
-actually stayed and rejects the solve when less than `min_fraction` of it is on
-the line — MoveIt's `computeCartesianPath` verdict, message included. A
-rejection propagates to the enclosing `Fallbacks`, which is how the reference
-pipeline reached the next candidate after rejecting a Cartesian solve. A
-free-space move is simply an empty hold planned by a non-Cartesian planner (or
-`min_fraction: 0`); there is no client-side gate.
+which expresses the line as those holds and solves them. There is no
+straightness gate anywhere: the server's fractional-path check was removed
+(it could never measure a real plan), so a Cartesian leg is accepted whatever its straightness. A free-space
+move is simply an empty hold planned by a non-Cartesian planner.
 
 This stage is **forward-only**: the hold comes from the start pose, so a
 backward (end-seeded) move would need a two-pass plan.

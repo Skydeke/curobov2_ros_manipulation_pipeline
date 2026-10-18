@@ -52,6 +52,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetJointLocks.srv"
   "srv/SetObjects.srv"
   "srv/GetJointInfo.srv"
+  "srv/GetWorkspace.srv"
+  "srv/SetWorkspace.srv"
   "srv/SetRobotStrategy.srv"
   "srv/GetRobotStrategies.srv"
   "srv/WarmupIK.srv"

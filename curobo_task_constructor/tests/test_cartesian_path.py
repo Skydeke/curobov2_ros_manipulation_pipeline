@@ -278,8 +278,8 @@ def test_cartesian_path_relative_goal_can_ride_the_hand_frame():
 
 
 def test_cartesian_path_without_a_line_guarantee_accepts_a_bowed_path():
-    """No CartesianPath solver -> no min_fraction to meet, so a bowed solve is
-    the optimizer's answer, not a failure to fall through on."""
+    """A bowed solve with no Cartesian planner is the optimizer's answer, not
+    a failure to fall through on (nothing measures straightness any more)."""
     robot = _robot(bow=0.03)  # 3 cm of bow
     goal = _vertical_goal(robot, 0.05)
     _, ex = _plan([_stage("cartesian_path", "descend",
@@ -288,42 +288,22 @@ def test_cartesian_path_without_a_line_guarantee_accepts_a_bowed_path():
     assert ex.best() is not None
 
 
-def test_cartesian_planner_min_fraction_rejects_a_bowed_path():
-    """The CARTESIAN solver owns the partial-path guarantee now (MTC
-    ``computeCartesianPath``): a solve that bows off the line is rejected on the
-    server, and the enclosing Fallbacks advances to the next sibling."""
+def test_cartesian_planner_accepts_a_bowed_path():
+    """The CARTESIAN planner has no straightness gate: a solve that bows off
+    the line is the optimizer's answer, not a failure to fall through on.
+    (The reference's fractional-path gate could never measure a real plan -
+    it was removed outright.)"""
     robot = _robot(bow=0.03)
     goal = _vertical_goal(robot, 0.05)
     _, ex = _plan([_stage("cartesian_path", "descend", {
-        "goal": {"pose": goal}, "planner": "cartesian", "min_fraction": 1.0,
-    })], robot)
-    assert not ex.plan()
-    assert robot.last_cartesian_fraction is not None
-    assert robot.last_cartesian_fraction < 1.0
-
-
-def test_cartesian_planner_min_fraction_accepts_a_straight_path():
-    robot = _robot(bow=0.0)
-    goal = _vertical_goal(robot, 0.05)
-    _, ex = _plan([_stage("cartesian_path", "descend", {
-        "goal": {"pose": goal}, "planner": "cartesian", "min_fraction": 1.0,
+        "goal": {"pose": goal}, "planner": "cartesian",
     })], robot)
     assert ex.plan()
-    assert robot.last_cartesian_fraction == pytest.approx(1.0)
+    assert ex.best() is not None
 
 
-def test_cartesian_planner_min_fraction_zero_disables_the_guarantee():
-    """min_fraction 0 is the MTC "accept any fraction" opt-out."""
-    robot = _robot(bow=0.03)
-    goal = _vertical_goal(robot, 0.05)
-    _, ex = _plan([_stage("cartesian_path", "descend", {
-        "goal": {"pose": goal}, "planner": "cartesian", "min_fraction": 0.0,
-    })], robot)
-    assert ex.plan()
-
-
-def test_cartesian_planner_rejection_feeds_the_fallbacks():
-    """A rejected line leg must let the NEXT sibling candidate run."""
+def test_cartesian_planner_line_leg_feeds_the_fallbacks():
+    """Sibling candidates still chain (there is no straightness rejection)."""
     robot = _robot(bow=0.0)
     x, y, z = _tool_xyz(robot)
 
@@ -332,7 +312,7 @@ def test_cartesian_planner_rejection_feeds_the_fallbacks():
             _stage("cartesian_path", "descend",
                    {"goal": {"pose": {"x": x, "y": y, "z": z - dz,
                                       **IDENTITY_Q}},
-                    "planner": "cartesian", "min_fraction": 1.0}),
+                    "planner": "cartesian"}),
         ])
 
     _, ex = _plan([_container("fallbacks", "candidates",

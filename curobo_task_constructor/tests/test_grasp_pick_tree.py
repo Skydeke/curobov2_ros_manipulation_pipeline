@@ -268,20 +268,19 @@ def test_free_space_strategy_sends_no_hold_at_all():
     # all-zero hold == "no axis is pinned" == the old free pose goal
     assert descend.plan_request.goalsets[0].trajectory_constraints == \
         [0, 0, 0, 0, 0, 0]
-    # no min_fraction: the free-space leg runs on the classic planner, so
+    # the free-space leg runs on the classic planner, so
     # there is no straight line for the CARTESIAN solver to guarantee
-    assert "min_fraction" not in descend.stage.params
 
 
-def test_a_bowed_descent_falls_through_to_the_next_strategy():
-    """cuRobo's hold is soft, so the CARTESIAN planner's ``min_fraction`` is
-    what actually enforces the line — and a rejection must reach the
-    fallbacks."""
-    # the only strategy is line-constrained, so the pick cannot be solved
+def test_a_bowed_descent_is_planned_not_rejected():
+    """A bowed descent is planned, not rejected: cuRobo's hold is soft and
+    nothing measures straightness any more (the server's fractional-path
+    gate was removed)."""
+    # a bowed line-constrained descent is accepted on its own
     robot, ex = _executor(strategies=STRATEGIES[:1], bow=0.04)
-    assert not ex.plan()
+    assert ex.plan()
 
-    # with free_space available it succeeds, on the unconstrained leg
+    # and the ladder still succeeds with free_space available
     robot, ex = _executor(bow=0.04)
     assert ex.plan()
     assert "descend_2" in [l.stage.name for l in _chain(ex)]
@@ -366,6 +365,48 @@ def test_attach_happens_after_the_descent_and_before_the_close():
     assert ex.execute(ex.best())
     # The pick task attaches and stops there.
     assert [kind for kind, _ in robot.world_ops] == ["attach"]
+
+
+def test_planning_attaches_the_grasped_object_for_the_legs_after_the_grasp():
+    """The server must hold the object attached while the legs after the grasp
+    are PLANNED, not only while they are executed (MTC parity).
+
+    ``ModifyPlanningScene.attachObject`` mutates the planning scene during
+    ``compute()``, so every downstream motion stage plans against the object
+    already in the hand. Here the shared curobo server holds that scene, so the
+    planner previews the attach — fitted at the grasp pose — and restores the
+    pre-plan scene when the burst ends, leaving execution to materialize its
+    own scene ops in chain order.
+    """
+    robot, ex = _executor()
+    assert ex.plan()
+
+    # The planner attached the object. Before the fix it only ever reached the
+    # server at execute time, so a post-grasp leg was planned against a bare
+    # world.
+    assert ("attach", OBJECT) in robot.plan_scene_ops
+
+    # ...fitted at the grasp pose, i.e. where the descent ends: the payload's
+    # geometry is captured in the flange frame where it is actually picked.
+    descend = next(l for l in _chain(ex) if l.stage.name == "descend_0")
+    grasp = [float(p) for p in descend.end.joint_state.position]
+    assert robot.plan_attach_states, "no plan-time attach was recorded"
+    assert robot.plan_attach_states[0] == pytest.approx(grasp)
+
+    # The pre-grasp legs planned with an empty hand; a later leg planned with
+    # the object in hand.
+    assert any(OBJECT not in snap for snap in robot.plan_attach_snapshots)
+    assert any(OBJECT in snap for snap in robot.plan_attach_snapshots)
+
+    # The preview is undone at the end of planning: the server is back to the
+    # task's base scene (empty hand).
+    assert robot.attached == set()
+
+    # Execution is unchanged: the executor materializes exactly the task's own
+    # attach op, in chain order.
+    assert ex.execute(ex.best())
+    assert [kind for kind, _ in robot.world_ops] == ["attach"]
+    assert robot.attached == {OBJECT}
 
 
 def test_pick_chain_is_continuous():

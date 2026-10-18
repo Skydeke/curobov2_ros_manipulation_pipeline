@@ -43,15 +43,20 @@ class PlanRequest:
     properties for this leg (mirror of ``TrajectoryGoal.cartesian_*``);
     consumed only by the Cartesian planner (SetPlanner CARTESIAN). Sentinels:
     ``cartesian_step_size <= 0`` and ``cartesian_precision <= 0`` mean the
-    planner default, ``cartesian_min_fraction < 0`` means the planner default.
+    planner default.
     """
 
     goalsets: list = field(default_factory=list)
     start_pose: Any = None  # JointStateLike or None (server uses current)
     planner: Any = None  # planner key/int; None -> server default
     cartesian_step_size: float = 0.0
-    cartesian_min_fraction: float = -1.0
     cartesian_precision: float = 0.0
+    #: The planning scene this leg must be solved in (a ``SceneDiff``), so a
+    #: downstream leg sees what an earlier stage attached/removed — the cuRobo
+    #: analog of MTC applying ``ModifyPlanningScene`` to the planning scene
+    #: before the motion is planned. ``None`` means "leave the server scene as
+    #: it is" (legacy callers that never populated a scene).
+    scene: Any = None
 
 
 @dataclass
@@ -185,6 +190,30 @@ class RobotInterface(ABC):
         (TrajectoryGenerationBatch). Default: sequential ``plan``."""
         return [self.plan(r) for r in requests]
 
+    # ----- plan-time planning scene ------------------------------------
+    def plan_scene(self, scene: Any, joint_state: Any = None) -> None:
+        """Reconcile the server's scene to ``scene`` for planning.
+
+        MTC parity: ``ModifyPlanningScene`` mutates the planning scene during
+        ``compute()``, so the motion stages that follow plan against the object
+        already attached. Here the shared cuRobo server holds that scene, so a
+        leg about to be solved reconciles the server's attach state to the
+        scene it carries — fitting the payload's spheres at ``joint_state`` (the
+        leg's start, i.e. the grasp pose) when it attaches.
+
+        This is a PLANNING preview: the adapter captures the pre-plan attach
+        state on the first call and restores it in ``end_plan_scene``, so
+        execution still materializes scene ops in chain order from the task's
+        own base scene. Default: no-op (offline/mock interfaces that keep no
+        shared scene)."""
+        return None
+
+    def end_plan_scene(self) -> None:
+        """Undo the previews made by ``plan_scene`` (end of a plan burst).
+
+        Default: no-op — see ``plan_scene``."""
+        return None
+
     @abstractmethod
     def execute(self, request: PlanRequest, trajectory) -> PlanResult:
         """Drive one segment (SendTrajectory action).
@@ -221,8 +250,13 @@ class RobotInterface(ABC):
         pass
 
     @abstractmethod
-    def attach_object(self, name: str) -> bool:
-        """Attach scene obstacle `name` to the robot flange."""
+    def attach_object(self, name: str, joint_state: Any = None) -> bool:
+        """Attach scene obstacle `name` to the robot flange.
+
+        ``joint_state`` (MTC parity) is the configuration the payload's
+        collision spheres are fitted at — the pose the grasp completes at.
+        ``None`` fits at the robot's current state (the classic call).
+        """
 
     @abstractmethod
     def detach_object(self, name: Optional[str] = None) -> bool:
