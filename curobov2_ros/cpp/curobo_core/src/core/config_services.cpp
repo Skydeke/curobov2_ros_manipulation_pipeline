@@ -165,13 +165,53 @@ void ConfigServices::handle_set_joint_locks(
 {
   std::map<std::string, double> requested = locks_;
   if (request->restore) {
-    // Drop the override and reload the robot YAML's own lock_joints.
-    const auto limits = bridge_->joint_limits(handle_);
-    requested.clear();
-    for (std::size_t i = 0; i < limits.locked_joint_names.size(); ++i) {
-      requested[limits.locked_joint_names[i]] = limits.locked_positions[i];
+    // PORT: robot_model_manager.set_lock_joints(None) - drop the override and
+    // reload the robot YAML's own lock_joints. The YAML's values are NOT
+    // readable from the live model (it reports whatever override is in force),
+    // so the restore is a rebuild with an EMPTY lock map: that is what makes
+    // the bridge re-parse the YAML's own lock_joints. Reading the live limits
+    // back before the rebuild (as this used to) just echoed the override being
+    // dropped, so every restore reported "already match" and changed nothing.
+    if (locks_.empty()) {
+      // No override in force: nothing to drop (matches the reference's
+      // idempotence - a restore of an unmodified model costs no rebuild).
+      const auto limits = bridge_->joint_limits(handle_);
+      for (std::size_t i = 0; i < limits.locked_joint_names.size(); ++i) {
+        response->joint_names.push_back(limits.locked_joint_names[i]);
+        response->positions.push_back(limits.locked_positions[i]);
+      }
+      response->success = true;
+      response->message = "No joint-lock override in force";
+      return;
     }
-  } else {
+    try {
+      bridge_->robot_model_rebuild_locks(handle_, "{}");
+      locks_.clear();
+      const auto limits = bridge_->joint_limits(handle_);
+      for (std::size_t i = 0; i < limits.locked_joint_names.size(); ++i) {
+        locks_[limits.locked_joint_names[i]] = limits.locked_positions[i];
+      }
+      if (joint_names_ != nullptr) {
+        *joint_names_ = limits.joint_names;
+      }
+      rebuild_planner();
+    } catch (const std::exception & e) {
+      response->success = false;
+      response->message = std::string("Joint-lock restore failed: ") + e.what();
+      return;
+    }
+    for (const auto & [name, value] : locks_) {
+      response->joint_names.push_back(name);
+      response->positions.push_back(value);
+    }
+    response->success = true;
+    response->message = "Joint locks restored from the robot YAML - solvers rebuilt (blocking, ~20s)";
+    RCLCPP_INFO(
+      node_->get_logger(), "Joint locks restored from the robot YAML (%zu joint(s))",
+      locks_.size());
+    return;
+  }
+  {
     if (request->joint_names.size() != request->positions.size()) {
       response->success = false;
       response->message = "Got " + std::to_string(request->joint_names.size()) +
