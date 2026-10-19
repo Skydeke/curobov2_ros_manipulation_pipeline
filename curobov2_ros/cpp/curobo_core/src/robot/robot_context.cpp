@@ -195,9 +195,9 @@ bool RobotContext::send_trajectrory(std::optional<int> expect_epoch)
   if (expect_epoch.has_value() && robot_strategy_->buffer_epoch() != *expect_epoch) {
     RCLCPP_ERROR(
       node_->get_logger(),
-      "send_trajectrory: buffer epoch mismatch (expected %d, current %d) - a newer "
+      "send_trajectrory: buffer epoch mismatch (expected %d, current %ld) - a newer "
       "set_command() superseded this one; refusing to execute a mismatched trajectory.",
-      *expect_epoch, robot_strategy_->buffer_epoch());
+      *expect_epoch, static_cast<long>(robot_strategy_->buffer_epoch()));
     return false;
   }
   robot_strategy_->send_trajectrory();

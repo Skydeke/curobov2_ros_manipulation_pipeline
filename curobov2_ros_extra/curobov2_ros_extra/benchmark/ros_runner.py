@@ -918,6 +918,23 @@ def run_ros(
                 "collision cache in place (padded kernel grids — diagnostic)"
             )
 
+        # PORT of upstream motion_plan_benchmark: the per-problem world the
+        # NATIVE leg builds is SceneCfg.create(obstacles).get_obb_world(). Convert
+        # the problems' obstacles ONCE here so the ROS leg collides against the
+        # same world - and so the collision cache is sized for what is actually
+        # pushed (all cuboids) rather than for the raw primitives/meshes.
+        from curobov2_ros_extra.benchmark.obstacle_convert import (
+            native_obb_obstacles,
+        )
+
+        for _scene_problems in problems.values():
+            for _p in _scene_problems:
+                if _p.get("obstacles"):
+                    _p["obstacles"] = native_obb_obstacles(_p["obstacles"])
+        node.get_logger().info(
+            "world: converted problem obstacles with the native leg's "
+            "get_obb_world() so both legs collide against identical geometry")
+
         ready_problems = [
             (scene_key, i, p)
             for scene_key, scene_problems in problems.items()

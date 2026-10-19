@@ -149,3 +149,41 @@ def obstacles_dict_to_add_requests(obstacles: Dict[str, Any]) -> List[Dict[str, 
         for obj_name, data in bucket_objs.items():
             requests.append(_single_request(bucket, obj_name, data))
     return requests
+
+def native_obb_obstacles(obstacles: Dict[str, Any]) -> Dict[str, Any]:
+    """The world the NATIVE leg builds for a problem, as wire obstacles.
+
+    Upstream ``motion_plan_benchmark`` builds each problem's world with
+    ``SceneCfg.create(deepcopy(problem["obstacles"])).get_obb_world()``: cuboids
+    stay, sphere/capsule/cylinder/mesh all become OBB cuboids. The ROS leg must
+    collide against that SAME world, so the conversion happens HERE, before the
+    obstacles travel to the server - the server then never sees a mesh or a
+    primitive for these problems and the two legs share one collision world by
+    construction. Idempotent: converting an already-converted world is a no-op.
+    """
+    import copy
+
+    from curobo._src.geom.types import SceneCfg
+
+    def _flatten(value, count: int) -> List[float]:
+        # cuRobo hands these back as a tensor in some builds and a plain list in
+        # others (Observed: AttributeError: 'list' object has no attribute
+        # 'reshape'); flatten either form.
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().reshape(-1)
+            return [float(v) for v in value[:count]]
+        import numpy as np
+
+        arr = np.asarray(value, dtype=float).reshape(-1)
+        return [float(v) for v in arr[:count]]
+
+    world = SceneCfg.create(copy.deepcopy(obstacles)).get_obb_world()
+    cuboid: Dict[str, Any] = {}
+    for i, c in enumerate(world.cuboid or []):
+        name = getattr(c, "name", None)
+        if isinstance(name, (list, tuple)):
+            name = name[0] if name else None
+        pose = _flatten(c.pose, 7)
+        dims = _flatten(c.dims, 3)
+        cuboid[name or f"obb_{i}"] = {"pose": pose, "dims": dims}
+    return {"cuboid": cuboid}

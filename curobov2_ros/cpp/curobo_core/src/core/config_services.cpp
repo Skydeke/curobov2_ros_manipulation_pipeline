@@ -63,6 +63,8 @@ void ConfigServices::rebuild_planner()
       << ",\"interpolation_dt\":" << node_->get_parameter("interpolation_dt").as_double()
       << ",\"max_batch_size\":" << node_->get_parameter("max_batch_size").as_int()
       << ",\"max_goalset\":" << node_->get_parameter("max_goalset").as_int()
+      << ",\"obstacle_collision_mode\":\""
+      << node_->get_parameter("obstacle_collision_mode").as_string() << "\""
       << ",\"collision_cache\":{\"cuboid\":"
       << node_->get_parameter("collision_cache_cuboid").as_int()
       << ",\"mesh\":" << node_->get_parameter("collision_cache_mesh").as_int()
@@ -82,6 +84,18 @@ void ConfigServices::rebuild_planner()
   // build is also wrapped, matching the other builders (mpc/retarget).
   auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
   bridge_->motion_planner_build(handle_, cfg.str());
+  // PORT: config_wrapper_motion.update_world_config - push the CURRENT scene
+  // into the freshly built solvers. A rebuild starts from an EMPTY scene (so the
+  // new cache always fits), and the plan path's freshness gate will NOT re-push
+  // it (the scene epoch is unchanged), so without this the solvers plan with NO
+  // obstacles at all. The benchmark sizes the collision cache once per scene, so
+  // every scene's first problems were planned straight through the world - the
+  // "success rate is too high" against the native leg.
+  try {
+    bridge_->world_push(handle_);
+  } catch (const std::exception &) {
+    // A push must never turn a cache/config change into a hard error.
+  }
 }
 
 // PORT: obstacle_manager.set_collision_cache

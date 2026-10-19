@@ -49,7 +49,7 @@ def bind_lane(name: str) -> None:
     try:
         import torch  # noqa: F401
         if torch.cuda.is_available():
-            _LANES[name] = torch.cuda.Stream(device=torch.device("cuda"))
+            _LANES[name] = torch.cuda.Stream(device=torch.device("cuda", torch.cuda.current_device()))
             return
     except Exception:
         pass
@@ -293,7 +293,7 @@ def fk(handle: int, q):
 
     entry = _REGISTRY[handle]
     kin = entry["kin"]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
 
     q_t = torch.tensor(np.asarray(q, dtype=np.float32), dtype=torch.float32, device=device)
     js = JointState.from_position(q_t, joint_names=kin.joint_names)
@@ -394,7 +394,7 @@ def ik(handle: int, poses):
 
     entry = _REGISTRY[handle]
     solver = _ik_solver(entry)
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     poses = np.asarray(poses, dtype=np.float32)
 
     pose = Pose(
@@ -426,21 +426,42 @@ def validate(handle: int, q):
 
     entry = _REGISTRY[handle]
     kin = entry["kin"]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     q = np.asarray(q, dtype=np.float32)
     n = q.shape[0]
 
     checker = entry.get("checker")
     if checker is None:
+        # PORT: fk_services._init - an EMPTY scene at construction (that is what
+        # the reference does: cuRobo raises on a populated one; empty always
+        # fits), sized from the collision cache exactly like the planners.
         try:
+            cache = entry.get("collision_cache") or {}
             cfg = RobotCollisionCheckerCfg.load_from_config(
                 robot_config=entry["robot_cfg"],
                 scene_model=Scene(),
                 device_cfg=DeviceCfg(device=device, dtype=torch.float32),
                 collision_activation_distance=0.001,
+                n_cuboids=max(1, int(cache.get("cuboid") or 0)),
+                n_meshes=max(1, int(cache.get("mesh") or 0)),
             )
             checker = RobotCollisionChecker(cfg)
-        except Exception:
+            # PORT: fk_services._init's `self._push_world()` right after the
+            # empty build. The C++ FKServices hands the validator to the bridge
+            # and it is built lazily here, on the FIRST validate() call - AFTER
+            # every scene mutation already pushed its world (world_push skips a
+            # checker that does not exist yet). Without this the checker keeps
+            # the EMPTY construction scene forever and reports every
+            # scene-collision config valid: the benchmark's cost leg read
+            # 432/500 valid where the reference reads 364/500.
+            checker.update_world(_collision_supported(
+                _primitives_only_scene(entry), _obstacle_mode(entry)))
+        except Exception as exc:
+            # PORT: fk_services._init's failure path - say why before degrading
+            # to all-True, or a broken validator is invisible.
+            print(
+                f"[curobo_bridge] FK collision validator init failed ({exc}); "
+                "fk_batch poses_valid will report all True", flush=True)
             checker = False   # advisory: unavailable -> all True
         entry["checker"] = checker
     if checker is False or checker is None:
@@ -490,9 +511,10 @@ def _sphere_snapshot(entry, q, kin=None):
 
     if kin is None:
         kin = entry["kin"]
-    dcfg = DeviceCfg(device=torch.device("cuda"), dtype=torch.float32)
+    dcfg = DeviceCfg(device=torch.device("cuda", torch.cuda.current_device()),
+                            dtype=torch.float32)
     q_t = torch.tensor(np.asarray(q, dtype=np.float32), dtype=torch.float32,
-                       device=torch.device("cuda"))
+                       device=torch.device("cuda", torch.cuda.current_device()))
     js = JointState.from_position(q_t, joint_names=kin.joint_names)
     ks = kin.compute_kinematics(js)
     robot_spheres = ks.robot_spheres
@@ -799,7 +821,8 @@ def _attachment_manager(entry):
         am = AttachmentManager(
             kinematics=entry["kin"],
             scene_collision=None,
-            device_cfg=DeviceCfg(device=torch.device("cuda"), dtype=torch.float32),
+            device_cfg=DeviceCfg(device=torch.device("cuda", torch.cuda.current_device()),
+                            dtype=torch.float32),
         )
         entry["attach_manager"] = am
     return am
@@ -937,7 +960,7 @@ def attach_object(handle: int, name: str, q) -> None:
     if spec is None:
         raise ValueError(f"Obstacle '{name}' not found in the scene")
 
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     obstacle = _to_scene(spec)
     am = _attachment_manager(entry)
     # PORT: _fit_and_attach writes into the ATTACHMENT MANAGER's kinematics -
@@ -1135,6 +1158,9 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
         except AttributeError:
             pass
     entry["collision_cache"] = cfg.get("collision_cache")
+    # PORT: obstacle_manager reads obstacle_collision_mode at startup.
+    entry["obstacle_collision_mode"] = str(
+        cfg.get("obstacle_collision_mode") or "cuboid")
     # PORT: obstacle_manager.collision_cache["voxel"] is None - SetCollisionCache
     # blox=0 builds the solvers with NO voxel storage. A scene carrying an ESDF
     # layer then raises inside update_world ("Cannot load 1 voxel grids, max
@@ -1596,7 +1622,7 @@ def plan_cspace(handle: int, req) -> dict:
 
     entry = _REGISTRY[handle]
     planner = entry["motion_planner"]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
 
     start = torch.tensor(
         [list(np.asarray(req["start"], dtype=np.float32))], dtype=torch.float32, device=device)
@@ -1621,7 +1647,7 @@ def plan_pose(handle: int, req) -> dict:
 
     entry = _REGISTRY[handle]
     planner = entry["motion_planner"]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
 
     start = torch.tensor(
         [list(np.asarray(req["start"], dtype=np.float32))], dtype=torch.float32, device=device)
@@ -1837,21 +1863,38 @@ def _primitives_only_scene(entry):
     return scene
 
 
-def _collision_supported(scene):
-    """Convert analytic primitives to the collision types the GPU solvers use.
+def _obstacle_mode(entry):
+    """The node's obstacle_collision_mode (reference default: 'cuboid')."""
+    return entry.get("obstacle_collision_mode") or "cuboid"
 
-    PORT: obstacle_manager._collision_supported (default `cuboid` mode):
-    sphere/cylinder/capsule become OBB cuboids via get_cuboid(), exactly like
-    cuRobo's own SceneCfg.create_obb_world; cuboids and user meshes pass
-    through. Without it those shapes are silently dropped from the rasterization.
+
+def _collision_supported(scene, mode="cuboid"):
+    """PORT: obstacle_manager._collision_supported.
+
+
+    * ``cuboid`` (default, the deployment's): sphere/capsule/cylinder -> OBB via
+      ``get_cuboid()`` - the same approximation native cuRobo makes for the
+      primitives. Cuboids, USER MESHES (deliberate exact geometry) and the voxel
+      layer pass through unchanged.
+    * ``mesh`` (legacy): ``SceneCfg.create_collision_support_world`` - primitives
+      become trimesh meshes (exact round geometry, slower kernels).
     """
     from curobo.scene import Scene
+
+    if mode == "mesh":
+        from curobo._src.geom.types import SceneCfg
+
+        if getattr(scene, "mesh", None) is None:  # create_collision_support_world concatenates it
+            scene.mesh = []
+        return SceneCfg.create_collision_support_world(scene)
 
     cuboids = list(scene.cuboid) if scene.cuboid is not None else []
     for attr in ("sphere", "capsule", "cylinder"):
         for obstacle in getattr(scene, attr) or []:
             cuboids.append(obstacle.get_cuboid())
-    return Scene(cuboid=cuboids, mesh=scene.mesh or [])
+    out = Scene(cuboid=cuboids, mesh=scene.mesh or [])
+    out.voxel = getattr(scene, "voxel", None)
+    return out
 
 
 def _rasterize_primitives_gpu(entry, voxel_grid, grid_min, voxel_size) -> int:
@@ -1868,7 +1911,7 @@ def _rasterize_primitives_gpu(entry, voxel_grid, grid_min, voxel_size) -> int:
     from curobo._src.geom.collision.collision_scene import SceneCollision, SceneCollisionCfg
     from curobo.types import DeviceCfg
 
-    scene = _collision_supported(_primitives_only_scene(entry))
+    scene = _collision_supported(_primitives_only_scene(entry), _obstacle_mode(entry))
     if not (list(scene.cuboid or []) or list(scene.mesh or [])):
         return 0
     size = tuple(int(v) for v in np.asarray(voxel_grid).shape)
@@ -1954,7 +1997,7 @@ def depth_integrate(handle: int, depth, intrinsics, camera_pose) -> None:
     from curobo._src.types.device_cfg import DeviceCfg
 
     entry = _REGISTRY[handle]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     dcfg = DeviceCfg(device=device, dtype=torch.float32)
     mapper = _mapper(entry)
 
@@ -1981,7 +2024,7 @@ def lidar_integrate(handle, range_image, poses, valid_range, elevation_range) ->
     from curobo._src.types.device_cfg import DeviceCfg
 
     entry = _REGISTRY[handle]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     _ = DeviceCfg(device=device, dtype=torch.float32)
     mapper = _mapper(entry)
 
@@ -2077,7 +2120,7 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
 
     entry = _REGISTRY[handle]
     kin = entry["kin"]
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
 
     depth_t = torch.tensor(np.asarray(depth, dtype=np.float32), device=device)
     h, w = int(depth_t.shape[0]), int(depth_t.shape[1])
@@ -2315,7 +2358,7 @@ def _mpc_goal_tool_pose(solver, raw):
     import numpy as np
     import torch
 
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     pose = Pose.from_list(list(raw))
     return GoalToolPose.from_poses(
         {solver.tool_frames[0]: pose},
@@ -2353,7 +2396,7 @@ def mpc_solve_goal_state(handle: int, goal_raw, seed_q):
 
     entry = _REGISTRY[handle]
     solver = _mpc(entry)
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     try:
         ik = _mpc_ensure_ik_solver(entry)
         raw = list(goal_raw)
@@ -2388,7 +2431,7 @@ def _mpc_apply_goal(entry, solver, goal, raw, seed_q):
         import torch
         from curobo.types import JointState
 
-        device = torch.device("cuda")
+        device = torch.device("cuda", torch.cuda.current_device())
         solver.update_goal_tool_poses(goal, run_ik=False)
         sol = torch.tensor(
             np.asarray(solved["solution"], dtype=np.float32), dtype=torch.float32,
@@ -2412,7 +2455,7 @@ def mpc_setup(handle: int, start_q):
 
     entry = _REGISTRY[handle]
     solver = _mpc(entry)
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
 
     start = torch.tensor(
         np.asarray(start_q, dtype=np.float32).reshape(1, -1),
@@ -2450,7 +2493,7 @@ def mpc_update_goal_state(handle: int, q) -> None:
 
     entry = _REGISTRY[handle]
     solver = _mpc(entry)
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     sol = torch.tensor(
         np.asarray(q, dtype=np.float32).reshape(1, -1), dtype=torch.float32, device=device)
     solver.update_goal_state(JointState.from_position(sol, joint_names=solver.joint_names))
@@ -2465,7 +2508,7 @@ def mpc_reseed(handle: int, q) -> None:
 
     entry = _REGISTRY[handle]
     solver = _mpc(entry)
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     sol = torch.tensor(
         np.asarray(q, dtype=np.float32).reshape(1, -1), dtype=torch.float32, device=device)
     solver.update_seed_trajectory_from_goal_state(
@@ -2477,7 +2520,7 @@ def _mpc_state_from_dict(state):
     import torch
     from curobo.types import JointState
 
-    device = torch.device("cuda")
+    device = torch.device("cuda", torch.cuda.current_device())
     pos = torch.tensor(
         np.asarray(state["position"], dtype=np.float32).reshape(1, -1),
         dtype=torch.float32, device=device)
@@ -2801,7 +2844,7 @@ def robot_spheres(handle: int, q):
     kin = entry["kin"]
     js = JointState.from_position(
         torch.tensor([list(np.asarray(q, dtype=np.float32))], dtype=torch.float32,
-                     device=torch.device("cuda")),
+                     device=torch.device("cuda", torch.cuda.current_device())),
         joint_names=kin.joint_names)
     res = kin.compute_kinematics(js)
     return res.robot_spheres.reshape(-1, 4).detach().cpu().numpy().astype(np.float32)
@@ -2889,7 +2932,7 @@ def collision_spheres_with_attached(handle: int, q):
     kin = getattr(mp, "kinematics", None) or entry["kin"]
     js = JointState.from_position(
         torch.tensor([list(np.asarray(q, dtype=np.float32))], dtype=torch.float32,
-                     device=torch.device("cuda")),
+                     device=torch.device("cuda", torch.cuda.current_device())),
         joint_names=kin.joint_names)
     spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
     kc = kin.kinematics_config
@@ -2904,6 +2947,19 @@ def collision_spheres_with_attached(handle: int, q):
         "spheres": spheres.detach().cpu().numpy().astype(np.float32),
         "attached": mask,
     }
+
+
+def _solver_bound_scene(scene, mode="cuboid"):
+    """PORT: obstacle_manager.collision_world_scene.
+
+    Primitives converted to SOLVER-SUPPORTED collision types (sphere/cylinder/
+    capsule -> OBB cuboid via get_cuboid()), voxel layer retained. cuRobo
+    silently DROPS a cylinder it cannot collide, so pushing the raw scene left
+    the solvers blind to exactly those obstacles - the robometrics tabletop
+    scenes carry 4 cylinders, and the ROS leg then "solved" problems that
+    collide in the native leg (7 success mismatches on the full dataset).
+    """
+    return _collision_supported(scene, mode)
 
 
 def world_push(handle: int) -> bool:
@@ -2926,19 +2982,39 @@ def world_push(handle: int) -> bool:
         scene = copy.copy(scene)     # shallow: share the primitive buckets
         scene.voxel = None
     pushed = False
+    # PORT: collision_world_scene() - the SOLVERS get the converted scene.
+    solver_scene = _solver_bound_scene(scene, _obstacle_mode(entry))
     mp = entry.get("motion_planner")
     if mp is not None:
         try:
-            mp.update_world(scene)
+            mp.update_world(solver_scene)
             pushed = True
         except Exception:
             pass
     ik = entry.get("ik")
     if ik is not None:
         try:
-            ik.update_world(scene)
+            ik.update_world(solver_scene)
         except Exception:
             pass
+    # PORT: fk_services._push_world - the FK collision validator is a THIRD
+    # collision model and needs the same world. It has no voxel cache at all, so
+    # it gets the primitives-only scene (a voxel-carrying one raises "Voxel cache
+    # not initialized"); a failed update disables it rather than aborting the
+    # push, exactly as the reference does.
+    fk_checker = entry.get("checker")
+    if fk_checker not in (None, False):
+        try:
+            fk_checker.update_world(_collision_supported(
+                _primitives_only_scene(entry), _obstacle_mode(entry)))
+        except Exception as exc:
+            # PORT: fk_services._push_world's error path - say why, then drop the
+            # validator (advisory: _validate reports all-True without it) instead
+            # of letting a failed refresh abort the push.
+            print(
+                f"[curobo_bridge] FK collision validator world update failed ({exc}); "
+                "disabling it - poses_valid will report all True", flush=True)
+            entry["checker"] = False
     entry["scene_collision"] = None
     # Every update_world above clears + re-adds all obstacles with enable=1,
     # which wipes the flag set for an attached obstacle - re-assert the disabled

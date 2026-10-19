@@ -166,7 +166,7 @@ robot_cfg:
       panda_rightfinger:
         - center: [0.0, -0.01, 0.043]
           radius: 0.011
-        - center: [0.0, -0.01, 0.015]
+        - center: [0.0, -0.02, 0.015]
           radius: 0.011
     collision_sphere_buffer: 0.0
     collision_link_names:
@@ -181,29 +181,46 @@ robot_cfg:
       - panda_hand
       - panda_leftfinger
       - panda_rightfinger
+    # Exactly the native leg's list: with mesh_link_names unset cuRobo
+    # checks these links with SPHERES only, so the ROS server collided
+    # less than the native leg on marginal problems.
+    mesh_link_names:
+      - panda_link0
+      - panda_link1
+      - panda_link2
+      - panda_link3
+      - panda_link4
+      - panda_link5
+      - panda_link6
+      - panda_link7
+      - panda_hand
+      - panda_leftfinger
+      - panda_rightfinger
     self_collision_ignore:
-      panda_link0: [panda_link1, panda_link2]
-      panda_link1: [panda_link2, panda_link3, panda_link4]
-      panda_link2: [panda_link3, panda_link4]
-      panda_link3: [panda_link4, panda_link6]
-      panda_link4: [panda_link5, panda_link6, panda_link7, panda_link8]
-      panda_link5:
-        - panda_link6
-        - panda_link7
-        - panda_hand
-        - panda_leftfinger
-        - panda_rightfinger
-      panda_link6:
-        - panda_link7
-        - panda_hand
-        - panda_leftfinger
-        - panda_rightfinger
-      panda_link7: [panda_hand, panda_leftfinger, panda_rightfinger]
-      panda_hand: [panda_leftfinger, panda_rightfinger]
-      panda_leftfinger: [panda_rightfinger]
-      panda_rightfinger: []
-    self_collision_buffer: {panda_link0: 0.1, panda_link1: 0.05, panda_hand: 0.02,
-      panda_leftfinger: 0.01, panda_rightfinger: 0.01}
+      panda_hand: ["panda_leftfinger", "panda_rightfinger", "attached_object"]
+      panda_leftfinger: ["panda_rightfinger", "attached_object"]
+      panda_link0: ["panda_link1", "panda_link2"]
+      panda_link1: ["panda_link2", "panda_link3", "panda_link4"]
+      panda_link2: ["panda_link3", "panda_link4"]
+      panda_link3: ["panda_link4", "panda_link6"]
+      panda_link4: ["panda_link5", "panda_link6", "panda_link7", "panda_link8"]
+      panda_link5: ["panda_link6", "panda_link7", "panda_hand", "panda_leftfinger", "panda_rightfinger"]
+      panda_link6: ["panda_link7", "panda_hand", "attached_object", "panda_leftfinger", "panda_rightfinger"]
+      panda_link7: ["panda_hand", "attached_object", "panda_leftfinger", "panda_rightfinger"]
+      panda_rightfinger: ["attached_object"]
+    self_collision_buffer:
+      attached_object: 0.0
+      panda_hand: 0.02
+      panda_leftfinger: 0.01
+      panda_link0: 0.1
+      panda_link1: 0.05
+      panda_link2: 0.0
+      panda_link3: 0.0
+      panda_link4: 0.0
+      panda_link5: 0.0
+      panda_link6: 0.0
+      panda_link7: 0.0
+      panda_rightfinger: 0.01
     tool_frames: [panda_hand]
     lock_joints: {panda_finger_joint1: 0.04, panda_finger_joint2: 0.04}
     cspace:
