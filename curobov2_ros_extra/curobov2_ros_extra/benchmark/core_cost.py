@@ -84,6 +84,17 @@ def run_cost_core(
     q_sample = torch.rand((batch, kin.get_dof()), dtype=dtype, device=device)
     js_sample = CuRoboJS.from_position(q_sample, joint_names=kin.joint_names)
     kin.compute_kinematics(js_sample)
+    # ...and the validator, the other half of the timed region. Its FIRST
+    # validate() instantiates the Warp collision kernels and uploads the world
+    # (~2 s on this GPU); left to the loop it lands inside the first timed
+    # batch and the report's mean (434 ms) is one 2 s outlier in five batches
+    # away from the true per-batch cost (~2 ms, median 2.1 ms). The ROS leg is
+    # immune because the kernels are process-wide and the server's planner
+    # already instantiated them, so /fk_batch batch 1 is warm as well. The
+    # synchronize keeps the init provably outside the timed window (the loop's
+    # wall clock is CPU-side and would otherwise just queue behind it).
+    checker.validate(q_sample.unsqueeze(1))
+    torch.cuda.synchronize()
 
     results: List[Dict[str, Any]] = []
     for b_idx, configs in enumerate(config_batches, start=1):
