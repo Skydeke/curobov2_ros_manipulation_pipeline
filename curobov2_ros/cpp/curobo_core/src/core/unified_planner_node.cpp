@@ -43,7 +43,9 @@ void UnifiedPlannerNode::declare_parameters()
   declare_parameter<double>("collision_activation_distance", 0.025);
   declare_parameter<double>("interpolation_dt", 0.025);
   declare_parameter<int>("max_batch_size", 1);
-  declare_parameter<int>("max_goalset", 1);
+  // PORT: config_wrapper_motion._resolve_max_goalset default is 16 (launches
+  // may pin it; the deployment does).
+  declare_parameter<int>("max_goalset", 16);
   declare_parameter<int>("collision_cache_cuboid", 32);
   declare_parameter<int>("collision_cache_mesh", 4);
   // PORT: the benchmark's planner envelope + the params it reads/writes.
@@ -197,6 +199,8 @@ void UnifiedPlannerNode::setup()
         << ",\"interpolation_dt\":" << get_parameter("interpolation_dt").as_double()
         << ",\"max_batch_size\":" << get_parameter("max_batch_size").as_int()
         << ",\"max_goalset\":" << get_parameter("max_goalset").as_int()
+        << ",\"obstacle_collision_mode\":\""
+        << get_parameter("obstacle_collision_mode").as_string() << "\""
         << ",\"collision_cache\":{\"cuboid\":" << get_parameter("collision_cache_cuboid").as_int()
         << ",\"mesh\":" << get_parameter("collision_cache_mesh").as_int()
         // PORT: obstacle_manager.collision_cache["voxel"] - WITHOUT this the

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // 1:1 C++ port of the scene bookkeeping in curobov2_ros/core/obstacle_manager.py.
 #include "curobo_core/core/obstacle_manager.hpp"
+#include "curobo_runtime/runtime.hpp"
 
 #include "curobo_core/core/frame_utils.hpp"
 
@@ -177,6 +178,25 @@ void ObstacleManager::notify_world_changed()
 {
   scene_version_ = bridge_->scene_set(handle_, scene_json(), true);
   epoch_ += 1;
+  // PORT: obstacle_manager.set_world_update_callback ->
+  // unified_planner_node.update_all_solvers_world(obstacle_manager.get_scene())
+  // (node line ~1084): every scene MUTATION pushes the analytic world to the
+  // solvers immediately. That is exactly what lets should_refresh_world skip a
+  // refresh on its min-interval throttle without ever leaving a stale object
+  // set - the gate is about ESDF/perception staleness ONLY. Without this push
+  // the solvers keep the PREVIOUS scene until the throttle opens, so a burst of
+  // mutations plans against the wrong world: the benchmark sets one world per
+  // problem ~0.7 s apart against the default 2 s interval, so about a third of
+  // the problems were planned against their predecessor's obstacles.
+  // Held under the exclusive GPU barrier: the push is a CUDA op and mutations
+  // can arrive from service threads (the reference takes gpu_lock here too).
+  try {
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+    bridge_->world_push(handle_);
+    mark_world_pushed();
+  } catch (const std::exception &) {
+    // A push must never break the mutation that triggered it.
+  }
 }
 
 // PORT: obstacle_manager.add_object
