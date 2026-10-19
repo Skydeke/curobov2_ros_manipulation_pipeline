@@ -11,6 +11,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/image.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 
 #include "curobov2_ros_interfaces/srv/get_planners.hpp"
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
@@ -23,6 +24,7 @@ namespace curobo_core
 {
 
 class ObstacleManager;
+class RobotContext;
 
 class PlannerServices
 {
@@ -50,6 +52,14 @@ public:
   // PORT: single_planner._publish_plan_image (latched, once per new plan).
   void publish_plan_image(const curobo_runtime::PlanOutcome & outcome);
 
+  // PORT: single_planner._stage_trajectory - feed a successful plan to the
+  // RobotContext so GhostStrategy publishes it on <node>/trajectory for
+  // preview. This is what makes the Joints tab's compute-only "Plan" visible
+  // in RViz; it never executes the trajectory.
+  void stage_preview(const std::vector<sensor_msgs::msg::JointState> & trajectory);
+
+  void set_robot_context(RobotContext * robot_context) {robot_context_ = robot_context;}
+
 private:
   void handle_set_planner(
     const std::shared_ptr<curobov2_ros_interfaces::srv::SetPlanner::Request> request,
@@ -72,6 +82,17 @@ private:
   curobo_runtime::PlanRequest build_request(
     const curobov2_ros_interfaces::msg::TrajectoryGoal & goal) const;
 
+  // Continuous-joint target normalisation. A joint whose reported position
+  // range spans a full turn (>= 2*pi) is continuous; cuRobo plans in the
+  // NUMERIC joint space and never wraps, so a joint-space target written as
+  // the "other" turn — in range but ~2*pi away from the start (e.g. -4.55
+  // instead of +1.73) — asks for a full sweep the solver usually cannot find,
+  // and a value just outside the range (e.g. 6.36) is rejected outright. Snap
+  // each such target to the in-range full-turn equivalent NEAREST the start,
+  // so a negative / un-wrapped target plans exactly like its wrapped twin
+  // (the requested and snapped values are the same physical configuration).
+  void wrap_full_turn_targets(curobo_runtime::PlanRequest & request) const;
+
   // PORT: joint_order.resolve_start_pose (name reorder, positional fallback).
   std::vector<float> resolve_start(
     const std::vector<std::string> & names, const std::vector<double> & positions) const;
@@ -92,6 +113,7 @@ private:
   // PORT: single_planner._debug_img_pub (transient_local depth-1).
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr plan_image_pub_;
   std::function<std::vector<float>()> current_pose_provider_;
+  RobotContext * robot_context_ = nullptr;
   PlannerManager manager_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::SetPlanner>::SharedPtr set_planner_srv_;

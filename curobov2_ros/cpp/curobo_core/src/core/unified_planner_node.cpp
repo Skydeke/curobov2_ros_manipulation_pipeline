@@ -58,10 +58,12 @@ void UnifiedPlannerNode::declare_parameters()
   declare_parameter<double>("voxel_size", 0.05);
   declare_parameter<std::vector<double>>("mapper_extent_xyz", {2.0, 2.0, 2.0});
   declare_parameter<std::vector<double>>("mapper_grid_center", {0.0, 0.0, 0.0});
-  // PORT: obstacle_manager source defaults (the test launch overrides to
-  // 1280x720; a deployment uses its camera's actual size).
-  declare_parameter<int>("mapper_image_width", 640);
-  declare_parameter<int>("mapper_image_height", 480);
+  // PORT: obstacle_manager source defaults. 0 = AUTO: the CameraSystemManager
+  // probes the configured cameras' camera_info topics and sizes the Mapper to
+  // the LARGEST resolution any of them reports (the depth strategies resample
+  // the others to it). Set a positive value to pin the resolution instead.
+  declare_parameter<int>("mapper_image_width", 0);
+  declare_parameter<int>("mapper_image_height", 0);
   declare_parameter<double>("sparse_voxel_publish_rate", 7.0);
   declare_parameter<bool>("publish_plan_debug_image", false);
   declare_parameter<bool>("publish_collision_spheres", true);
@@ -85,6 +87,14 @@ void UnifiedPlannerNode::declare_parameters()
   declare_parameter<std::string>("urdf_path", "");
   declare_parameter<std::string>("asset_root_path", "");
   declare_parameter<std::string>("world_file", "");
+  // Frame the depth is INTEGRATED in (the Mapper's TSDF/ESDF frame). Empty =>
+  // the robot base (`base_link`) is used, which makes the map ride the robot:
+  // obstacle voxels stay put RELATIVE TO THE ROBOT and therefore appear to move
+  // through the map while it drives. Set it to a fixed world frame (e.g. `odom`)
+  // so the map sticks to the world. Note the arm planner's voxel collision cache
+  // is still built around `base_link`, so this is for a world-anchored map; the
+  // base pose offset is not applied to the solver's cache.
+  declare_parameter<std::string>("mapper_frame", "");
   declare_parameter<std::string>("cameras_config_file", "");
   declare_parameter<std::string>("planner_type", "classic");
   declare_parameter<bool>("use_mapper", true);
@@ -170,11 +180,20 @@ void UnifiedPlannerNode::setup()
   if (!robot_config_file.empty()) {
     // PORT: ConfigManager._translate_xrdf - xrdf configs need the urdf_path /
     // asset_root_path parameters (they are not inside the xrdf file).
+    // The robot-masking knobs ride along here because robot_segment() reads them
+    // from this handle's registry entry: without them the bridge silently falls
+    // back to its 0.05 / 0.0 defaults and robot_segmentation_distance_threshold /
+    // _mask_margin were accepted (declared) but never took effect.
     std::ostringstream model_cfg;
     model_cfg << "{\"robot_config_file\":\"" << robot_config_file << "\""
               << ",\"urdf_path\":\"" << get_parameter("urdf_path").as_string() << "\""
               << ",\"asset_root_path\":\"" << get_parameter("asset_root_path").as_string()
-              << "\"}";
+              << "\""
+              << ",\"seg_distance_threshold\":"
+              << get_parameter("robot_segmentation_distance_threshold").as_double()
+              << ",\"seg_mask_margin\":"
+              << get_parameter("robot_segmentation_mask_margin").as_double()
+              << "}";
     try {
       bridge_->robot_model_build(handle_, model_cfg.str());
     } catch (const std::exception & e) {
@@ -227,47 +246,31 @@ void UnifiedPlannerNode::setup()
     RCLCPP_INFO(get_logger(), "%s planner ready",
       get_parameter("planner_type").as_string().c_str());
 
-    // PORT: ObstacleManager._build_mapper (node mapper_* parameters).
-    std::ostringstream mapper_cfg;
-    // PORT: obstacle_manager._build_mapper / _load_perception_params. The mapper's
-    // TSDF voxel size is `mapper_voxel_size`; the ESDF size is `voxel_size`.
-    mapper_cfg << "{\"voxel_size\":" << get_parameter("mapper_voxel_size").as_double()
-               << ",\"image_width\":" << get_parameter("mapper_image_width").as_int()
-               << ",\"image_height\":" << get_parameter("mapper_image_height").as_int()
-               << ",\"depth_min\":" << get_parameter("mapper_depth_min").as_double()
-               << ",\"depth_max\":" << get_parameter("mapper_depth_max").as_double()
-               << ",\"truncation_distance\":"
-               << get_parameter("mapper_truncation_distance").as_double()
-               << ",\"minimum_tsdf_weight\":"
-               << get_parameter("mapper_minimum_tsdf_weight").as_double()
-               << ",\"block_size\":" << get_parameter("mapper_block_size").as_int()
-               << ",\"seeding_method\":\""
-               << get_parameter("mapper_seeding_method").as_string() << "\""
-               << ",\"max_support_pixels_per_block_camera\":"
-               << get_parameter("mapper_max_support_pixels_per_block_camera").as_int()
-               << ",\"grid_center\":[";
-    const auto center = get_parameter("mapper_grid_center").as_double_array();
-    for (std::size_t i = 0; i < center.size(); ++i) {
-      mapper_cfg << (i ? "," : "") << center[i];
-    }
-    mapper_cfg << "],\"extent_xyz\":[";
-    const auto extent = get_parameter("mapper_extent_xyz").as_double_array();
-    for (std::size_t i = 0; i < extent.size(); ++i) {
-      mapper_cfg << (i ? "," : "") << extent[i];
-    }
-    mapper_cfg << "],\"esdf_voxel_size\":" << get_parameter("voxel_size").as_double();
-    // Left OPEN: decay_factor is appended once the camera/laser managers exist.
-    mapper_cfg_base_ = mapper_cfg.str();
+    // PORT: ObstacleManager._build_mapper (node mapper_* parameters). The cfg
+    // itself is built by configure_mapper_from_params() (below) so that the
+    // `set_workspace` service can rebuild it from the CURRENT parameters rather
+    // than a cfg baked once at startup.
   }
 
   config_services_ = std::make_unique<ConfigServices>(
     this, bridge_, handle_, &joint_names_);
+  // `set_workspace` changes mapper_extent_xyz/mapper_grid_center: the Mapper
+  // grid must be rebuilt to the new box and the marker redrawn, so hand the
+  // node's own rebuild + the marker publisher to the service.
+  config_services_->set_mapper_reconfigure([this]() {configure_mapper_from_params();});
+  config_services_->set_workspace_republish([this]() {
+      if (ros_service_manager_) {
+        ros_service_manager_->publish_mapper_workspace();
+      }
+    });
+  config_services_->set_integration_frame_provider([this]() {return integration_frame();});
   obstacle_manager_ = std::make_unique<ObstacleManager>(bridge_, handle_);
   // PORT: unified_planner_node._esdf_refresh_min_interval (open-loop throttle).
   obstacle_manager_->set_esdf_refresh_min_interval(
     get_parameter("esdf_refresh_min_interval").as_double());
   ros_service_manager_ = std::make_unique<RosServiceManager>(
     this, bridge_, handle_, obstacle_manager_.get());
+  ros_service_manager_->set_integration_frame_provider([this]() {return integration_frame();});
   ros_service_manager_->init_services();
 
   // PORT: ConfigWrapperMotion.camera_system_manager / laser_system_manager. Both
@@ -304,11 +307,78 @@ void UnifiedPlannerNode::setup()
     } else {
       decay = std::pow(0.5, 1.0 / (total_rate * half_life));
     }
-    bridge_->configure_mapper(
-      handle_, mapper_cfg_base_ + ",\"decay_factor\":" + std::to_string(decay) + "}");
+    // The mapper's depth-projection resolution: the CameraSystemManager has
+    // already resolved it (explicit mapper_image_width/height, else the largest
+    // configured camera, else the default) and its depth strategies resample to
+    // the same value, so the two always agree.
+    int mapper_w = get_parameter("mapper_image_width").as_int();
+    int mapper_h = get_parameter("mapper_image_height").as_int();
+    if (camera_system_manager_ != nullptr) {
+      if (camera_system_manager_->mapper_image_width() > 0) {
+        mapper_w = camera_system_manager_->mapper_image_width();
+      }
+      if (camera_system_manager_->mapper_image_height() > 0) {
+        mapper_h = camera_system_manager_->mapper_image_height();
+      }
+    }
+    if (mapper_w <= 0) {
+      mapper_w = DEFAULT_MAPPER_IMAGE_WIDTH;
+    }
+    if (mapper_h <= 0) {
+      mapper_h = DEFAULT_MAPPER_IMAGE_HEIGHT;
+    }
+    mapper_image_w_ = mapper_w;
+    mapper_image_h_ = mapper_h;
+    mapper_decay_ = decay;
+    // Pin the depth-integration frame ONCE and place the Mapper box in it. Depth
+    // and the grid volume must share ONE frame, and the grid is a fixed volume
+    // allocated once, so this cannot switch per frame: integrating in `map`
+    // while the box sits at the base-relative centre would put the box at the
+    // map origin, away from the robot, and no depth would land in it. Prefer a
+    // fixed world frame (map -> odom) so the map sticks to the world while
+    // driving; `mapper_grid_center` is base-relative, so translate it into the
+    // chosen frame. Falls back to the robot base when no world frame exists yet.
+    if (tf_buffer_ == nullptr) {
+      tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+      tf_buffer_->setUsingDedicatedThread(true);
+    }
+    if (get_parameter("mapper_frame").as_string().empty()) {
+      const std::string frames = " " + tf_buffer_->allFramesAsString() + " ";
+      for (const char * candidate : {"map", "odom"}) {
+        // Frame-existence check without tf2's per-miss "Invalid frame ID" warn.
+        if (frames.find(std::string(" ") + candidate + " ") != std::string::npos) {
+          set_parameter(rclcpp::Parameter("mapper_frame", std::string(candidate)));
+          break;
+        }
+      }
+    }
+    const std::string integration = get_parameter("mapper_frame").as_string();
+    if (!integration.empty() && integration != base_link_) {
+      try {
+        const auto t = get_transform(*tf_buffer_, integration, base_link_);
+        auto center = get_parameter("mapper_grid_center").as_double_array();
+        if (center.size() == 3) {
+          center[0] += t.transform.translation.x;
+          center[1] += t.transform.translation.y;
+          center[2] += t.transform.translation.z;
+          set_parameter(rclcpp::Parameter("mapper_grid_center", center));
+        }
+        RCLCPP_INFO(
+          get_logger(), "Mapper integrates in '%s'; box centre placed there", integration.c_str());
+      } catch (const std::exception & e) {
+        RCLCPP_WARN(
+          get_logger(), "Could not place the mapper box in '%s': %s", integration.c_str(), e.what());
+      }
+    }
+    configure_mapper_from_params();
     RCLCPP_INFO(
-      get_logger(), "Mapper configured: decay_factor=%.6f (half_life=%.2fs, total_frame_rate=%.1fHz)",
-      decay, half_life, total_rate);
+      get_logger(), "Mapper configured: %dx%d, decay_factor=%.6f (half_life=%.2fs, "
+      "total_frame_rate=%.1fHz)", mapper_w, mapper_h, decay, half_life, total_rate);
+    // The integration frame may just have been pinned above; redraw the box in it
+    // so the marker frame matches the integrated voxels.
+    if (ros_service_manager_) {
+      ros_service_manager_->publish_mapper_workspace();
+    }
   }
 
   // PORT: unified_planner_node depth-map robot segmentation (gated by
@@ -349,6 +419,9 @@ void UnifiedPlannerNode::setup()
   // PORT: reachability_services.ReachabilityServices (/generate_rm).
   if (tf_buffer_ == nullptr) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    // Populated by this node's executor thread, not the caller: required for a
+    // lookup timeout to be honoured (see camera_strategy.cpp).
+    tf_buffer_->setUsingDedicatedThread(true);
   }
   reachability_services_ = std::make_unique<ReachabilityServices>(
     this, ik_services_.get(), base_link_, tf_buffer_);
@@ -387,6 +460,10 @@ void UnifiedPlannerNode::setup()
   robot_context_ = std::make_unique<RobotContext>(
     this, get_parameter("interpolation_dt").as_double(), joint_names_,
     get_parameter("control_strategy").as_string(), strategy_params, default_home);
+  // PORT: single_planner holds a reference to the RobotContext so a
+  // compute-only plan can be staged into the command buffer for preview
+  // (GhostStrategy publishes it on <node>/trajectory without executing it).
+  planner_services_->set_robot_context(robot_context_.get());
   action_server_ = std::make_unique<TrajectoryActionServer>(
     this, planner_services_.get(), robot_context_.get(), joint_names_);
 
@@ -397,6 +474,9 @@ void UnifiedPlannerNode::setup()
   // PORT: unified_planner_node.mpc_goal_callback - live reactive-goal updates.
   if (tf_buffer_ == nullptr) {
     tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
+    // Populated by this node's executor thread, not the caller: required for a
+    // lookup timeout to be honoured (see camera_strategy.cpp).
+    tf_buffer_->setUsingDedicatedThread(true);
   }
   // PORT: unified_planner_node._publish_tool_pose_callback (1 Hz, TF-driven).
   tool_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
@@ -430,6 +510,58 @@ void UnifiedPlannerNode::setup()
   }
 
   RCLCPP_INFO(get_logger(), "UnifiedPlannerNode (M2 services) ready");
+}
+
+// Rebuild the Mapper (TSDF/ESDF) from the current mapper_* parameters. Used at
+// startup and by the `set_workspace` service, which changes mapper_extent_xyz /
+// mapper_grid_center and must reallocate the Mapper's grid to the new box.
+// Needs a positive image size (0 == auto never reaches here: the startup path
+// resolves it first).
+void UnifiedPlannerNode::configure_mapper_from_params()
+{
+  // PORT: ObstacleManager._build_mapper / _load_perception_params. Built fresh
+  // from the node's mapper_* parameters every time, so set_workspace (which
+  // rewrites mapper_extent_xyz / mapper_grid_center) reallocates the grid to the
+  // new box. The TSDF voxel size is `mapper_voxel_size`; the ESDF size is
+  // `voxel_size`.
+  std::ostringstream mapper_cfg;
+  mapper_cfg << "{\"voxel_size\":" << get_parameter("mapper_voxel_size").as_double()
+             << ",\"depth_min\":" << get_parameter("mapper_depth_min").as_double()
+             << ",\"depth_max\":" << get_parameter("mapper_depth_max").as_double()
+             << ",\"truncation_distance\":"
+             << get_parameter("mapper_truncation_distance").as_double()
+             << ",\"minimum_tsdf_weight\":"
+             << get_parameter("mapper_minimum_tsdf_weight").as_double()
+             << ",\"block_size\":" << get_parameter("mapper_block_size").as_int()
+             << ",\"seeding_method\":\""
+             << get_parameter("mapper_seeding_method").as_string() << "\""
+             << ",\"max_support_pixels_per_block_camera\":"
+             << get_parameter("mapper_max_support_pixels_per_block_camera").as_int()
+             << ",\"grid_center\":[";
+  const auto center = get_parameter("mapper_grid_center").as_double_array();
+  for (std::size_t i = 0; i < center.size(); ++i) {
+    mapper_cfg << (i ? "," : "") << center[i];
+  }
+  mapper_cfg << "],\"extent_xyz\":[";
+  const auto extent = get_parameter("mapper_extent_xyz").as_double_array();
+  for (std::size_t i = 0; i < extent.size(); ++i) {
+    mapper_cfg << (i ? "," : "") << extent[i];
+  }
+  mapper_cfg << "],\"esdf_voxel_size\":" << get_parameter("voxel_size").as_double()
+             << ",\"image_width\":" << mapper_image_w_
+             << ",\"image_height\":" << mapper_image_h_
+             << ",\"decay_factor\":" << mapper_decay_ << "}";
+  bridge_->configure_mapper(handle_, mapper_cfg.str());
+}
+
+// Frame the depth is integrated in. This is the frame pinned by setup() (a
+// fixed world frame when one exists, else the robot base); exposed so the
+// mapper_workspace marker and the workspace service report the same frame the
+// voxels are in.
+std::string UnifiedPlannerNode::integration_frame()
+{
+  const std::string frame = get_parameter("mapper_frame").as_string();
+  return frame.empty() ? base_link_ : frame;
 }
 
 // PORT: unified_planner_node.mpc_goal_callback

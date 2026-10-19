@@ -19,14 +19,22 @@ CameraStrategy::CameraStrategy(
 {
   // PORT: each strategy owns its own TF buffer/listener.
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
+  // The buffer is filled by the node's executor thread, not the thread calling
+  // canTransform/lookupTransform. Without this flag tf2 refuses to honour a
+  // lookup timeout ("it will always timeout") and get_transform() throws on
+  // every frame -- which silently drops every depth frame.
+  tf_buffer_->setUsingDedicatedThread(true);
   tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, false);
   intrinsics_ = parse_intrinsics(intrinsics);
   static_pose_ = parse_extrinsics(extrinsics);
 
   // PORT: "No intrinsics in config, waiting for camera info on {topic}...".
   // The Python blocks on wait_for_message; the node must not block (UD-5), so
-  // subscribe and fill the intrinsics on the first CameraInfo.
-  if (!intrinsics_.has_value() && !camera_info_topic_.empty()) {
+  // subscribe and fill the intrinsics on the first CameraInfo. The same
+  // message carries header.frame_id, which is now the authoritative source for
+  // the camera frame used by the depth projection, so subscribe whenever we
+  // still need either the intrinsics or the frame.
+  if ((!intrinsics_.has_value() || frame_id_.empty()) && !camera_info_topic_.empty()) {
     RCLCPP_INFO(node_->get_logger(),
       "No intrinsics in config, waiting for camera info on %s...", camera_info_topic_.c_str());
     camera_info_sub_ = node_->create_subscription<sensor_msgs::msg::CameraInfo>(
@@ -38,20 +46,31 @@ CameraStrategy::CameraStrategy(
 // PORT: the CameraInfo -> 3x3 K fallback (camera_depth_map_strategy lines 74-92).
 void CameraStrategy::on_camera_info(const sensor_msgs::msg::CameraInfo & msg)
 {
+  bool have_intrinsics = false;
+  bool have_frame = false;
   {
     std::lock_guard<std::mutex> lk(intrinsics_mutex_);
-    if (intrinsics_.has_value()) {
-      return;
+    // The frame travels with the depth pixels, so take it from the driver's own
+    // camera_info header rather than a hardcoded `camera_frame` param.
+    if (!msg.header.frame_id.empty()) {
+      camera_info_frame_ = msg.header.frame_id;
     }
-    const auto & K = msg.k;
-    intrinsics_ = std::array<double, 9>{
-      K[0], K[1], K[2], K[3], K[4], K[5], K[6], K[7], K[8]};
+    if (!intrinsics_.has_value()) {
+      const auto & K = msg.k;
+      intrinsics_ = std::array<double, 9>{
+        K[0], K[1], K[2], K[3], K[4], K[5], K[6], K[7], K[8]};
+    }
+    have_intrinsics = intrinsics_.has_value();
+    have_frame = !camera_info_frame_.empty();
   }
   RCLCPP_INFO(
-    node_->get_logger(), "Camera intrinsics from topic: fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
-    msg.k[0], msg.k[4], msg.k[2], msg.k[5]);
-  // One message is enough; drop the subscription.
-  camera_info_sub_.reset();
+    node_->get_logger(),
+    "Camera info: frame='%s' fx=%.2f, fy=%.2f, cx=%.2f, cy=%.2f",
+    msg.header.frame_id.c_str(), msg.k[0], msg.k[4], msg.k[2], msg.k[5]);
+  // One message carries both; drop the subscription once we have them.
+  if (have_intrinsics && have_frame) {
+    camera_info_sub_.reset();
+  }
 }
 
 // PORT: camera_strategy._parse_intrinsics

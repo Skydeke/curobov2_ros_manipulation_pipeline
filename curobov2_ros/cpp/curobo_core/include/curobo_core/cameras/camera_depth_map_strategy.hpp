@@ -38,7 +38,8 @@ public:
     const std::optional<std::vector<double>> & extrinsics,
     curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
     rclcpp::CallbackGroup::SharedPtr callback_group = nullptr,
-    curobo_runtime::GpuLane * lane = nullptr);
+    curobo_runtime::GpuLane * lane = nullptr,
+    int mapper_image_width = 0, int mapper_image_height = 0);
   ~DepthMapCameraStrategy() override;
 
   // PORT: callback_depth_map
@@ -59,6 +60,10 @@ private:
   curobo_runtime::GpuLane * lane_;
   std::string base_frame_;
   std::function<void()> on_integrated_;
+  // Mapper projection resolution (mapper_image_width/height). A depth frame whose
+  // (H, W) differs is resampled (and its intrinsics scaled) before integration.
+  int mapper_image_width_ = 0;
+  int mapper_image_height_ = 0;
 
   std::deque<std::pair<curobo_runtime::TensorF32, Pose7d>> queue_;
   std::mutex queue_mutex_;

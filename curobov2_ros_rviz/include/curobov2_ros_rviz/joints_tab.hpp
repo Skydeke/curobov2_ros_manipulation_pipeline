@@ -27,6 +27,7 @@
 #include <mutex>
 
 class QComboBox;
+class QCheckBox;
 class QLabel;
 class QPushButton;
 class QTreeWidget;
@@ -132,6 +133,12 @@ private Q_SLOTS:
   void setTargetsFromCurrent();
   void zeroTargets();
   void onNamedPoseChosen(int index);
+  /// Publish the current target column as a one-waypoint JointTrajectory on
+  /// <planner_node>/trajectory (the ghost topic the CuroboTrajectoryDisplay
+  /// shows), so moving a joint bar / selecting a named pose displays the
+  /// configuration without planning. No-op unless "Preview" is checked and the
+  /// target actually changed.
+  void publishPreview();
   void checkTarget();
   void clearLocks();
   void planTarget();
@@ -238,6 +245,14 @@ private:
   /// Fallback SRDF source: the latched /robot_description_semantic topic.
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr srdf_sub_;
   QComboBox * named_pose_combo_ = nullptr;
+
+  /// "Preview" gate + its topic. Checked => the target column is mirrored onto
+  /// <planner_node>/trajectory (a one-waypoint JointTrajectory) whenever it
+  /// changes, so the CuroboTrajectoryDisplay shows the configuration live while
+  /// the bars are dragged. Unchecked => the tab only edits the request.
+  QCheckBox * preview_check_ = nullptr;
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr preview_pub_;
+  QVector<double> last_preview_target_;
 
   bool goal_active_ = false;
   bool cspace_known_ = false;

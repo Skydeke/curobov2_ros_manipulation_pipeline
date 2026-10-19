@@ -141,10 +141,23 @@ class ProgressBarEditor : public QWidget
 {
   Q_OBJECT
 
+  /// The edited value, exposed as the Qt USER property.
+  ///
+  /// REQUIRED, not cosmetic. QAbstractItemView commits a cell through
+  /// QStyledItemDelegate::setModelData, which writes `editor->metaObject()-
+  /// >userProperty()`. If the editor has NO user property, setModelData writes
+  /// an INVALID QVariant -- so every drag is erased the instant the mouse is
+  /// released and the value collapses to 0 (EditRole invalid -> toDouble()==0).
+  /// The live valueChanged below is what makes the bar move DURING a drag; this
+  /// property is what makes the value STICK on release. QStyledItemDelegate::
+  /// setEditorData also populates value_ from the cell here, so the editor
+  /// starts from the current target.
+  Q_PROPERTY(double value READ getValue WRITE setValue USER true)
+
 public:
   ProgressBarEditor(QWidget * parent, double min, double max, int digits);
 
-  void setValue(double value) {value_ = value;}
+  void setValue(double value) {value_ = value; update();}
   double getValue() const {return value_;}
 
 Q_SIGNALS:

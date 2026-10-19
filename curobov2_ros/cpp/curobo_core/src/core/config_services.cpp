@@ -8,6 +8,7 @@
 #include <std_srvs/srv/trigger.hpp>
 
 #include "curobo_runtime/runtime.hpp"
+#include "curobo_core/cameras/camera_cfg.hpp"
 
 namespace curobo_core
 {
@@ -32,6 +33,16 @@ ConfigServices::ConfigServices(
     name + "/set_joint_locks",
     std::bind(
       &ConfigServices::handle_set_joint_locks, this,
+      std::placeholders::_1, std::placeholders::_2));
+  get_workspace_srv_ = node_->create_service<curobov2_ros_interfaces::srv::GetWorkspace>(
+    name + "/get_workspace",
+    std::bind(
+      &ConfigServices::handle_get_workspace, this,
+      std::placeholders::_1, std::placeholders::_2));
+  set_workspace_srv_ = node_->create_service<curobov2_ros_interfaces::srv::SetWorkspace>(
+    name + "/set_workspace",
+    std::bind(
+      &ConfigServices::handle_set_workspace, this,
       std::placeholders::_1, std::placeholders::_2));
 
   // Seed the lock state from the model.
@@ -284,6 +295,155 @@ void ConfigServices::handle_set_joint_locks(
   for (const auto & [name, value] : locks_) {
     response->joint_names.push_back(name);
     response->positions.push_back(value);
+  }
+}
+
+// A Mapper exists when use_mapper is on AND at least one depth/laser feed is
+// configured. The camera_*/laser_* blocks are declared by the perception
+// managers, so a missing block means "not configured".
+bool ConfigServices::perception_active() const
+{
+  if (node_->has_parameter("use_mapper") &&
+    !node_->get_parameter("use_mapper").as_bool())
+  {
+    return false;
+  }
+  const auto any_set = [this](const char * name) {
+      if (!node_->has_parameter(name)) {
+        return false;
+      }
+      for (const auto & s : node_->get_parameter(name).as_string_array()) {
+        if (!s.empty()) {
+          return true;
+        }
+      }
+      return false;
+    };
+  return any_set("camera_topic") || any_set("laser_topic");
+}
+
+// Read-only view of the Mapper's TSDF/ESDF box. Pure parameter read (no solver,
+// no GPU), so the RViz Context tab can poll it.
+void ConfigServices::handle_get_workspace(
+  const std::shared_ptr<curobov2_ros_interfaces::srv::GetWorkspace::Request>,
+  std::shared_ptr<curobov2_ros_interfaces::srv::GetWorkspace::Response> response)
+{
+  try {
+    response->frame_id = integration_frame_provider_ ? integration_frame_provider_() :
+      integration_frame(node_);
+    if (node_->has_parameter("mapper_grid_center")) {
+      response->center = node_->get_parameter("mapper_grid_center").as_double_array();
+    }
+    if (node_->has_parameter("mapper_extent_xyz")) {
+      response->extent = node_->get_parameter("mapper_extent_xyz").as_double_array();
+    }
+    if (node_->has_parameter("voxel_size")) {
+      response->voxel_size = node_->get_parameter("voxel_size").as_double();
+    }
+    response->perception_active = perception_active();
+    response->success = true;
+    response->message = response->perception_active ?
+      "Mapper workspace (perception active)" : "Mapper workspace (no camera/laser feed)";
+  } catch (const std::exception & e) {
+    response->success = false;
+    response->message = std::string("get_workspace failed: ") + e.what();
+    RCLCPP_ERROR(node_->get_logger(), "%s", response->message.c_str());
+  }
+}
+
+// Apply a new box centre/size: update mapper_grid_center / mapper_extent_xyz,
+// rebuild the Mapper grid to the new box (dropping the integrated TSDF/ESDF),
+// rebuild the solvers (their voxel collision cache is sized from
+// mapper_extent_xyz) and redraw the wireframe. An empty list leaves that field
+// unchanged; the response always echoes the values actually in force.
+void ConfigServices::handle_set_workspace(
+  const std::shared_ptr<curobov2_ros_interfaces::srv::SetWorkspace::Request> request,
+  std::shared_ptr<curobov2_ros_interfaces::srv::SetWorkspace::Response> response)
+{
+  const auto echo = [this, &response]() {
+      response->frame_id = integration_frame_provider_ ? integration_frame_provider_() :
+        integration_frame(node_);
+      if (node_->has_parameter("mapper_grid_center")) {
+        response->center = node_->get_parameter("mapper_grid_center").as_double_array();
+      }
+      if (node_->has_parameter("mapper_extent_xyz")) {
+        response->extent = node_->get_parameter("mapper_extent_xyz").as_double_array();
+      }
+      if (node_->has_parameter("voxel_size")) {
+        response->voxel_size = node_->get_parameter("voxel_size").as_double();
+      }
+      response->perception_active = perception_active();
+    };
+  try {
+    if ((!request->center.empty() && request->center.size() != 3) ||
+      (!request->extent.empty() && request->extent.size() != 3))
+    {
+      echo();
+      response->success = false;
+      response->message = "center/extent must be empty (unchanged) or exactly 3 values";
+      return;
+    }
+    if (!node_->has_parameter("mapper_grid_center") ||
+      !node_->has_parameter("mapper_extent_xyz"))
+    {
+      echo();
+      response->success = false;
+      response->message = "mapper_grid_center / mapper_extent_xyz are not declared";
+      return;
+    }
+    const std::vector<double> cur_center =
+      node_->get_parameter("mapper_grid_center").as_double_array();
+    const std::vector<double> cur_extent =
+      node_->get_parameter("mapper_extent_xyz").as_double_array();
+    std::vector<double> new_center = cur_center;
+    std::vector<double> new_extent = cur_extent;
+    if (request->center.size() == 3) {
+      new_center = request->center;
+    }
+    if (request->extent.size() == 3) {
+      for (double e : request->extent) {
+        if (!(e > 0.0)) {
+          echo();
+          response->success = false;
+          response->message = "extent values must all be > 0";
+          return;
+        }
+      }
+      new_extent = request->extent;
+    }
+    const bool same = new_center == cur_center && new_extent == cur_extent;
+    if (!same) {
+      node_->set_parameter(rclcpp::Parameter("mapper_grid_center", new_center));
+      node_->set_parameter(rclcpp::Parameter("mapper_extent_xyz", new_extent));
+      // Reallocate the Mapper to the new box first (the solvers' voxel cache is
+      // then sized from the new mapper_extent_xyz by rebuild_planner).
+      if (mapper_reconfigure_) {
+        mapper_reconfigure_();
+      }
+      rebuild_planner();
+    }
+    if (workspace_republish_) {
+      workspace_republish_();
+    }
+    echo();
+    response->success = true;
+    response->message = same ? "workspace already matches the request" :
+      "workspace updated - Mapper and solvers rebuilt (blocking, ~20s)";
+    std::ostringstream log;
+    log << "set_workspace: center=[";
+    for (std::size_t i = 0; i < response->center.size(); ++i) {
+      log << (i ? "," : "") << response->center[i];
+    }
+    log << "] extent=[";
+    for (std::size_t i = 0; i < response->extent.size(); ++i) {
+      log << (i ? "," : "") << response->extent[i];
+    }
+    log << "] (" << (same ? "unchanged" : "rebuilt") << ")";
+    RCLCPP_INFO(node_->get_logger(), "%s", log.str().c_str());
+  } catch (const std::exception & e) {
+    response->success = false;
+    response->message = std::string("set_workspace failed: ") + e.what();
+    RCLCPP_ERROR(node_->get_logger(), "%s", response->message.c_str());
   }
 }
 

@@ -17,6 +17,14 @@ namespace curobo_core
 
 // PORT: camera_cfg.DEFAULT_CAMERA_FRAME_RATE_HZ
 inline constexpr double DEFAULT_CAMERA_FRAME_RATE_HZ = 30.0;
+// Fallback Mapper depth-projection resolution used when nothing better is
+// known: no camera is configured, or none answered on its camera_info topic
+// within the probe timeout. Matches the node's historical default. When any
+// camera reports a size, the manager sizes the shared Mapper to the LARGEST
+// one (see CameraSystemManager::configure) and the depth strategies resample
+// the other cameras to it.
+inline constexpr int DEFAULT_MAPPER_IMAGE_WIDTH = 640;
+inline constexpr int DEFAULT_MAPPER_IMAGE_HEIGHT = 480;
 // PORT: PURPOSE_*
 inline constexpr const char * PURPOSE_ESDF = "esdf";
 inline constexpr const char * PURPOSE_SEGMENTATION = "segmentation";
@@ -24,6 +32,20 @@ inline constexpr const char * PURPOSE_ALL = "all";
 
 // PORT: camera_cfg.masked_depth_topic
 std::string masked_depth_topic(const std::string & depth_topic);
+
+// Frame the depth is integrated in — the Mapper's TSDF/ESDF frame — as an
+// ORDERED list of candidates to try against TF:
+//   1. the `mapper_frame` parameter when set (explicit override), else
+//   2. `map`, then 3. `odom` (a fixed world frame, so the map sticks to the
+//      world while the robot drives), then 4. the robot base `base_link`.
+// The caller tries each in order and uses the first that TF resolves; a static
+// map is preferred over odom, which is preferred over the (moving) base.
+std::vector<std::string> integration_frame_candidates(rclcpp::Node * node);
+
+// Single best-effort pick (mapper_frame, else base_link). For callers without a
+// TF buffer (marker/service metadata); prefer integration_frame_candidates()
+// where a TF lookup is available.
+std::string integration_frame(rclcpp::Node * node);
 
 // PORT: camera_cfg._parse_floats
 std::optional<std::vector<double>> parse_floats(const std::string & text);

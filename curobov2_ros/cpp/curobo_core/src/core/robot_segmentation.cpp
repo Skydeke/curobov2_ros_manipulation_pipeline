@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // 1:1 C++ port of curobov2_ros/core/robot_segmentation.py.
 #include "curobo_core/core/robot_segmentation.hpp"
+#include "curobo_core/cameras/camera_cfg.hpp"
 
 #include <fstream>
 #include <sstream>
@@ -30,8 +31,7 @@ RobotSegmentation::RobotSegmentation(
   std::function<std::vector<double>()> joint_pose)
 : node_(node), bridge_(bridge), handle_(handle)
 {
-  base_frame_ = node_->has_parameter("base_link") ?
-    node_->get_parameter("base_link").as_string() : "base_link";
+  base_frame_ = integration_frame(node_);
   if (!node_->has_parameter("robot_segmentation_mask_margin")) {
     node_->declare_parameter("robot_segmentation_mask_margin", 0.0);
   }
@@ -56,6 +56,13 @@ RobotSegmentation::RobotSegmentation(
       "RobotSegmentation stream for camera '%s' (index %d): %s -> %s", cfg.name.c_str(),
       cfg.camera_index, cfg.depth_topic.c_str(), strategy->output_topic().c_str());
   }
+  // These reach the bridge through the robot-model config, but log them here too:
+  // they are the knobs that decide how much of the depth image is deleted as
+  // "robot", and a silently-ignored threshold is hard to notice otherwise.
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "Robot segmentation masking: distance_threshold=%.4f m, mask_margin=%.4f m (%zu stream%s)",
+    distance_threshold_, mask_margin_, streams_.size(), streams_.size() == 1 ? "" : "s");
 }
 
 void RobotSegmentation::destroy()

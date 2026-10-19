@@ -7,6 +7,7 @@
 #include <limits>
 
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
@@ -99,11 +100,39 @@ double targetOf(const QTreeWidgetItem * item)
 
 /// Writes a row's target and repaints it. EVERY write in this file goes through
 /// here, so the clamp to the joint's own limits cannot be bypassed by one path.
+///
+/// A CONTINUOUS joint (reported range is a full turn or wider) is periodic, so
+/// a value written as the "other" turn — e.g. the SRDF's
+/// laundry_check_gripper j5 = 6.3641, just past the 6.28 top — is not out of
+/// range, it is the SAME pose as 6.3641 - 2*pi = 0.0809. Clamping it to 6.28
+/// (what a plain std::clamp does) silently plans a different configuration;
+/// wrapping it to the in-range full-turn equivalent keeps the pose exact.
 void setTarget(QTreeWidgetItem * item, double value)
 {
   if (hasBounds(item)) {
     const QPointF limits = boundsOf(item);
-    value = std::clamp(value, limits.x(), limits.y());
+    const double lo = limits.x();
+    const double hi = limits.y();
+    constexpr double kTwoPi = 6.283185307179586;
+    if (hi - lo >= kTwoPi - 1e-6) {
+      // Continuous: pick the in-range 2*pi-equivalent nearest the raw value.
+      double best = value;
+      double best_dist = std::numeric_limits<double>::infinity();
+      for (int k = -2; k <= 2; ++k) {
+        const double cand = value + static_cast<double>(k) * kTwoPi;
+        if (cand < lo - 1e-9 || cand > hi + 1e-9) {
+          continue;
+        }
+        const double dist = std::fabs(cand - value);
+        if (dist < best_dist) {
+          best_dist = dist;
+          best = cand;
+        }
+      }
+      value = best;
+    } else {
+      value = std::clamp(value, lo, hi);
+    }
   }
   // ARGUMENT ORDER: QTreeWidgetItem::data is (column, role) but
   // QTreeWidgetItem::setData is (column, role, value) -- the value goes LAST,
@@ -150,6 +179,18 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
   // a truthful "no named poses available", not a control that does nothing.
   named_pose_combo_->setEnabled(false);
   preset_row->addWidget(named_pose_combo_, 1);
+  // "Preview": mirror the target column onto <planner_node>/trajectory (a
+  // one-waypoint JointTrajectory) whenever it changes, so the
+  // CuroboTrajectoryDisplay shows the configuration live as the bars are
+  // dragged. Checked by default; unchecking makes the tab edit-only again.
+  preview_check_ = new QCheckBox(tr("Preview"), this);
+  preview_check_->setToolTip(
+    tr("Mirror the target configuration onto the planner's trajectory topic "
+       "(<planner_node>/trajectory) as a single-waypoint JointTrajectory, so the "
+       "CuroboTrajectoryDisplay shows it while you move the bars. This only "
+       "changes what is DRAWN - it never plans or moves the robot."));
+  preview_check_->setChecked(true);
+  preset_row->addWidget(preview_check_);
   layout->addLayout(preset_row);
 
   // MoveIt's Joints tab, reproduced from the ground up rather than approximated.
@@ -269,6 +310,14 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
     named_pose_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
     &JointsTab::onNamedPoseChosen);
 
+  // Preview poll: rather than hooking every write path (bar drags write the
+  // model directly through the delegate), poll the target column and publish it
+  // when it changed (see publishPreview). 100 ms is below the drag's own repaint
+  // cadence, so the preview tracks the bar.
+  auto * preview_timer = new QTimer(this);
+  connect(preview_timer, &QTimer::timeout, this, &JointsTab::publishPreview);
+  preview_timer->start(100);
+
   setButtonsEnabled();
 }
 
@@ -362,6 +411,14 @@ void JointsTab::setPlannerNode(const QString & planner_node)
       ns + "generate_trajectory");
   action_client_ = rclcpp_action::create_client<curobov2_ros_interfaces::action::SendTrajectory>(
     node_, ns + "execute_trajectory");
+
+  // Preview/ghost topic: CuroboTrajectoryDisplay subscribes to
+  // <planner_node>/trajectory. The server publishes the planned ghost there; the
+  // tab ALSO mirrors the edited target (a one-waypoint JointTrajectory) so
+  // moving the joint bars displays the configuration without planning.
+  preview_pub_ = node_->create_publisher<trajectory_msgs::msg::JointTrajectory>(
+    ns + "trajectory", 10);
+  last_preview_target_.clear();
 
   // A different planner is a different robot: the old cspace (and the target
   // positions indexed by it) mean nothing here.
@@ -811,6 +868,33 @@ QVector<double> targetVector(QTreeWidget * tree)
 }
 
 }  // namespace
+
+// Mirror the target column onto <planner_node>/trajectory as a single-waypoint
+// JointTrajectory so the CuroboTrajectoryDisplay shows the configuration the
+// user is editing - no plan, no motion. Gated on the "Preview" checkbox; only
+// publishes when the target actually changed (the caller polls).
+void JointsTab::publishPreview()
+{
+  if (preview_pub_ == nullptr || preview_check_ == nullptr ||
+    !preview_check_->isChecked() || !cspace_known_ ||
+    tree_->topLevelItemCount() == 0)
+  {
+    return;
+  }
+  const QVector<double> target = targetVector(tree_);
+  if (target == last_preview_target_) {
+    return;
+  }
+  trajectory_msgs::msg::JointTrajectory msg;
+  for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+    msg.joint_names.push_back(tree_->topLevelItem(i)->text(COL_JOINT).toStdString());
+  }
+  trajectory_msgs::msg::JointTrajectoryPoint point;
+  point.positions.assign(target.begin(), target.end());
+  msg.points.push_back(point);
+  preview_pub_->publish(msg);
+  last_preview_target_ = target;
+}
 
 void JointsTab::checkTarget()
 {

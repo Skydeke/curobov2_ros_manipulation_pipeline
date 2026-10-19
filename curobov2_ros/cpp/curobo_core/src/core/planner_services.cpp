@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "curobo_core/core/obstacle_manager.hpp"
 #include "curobo_core/core/collision_diagnostics.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
+#include "curobo_core/robot/robot_context.hpp"
 #include "curobo_runtime/runtime.hpp"
 #include "curobo_core/planners/reactive_controller.hpp"
 
@@ -280,6 +282,70 @@ std::vector<float> PlannerServices::resolve_start(
   return ordered;
 }
 
+// Continuous-joint target normalisation (see the header). A full turn is the
+// wrap period; the reported range of a continuous joint is 2*pi (cuRobo's
+// [-2*pi, 2*pi] is 4*pi, comfortably >= one turn, so exactly one equivalent
+// of any target falls in range except at the very edges).
+void PlannerServices::wrap_full_turn_targets(curobo_runtime::PlanRequest & request) const
+{
+  if (request.joint_target.empty()) {
+    return;
+  }
+  curobo_runtime::JointLimitsOutcome limits;
+  try {
+    limits = bridge_->joint_limits(handle_);
+  } catch (const std::exception &) {
+    return;  // limits unavailable: leave the target verbatim
+  }
+  const std::size_t dof = limits.joint_names.size();
+  if (request.joint_target.size() != dof || limits.positions.data.size() < 2 * dof) {
+    return;
+  }
+  constexpr double kTwoPi = 6.283185307179586;
+  for (std::size_t j = 0; j < dof; ++j) {
+    const double lo = limits.positions.data[j];
+    const double hi = limits.positions.data[dof + j];
+    // Bounded revolute/prismatic joints have a range shorter than a turn;
+    // only full-turn (continuous) joints are periodic under 2*pi.
+    if (!std::isfinite(lo) || !std::isfinite(hi) || hi - lo < kTwoPi - 1e-6) {
+      continue;
+    }
+    const double start = j < request.start.size() ?
+      static_cast<double>(request.start[j]) : static_cast<double>(request.joint_target[j]);
+    const double target = request.joint_target[j];
+    // cuRobo converts a continuous joint to revolute with limits of
+    // +/-2*3.14 (=+/-6.28), which is ~0.0032 rad SHORT of a full turn. So the
+    // +/-2*pi equivalent of a target can fall *just outside* [-6.28, 6.28]:
+    // e.g. target 0 on a joint whose start is 5.997 -- the short way is
+    // 2*pi = 6.2832, but the range tops out at 6.2800. Admit equivalents within
+    // a small tolerance of the range and snap them to the boundary; the pose
+    // error is that tolerance (<0.01 rad) yet it is what lets the SHORT path be
+    // chosen instead of a full-turn sweep that usually self-collides.
+    constexpr double kRangeTolerance = 0.01;
+    double best = target;
+    double best_dist = std::numeric_limits<double>::infinity();
+    for (int k = -2; k <= 2; ++k) {
+      double cand = target + static_cast<double>(k) * kTwoPi;
+      if (cand < lo - kRangeTolerance || cand > hi + kRangeTolerance) {
+        continue;  // equivalent genuinely outside the reported range
+      }
+      cand = std::clamp(cand, lo, hi);
+      const double dist = std::abs(cand - start);
+      if (dist < best_dist) {
+        best_dist = dist;
+        best = cand;
+      }
+    }
+    if (best != target) {
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Continuous joint %s: snapped target %.6f -> %.6f (nearest start %.6f)",
+        limits.joint_names[j].c_str(), target, best, start);
+    }
+    request.joint_target[j] = static_cast<float>(best);
+  }
+}
+
 // PORT: unified_planner_node._plan_trajectory_goal request assembly
 curobo_runtime::PlanRequest PlannerServices::build_request(
   const curobov2_ros_interfaces::msg::TrajectoryGoal & goal) const
@@ -298,6 +364,9 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
     for (double v : goal.goalsets.front().target_joint_positions) {
       plan_request.joint_target.push_back(static_cast<float>(v));
     }
+    // Snap continuous-joint targets to the in-range equivalent nearest the
+    // start so a negative / un-wrapped joint goal plans like its wrapped twin.
+    wrap_full_turn_targets(plan_request);
   } else if (!goal.goalsets.empty()) {
     plan_request.goalset_count = static_cast<std::int64_t>(goal.goalsets.size());
     // PORT: single_planner._apply_pose_constraints - the FIRST non-empty
@@ -358,6 +427,58 @@ void PlannerServices::publish_plan_image(const curobo_runtime::PlanOutcome & out
     plan_image_pub_->publish(msg);
   } catch (const std::exception &) {
     // A debug image must never break a successful plan.
+  }
+}
+
+// PORT: single_planner._stage_trajectory - project + buffer a trajectory into
+// the RobotContext's command buffer. plan() calls this so a compute-only plan
+// is rendered for preview (GhostStrategy) and can be streamed later; it does
+// not execute anything.
+void PlannerServices::stage_preview(
+  const std::vector<sensor_msgs::msg::JointState> & trajectory)
+{
+  if (robot_context_ == nullptr || trajectory.empty()) {
+    return;
+  }
+
+  std::vector<std::vector<double>> position;
+  std::vector<std::vector<double>> velocity;
+  std::vector<std::vector<double>> acceleration;
+  std::vector<std::string> names;
+  position.reserve(trajectory.size());
+  velocity.reserve(trajectory.size());
+  acceleration.reserve(trajectory.size());
+
+  for (const auto & point : trajectory) {
+    names = point.name.empty() ? joint_names_ : point.name;
+    // cuRobo can return more columns than the named active joints (locked
+    // fingers are part of the solver DOF). The command strategy expects one
+    // name per column, so keep the leading columns that are named. This is the
+    // same projection the action server applies before streaming.
+    std::size_t count = std::min(names.size(), point.position.size());
+    if (count == 0) {
+      return;
+    }
+    names.resize(count);
+
+    std::vector<double> pos(point.position.begin(), point.position.begin() + count);
+    std::vector<double> vel(count, 0.0);
+    if (point.velocity.size() >= count) {
+      vel.assign(point.velocity.begin(), point.velocity.begin() + count);
+    }
+    position.push_back(std::move(pos));
+    velocity.push_back(std::move(vel));
+    acceleration.emplace_back(count, 0.0);
+  }
+
+  try {
+    robot_context_->set_command(names, velocity, acceleration, position);
+    RCLCPP_INFO(
+      node_->get_logger(), "Trajectory sent to robot context for visualization");
+  } catch (const std::exception & e) {
+    // A preview must never turn a successful plan into a failed service call.
+    RCLCPP_WARN(
+      node_->get_logger(), "Could not stage trajectory preview: %s", e.what());
   }
 }
 
@@ -615,7 +736,9 @@ void PlannerServices::fill_result(
   out.stats.candidates_solved = outcome.candidates_solved;
   out.stats.candidates_pruned = outcome.candidates_pruned;
   out.stats.waypoints_planned = outcome.waypoints_planned;
-  // PORT: single_planner.plan() -> _publish_plan_image (once per new plan).
+  // PORT: single_planner.plan() -> _stage_trajectory (preview buffer) and
+  // _publish_plan_image (once per new plan).
+  stage_preview(out.trajectory);
   publish_plan_image(outcome);
   out.stats.solver_time_s = outcome.solver_time_s;
   out.stats.position_error_mm = outcome.position_error_mm;

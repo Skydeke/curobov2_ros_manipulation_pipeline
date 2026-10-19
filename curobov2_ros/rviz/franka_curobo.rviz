@@ -212,7 +212,7 @@ Visualization Manager:
             Reliability Policy: Reliable
             Value: /unified_planner/voxel_grid_sparse
           Value: true
-        - Class: rviz_default_plugins/Marker
+        - Class: rviz_default_plugins/MarkerArray
           Enabled: false
           Name: Mapper Workspace
           Namespaces:
