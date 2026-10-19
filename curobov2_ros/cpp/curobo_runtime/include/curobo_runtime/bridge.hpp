@@ -339,7 +339,13 @@ public:
   // PORT: ik_services._solve. poses: [N, 7] -> per-N solution + validity.
   virtual IkOutcome ik(RobotHandle handle, const TensorF32 & poses) = 0;
   // PORT: config_wrapper_ik.ConfigWrapperIK.build (solver lifecycle).
-  virtual void ik_config(RobotHandle handle, int batch_size, int num_seeds) = 0;
+  // `self_collision_check` drives BOTH self-collision and scene collision (the
+  // old Python's single `ik_collision_check` flag; false = pure-kinematics IK
+  // with no scene/cache). `num_seeds` / these flags bake into the solver
+  // buffers, so VRAM scales as batch x num_seeds.
+  virtual void ik_config(
+    RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,
+    bool use_lm_seed, bool use_cuda_graph) = 0;
   // PORT: fk_services._validate. q: [N, dof] -> bool[N].
   virtual std::vector<std::uint8_t> validate(RobotHandle handle, const TensorF32 & q) = 0;
   // PORT: collision_distance._compute_sphere_distance. q: [N, dof] ->

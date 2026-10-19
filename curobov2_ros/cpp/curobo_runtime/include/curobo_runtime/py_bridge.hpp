@@ -39,7 +39,9 @@ public:
   void robot_model_build(RobotHandle handle, const std::string & cfg_json) override;
   TensorF32 fk(RobotHandle handle, const TensorF32 & q) override;
   IkOutcome ik(RobotHandle handle, const TensorF32 & poses) override;
-  void ik_config(RobotHandle handle, int batch_size, int num_seeds) override;
+  void ik_config(
+    RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,
+    bool use_lm_seed, bool use_cuda_graph) override;
   std::vector<std::uint8_t> validate(RobotHandle handle, const TensorF32 & q) override;
   std::vector<float> collision_distance(RobotHandle handle, const TensorF32 & q) override;
   CollisionAttribution collision_attribution(

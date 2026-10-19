@@ -3,6 +3,8 @@
 #include "curobo_core/core/ik_services.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <stdexcept>
 
 namespace curobo_core
@@ -76,7 +78,21 @@ std::string IKServices::warmup(int batch_size, int num_seeds)
   if (ready_ && !needs_rebuild(batch_size, num_seeds)) {
     return "IK solver already ready (batch_size=" + std::to_string(batch_size) + ")";
   }
-  bridge_->ik_config(handle_, batch_size, num_seeds);
+  // PORT: config_wrapper_ik.ConfigWrapperIK.build - resolve the tunables from
+  // the node params at build time; they bake into the solver buffers.
+  const bool self_collision_check = resolve_collision_check();
+  const bool use_lm_seed = resolve_use_lm_seed();
+  const bool use_cuda_graph = resolve_use_cuda_graph();
+  RCLCPP_INFO(
+    node_->get_logger(),
+    "IK solver envelope: use_cuda_graph=%s, num_ik_seeds=%d, collision_check=%s, "
+    "use_lm_seed=%s, batch_size=%d",
+    use_cuda_graph ? "True" : "False", num_seeds,
+    self_collision_check ? "True" : "False", use_lm_seed ? "True" : "False",
+    batch_size);
+  bridge_->ik_config(
+    handle_, batch_size, num_seeds, self_collision_check, use_lm_seed,
+    use_cuda_graph);
   // PORT: config_wrapper_ik build - the torch_sync CPU/GPU ordering bridge.
   if (node_ != nullptr && node_->has_parameter("torch_sync") &&
     node_->get_parameter("torch_sync").as_bool())
@@ -85,14 +101,66 @@ std::string IKServices::warmup(int batch_size, int num_seeds)
   }
   ik_batch_size_ = batch_size;
   ik_num_seeds_ = num_seeds;
+  ik_collision_check_ = self_collision_check;
+  ik_use_lm_seed_ = use_lm_seed;
+  ik_use_cuda_graph_ = use_cuda_graph;
   ready_ = true;
   return "IK solver ready (batch_size=" + std::to_string(batch_size) + ")";
+}
+
+// PORT: config_wrapper_ik.ConfigWrapperIK._resolve_num_ik_seeds
+int IKServices::resolve_num_seeds() const
+{
+  if (node_ != nullptr && node_->has_parameter("num_ik_seeds")) {
+    return std::max(
+      1, static_cast<int>(node_->get_parameter("num_ik_seeds").as_int()));
+  }
+  return num_ik_seeds_;
+}
+
+// PORT: config_wrapper_ik.ConfigWrapperIK._resolve_collision_check
+bool IKServices::resolve_collision_check() const
+{
+  if (node_ != nullptr && node_->has_parameter("ik_collision_check")) {
+    return node_->get_parameter("ik_collision_check").as_bool();
+  }
+  return true;
+}
+
+// PORT: config_wrapper_ik.ConfigWrapperIK._resolve_use_lm_seed
+bool IKServices::resolve_use_lm_seed() const
+{
+  if (node_ != nullptr && node_->has_parameter("ik_use_lm_seed")) {
+    return node_->get_parameter("ik_use_lm_seed").as_bool();
+  }
+  return true;
+}
+
+// PORT: config_wrapper.resolve_use_cuda_graph - env var wins, then the ROS
+// param, then True.
+bool IKServices::resolve_use_cuda_graph() const
+{
+  const char * env = std::getenv("CUROBO_USE_CUDA_GRAPH");
+  if (env != nullptr) {
+    std::string value(env);
+    std::transform(
+      value.begin(), value.end(), value.begin(),
+      [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+    return !(value == "0" || value == "false" || value == "no" || value == "off");
+  }
+  if (node_ != nullptr && node_->has_parameter("use_cuda_graph")) {
+    return node_->get_parameter("use_cuda_graph").as_bool();
+  }
+  return true;
 }
 
 // PORT: config_wrapper_ik.ConfigWrapperIK.needs_rebuild
 bool IKServices::needs_rebuild(int batch_size, int num_seeds) const
 {
-  return batch_size != ik_batch_size_ || num_seeds != ik_num_seeds_;
+  return batch_size != ik_batch_size_ || num_seeds != ik_num_seeds_ ||
+         resolve_collision_check() != ik_collision_check_ ||
+         resolve_use_lm_seed() != ik_use_lm_seed_ ||
+         resolve_use_cuda_graph() != ik_use_cuda_graph_;
 }
 
 // PORT: ik_services.IKServices._warmup_ik_callback
@@ -122,9 +190,11 @@ bool IKServices::solve(
     // PORT: ik_services.IKServices._solve - rebuild lazily when the request
     // batch no longer matches the live solver (needs_rebuild -> build). Without
     // this a batch larger than the warmed solver (e.g. a reachability grid)
-    // solves against a too-small buffer and every cell fails.
+    // solves against a too-small buffer and every cell fails. Also picks up a
+    // `ros2 param set num_ik_seeds` / `ik_collision_check` flip, like the Python
+    // `needs_rebuild(n, num_seeds)` check.
     const int requested = static_cast<int>(poses.size());
-    if (!ready_ || ik_batch_size_ != requested) {
+    if (!ready_ || needs_rebuild(requested, resolve_num_seeds())) {
       warmup(requested, -1);
     }
     outcome = bridge_->ik(handle_, poses_to_tensor(poses));

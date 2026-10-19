@@ -51,8 +51,18 @@ public:
   int batch_size() const {return ik_batch_size_;}
   int num_seeds() const {return ik_num_seeds_;}
 
-  // PORT: ik_services.IKServices._resolve_num_seeds
-  int resolve_num_seeds() const {return num_ik_seeds_;}
+  // PORT: ik_services.IKServices._resolve_num_seeds / config_wrapper_ik
+  // ._resolve_collision_check / ._resolve_use_lm_seed / config_wrapper
+  // .resolve_use_cuda_graph. Resolved from the node params (and the
+  // CUROBO_USE_CUDA_GRAPH env var) at build time, so a `ros2 param set` +
+  // update_ik_config rebuild takes effect without a relaunch — exactly like the
+  // Python source. These bake into the solver buffers: VRAM scales as
+  // batch x num_seeds, which is why dropping the param (default 32) overflows
+  // the GPU for callers that run a smaller seed budget (mapping uses 4).
+  int resolve_num_seeds() const;
+  bool resolve_collision_check() const;
+  bool resolve_use_lm_seed() const;
+  bool resolve_use_cuda_graph() const;
 
   // PORT: config_wrapper_ik.ConfigWrapperIK.needs_rebuild
   bool needs_rebuild(int batch_size, int num_seeds) const;
@@ -79,10 +89,16 @@ private:
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
   std::string base_link_;
+  // Fallback used only when the node does not declare `num_ik_seeds` (unit
+  // tests); production nodes always declare it.
   int num_ik_seeds_;
   bool ready_ = false;
   int ik_batch_size_ = 0;
   int ik_num_seeds_ = 0;
+  // The tunables the live solver was actually built with (needs_rebuild).
+  bool ik_collision_check_ = true;
+  bool ik_use_lm_seed_ = true;
+  bool ik_use_cuda_graph_ = true;
   std::mutex solve_lock_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::WarmupIK>::SharedPtr warmup_srv_;
