@@ -89,6 +89,71 @@ void TrajectoryActionServer::publish_feedback(
   goal_handle->publish_feedback(feedback);
 }
 
+// PORT: single_planner._active_joint_projection
+void TrajectoryActionServer::project_active_joints(
+  std::vector<std::string> & names,
+  std::vector<std::vector<double>> & positions,
+  std::vector<std::vector<double>> & velocities) const
+{
+  if (names.empty() || positions.empty() || positions.front().empty()) {
+    return;
+  }
+  const std::size_t dof = positions.front().size();
+  const std::size_t named = names.size();
+
+  auto select = [&positions, &velocities](
+    const std::vector<std::size_t> & cols, std::size_t new_named,
+    std::vector<std::string> & out_names) {
+      auto pick = [&cols](const std::vector<std::vector<double>> & rows) {
+          std::vector<std::vector<double>> out;
+          out.reserve(rows.size());
+          for (const auto & row : rows) {
+            std::vector<double> projected;
+            projected.reserve(cols.size());
+            for (const std::size_t col : cols) {
+              projected.push_back(col < row.size() ? row[col] : 0.0);
+            }
+            out.push_back(std::move(projected));
+          }
+          return out;
+        };
+      positions = pick(positions);
+      if (!velocities.empty()) {
+        velocities = pick(velocities);
+      }
+      out_names.resize(new_named);
+    };
+
+  if (named < dof) {
+    // Rows wider than the name list: cuRobo appended locked/fixed joint columns
+    // (e.g. finger_joint) via get_full_dof_from_solution(), with the named
+    // joints leading in order - a plain prefix keeps the arm joints and drops
+    // the appended tail.
+    std::vector<std::size_t> cols(named);
+    for (std::size_t i = 0; i < named; ++i) {
+      cols[i] = i;
+    }
+    select(cols, named, names);
+    return;
+  }
+
+  // Rows are no wider than the name list: keep the node's ACTIVE joints by
+  // NAME (the controller owns exactly those), dropping any locked columns.
+  if (named == joint_names_.size()) {
+    return;  // already active-sized and needs no projection
+  }
+  std::vector<std::size_t> cols;
+  cols.reserve(joint_names_.size());
+  for (const std::string & want : joint_names_) {
+    auto it = std::find(names.begin(), names.end(), want);
+    if (it == names.end()) {
+      return;  // cannot map by name - leave the trajectory untouched
+    }
+    cols.push_back(static_cast<std::size_t>(it - names.begin()));
+  }
+  select(cols, cols.size(), names);
+}
+
 // PORT: execute_callback
 void TrajectoryActionServer::execute(const std::shared_ptr<GoalHandle> goal_handle)
 {
@@ -155,6 +220,9 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     if (names.empty()) {
       names = joint_names_;
     }
+    // PORT: single_planner._stage_trajectory - project the replayed full-joint
+    // plan onto the active (controller) joints before streaming it.
+    project_active_joints(names, positions, velocities);
     RCLCPP_INFO(
       node_->get_logger(), "Executing with %s (replayed %zu waypoints, no re-plan)",
       planner->get_planner_name().c_str(), n);

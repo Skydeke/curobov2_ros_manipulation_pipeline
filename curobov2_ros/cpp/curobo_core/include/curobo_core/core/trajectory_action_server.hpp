@@ -53,6 +53,15 @@ private:
     const std::shared_ptr<GoalHandle> goal_handle, const std::string & state,
     double step_progression, bool on_target);
 
+  // PORT: single_planner._active_joint_projection - cuRobo's interpolated plan
+  // carries EVERY model joint (locked ones appended via
+  // get_full_dof_from_solution()), so a replayed full-joint trajectory must be
+  // projected onto the controller's ACTIVE joints before it is streamed.
+  void project_active_joints(
+    std::vector<std::string> & names,
+    std::vector<std::vector<double>> & positions,
+    std::vector<std::vector<double>> & velocities) const;
+
   rclcpp::Node * node_;
   PlannerServices * planners_;
   RobotContext * robot_context_;
