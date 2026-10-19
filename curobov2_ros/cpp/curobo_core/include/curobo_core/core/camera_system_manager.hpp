@@ -8,6 +8,7 @@
 
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -32,8 +33,21 @@ public:
   CameraContext * get_camera_context() {return camera_context_.get();}
   const std::vector<PerceptionCameraCfg> & camera_cfgs() const {return camera_cfgs_;}
 
+  /// Depth-projection resolution the shared Mapper is (or will be) built at.
+  /// Resolved in configure(): an explicit mapper_image_width/height (>0) wins,
+  /// otherwise the LARGEST size any configured camera reports on its
+  /// camera_info topic. 0 means "not resolved" (no camera configured), and the
+  /// node then falls back to DEFAULT_MAPPER_IMAGE_*.
+  int mapper_image_width() const {return mapper_image_width_;}
+  int mapper_image_height() const {return mapper_image_height_;}
+
 private:
   void configure();
+
+  /// Probe each configured camera's camera_info topic (bounded) and return the
+  /// largest reported (width, height); {0, 0} when none answers.
+  std::pair<int, int> detect_max_camera_resolution(
+    const std::vector<PerceptionCameraCfg> & cfgs);
 
   rclcpp::Node * node_;
   curobo_runtime::IBridge * bridge_;
@@ -42,6 +56,8 @@ private:
   std::function<void()> on_integrated_;
   std::unique_ptr<CameraContext> camera_context_;
   std::vector<PerceptionCameraCfg> camera_cfgs_;
+  int mapper_image_width_ = 0;
+  int mapper_image_height_ = 0;
 };
 
 }  // namespace curobo_core

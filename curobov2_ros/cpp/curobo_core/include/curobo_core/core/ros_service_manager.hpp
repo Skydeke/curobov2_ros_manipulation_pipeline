@@ -55,6 +55,11 @@ public:
   // is the node's current joint pose).
   void set_pose_provider(std::function<std::vector<float>()> provider)
   {pose_provider_ = std::move(provider);}
+  // Frame the Mapper is integrated in (map/odom when TF provides one, else the
+  // robot base). The node owns the TF buffer, so it supplies the resolver; used
+  // for the mapper_workspace marker so the box matches the integrated voxels.
+  void set_integration_frame_provider(std::function<std::string()> provider)
+  {integration_frame_provider_ = std::move(provider);}
   void publish_collision_spheres();
 
   // PORT: ros_service_manager.register_robot_segmentation (set_mask / remove_mask,
@@ -124,12 +129,13 @@ private:
   rclcpp::Service<std_srvs::srv::SetBool>::SharedPtr set_collision_spheres_srv_;
   bool collision_spheres_enabled_ = true;
   bool workspace_viz_enabled_ = true;
-  rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr workspace_viz_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr workspace_viz_pub_;
   rclcpp::Publisher<curobov2_ros_interfaces::msg::SparseVoxelGrid>::SharedPtr sparse_voxel_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr scene_obstacle_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr collision_spheres_pub_;
   rclcpp::TimerBase::SharedPtr collision_spheres_timer_;
   std::function<std::vector<float>()> pose_provider_;
+  std::function<std::string()> integration_frame_provider_;
   rclcpp::TimerBase::SharedPtr sparse_voxel_timer_;
   rclcpp::CallbackGroup::SharedPtr viz_callback_group_;
   rclcpp::Service<curobov2_ros_interfaces::srv::SetMask>::SharedPtr set_mask_srv_;

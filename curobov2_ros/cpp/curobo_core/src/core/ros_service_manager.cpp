@@ -136,7 +136,7 @@ void RosServiceManager::init_services()
   // PORT: ros_service_manager viz publishers (mapper workspace + sparse voxel).
   workspace_viz_enabled_ = node_->has_parameter("publish_workspace_visualisation") ?
     node_->get_parameter("publish_workspace_visualisation").as_bool() : true;
-  workspace_viz_pub_ = node_->create_publisher<visualization_msgs::msg::Marker>(
+  workspace_viz_pub_ = node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     name + "/mapper_workspace", rclcpp::QoS(1).transient_local());
   publish_mapper_workspace();
 
@@ -448,8 +448,8 @@ void RosServiceManager::publish_mapper_workspace()
       return;
     }
     visualization_msgs::msg::Marker marker;
-    marker.header.frame_id = node_->has_parameter("base_link") ?
-      node_->get_parameter("base_link").as_string() : "base_link";
+    marker.header.frame_id = integration_frame_provider_ ? integration_frame_provider_() :
+      integration_frame(node_);
     marker.header.stamp = node_->get_clock()->now();
     marker.ns = "mapper_workspace";
     marker.id = 0;
@@ -480,7 +480,9 @@ void RosServiceManager::publish_mapper_workspace()
       marker.points.push_back(corners[i]);
       marker.points.push_back(corners[j]);
     }
-    workspace_viz_pub_->publish(marker);
+    visualization_msgs::msg::MarkerArray array;
+    array.markers.push_back(marker);
+    workspace_viz_pub_->publish(array);
   } catch (const std::exception & e) {
     RCLCPP_WARN_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 5000,

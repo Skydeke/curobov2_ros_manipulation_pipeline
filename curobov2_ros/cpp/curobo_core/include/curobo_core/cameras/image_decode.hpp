@@ -35,6 +35,15 @@ sensor_msgs::msg::Image encode_depth(
   const std::vector<float> & data, std::uint32_t height, std::uint32_t width,
   const std::string & encoding, const builtin_interfaces::msg::Time & stamp);
 
+// PORT: camera_depth_map_strategy.callback_depth_map - the Mapper allocates its
+// depth-projection kernel once for the configured mapper_image_width/height, so
+// every frame must be resampled to that exact resolution before integration.
+// Bilinear (align_corners=false), the cv2.INTER_LINEAR / torch bilinear
+// convention. `src` is row-major metres of size src_h * src_w.
+std::vector<float> resize_depth_bilinear(
+  const std::vector<float> & src, std::uint32_t src_h, std::uint32_t src_w,
+  std::uint32_t dst_h, std::uint32_t dst_w);
+
 }  // namespace curobo_core
 
 #endif  // CUROBO_CORE__CAMERAS__IMAGE_DECODE_HPP_

@@ -110,7 +110,17 @@ private:
   // startup but COMPLETED (with decay_factor, which needs the camera/laser
   // frame rates) after their managers exist. The bridge builds the mapper
   // lazily, so configuring it late is safe.
-  std::string mapper_cfg_base_;
+  // Resolved Mapper depth-projection resolution + decay, stored so the
+  // workspace services (`set_workspace`) can rebuild the Mapper with a new
+  // extent/centre without re-deriving them. See configure_mapper_from_params().
+  int mapper_image_w_ = 0;
+  int mapper_image_h_ = 0;
+  double mapper_decay_ = 1.0;
+  // Rebuild the Mapper (TSDF/ESDF) from the current mapper_* parameters.
+  void configure_mapper_from_params();
+  // The frame depth is integrated in: an explicit `mapper_frame`, else the first
+  // of `map`/`odom` that TF connects to the robot base, else `base_link`.
+  std::string integration_frame();
   std::unique_ptr<CameraSystemManager> camera_system_manager_;
   std::unique_ptr<LaserSystemManager> laser_system_manager_;
   std::unique_ptr<RobotSegmentation> robot_segmentation_;

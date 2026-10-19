@@ -12,6 +12,7 @@
 #include <sensor_msgs/msg/point_field.hpp>
 
 #include "curobo_core/core/frame_utils.hpp"
+#include "curobo_core/cameras/camera_cfg.hpp"
 
 namespace curobo_core
 {
@@ -105,17 +106,25 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
     if (static_pose_.has_value()) {
       cam_pose = *static_pose_;
     } else if (!frame_id_.empty()) {
-      try {
-        const auto transform = tf_buffer_->lookupTransform(
-          node_->has_parameter("base_link") ? node_->get_parameter("base_link").as_string() :
-          "base_0", frame_id_, tf2::TimePointZero);
-        const auto & t = transform.transform.translation;
-        const auto & r = transform.transform.rotation;
-        const auto q = normalize_quat_wxyz({r.w, r.x, r.y, r.z});
-        cam_pose = {t.x, t.y, t.z, q[0], q[1], q[2], q[3]};
-      } catch (const tf2::TransformException &) {
+      // Same fixed-world-frame preference as the depth strategy (map -> odom ->
+      // base) so the robot is projected into the same frame the map uses.
+      geometry_msgs::msg::TransformStamped transform;
+      bool resolved = false;
+      for (const std::string & base : integration_frame_candidates(node_)) {
+        try {
+          transform = get_transform(*tf_buffer_, base, frame_id_);
+          resolved = true;
+          break;
+        } catch (const std::exception &) {
+        }
+      }
+      if (!resolved) {
         return;
       }
+      const auto & t = transform.transform.translation;
+      const auto & r = transform.transform.rotation;
+      const auto q = normalize_quat_wxyz({r.w, r.x, r.y, r.z});
+      cam_pose = {t.x, t.y, t.z, q[0], q[1], q[2], q[3]};
     }
 
     const std::vector<double> q = joint_pose_ ? joint_pose_() : std::vector<double>{};
@@ -135,9 +144,12 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
         msg.header.stamp);
     }
   } catch (const std::exception & e) {
-    RCLCPP_DEBUG_THROTTLE(
-      node_->get_logger(), *node_->get_clock(), 2000, "robot_segmentation frame dropped (%s)",
-      e.what());
+    // WARN, not DEBUG: a persistent failure here silently stops the masked
+    // depth, so the Mapper freezes with only its first integrations and nothing
+    // is logged. Throttled so a burst of bad frames is one line.
+    RCLCPP_WARN_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 5000, "[%s] robot_segmentation frame dropped (%s)",
+      name_.c_str(), e.what());
   }
 }
 
@@ -169,8 +181,7 @@ void RobotSegmentationCameraStrategy::publish_robot_pointcloud(
   }
   sensor_msgs::msg::PointCloud2 msg;
   msg.header.stamp = stamp;
-  msg.header.frame_id = node_->has_parameter("base_link") ?
-    node_->get_parameter("base_link").as_string() : "base_link";
+  msg.header.frame_id = integration_frame(node_);
   msg.height = 1;
   msg.width = static_cast<std::uint32_t>(points.size() / 3);
   msg.is_bigendian = false;

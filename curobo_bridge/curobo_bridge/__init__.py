@@ -253,6 +253,15 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
     entry["kin"] = kin
     entry["joint_names"] = list(kin.joint_names)
     entry["dof"] = int(kin.get_dof())
+    # Robot-masking knobs (PORT: RobotSegmentation.__init__, which reads
+    # robot_segmentation_distance_threshold / robot_segmentation_mask_margin).
+    # robot_segment() looks both up on THIS registry entry; without them it
+    # silently fell back to its own 0.05 / 0.0 defaults, so the launch
+    # parameters were accepted but had no effect.
+    if "seg_distance_threshold" in cfg:
+        entry["seg_distance_threshold"] = float(cfg["seg_distance_threshold"])
+    if "seg_mask_margin" in cfg:
+        entry["seg_mask_margin"] = float(cfg["seg_mask_margin"])
     # The robot YAML's own lock_joints (PORT: RobotModelManager.config_lock_joints).
     entry["resolved_config"] = resolved
     # PORT: the lock_joints map, structure-aware (robot_cfg.kinematics.* or the
@@ -2150,9 +2159,35 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     js = JointState.from_position(q_t, joint_names=kin.joint_names)
     spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
     threshold = float(entry.get("seg_distance_threshold", 0.05))
-    dist = torch.norm(base.unsqueeze(1) - spheres[:, :3].unsqueeze(0), dim=2) \
-        - spheres[:, 3].unsqueeze(0)
-    keep = dist.min(dim=1).values > threshold
+    # Distance to the nearest robot sphere. The naive
+    # `torch.norm(base[:, None] - spheres[None, :, :3], dim=2)` materialises an
+    # [N, S, 3] float32 tensor, and on KATE that is not a rounding error: the
+    # collision model carries 592 spheres over 68 links (the simulated chassis
+    # wheel hubs, top_plate, screen, router, sonars -- not just an arm like the
+    # franka/ur10e demos), so a single 800x600 frame asks for ~886 MiB here. On
+    # this 7.7 GiB card, shared with the GPU Gazebo/MoveIt, that allocation
+    # fails, the frame is dropped, the masked depth stops and the Mapper freezes.
+    # Two guards bound it:
+    #   1. only points inside the robot's AABB (+threshold) can be within
+    #      `threshold` of a sphere -- everything else is kept with no distance
+    #      computation at all (the robot covers a small part of the view);
+    #   2. the rest are evaluated in chunks, so no [N, S, 3] intermediate exists.
+    sph = spheres[:, :3].contiguous()
+    sph_r = spheres[:, 3].contiguous()
+    n_pts = int(base.shape[0])
+    keep = torch.ones(n_pts, dtype=torch.bool, device=device)
+    if n_pts > 0 and sph.numel() > 0:
+        reach = float(sph_r.max()) + threshold
+        lo = sph.min(dim=0).values - reach
+        hi = sph.max(dim=0).values + reach
+        near = ((base >= lo) & (base <= hi)).all(dim=1).nonzero(as_tuple=True)[0]
+        chunk = 8192
+        for start in range(0, int(near.numel()), chunk):
+            idx = near[start:start + chunk]
+            b = base.index_select(0, idx)                               # [c, 3]
+            d = torch.norm(b.unsqueeze(1) - sph.unsqueeze(0), dim=2) - sph_r.unsqueeze(0)
+            keep[idx] = d.min(dim=1).values > threshold
+    del sph, sph_r
 
     margin = float(entry.get("seg_mask_margin", 0.0))
     for mask in json.loads(masks_json or "[]"):

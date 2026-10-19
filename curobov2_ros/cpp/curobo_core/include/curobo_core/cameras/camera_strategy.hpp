@@ -52,6 +52,21 @@ public:
     std::lock_guard<std::mutex> lk(intrinsics_mutex_);
     return intrinsics_.has_value();
   }
+  // The frame the depth pixels are expressed in. An explicit `camera_frame`
+  // wins (a Gazebo RGBD camera emits x-forward pixels under its LINK frame,
+  // which is right for the point cloud but wrong for a z-forward projection, so
+  // such setups must name the optical frame); otherwise the driver's own
+  // camera_info header frame is used. Depth is projected with a z-forward
+  // (optical) convention, so the resolved frame must be the camera's optical
+  // frame.
+  std::string frame_for_lookup() const
+  {
+    std::lock_guard<std::mutex> lk(intrinsics_mutex_);
+    if (!frame_id_.empty()) {
+      return frame_id_;
+    }
+    return camera_info_frame_;
+  }
   // 3x3 row-major K (copy; safe against a concurrent camera_info update).
   std::optional<std::array<double, 9>> intrinsics_copy() const
   {
@@ -83,6 +98,10 @@ protected:
   std::optional<Pose7d> static_pose_;
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+  // Frame reported by the camera_info header (empty until one arrives). Guarded
+  // by intrinsics_mutex_ (read from the depth worker, written from the
+  // camera_info callback).
+  std::string camera_info_frame_;
   std::function<void(const sensor_msgs::msg::Image &)> update_callback_;
 };
 
