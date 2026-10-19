@@ -244,11 +244,17 @@ void FakeBridge::set_dof(int dof)
   dof_ = dof;
 }
 
-void FakeBridge::ik_config(RobotHandle, int batch_size, int num_seeds)
+void FakeBridge::ik_config(
+  RobotHandle, int batch_size, int num_seeds, bool self_collision_check,
+  bool use_lm_seed, bool use_cuda_graph)
 {
   std::lock_guard<std::mutex> lk(mutex_);
   ik_batch_ = batch_size;
   ik_num_seeds_ = num_seeds;
+  ik_self_collision_check_ = self_collision_check;
+  ik_use_lm_seed_ = use_lm_seed;
+  ik_use_cuda_graph_ = use_cuda_graph;
+  ++ik_builds_;
 }
 
 // PORT: attachment_services.attach / detach (test double: tracks the name).
@@ -640,6 +646,42 @@ std::string FakeBridge::mpc_cfg() const
 {
   std::lock_guard<std::mutex> lk(mutex_);
   return mpc_cfg_;
+}
+
+int FakeBridge::ik_builds() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return ik_builds_;
+}
+
+int FakeBridge::ik_batch() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return ik_batch_;
+}
+
+int FakeBridge::ik_num_seeds() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return ik_num_seeds_;
+}
+
+bool FakeBridge::ik_self_collision_check() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return ik_self_collision_check_;
+}
+
+bool FakeBridge::ik_use_lm_seed() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return ik_use_lm_seed_;
+}
+
+bool FakeBridge::ik_use_cuda_graph() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return ik_use_cuda_graph_;
 }
 
 }  // namespace curobo_runtime

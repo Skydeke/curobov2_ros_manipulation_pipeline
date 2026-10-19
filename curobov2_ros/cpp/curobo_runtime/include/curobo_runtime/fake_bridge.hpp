@@ -34,7 +34,9 @@ public:
   void robot_model_build(RobotHandle handle, const std::string & cfg_json) override;
   TensorF32 fk(RobotHandle handle, const TensorF32 & q) override;
   IkOutcome ik(RobotHandle handle, const TensorF32 & poses) override;
-  void ik_config(RobotHandle handle, int batch_size, int num_seeds) override;
+  void ik_config(
+    RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,
+    bool use_lm_seed, bool use_cuda_graph) override;
   std::vector<std::uint8_t> validate(RobotHandle handle, const TensorF32 & q) override;
   std::vector<float> collision_distance(RobotHandle handle, const TensorF32 & q) override;
   CollisionAttribution collision_attribution(
@@ -134,6 +136,14 @@ public:
   int mpc_reseeds() const;
   int retarget_steps() const;
   std::string mpc_cfg() const;
+  // IK test hooks (the standalone IK solver build: num_seeds/flags are baked in,
+  // so the port must forward what ConfigWrapperIK.build resolved).
+  int ik_builds() const;
+  int ik_batch() const;
+  int ik_num_seeds() const;
+  bool ik_self_collision_check() const;
+  bool ik_use_lm_seed() const;
+  bool ik_use_cuda_graph() const;
 
 private:
   mutable std::mutex mutex_;
@@ -163,6 +173,10 @@ private:
   int mpc_reseeds_ = 0;
   int ik_batch_ = 0;
   int ik_num_seeds_ = 0;
+  int ik_builds_ = 0;
+  bool ik_self_collision_check_ = true;
+  bool ik_use_lm_seed_ = true;
+  bool ik_use_cuda_graph_ = true;
   std::string attached_;
   std::string planner_cfg_;
   int seed_resets_ = 0;

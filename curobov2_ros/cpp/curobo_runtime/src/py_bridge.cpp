@@ -358,11 +358,15 @@ IkOutcome PyBridge::ik(RobotHandle handle, const TensorF32 & poses)
 }
 
 // PORT: config_wrapper_ik.ConfigWrapperIK.build
-void PyBridge::ik_config(RobotHandle handle, int batch_size, int num_seeds)
+void PyBridge::ik_config(
+  RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,
+  bool use_lm_seed, bool use_cuda_graph)
 {
   py::gil_scoped_acquire gil;
   try {
-    bridge_module().attr("ik_config")(handle, batch_size, num_seeds);
+    bridge_module().attr("ik_config")(
+      handle, batch_size, num_seeds, self_collision_check, use_lm_seed,
+      use_cuda_graph);
   } catch (const py::error_already_set & e) {
     throw BridgeError("config", e.what());
   }
