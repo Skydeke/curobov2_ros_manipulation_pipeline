@@ -110,7 +110,19 @@ bool CaptureBarrier::acquire_exclusive(bool blocking)
       return false;
     }
     writers_waiting_ += 1;
-    cond_.wait(lk, [&] {return !writer_.has_value() && readers_ == 0;});
+    try {
+      cond_.wait(lk, [&] {return !writer_.has_value() && readers_ == 0;});
+    } catch (...) {
+      // PORT: gpu_lanes.py:acquire_exclusive's `finally: self._writers_waiting
+      // -= 1`. std::condition_variable::wait can throw (std::system_error); a
+      // leaked counter makes acquire_shared's predicate (`writers_waiting_ ==
+      // 0`) permanently false, deadlocking every later shared acquisition.
+      writers_waiting_ -= 1;
+      if (held_shared) {
+        readers_ += 1;  // re-assert the read hold we dropped while waiting
+      }
+      throw;
+    }
     writers_waiting_ -= 1;
     writer_ = me;
   }
@@ -268,6 +280,21 @@ void GpuLane::shutdown(double /*timeout_s*/)
   }
 }
 
+// PORT: gpu_lanes.py:_is_fatal (marker scan over a lower-cased message)
+bool is_cuda_fatal_message(const std::string & message)
+{
+  std::string msg = message;
+  std::transform(
+    msg.begin(), msg.end(), msg.begin(),
+    [](unsigned char c) {return static_cast<char>(std::tolower(c));});
+  for (const auto & marker : kCudaFatalMarkers) {
+    if (msg.find(marker) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // PORT: gpu_lanes.py:GpuLane._is_fatal
 bool GpuLane::is_fatal(const std::exception_ptr & e)
 {
@@ -277,16 +304,7 @@ bool GpuLane::is_fatal(const std::exception_ptr & e)
   try {
     std::rethrow_exception(e);
   } catch (const std::runtime_error & re) {
-    std::string msg = re.what();
-    std::transform(
-      msg.begin(), msg.end(), msg.begin(),
-      [](unsigned char c) {return static_cast<char>(std::tolower(c));});
-    for (const auto & marker : kCudaFatalMarkers) {
-      if (msg.find(marker) != std::string::npos) {
-        return true;
-      }
-    }
-    return false;
+    return is_cuda_fatal_message(re.what());
   } catch (...) {
     return false;
   }

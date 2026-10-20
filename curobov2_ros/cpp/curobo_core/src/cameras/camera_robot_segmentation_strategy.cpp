@@ -129,7 +129,11 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
 
     const std::vector<double> q = joint_pose_ ? joint_pose_() : std::vector<double>{};
     std::vector<float> qf(q.begin(), q.end());
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+    // PORT: camera_robot_segmentation_strategy.callback_depth - the Python takes
+    // the EXCLUSIVE gpu_lock here (blocking), not a shared lane hold: the CPU->GPU
+    // transfer + FK masking must not overlap any other GPU job, and a concurrent
+    // CUDA-graph capture would invalidate it. shared() admitted exactly that.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     const auto masked = bridge_->robot_segment(
       handle_, depth, k, cam_pose, qf, masks_json_ ? masks_json_() : "[]");
     publish_masked(masked.data, frame.height, frame.width, msg.header.stamp);

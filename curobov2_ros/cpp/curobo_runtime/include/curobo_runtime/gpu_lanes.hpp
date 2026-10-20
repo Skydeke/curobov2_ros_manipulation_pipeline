@@ -48,6 +48,12 @@ inline constexpr int PRIO_TAMP = 11;
 // PORT: gpu_lanes.py:_CUDA_FATAL_MARKERS
 extern const std::vector<std::string> kCudaFatalMarkers;
 
+// PORT: gpu_lanes.py:GpuLane._is_fatal's marker scan, exposed as a message
+// predicate so call sites that CATCH a CUDA error (and turn it into a service
+// result string instead of letting it reach GpuLane::run_job) can still detect a
+// fatal fault and stop serving a corrupt context.
+bool is_cuda_fatal_message(const std::string & message);
+
 // PORT: gpu_lanes.py:LanePoisoned / LaneStopped / JobCancelled / NotLaneOwner /
 // DeadlockRisk
 class LanePoisoned : public std::runtime_error

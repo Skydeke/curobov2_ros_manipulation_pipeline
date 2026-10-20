@@ -118,8 +118,7 @@ private:
   double mapper_decay_ = 1.0;
   // Rebuild the Mapper (TSDF/ESDF) from the current mapper_* parameters.
   void configure_mapper_from_params();
-  // The frame depth is integrated in: an explicit `mapper_frame`, else the first
-  // of `map`/`odom` that TF connects to the robot base, else `base_link`.
+  // The frame depth is integrated in: always the configured robot base.
   std::string integration_frame();
   std::unique_ptr<CameraSystemManager> camera_system_manager_;
   std::unique_ptr<LaserSystemManager> laser_system_manager_;

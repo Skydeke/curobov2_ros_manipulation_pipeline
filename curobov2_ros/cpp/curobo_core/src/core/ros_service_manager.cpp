@@ -298,6 +298,10 @@ void RosServiceManager::handle_get_voxel_grid(
   std::shared_ptr<curobov2_ros_interfaces::srv::GetVoxelGrid::Response> response)
 {
   try {
+    // PORT: ros_service_manager._gpu_guard - the dense grid rasterises analytic
+    // primitives on the GPU and then host-syncs; without the exclusive barrier
+    // it can launch into an in-flight CUDA-graph capture and invalidate it.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     const auto grid = obstacle_manager_->get_voxel_grid();
     auto & out = response->voxel_grid;
     // PORT: get_voxel_grid sets no header (frame_id/stamp stay at their message
@@ -349,15 +353,27 @@ void RosServiceManager::handle_clear_voxel_map(
   std::shared_ptr<std_srvs::srv::Trigger::Response> response)
 {
   int n_blocks = 0;
+  bool refreshed = false;
   try {
+    // PORT: unified_planner_node.clear_voxel_map_callback - `with self.gpu_lock:`
+    // around the TSDF clear AND the ESDF rebuild (both are CUDA ops), then
+    // update_all_solvers_world() so the solvers drop the cleared voxels. Without
+    // the lock the pair raced an in-flight capture; without the push the solvers
+    // kept the old voxels (clear_dynamic_voxels does not bump the epoch, so the
+    // freshness gate would not re-push either).
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     n_blocks = obstacle_manager_->clear_dynamic_voxels();
+    refreshed = obstacle_manager_->refresh_esdf();
+    if (refreshed) {
+      bridge_->world_push(handle_);
+      obstacle_manager_->mark_world_pushed();
+    }
   } catch (const std::exception & e) {
     response->success = false;
     response->message = std::string("clear_voxel_map failed: ") + e.what();
     RCLCPP_ERROR(node_->get_logger(), "%s", response->message.c_str());
     return;
   }
-  const bool refreshed = obstacle_manager_->refresh_esdf();
   response->success = true;
   response->message = "Cleared dynamic voxel channel (" + std::to_string(n_blocks) +
     " block(s))" + (refreshed ? "" : "; WARNING: perception ESDF not refreshed");
@@ -388,7 +404,10 @@ void RosServiceManager::handle_set_link_collision(
   std::vector<std::string> link_names(request->link_names.begin(), request->link_names.end());
   std::vector<std::string> unknown;
   try {
-    // PORT: mutates kinematics tensors shared by every solver.
+    // PORT: robot_model_manager.set_link_collision_callback - `with
+    // gpu.exclusive():` because it mutates kinematics tensors shared by every
+    // solver.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     const auto outcome = bridge_->set_link_collision(handle_, link_names, request->enabled);
     const std::vector<std::string> & applied = outcome.applied;
     unknown = outcome.unknown;

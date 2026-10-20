@@ -6,6 +6,7 @@
 #include <cstdint>
 
 #include "curobo_core/convert.hpp"
+#include "curobo_runtime/runtime.hpp"
 
 namespace curobo_core
 {
@@ -66,7 +67,13 @@ void FKServices::init(int batch_size)
     static_cast<std::size_t>(batch_size),
     std::vector<double>(joint_names_.size(), 0.0));
   std::vector<curobo_runtime::TensorF32> poses;
-  compute_poses(qs, poses);
+  {
+    // PORT: fk_services._gpu_guard - `with self._gpu_guard(): self._init(...)`
+    // (blocking gpu_lock). Model construction + the warmup batch are eager CUDA
+    // ops that must not overlap a CUDA-graph capture.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+    compute_poses(qs, poses);
+  }
 
   RCLCPP_INFO(node_->get_logger(), "FK model ready");
 }
@@ -200,6 +207,10 @@ void FKServices::handle_fk(
   bool ok = false;
   std::vector<std::uint8_t> valid;
   try {
+    // PORT: fk_services._on_lane - FK jobs ran on the shared `kin` lane inside
+    // barrier.shared(); the port issued the kernels bare, so an FK solve could
+    // run while another thread captured a graph.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
     ok = compute_poses(qs, poses);
     if (ok) {
       valid = validate(qs);
@@ -260,6 +271,8 @@ void FKServices::handle_fk_batch(
   std::vector<std::uint8_t> valid;
   bool ok = false;
   try {
+    // PORT: fk_services._on_lane - shared `kin` lane, see handle_fk.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
     ok = compute_poses(qs, poses);
     if (ok) {
       valid = validate(qs);

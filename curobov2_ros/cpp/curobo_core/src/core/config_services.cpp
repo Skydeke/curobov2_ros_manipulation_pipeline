@@ -102,10 +102,17 @@ void ConfigServices::rebuild_planner()
   // obstacles at all. The benchmark sizes the collision cache once per scene, so
   // every scene's first problems were planned straight through the world - the
   // "success rate is too high" against the native leg.
+  bool pushed = false;
   try {
-    bridge_->world_push(handle_);
+    pushed = bridge_->world_push(handle_);
   } catch (const std::exception &) {
     // A push must never turn a cache/config change into a hard error.
+    pushed = false;
+  }
+  if (!pushed && world_invalidate_) {
+    // The freshly built planner is on an empty world. Do not let the freshness
+    // gate consider it current, or the next plan collides against nothing.
+    world_invalidate_();
   }
 }
 

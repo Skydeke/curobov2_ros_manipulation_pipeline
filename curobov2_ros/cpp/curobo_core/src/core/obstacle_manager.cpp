@@ -190,12 +190,23 @@ void ObstacleManager::notify_world_changed()
   // the problems were planned against their predecessor's obstacles.
   // Held under the exclusive GPU barrier: the push is a CUDA op and mutations
   // can arrive from service threads (the reference takes gpu_lock here too).
+  //
+  // This pushes the analytic layer but is NOT an ESDF/perception refresh, so it
+  // must NOT mark the perception world as pushed: `epoch_` is bumped by depth
+  // integrates too, and the gate is what decides whether a later plan rebuilds
+  // the ESDF. Marking here would make should_refresh_world skip that rebuild, so
+  // a plan issued after an analytic mutation would collide against a scene whose
+  // camera voxels are stale (or absent) and solve straight through them.
   try {
     auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-    bridge_->world_push(handle_);
-    mark_world_pushed();
+    if (!bridge_->world_push(handle_)) {
+      // The mutation must still land, but the solvers are now on a world the
+      // gate must not consider fresh.
+      invalidate_world();
+    }
   } catch (const std::exception &) {
-    // A push must never break the mutation that triggered it.
+    // A push must never break the mutation that triggered it; retry next plan.
+    invalidate_world();
   }
 }
 

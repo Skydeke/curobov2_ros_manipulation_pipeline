@@ -5,6 +5,8 @@
 
 #include <cstdint>
 
+#include "curobo_runtime/runtime.hpp"
+
 namespace curobo_core
 {
 
@@ -31,6 +33,9 @@ std::vector<float> CollisionDistance::computeSphereDistance()
   tensor.shape = {1, static_cast<std::int64_t>(q.size())};
   tensor.data = q;
   try {
+    // PORT: ros_service_manager._gpu_guard - FK + sphere distance + a host sync,
+    // so it must not run inside an in-flight CUDA-graph capture.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     return bridge_->collision_distance(handle_, tensor);
   } catch (const std::exception & e) {
     RCLCPP_WARN_THROTTLE(

@@ -52,6 +52,19 @@ void Runtime::start(const std::string & cfg)
   }
   handle_ = bridge_->init(cfg);
   started_ = true;
+  // PORT: gpu_lanes.GpuScheduler.install_sync_hook -> barrier.sync_hook =
+  // _cuda_device_sync. In Python the scheduler installed the device fence on the
+  // process-global barrier; the port only installed it inside GpuScheduler, which
+  // production never constructs - so every exclusive enter/exit on
+  // Runtime::barrier() silently skipped the torch.cuda.synchronize() that stops
+  // an in-flight kernel queued by a shared holder from racing the capture/edit.
+  // Install it here, where the barrier actually lives, and drop it on stop() so
+  // teardown never calls into a dead bridge (run_sync_hook is a no-op when null).
+  barrier_.sync_hook = [this]() {
+      if (started_ && bridge_) {
+        bridge_->device_sync();
+      }
+    };
 }
 
 void Runtime::stop()
@@ -59,6 +72,7 @@ void Runtime::stop()
   if (!started_) {
     return;
   }
+  barrier_.sync_hook = nullptr;
   bridge_->shutdown(handle_);
   handle_ = -1;
   started_ = false;

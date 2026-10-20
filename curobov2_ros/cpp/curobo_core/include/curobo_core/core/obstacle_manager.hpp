@@ -92,6 +92,10 @@ public:
   bool should_refresh_world(bool force) const;
   // Record a successful ESDF rebuild + push (updates the gate state).
   void mark_world_pushed();
+  // A push FAILED: the solvers may be blind to the current perception. Force the
+  // next plan/servo refresh to rebuild and push again instead of treating a
+  // blind solver as fresh (it must never plan through un-seen camera voxels).
+  void invalidate_world() {last_pushed_epoch_ = -1;}
   // PORT: camera_depth_map_strategy's `node.perception_epoch += 1` on integrate.
   void bump_perception_epoch() {epoch_ += 1;}
   // `esdf_refresh_min_interval` param (open-loop refresh throttle).

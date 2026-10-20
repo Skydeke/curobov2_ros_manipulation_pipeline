@@ -3,11 +3,14 @@
 #include "curobo_core/core/planner_services.hpp"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 #include <chrono>
 #include <cmath>
 #include <iomanip>
 #include <limits>
+#include <optional>
 #include <sstream>
 #include <utility>
 #include <vector>
@@ -318,10 +321,18 @@ void PlannerServices::wrap_full_turn_targets(curobo_runtime::PlanRequest & reque
     // +/-2*pi equivalent of a target can fall *just outside* [-6.28, 6.28]:
     // e.g. target 0 on a joint whose start is 5.997 -- the short way is
     // 2*pi = 6.2832, but the range tops out at 6.2800. Admit equivalents within
-    // a small tolerance of the range and snap them to the boundary; the pose
-    // error is that tolerance (<0.01 rad) yet it is what lets the SHORT path be
-    // chosen instead of a full-turn sweep that usually self-collides.
+    // a small tolerance of the range and snap them INSIDE the range; that is
+    // what lets the SHORT path be chosen instead of a full-turn sweep that
+    // usually self-collides.
     constexpr double kRangeTolerance = 0.01;
+    // ...but never park the goal exactly ON the boundary: a goal pinned to the
+    // limit is infeasible for the solver, and the symptom is a
+    // "start: clear / goal: clear / no solution" failure for motions of a few
+    // milliradians. Staying kBoundaryMargin inside moves the pose error from
+    // 0.0032 to 0.0042 rad (0.24 deg).
+    constexpr double kBoundaryMargin = 1e-3;
+    const double inner_lo = lo + kBoundaryMargin;
+    const double inner_hi = hi - kBoundaryMargin;
     double best = target;
     double best_dist = std::numeric_limits<double>::infinity();
     for (int k = -2; k <= 2; ++k) {
@@ -329,13 +340,16 @@ void PlannerServices::wrap_full_turn_targets(curobo_runtime::PlanRequest & reque
       if (cand < lo - kRangeTolerance || cand > hi + kRangeTolerance) {
         continue;  // equivalent genuinely outside the reported range
       }
-      cand = std::clamp(cand, lo, hi);
+      cand = std::clamp(cand, inner_lo, inner_hi);
       const double dist = std::abs(cand - start);
       if (dist < best_dist) {
         best_dist = dist;
         best = cand;
       }
     }
+    // A target typed straight onto an end stop (the Joints tab slider's limit)
+    // needs the same margin, or it stays pinned to the boundary.
+    best = std::clamp(best, inner_lo, inner_hi);
     if (best != target) {
       RCLCPP_INFO(
         node_->get_logger(),
@@ -354,7 +368,12 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
   plan_request.start = resolve_start(goal.start_pose.name, goal.start_pose.position);
   // PORT: config max_attempts / enable_graph_attempt (planner config).
   plan_request.max_attempts = node_->get_parameter("max_attempts").as_int();
-  plan_request.enable_graph_attempt = 1;
+  // PORT: config enable_graph_attempt (Python: `config.get("enable_graph_attempt", 1)`).
+  // cuRobo consults the PRM graph planner on attempts where
+  // `current_attempt >= enable_graph_attempt`, so at 1 with max_attempts=1 it is
+  // not consulted -- the reference behaviour.
+  plan_request.enable_graph_attempt =
+    node_->get_parameter("enable_graph_attempt").as_int();
   plan_request.cartesian_step_size = goal.cartesian_step_size;
   plan_request.cartesian_precision = goal.cartesian_precision;
 
@@ -491,10 +510,6 @@ void PlannerServices::fill_result(
   // every plan on the plan lane (the shared MotionPlanner is not thread-safe).
   std::lock_guard<std::recursive_mutex> plan_lane(plan_lane_mutex_);
   const auto t_total = std::chrono::steady_clock::now();
-  // PORT: reset_seed_per_plan - rewind the solver RNG before every plan.
-  if (node_->get_parameter("reset_seed_per_plan").as_bool()) {
-    bridge_->reset_seed(handle_);
-  }
   // PORT: unified_planner_node._check_goal_request (validation) +
   // _resolve_goalset_frames (the server owns every transform), both BEFORE the
   // solver so an invalid request never reaches it.
@@ -595,6 +610,7 @@ void PlannerServices::fill_result(
   // PORT: refresh_perception_world() - refresh the perception-based collision
   // world before planning so the plan accounts for the latest camera data.
   const auto t_setup = std::chrono::steady_clock::now();
+  bool world_ok = true;
   if (!node_->has_parameter("push_esdf_to_solvers") ||
     node_->get_parameter("push_esdf_to_solvers").as_bool())
   {
@@ -602,26 +618,108 @@ void PlannerServices::fill_result(
       // PORT: refresh_perception_world() = refresh_esdf() + update_all_solvers_
       // world(); the push is what makes the planner collide against the
       // camera-observed voxels (otherwise the published grid shows unchecked
-      // voxels). Gated by should_refresh_world (open-loop: throttle bound) and
-      // the ESDF rebuild + push both run under the exclusive barrier (the Python
-      // holds gpu_lock around both; refresh_esdf mutates the shared scene).
-      if (obstacle_manager_->should_refresh_world(false)) {
+      // voxels) and both run under the exclusive barrier (the Python holds
+      // gpu_lock around both; refresh_esdf mutates the shared scene).
+      //
+      // force=true: a discrete plan must see the LATEST perception, not a
+      // throttled snapshot. The old force=false path skipped a refresh whenever a
+      // depth frame had arrived within esdf_refresh_min_interval of the last push,
+      // so the solver solved against a world older than the wall it was looking
+      // at. The throttle only exists to spare the servo loop; it must not gate a
+      // one-shot plan.
+      if (obstacle_manager_->should_refresh_world(true)) {
         auto guard = curobo_runtime::Runtime::instance().barrier().exclusive();
         if (obstacle_manager_->refresh_esdf()) {
-          bridge_->world_push(handle_);
-          obstacle_manager_->mark_world_pushed();
+          if (bridge_->world_push(handle_)) {
+            obstacle_manager_->mark_world_pushed();
+          } else {
+            // The solver did not receive the perception world (camera voxels may
+            // be missing). Never plan against it.
+            obstacle_manager_->invalidate_world();
+            world_ok = false;
+          }
         }
       }
-    } catch (const std::exception &) {
-      // A perception refresh must never block planning.
+    } catch (const std::exception & e) {
+      // A failed perception refresh is NOT ignorable: planning with it risks
+      // driving straight through an obstacle the sensors can see.
+      obstacle_manager_->invalidate_world();
+      world_ok = false;
+      RCLCPP_ERROR_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "Perception world refresh failed (%s): refusing to plan against an "
+        "unverified collision world", e.what());
     }
+  }
+  if (!world_ok) {
+    out.success = false;
+    out.message =
+      "Planning refused: the collision world could not be refreshed from "
+      "perception (camera voxels may be missing)";
+    out.selected_goal_index.push_back(-1);
+    out.selected_seed_index.push_back(-1);
+    out.stats.problems = 1;
+    out.stats.waypoints_planned = static_cast<std::uint32_t>(goal.goalsets.size());
+    // Throttled: the freshness gate keeps retrying while the push fails, so this
+    // fires once per plan. Report the condition, do not flood the log.
+    RCLCPP_ERROR_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 5000,
+      "Planning failed: %s", out.message.c_str());
+    return;
   }
   const auto t_world = std::chrono::steady_clock::now();
 
+  // cuRobo captures ONE set of optimizer CUDA graphs and replays them for BOTH
+  // solve modes. A pose<->cspace switch changes the goal-buffer structure under
+  // the captured graph, and the stale replay dies with a CUDA illegal memory
+  // access (the `plan_cspace` crash). Make the solver's graphs match this mode
+  // before solving, under the exclusive barrier (capture is process-global).
+  if (!node_->has_parameter("use_cuda_graph") ||
+    node_->get_parameter("use_cuda_graph").as_bool())
+  {
+    const bool is_cspace =
+      effective->get_planner_name().find("Joint Space") != std::string::npos;
+    try {
+      auto guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+      bridge_->prepare_solve_mode(handle_, is_cspace ? "cspace" : "pose");
+    } catch (const std::exception & e) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "solve-mode CUDA-graph preparation failed (%s)", e.what());
+    }
+  }
+
+  // PORT: unified_planner_node._plan_lock - hold gpu_lock (the exclusive GPU
+  // barrier) for the WHOLE solve while CUDA graphs are on. cuRobo re-captures
+  // optimizer graphs mid-plan (`reset_shape` out of `_prepare_goal_buffer`) and
+  // replays the rest; either one concurrent with the camera/ESDF lane faults the
+  // context. The port locked only the world refresh and the solve-mode prep, so
+  // the first mid-plan re-capture ("operation failed due to a previous error
+  // during capture" / "illegal memory access") killed the server.
+  const bool plan_exclusive =
+    (!node_->has_parameter("use_cuda_graph") ||
+    node_->get_parameter("use_cuda_graph").as_bool()) &&
+    (!node_->has_parameter("gpu_exclusive_plans") ||
+    node_->get_parameter("gpu_exclusive_plans").as_bool());
+
   PlannerResult result;
   try {
+    std::optional<curobo_runtime::CaptureBarrier::ExclusiveGuard> plan_guard;
+    if (plan_exclusive) {
+      plan_guard.emplace(curobo_runtime::Runtime::instance().barrier().exclusive());
+    }
+    // PORT: single_planner.plan -> reset_seed_per_plan runs INSIDE plan(), i.e.
+    // under _plan_lock. It rewinds the solver RNG through GPU sampling kernels
+    // (_dist.update_samples), so issuing it outside the barrier let it land in
+    // another thread's capture window and invalidate the capture.
+    if (node_->get_parameter("reset_seed_per_plan").as_bool()) {
+      bridge_->reset_seed(handle_);
+    }
     result = effective->plan(request);
   } catch (const std::exception & e) {
+    // A CUDA fatal error must not be reported as an ordinary "planning failed"
+    // and then left to corrupt every later request: the context is dead.
+    handle_gpu_fault("planning", e.what());
     out.success = false;
     out.message = std::string("Planning error: ") + e.what();
     out.selected_goal_index.push_back(-1);
@@ -648,12 +746,22 @@ void PlannerServices::fill_result(
   }
 
   if (!result.success) {
+    // The solver may have caught the fault and returned it as a message instead
+    // of throwing; catch that too so a corrupt context still stops the node.
+    handle_gpu_fault("planning", result.message);
     // PORT: _build_collision_diagnostics - attributed collisions at the start
-    // (always) and goal (joint-space segments only) configurations.
-    const auto start_collisions =
-      collision_attribution_at(bridge_, handle_, request.start, true);
-    const auto goal_collisions = collision_attribution_at(
-      bridge_, handle_, request.joint_target, !request.joint_target.empty());
+    // (always) and goal (joint-space segments only) configurations. The Python
+    // ran this inside the plan-lane job (barrier held); it is FK + sphere
+    // distance + a host sync, so it needs the barrier here too.
+    curobo_runtime::CollisionAttribution start_collisions;
+    curobo_runtime::CollisionAttribution goal_collisions;
+    {
+      auto attribution_guard =
+        curobo_runtime::Runtime::instance().barrier().exclusive();
+      start_collisions = collision_attribution_at(bridge_, handle_, request.start, true);
+      goal_collisions = collision_attribution_at(
+        bridge_, handle_, request.joint_target, !request.joint_target.empty());
+    }
     // PORT: unified_planner_node "Planning failed: {message}\n{_format_collision_feedback}".
     const std::string feedback =
       format_collision_feedback(start_collisions, goal_collisions);
@@ -749,6 +857,41 @@ void PlannerServices::fill_result(
   }
 }
 
+// PORT: gpu_lanes.py:GpuLane._run_job's fatal path, applied to the plan service
+// results. A CUDA fatal error (illegal memory access, device-side assert, ...)
+// leaves the process's single context permanently broken: every later CUDA call
+// returns garbage or fails. `fill_result` catches those errors and turns them
+// into a "Planning failed" response, which is exactly what kept the node limping
+// after the crash. Detecting the marker here lets `exit_on_gpu_fault` do its job.
+bool PlannerServices::handle_gpu_fault(
+  const std::string & context, const std::string & message)
+{
+  if (!curobo_runtime::is_cuda_fatal_message(message)) {
+    return false;
+  }
+  RCLCPP_FATAL(
+    node_->get_logger(),
+    "CUDA fatal error while %s: %s\n"
+    "The GPU context is corrupt; no later plan can be trusted.",
+    context.c_str(), message.c_str());
+
+  bool exit_on_fault = true;
+  if (node_->has_parameter("exit_on_gpu_fault")) {
+    exit_on_fault = node_->get_parameter("exit_on_gpu_fault").as_bool();
+  }
+  if (exit_on_fault) {
+    RCLCPP_FATAL(
+      node_->get_logger(),
+      "exit_on_gpu_fault=true: stopping instead of serving a corrupt context");
+    rclcpp::shutdown();
+    // Do NOT run destructors: tearing down (and especially synchronizing) a dead
+    // CUDA context can block forever. Stop the process now.
+    std::fflush(nullptr);
+    std::_Exit(EXIT_FAILURE);
+  }
+  return true;
+}
+
 // PORT: unified_planner_node.set_planner_callback
 void PlannerServices::handle_set_planner(
   const std::shared_ptr<curobov2_ros_interfaces::srv::SetPlanner::Request> request,
@@ -784,8 +927,13 @@ void PlannerServices::handle_set_planner(
         {
           auto guard = curobo_runtime::Runtime::instance().barrier().exclusive();
           if (obstacle_manager_->refresh_esdf()) {
-            bridge_->world_push(handle_);
-            obstacle_manager_->mark_world_pushed();
+            if (bridge_->world_push(handle_)) {
+              obstacle_manager_->mark_world_pushed();
+            } else {
+              // Keep retrying: a blind reactive controller must not be treated
+              // as fresh.
+              obstacle_manager_->invalidate_world();
+            }
           }
         }
       });

@@ -68,8 +68,10 @@ public:
   void reset_seed(RobotHandle handle) override;
   void robot_model_rebuild_locks(RobotHandle handle, const std::string & lock_json) override;
   void configure_mapper(RobotHandle handle, const std::string & cfg_json) override;
+  void warmup_mapper(RobotHandle handle) override;
   bool esdf_refresh(RobotHandle handle) override;
   bool world_push(RobotHandle handle) override;
+  void prepare_solve_mode(RobotHandle handle, const std::string & mode) override;
   VoxelGrid voxel_grid(RobotHandle handle) override;
   // Test hook: install the grid voxel_grid() returns (parity tests replay a
   // recorded oracle grid through the analytic rasterization).
@@ -144,6 +146,8 @@ public:
   bool ik_self_collision_check() const;
   bool ik_use_lm_seed() const;
   bool ik_use_cuda_graph() const;
+  // Last solve mode requested via prepare_solve_mode ("" until called).
+  std::string solve_mode() const;
 
 private:
   mutable std::mutex mutex_;
@@ -180,6 +184,7 @@ private:
   std::string attached_;
   std::string planner_cfg_;
   int seed_resets_ = 0;
+  std::string solve_mode_;
   int esdf_refreshes_ = 0;
   int depth_integrates_ = 0;
   int lidar_integrates_ = 0;

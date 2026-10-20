@@ -418,6 +418,12 @@ public:
   // PORT: obstacle_manager._build_mapper config (extent, voxel size, image size,
   // decay, ...). cfg_json carries the node's mapper_* parameters.
   virtual void configure_mapper(RobotHandle handle, const std::string & cfg_json) = 0;
+  // Force the Mapper's Warp kernels (incl. the TSDF block recycle/decay kernels)
+  // to JIT-compile and LOAD now. Warp loads a module lazily per specialization;
+  // a load that races the plan lane's CUDA-graph capture/replay fails with
+  // "misaligned address" (wp_cuda_load_module) and poisons the CUDA context.
+  // Call under the exclusive GPU barrier, before any planning.
+  virtual void warmup_mapper(RobotHandle handle) = 0;
   // PORT: obstacle_manager.refresh_esdf - mapper.compute_esdf() + scene.voxel.
   virtual bool esdf_refresh(RobotHandle handle) = 0;
   // PORT: unified_planner_node.update_all_solvers_world - push the shared scene
@@ -425,6 +431,13 @@ public:
   // CUDA collision model. Without it the planner would not collide against the
   // camera-observed voxels (the published grid would show unchecked voxels).
   virtual bool world_push(RobotHandle handle) = 0;
+  // Ensure the trajopt solver's CUDA graphs were captured for `mode`
+  // ("pose"/"cspace"). cuRobo reuses one captured graph set across BOTH solve
+  // modes; a pose<->cspace switch changes the goal-buffer structure under it and
+  // the stale replay dies with a CUDA illegal-memory-access. Resets + re-captures
+  // on a mode change. MUST be called while holding Runtime::barrier().exclusive()
+  // (graph capture is process-global).
+  virtual void prepare_solve_mode(RobotHandle handle, const std::string & mode) = 0;
   // PORT: obstacle_manager.get_voxel_grid - dense occupied voxels (mapper +
   // primitives), row-major uint8.
   virtual VoxelGrid voxel_grid(RobotHandle handle) = 0;

@@ -444,3 +444,19 @@ TEST(GpuLanes, SchedulerInstallsSafeSyncHook)
     auto e = sch.exclusive();  // must not raise on a CPU-only box
   }
 }
+
+// The marker predicate the plan service uses to catch a CUDA fatal that was
+// swallowed into a "Planning failed" result (design section 14.4).
+TEST(GpuLanes, IsCudaFatalMessageMatchesTheMarkerList)
+{
+  EXPECT_TRUE(is_cuda_fatal_message(
+    "Planning error: AcceleratorError: CUDA error: an illegal memory access was encountered"));
+  EXPECT_TRUE(is_cuda_fatal_message("device-side assert triggered"));
+  EXPECT_TRUE(is_cuda_fatal_message("CUDA error: cudaErrorStreamCaptureInvalidated"));
+  EXPECT_TRUE(is_cuda_fatal_message("cuGraphLaunch failed: CUDA_ERROR_ILLEGAL_ADDRESS"));
+
+  // Ordinary failures must NOT be treated as a fatal context fault.
+  EXPECT_FALSE(is_cuda_fatal_message("Planning failed: no solution found"));
+  EXPECT_FALSE(is_cuda_fatal_message("collision feedback: start: clear"));
+  EXPECT_FALSE(is_cuda_fatal_message(""));
+}
