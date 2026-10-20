@@ -15,6 +15,22 @@ namespace curobo_core
 
 namespace
 {
+// PORT: reactive_controller.lane_reactive.call(..., prio=PRIO_REACTIVE) - run a
+// servo job on the reactive lane unless this thread already is its worker.
+template<class F>
+auto on_reactive_lane(curobo_runtime::GpuLane * lane, F && fn) -> decltype(fn())
+{
+  if (lane == nullptr || lane->owns_current_thread()) {
+    return fn();
+  }
+  curobo_runtime::SubmitOptions opts;
+  opts.prio = curobo_runtime::PRIO_REACTIVE;
+  return lane->call(opts, std::forward<F>(fn));
+}
+}  // namespace
+
+namespace
+{
 // PORT: reactive_controller._row - a flat [n] vector to the last row of a tensor
 // shaped [rows, n] (or the [n] itself when it has a single row).
 std::vector<float> last_row(const curobo_runtime::TensorF32 & tensor)
@@ -61,7 +77,18 @@ PlannerResult ReactiveController::plan(const curobo_runtime::PlanRequest &)
 }
 
 // PORT: ReactiveController.plan(start_state, goal_request, config, robot_context)
+// PORT: ReactiveController.plan - lane_reactive.call(plan_reactive_impl, ...).
 PlannerResult ReactiveController::plan_reactive(
+  const ReactiveGoal & goal, double convergence_threshold, int max_iterations,
+  RobotContext * robot_context)
+{
+  return on_reactive_lane(
+    lane_, [&]() {
+      return plan_reactive_impl(goal, convergence_threshold, max_iterations, robot_context);
+    });
+}
+
+PlannerResult ReactiveController::plan_reactive_impl(
   const ReactiveGoal & goal, double convergence_threshold, int max_iterations,
   RobotContext * robot_context)
 {
@@ -286,7 +313,13 @@ std::vector<double> feedback_command(const curobo_runtime::ReactiveAction & acti
 }  // namespace
 
 // PORT: ReactiveController.execute
+// PORT: ReactiveController.execute - the whole servo run on lane_reactive.
 bool ReactiveController::execute(const ReactiveExecutionContext & ctx)
+{
+  return on_reactive_lane(lane_, [&]() {return execute_impl(ctx);});
+}
+
+bool ReactiveController::execute_impl(const ReactiveExecutionContext & ctx)
 {
   if (!is_goal_active_ || !solver_ready()) {
     RCLCPP_ERROR(

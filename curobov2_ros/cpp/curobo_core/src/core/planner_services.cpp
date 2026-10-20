@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // PORT: the planning service callbacks (see the header).
 #include "curobo_core/core/planner_services.hpp"
+#include "curobo_core/core/gpu_runtime.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -674,8 +675,7 @@ void PlannerServices::fill_result(
   // the captured graph, and the stale replay dies with a CUDA illegal memory
   // access (the `plan_cspace` crash). Make the solver's graphs match this mode
   // before solving, under the exclusive barrier (capture is process-global).
-  if (!node_->has_parameter("use_cuda_graph") ||
-    node_->get_parameter("use_cuda_graph").as_bool())
+  if (resolve_use_cuda_graph(node_))
   {
     const bool is_cspace =
       effective->get_planner_name().find("Joint Space") != std::string::npos;
@@ -697,8 +697,7 @@ void PlannerServices::fill_result(
   // the first mid-plan re-capture ("operation failed due to a previous error
   // during capture" / "illegal memory access") killed the server.
   const bool plan_exclusive =
-    (!node_->has_parameter("use_cuda_graph") ||
-    node_->get_parameter("use_cuda_graph").as_bool()) &&
+    resolve_use_cuda_graph(node_) &&
     (!node_->has_parameter("gpu_exclusive_plans") ||
     node_->get_parameter("gpu_exclusive_plans").as_bool());
 
@@ -947,6 +946,24 @@ void PlannerServices::handle_set_planner(
   RCLCPP_INFO(node_->get_logger(), "Switched to planner: %s", response->current_planner.c_str());
 }
 
+
+namespace
+{
+// PORT: unified_planner_node._plan_trajectory_goal -> lane_plan.call - run the
+// plan body on the plan lane (PRIO_PLAN); inline when there is no lane or when
+// this thread already is the lane worker.
+template<class F>
+auto on_plan_lane(curobo_runtime::GpuLane * lane, F && fn) -> decltype(fn())
+{
+  if (lane == nullptr || lane->owns_current_thread()) {
+    return fn();
+  }
+  curobo_runtime::SubmitOptions opts;
+  opts.prio = curobo_runtime::PRIO_PLAN;
+  return lane->call(opts, std::forward<F>(fn));
+}
+}  // namespace
+
 // PORT: unified_planner_node.get_planners_callback
 void PlannerServices::handle_get_planners(
   const std::shared_ptr<curobov2_ros_interfaces::srv::GetPlanners::Request>,
@@ -978,7 +995,8 @@ void PlannerServices::handle_generate_trajectory(
     response->response.message = "No planner selected";
     return;
   }
-  fill_result(planner, request->request, response->response);
+  on_plan_lane(
+    lane_plan_, [&]() {fill_result(planner, request->request, response->response);});
 }
 
 // PORT: unified_planner_node.trajectory_generation_batch_callback + _rollup_stats
@@ -995,7 +1013,9 @@ void PlannerServices::handle_generate_trajectory_batch(
   response->responses.resize(request->requests.size());
   bool all_ok = true;
   for (std::size_t i = 0; i < request->requests.size(); ++i) {
-    fill_result(planner, request->requests[i], response->responses[i]);
+    on_plan_lane(lane_plan_, [&]() {
+        fill_result(planner, request->requests[i], response->responses[i]);
+      });
     all_ok = all_ok && response->responses[i].success;
   }
   // PORT: _rollup_stats - sum scalar counts, times do not sum.

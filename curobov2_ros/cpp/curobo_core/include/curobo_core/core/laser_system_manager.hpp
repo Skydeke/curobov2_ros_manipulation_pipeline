@@ -11,6 +11,7 @@
 #include "curobo_core/lasers/laser_cfg.hpp"
 #include "curobo_core/lasers/laser_context.hpp"
 #include "curobo_runtime/bridge.hpp"
+#include "curobo_runtime/gpu_lanes.hpp"
 
 namespace curobo_core
 {
@@ -20,7 +21,8 @@ class LaserSystemManager
 public:
   LaserSystemManager(
     rclcpp::Node * node, curobo_runtime::IBridge * bridge,
-    curobo_runtime::RobotHandle handle);
+    curobo_runtime::RobotHandle handle,
+    curobo_runtime::GpuLane * lane = nullptr);
 
   LaserContext * get_laser_context() {return laser_context_.get();}
   const std::vector<PerceptionLaserCfg> & laser_cfgs() const {return laser_cfgs_;}
@@ -32,6 +34,7 @@ private:
   rclcpp::Node * node_;
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
+  curobo_runtime::GpuLane * lane_ = nullptr;
   std::unique_ptr<LaserContext> laser_context_;
   std::vector<PerceptionLaserCfg> laser_cfgs_;
   int num_lasers_ = 0;

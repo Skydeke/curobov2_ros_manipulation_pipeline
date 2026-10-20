@@ -49,7 +49,7 @@ std::string canonical_key(const std::string & planner_type)
 std::unique_ptr<TrajectoryPlanner> PlannerFactory::create(
   const std::string & planner_type, curobo_runtime::IBridge * bridge,
   curobo_runtime::RobotHandle handle, std::vector<std::string> joint_names,
-  rclcpp::Node * node)
+  rclcpp::Node * node, curobo_runtime::GpuLane * reactive_lane)
 {
   const std::string key = canonical_key(planner_type);
   if (key == "classic") {
@@ -64,10 +64,17 @@ std::unique_ptr<TrajectoryPlanner> PlannerFactory::create(
     return std::make_unique<JointSpacePlanner>(bridge, handle, std::move(joint_names));
   }
   if (key == "mpc") {
-    return std::make_unique<MPCController>(bridge, handle, std::move(joint_names), node);
+    auto planner = std::make_unique<MPCController>(
+      bridge, handle, std::move(joint_names), node);
+    // PORT: reactive_controller.lane_reactive.
+    planner->set_lane(reactive_lane);
+    return planner;
   }
   if (key == "retarget") {
-    return std::make_unique<RetargetController>(bridge, handle, std::move(joint_names), node);
+    auto planner = std::make_unique<RetargetController>(
+      bridge, handle, std::move(joint_names), node);
+    planner->set_lane(reactive_lane);
+    return planner;
   }
   return nullptr;
 }
@@ -98,7 +105,8 @@ TrajectoryPlanner * PlannerManager::get_planner(const std::string & planner_type
   if (it != planners_.end()) {
     return it->second.get();
   }
-  auto planner = PlannerFactory::create(key, bridge_, handle_, joint_names_, node_);
+  auto planner = PlannerFactory::create(
+    key, bridge_, handle_, joint_names_, node_, reactive_lane_);
   TrajectoryPlanner * raw = planner.get();
   planners_[key] = std::move(planner);
   return raw;

@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // 1:1 C++ port of curobov2_ros/core/ik_services.py.
 #include "curobo_core/core/ik_services.hpp"
+#include "curobo_core/core/gpu_runtime.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <stdexcept>
+#include <utility>
 
 #include "curobo_runtime/runtime.hpp"
 
@@ -14,6 +16,20 @@ namespace curobo_core
 
 namespace
 {
+// PORT: ik_services._on_lane - run a GPU job on lane_kin (PRIO_KIN, the Python
+// _LANE_TIMEOUT_S budget) unless this thread already IS the lane worker. The
+// lane's single worker thread is what serialises IK/FK against each other; the
+// port ran them inline on the caller's thread.
+template<class F>
+auto on_kin_lane(curobo_runtime::GpuLane * lane, F && fn) -> decltype(fn())
+{
+  if (lane == nullptr || lane->owns_current_thread()) {
+    return fn();
+  }
+  curobo_runtime::SubmitOptions opts;
+  opts.prio = curobo_runtime::PRIO_KIN;
+  return lane->call_for(opts, 120.0, std::forward<F>(fn));
+}
 // PORT: frame_utils.resolve_poses_to_base - the server owns the transform. TF is
 // not ported yet (M3), so only the empty/base-identity case resolves here; any
 // other frame errors exactly like the Python path with no TF buffer.
@@ -97,10 +113,12 @@ std::string IKServices::warmup(int batch_size, int num_seeds)
     // the solver (Re)CAPTURES its CUDA graph, so it takes the exclusive
     // gpu_lock. Unguarded it could capture while the plan/camera lane was
     // capturing, invalidating one of them.
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-    bridge_->ik_config(
-      handle_, batch_size, num_seeds, self_collision_check, use_lm_seed,
-      use_cuda_graph);
+    on_kin_lane(lane_, [&]() {
+        auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+        bridge_->ik_config(
+          handle_, batch_size, num_seeds, self_collision_check, use_lm_seed,
+          use_cuda_graph);
+      });
   }
   // PORT: config_wrapper_ik build - the torch_sync CPU/GPU ordering bridge.
   if (node_ != nullptr && node_->has_parameter("torch_sync") &&
@@ -149,18 +167,8 @@ bool IKServices::resolve_use_lm_seed() const
 // param, then True.
 bool IKServices::resolve_use_cuda_graph() const
 {
-  const char * env = std::getenv("CUROBO_USE_CUDA_GRAPH");
-  if (env != nullptr) {
-    std::string value(env);
-    std::transform(
-      value.begin(), value.end(), value.begin(),
-      [](unsigned char c) {return static_cast<char>(std::tolower(c));});
-    return !(value == "0" || value == "false" || value == "no" || value == "off");
-  }
-  if (node_ != nullptr && node_->has_parameter("use_cuda_graph")) {
-    return node_->get_parameter("use_cuda_graph").as_bool();
-  }
-  return true;
+  // PORT: config_wrapper.resolve_use_cuda_graph (shared helper).
+  return curobo_core::resolve_use_cuda_graph(node_);
 }
 
 // PORT: config_wrapper_ik.ConfigWrapperIK.needs_rebuild
@@ -210,7 +218,9 @@ bool IKServices::solve(
     // barrier.shared(); the port called the bridge bare, so a solve could issue
     // kernels while another thread captured a graph.
     auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
-    outcome = bridge_->ik(handle_, poses_to_tensor(poses));
+    outcome = on_kin_lane(lane_, [&]() {
+        return bridge_->ik(handle_, poses_to_tensor(poses));
+      });
     // PORT: ik_services._solve_call - the torch_sync CPU/GPU ordering bridge.
     if (node_ != nullptr && node_->has_parameter("torch_sync") &&
       node_->get_parameter("torch_sync").as_bool())
@@ -219,6 +229,9 @@ bool IKServices::solve(
     }
     return true;
   } catch (const std::exception & e) {
+    // PORT: a lane/solve fatal CUDA error must stop the node, not be
+    // reported as an ordinary failure from a dead context.
+    handle_gpu_fault(node_, "solving IK", e.what());
     RCLCPP_ERROR(node_->get_logger(), "IK solve failed: %s", e.what());
     return false;
   }

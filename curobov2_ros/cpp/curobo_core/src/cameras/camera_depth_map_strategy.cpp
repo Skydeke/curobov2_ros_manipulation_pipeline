@@ -199,14 +199,24 @@ bool DepthMapCameraStrategy::integrate_once(
     k.shape = {3, 3};
     k.data.assign(k_scaled.begin(), k_scaled.end());
     if (lane_ != nullptr) {
-      // Capture BY VALUE: the lane runs the job asynchronously, after this
-      // frame's locals are gone, so a captured reference would dangle.
+      // PORT: camera_depth_map_strategy._integrate_loop - submit to
+      // lane_perception at PRIO_PERCEPTION (the no-options overload would queue
+      // it at PRIO_BULK, below plan/kin); `submit_if_idle` drops the frame when
+      // the lane is busy. Capture BY VALUE: the lane runs the job
+      // asynchronously, after this frame's locals are gone.
+      curobo_runtime::SubmitOptions opts;
+      opts.prio = curobo_runtime::PRIO_PERCEPTION;
       auto future = lane_->submit_if_idle(
-        [this, frame, k, pose]() {bridge_->depth_integrate(handle_, frame, k, pose);});
-      // PORT: a busy lane drops the frame.
-      if (future.has_value() && on_integrated_) {
-        on_integrated_();   // PORT: node.perception_epoch += 1
-      }
+        opts,
+        [this, frame, k, pose]() {
+          bridge_->depth_integrate(handle_, frame, k, pose);
+          // PORT: `node.perception_epoch += 1` runs INSIDE the job, AFTER the
+          // integrate, so the ESDF freshness gate never advances for a frame
+          // that never landed.
+          if (on_integrated_) {
+            on_integrated_();
+          }
+        });
       if (future.has_value()) {
         maybe_sync();
       }

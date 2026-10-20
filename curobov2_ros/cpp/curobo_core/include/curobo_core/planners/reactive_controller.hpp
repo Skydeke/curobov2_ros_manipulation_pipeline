@@ -24,6 +24,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "curobo_core/planners/trajectory_planner.hpp"
+#include "curobo_runtime/gpu_lanes.hpp"
 #include "curobo_core/core/diagnostics.hpp"
 #include "curobo_core/robot/robot_context.hpp"
 
@@ -58,6 +59,11 @@ public:
     std::vector<std::string> joint_names, rclcpp::Node * node);
 
   ExecutionMode execution_mode() const override {return ExecutionMode::kClosedLoop;}
+
+  // PORT: reactive_controller.lane_reactive - plan/setup/step run on this
+  // lane (PRIO_REACTIVE), which serialises them and orders them below
+  // planning. Inline when absent.
+  void set_lane(curobo_runtime::GpuLane * lane) {lane_ = lane;}
 
   // PORT: TrajectoryPlanner.plan - reactive controllers do not produce a
   // trajectory; planning a reactive goal goes through plan_reactive.
@@ -142,6 +148,11 @@ protected:
   double last_position_error_ = std::numeric_limits<double>::infinity();
 
 private:
+  PlannerResult plan_reactive_impl(
+    const ReactiveGoal & goal, double convergence_threshold, int max_iterations,
+    RobotContext * robot_context);
+  bool execute_impl(const ReactiveExecutionContext & ctx);
+
   bool execute_immediate(const ReactiveExecutionContext & ctx);
   bool execute_paced(const ReactiveExecutionContext & ctx, double interval);
   void wait_for_execution(RobotContext * robot_context, double interval);
@@ -185,6 +196,8 @@ private:
   // CAPTURE a CUDA graph and must run under the exclusive barrier.
   bool graph_capture_pending_ = false;
   std::array<double, 3> target_{0.0, 0.0, 0.0};
+  // PORT: node.lane_reactive.
+  curobo_runtime::GpuLane * lane_ = nullptr;
 };
 
 }  // namespace curobo_core

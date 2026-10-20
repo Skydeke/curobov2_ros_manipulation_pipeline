@@ -10,9 +10,10 @@ namespace curobo_core
 
 LaserContext::LaserContext(
   rclcpp::Node * node, int image_height, int image_width,
-  curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle)
+  curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
+  curobo_runtime::GpuLane * lane)
 : node_(node), image_height_(image_height), image_width_(image_width),
-  bridge_(bridge), handle_(handle)
+  bridge_(bridge), handle_(handle), lane_(lane)
 {
   worker_ = std::thread(&LaserContext::integrate_loop, this);
 }
@@ -126,8 +127,20 @@ void LaserContext::integrate_loop()
       elev.data.push_back(static_cast<float>(cfg.elevation_max_rad));
     }
     try {
-      auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
-      bridge_->lidar_integrate(handle_, range, pose_t, valid, elev);
+      if (lane_ != nullptr) {
+        // PORT: laser_context._maybe_integrate - submit to lane_perception
+        // (PRIO_PERCEPTION, shared with the depth integrates so only one owner
+        // thread touches the Mapper); a busy lane drops this batch.
+        curobo_runtime::SubmitOptions opts;
+        opts.prio = curobo_runtime::PRIO_PERCEPTION;
+        lane_->submit_if_idle(
+          opts, [this, range, pose_t, valid, elev]() {
+            bridge_->lidar_integrate(handle_, range, pose_t, valid, elev);
+          });
+      } else {
+        auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+        bridge_->lidar_integrate(handle_, range, pose_t, valid, elev);
+      }
     } catch (const std::exception & e) {
       RCLCPP_ERROR(node_->get_logger(), "Laser batch integrate failed: %s", e.what());
     }

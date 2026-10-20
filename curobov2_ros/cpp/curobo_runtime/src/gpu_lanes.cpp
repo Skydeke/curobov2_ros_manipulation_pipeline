@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <stdexcept>
 
 namespace curobo_runtime
@@ -250,7 +251,7 @@ void GpuLane::enqueue(detail::Job job)
 }
 
 // PORT: gpu_lanes.py:GpuLane.shutdown
-void GpuLane::shutdown(double /*timeout_s*/)
+void GpuLane::shutdown(double timeout_s)
 {
   const bool was_stopped = stop_.exchange(true);
   if (!was_stopped) {
@@ -263,6 +264,24 @@ void GpuLane::shutdown(double /*timeout_s*/)
     enqueue(std::move(sentinel));
   }
   if (thread_.joinable() && std::this_thread::get_id() != thread_id_) {
+    // PORT: gpu_lanes.py's `self._thread.join(timeout)` - a lane wedged inside a
+    // job (e.g. blocked on the capture barrier) must never hang teardown.
+    // std::thread cannot express a timed join, so wait on the worker's
+    // completion flag, then join (immediate once it has fired).
+    bool finished = true;
+    if (timeout_s > 0.0) {
+      std::unique_lock<std::mutex> lk(q_mutex_);
+      finished = done_cv_.wait_for(
+        lk, std::chrono::duration<double>(timeout_s), [&] {return worker_done_;});
+    }
+    if (!finished) {
+      std::fprintf(
+        stderr,
+        "lane '%s': shutdown timed out after %.1fs; leaving the worker thread "
+        "running (it was blocked inside a job)\n", name_.c_str(), timeout_s);
+      thread_.detach();
+      return;
+    }
     thread_.join();
   }
   // fail anything left
@@ -342,6 +361,11 @@ void GpuLane::run()
       queue_.pop();
     }
     if (stop_.load() && job.prio >= 1000000000) {
+      {
+        std::lock_guard<std::mutex> lk(q_mutex_);
+        worker_done_ = true;
+      }
+      done_cv_.notify_all();
       return;
     }
     if (stop_.load()) {
@@ -371,36 +395,48 @@ void GpuLane::run_job(detail::Job & job)
     stats_.max_wait_s = std::max(stats_.max_wait_s, waited);
   }
   busy_.store(true);
+  // PORT: gpu_lanes.py:GpuLane._run_job wraps the body in `try/except` and does
+  // `finally: self._busy = False; stats[...] = ...`. Keeping that tail OUTSIDE
+  // the failure handler matters: if the handler itself throws (poison message
+  // formatting, a throwing on_poisoned), busy_ would otherwise stay true and
+  // `submit_if_idle` would drop every later job for this lane - permanently
+  // starving perception/viz.
   try {
-    {
-      auto shared = barrier_->shared();
-      job.invoke();
-      if (options_.use_cuda_stream && bridge_ != nullptr) {
-        // Finish this lane's GPU work BEFORE leaving the shared side.
-        bridge_->sync_lane();
-      }
-    }
-    job.commit();
-  } catch (...) {
-    const std::exception_ptr e = std::current_exception();
-    {
-      std::lock_guard<std::mutex> lk(stats_mutex_);
-      stats_.failed += 1;
-    }
-    if (is_fatal(e)) {
+    try {
       {
-        std::lock_guard<std::mutex> lk(poison_mutex_);
-        poisoned_.store(true);
-        poison_message_ = "lane '" + name_ + "': " + describe_exception(e);
-      }
-      if (options_.on_poisoned) {
-        try {
-          options_.on_poisoned(this, e);
-        } catch (...) {
+        auto shared = barrier_->shared();
+        job.invoke();
+        if (options_.use_cuda_stream && bridge_ != nullptr) {
+          // Finish this lane's GPU work BEFORE leaving the shared side.
+          bridge_->sync_lane();
         }
       }
+      job.commit();
+    } catch (...) {
+      const std::exception_ptr e = std::current_exception();
+      {
+        std::lock_guard<std::mutex> lk(stats_mutex_);
+        stats_.failed += 1;
+      }
+      if (is_fatal(e)) {
+        {
+          std::lock_guard<std::mutex> lk(poison_mutex_);
+          poisoned_.store(true);
+          poison_message_ = "lane '" + name_ + "': " + describe_exception(e);
+        }
+        if (options_.on_poisoned) {
+          try {
+            options_.on_poisoned(this, e);
+          } catch (...) {
+          }
+        }
+      }
+      job.fail(e);
     }
-    job.fail(e);
+  } catch (...) {
+    // The failure path itself threw. Report and fall through to the `finally`
+    // below, exactly as the Python's unconditional tail would.
+    std::fprintf(stderr, "lane '%s': failure handling threw\n", name_.c_str());
   }
   busy_.store(false);
   {

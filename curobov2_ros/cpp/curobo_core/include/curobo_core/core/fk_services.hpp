@@ -21,6 +21,8 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include "curobo_runtime/gpu_lanes.hpp"
+
 #include "curobov2_ros_interfaces/srv/fk.hpp"
 #include "curobov2_ros_interfaces/srv/fk_batch.hpp"
 #include "curobov2_ros_interfaces/srv/warmup_fk.hpp"
@@ -39,6 +41,9 @@ public:
     int cache_cuboid = 32, int cache_mesh = 4);
 
   // PORT: fk_services.FKServices.warmup
+  // PORT: fk_services._on_lane - the node's lane_kin (shared with IK).
+  void set_lane(curobo_runtime::GpuLane * lane) {lane_ = lane;}
+
   std::string warmup(int batch_size);
 
   // PORT: fk_services.FKServices._compute_poses (exposed for the service paths
@@ -82,6 +87,7 @@ private:
   std::vector<std::string> joint_names_;
   int cache_cuboid_;
   int cache_mesh_;
+  curobo_runtime::GpuLane * lane_ = nullptr;
   bool initialized_ = false;
   int fk_batch_ = 0;
 

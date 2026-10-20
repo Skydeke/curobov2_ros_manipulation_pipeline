@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // 1:1 C++ port of the config/cache/joint-lock service callbacks.
 #include "curobo_core/core/config_services.hpp"
+#include "curobo_core/core/gpu_runtime.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -68,7 +69,7 @@ void ConfigServices::rebuild_planner()
   cfg << "{\"num_ik_seeds\":" << node_->get_parameter("num_ik_seeds").as_int()
       << ",\"num_trajopt_seeds\":" << node_->get_parameter("num_trajopt_seeds").as_int()
       << ",\"use_cuda_graph\":"
-      << (node_->get_parameter("use_cuda_graph").as_bool() ? "true" : "false")
+      << (resolve_use_cuda_graph(node_) ? "true" : "false")
       << ",\"collision_activation_distance\":"
       << node_->get_parameter("collision_activation_distance").as_double()
       << ",\"interpolation_dt\":" << node_->get_parameter("interpolation_dt").as_double()

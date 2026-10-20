@@ -1,15 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 // 1:1 C++ port of curobov2_ros/core/fk_services.py.
 #include "curobo_core/core/fk_services.hpp"
+#include "curobo_core/core/gpu_runtime.hpp"
 
 #include <algorithm>
 #include <cstdint>
+#include <utility>
 
 #include "curobo_core/convert.hpp"
 #include "curobo_runtime/runtime.hpp"
 
 namespace curobo_core
 {
+
+namespace
+{
+// PORT: fk_services._on_lane - run on lane_kin (PRIO_KIN, 120 s) unless this
+// thread already is the lane worker. Shared with IKServices, so it is what
+// serialises FK against IK (and therefore against itself).
+template<class F>
+auto on_kin_lane(curobo_runtime::GpuLane * lane, F && fn) -> decltype(fn())
+{
+  if (lane == nullptr || lane->owns_current_thread()) {
+    return fn();
+  }
+  curobo_runtime::SubmitOptions opts;
+  opts.prio = curobo_runtime::PRIO_KIN;
+  return lane->call_for(opts, 120.0, std::forward<F>(fn));
+}
+}  // namespace
 
 FKServices::FKServices(
   rclcpp::Node * node, curobo_runtime::IBridge * bridge,
@@ -140,7 +159,10 @@ bool FKServices::compute_poses(
       q.data.push_back(static_cast<float>(j < row.size() ? row[j] : 0.0));
     }
   }
-  const curobo_runtime::TensorF32 out = bridge_->fk(handle_, q);
+  // PORT: fk_services._on_lane - FK shares lane_kin with IK, so the two never
+  // issue kinematics kernels concurrently.
+  const curobo_runtime::TensorF32 out = on_kin_lane(
+    lane_, [&]() {return bridge_->fk(handle_, q);});
   poses.clear();
   const std::size_t n = qs.size();
   for (std::size_t i = 0; i < n; ++i) {
@@ -166,7 +188,7 @@ std::vector<std::uint8_t> FKServices::validate(
     }
   }
   try {
-    return bridge_->validate(handle_, q);
+    return on_kin_lane(lane_, [&]() {return bridge_->validate(handle_, q);});
   } catch (const std::exception & e) {
     RCLCPP_ERROR(node_->get_logger(), "FK collision validation failed: %s", e.what());
     return std::vector<std::uint8_t>(qs.size(), 1);
@@ -219,6 +241,7 @@ void FKServices::handle_fk(
     RCLCPP_WARN_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 5000,
       "FK failed, returning failure (GPU fault?): %s", exc.what());
+    handle_gpu_fault(node_, "running FK", exc.what());
     return;
   }
   if (!ok) {
@@ -281,6 +304,7 @@ void FKServices::handle_fk_batch(
     RCLCPP_WARN_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 5000,
       "FK batch failed, returning failure (GPU fault?): %s", exc.what());
+    handle_gpu_fault(node_, "running FK batch", exc.what());
     response->success = false;
     response->error_msg.data = std::string("FK batch failed: ") + exc.what();
     return;

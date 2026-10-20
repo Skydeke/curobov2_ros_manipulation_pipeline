@@ -16,6 +16,7 @@
 
 #include <rclcpp/rclcpp.hpp>
 
+#include "curobo_runtime/gpu_lanes.hpp"
 #include "curobov2_ros_interfaces/srv/ik.hpp"
 #include "curobov2_ros_interfaces/srv/ik_batch.hpp"
 #include "curobov2_ros_interfaces/srv/warmup_ik.hpp"
@@ -32,6 +33,11 @@ public:
   IKServices(
     rclcpp::Node * node, curobo_runtime::IBridge * bridge,
     curobo_runtime::RobotHandle handle, std::string base_link, int num_ik_seeds = 32);
+
+  // PORT: ik_services.IKServices._on_lane - the node's lane_kin. IK (and FK,
+  // sharing the lane) run on its single worker thread, which is what serialises
+  // them against each other; with no lane they run inline.
+  void set_lane(curobo_runtime::GpuLane * lane) {lane_ = lane;}
 
   // PORT: ik_services.IKServices.warmup
   std::string warmup(int batch_size, int num_seeds = -1);
@@ -92,6 +98,7 @@ private:
   // Fallback used only when the node does not declare `num_ik_seeds` (unit
   // tests); production nodes always declare it.
   int num_ik_seeds_;
+  curobo_runtime::GpuLane * lane_ = nullptr;
   bool ready_ = false;
   int ik_batch_size_ = 0;
   int ik_num_seeds_ = 0;

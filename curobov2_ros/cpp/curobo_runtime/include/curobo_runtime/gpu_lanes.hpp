@@ -232,7 +232,7 @@ struct GpuLaneOptions
 // Extra submit options (Python keyword arguments).
 struct SubmitOptions
 {
-  int prio = PRIO_PLAN;
+  int prio = PRIO_BULK;
   std::shared_ptr<CancelToken> cancel;
   std::string name;
 };
@@ -241,7 +241,7 @@ namespace detail
 {
 struct Job
 {
-  int prio = PRIO_PLAN;
+  int prio = PRIO_BULK;
   std::uint64_t seq = 0;
   std::string name;
   std::function<void()> invoke;                          // runs fn; may throw
@@ -460,6 +460,10 @@ private:
   std::priority_queue<detail::Job, std::vector<detail::Job>, detail::JobGreater> queue_;
   std::atomic<bool> stop_{false};
   std::atomic<bool> busy_{false};
+  // Set by run() on the stop sentinel; lets shutdown() bound its join
+  // (std::thread has no timed join - PORT: gpu_lanes.py join(timeout)).
+  bool worker_done_ = false;
+  std::condition_variable done_cv_;
 
   mutable std::mutex poison_mutex_;
   std::atomic<bool> poisoned_{false};

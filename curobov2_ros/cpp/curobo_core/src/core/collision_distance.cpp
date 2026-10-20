@@ -2,6 +2,7 @@
 // 1:1 C++ port of the GetCollisionDistance service in
 // curobov2_ros/core/collision_distance.py.
 #include "curobo_core/core/collision_distance.hpp"
+#include "curobo_core/core/gpu_runtime.hpp"
 
 #include <cstdint>
 
@@ -41,6 +42,7 @@ std::vector<float> CollisionDistance::computeSphereDistance()
     RCLCPP_WARN_THROTTLE(
       node_->get_logger(), *node_->get_clock(), 5000,
       "get_collision_distance failed: %s", e.what());
+    handle_gpu_fault(node_, "computing the collision distance", e.what());
     return {};
   }
 }
