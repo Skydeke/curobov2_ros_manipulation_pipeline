@@ -242,8 +242,20 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
 
         kin_cfg = KinematicsCfg.from_robot_yaml_file(resolved)
 
-    dynamics = RobotCfg._create_dynamics_config(
-        kinematics_config=kin_cfg.kinematics_config, device_cfg=DeviceCfg())
+    # PORT: RobotModelManager.set_torque_mode / _wrap_robot_cfg - the pinocchio
+    # inverse-dynamics model is attached ONLY when the node runs torque-limited
+    # (load_dynamics:=true; the launch default is false). This must be gated:
+    # with a dynamics model present the rollout computes joint_torque (RNEA
+    # forward + backward) inside the cspace cost on EVERY optimizer iteration
+    # (see rollout/cost_manager/cost_manager_robot.py, `joint_torque=`), which
+    # roughly doubles the cost of pure-kinematics modes such as the standalone
+    # IK solver used by the reachability client. The pre-port Python
+    # RobotModelManager built `dynamics=None` unless load_dynamics was set.
+    load_dynamics = bool(cfg.get("load_dynamics", False))
+    dynamics = None
+    if load_dynamics:
+        dynamics = RobotCfg._create_dynamics_config(
+            kinematics_config=kin_cfg.kinematics_config, device_cfg=DeviceCfg())
     robot_cfg = RobotCfg(kinematics=kin_cfg, dynamics=dynamics)
     kin = Kinematics(robot_cfg.kinematics)
 
