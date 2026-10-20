@@ -20,10 +20,20 @@ namespace
 // _LANE_TIMEOUT_S budget) unless this thread already IS the lane worker. The
 // lane's single worker thread is what serialises IK/FK against each other; the
 // port ran them inline on the caller's thread.
+//
+// The barrier is owned here, never by the caller: a lane job already runs inside
+// barrier.shared() (GpuLane::run_job), so a caller that pre-acquired a read hold
+// would then block on the lane while a waiting capture (writer) blocks on that
+// read hold - a three-way deadlock. Only the no-lane (standalone/test) path
+// needs the barrier taken explicitly, like the Python _on_lane fallback.
 template<class F>
 auto on_kin_lane(curobo_runtime::GpuLane * lane, F && fn) -> decltype(fn())
 {
-  if (lane == nullptr || lane->owns_current_thread()) {
+  if (lane == nullptr) {
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+    return fn();
+  }
+  if (lane->owns_current_thread()) {
     return fn();
   }
   curobo_runtime::SubmitOptions opts;
@@ -214,10 +224,10 @@ bool IKServices::solve(
     if (!ready_ || needs_rebuild(requested, resolve_num_seeds())) {
       warmup(requested, -1);
     }
-    // PORT: ik_services._on_lane - every solve ran on lane_kin inside
-    // barrier.shared(); the port called the bridge bare, so a solve could issue
-    // kernels while another thread captured a graph.
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+    // PORT: ik_services._on_lane - every solve runs on lane_kin, whose job
+    // holds barrier.shared() itself (GpuLane::run_job). Do NOT pre-acquire the
+    // barrier here: blocking on the lane while holding a read hold deadlocks
+    // against a capture (writer) that is waiting for readers to drain.
     outcome = on_kin_lane(lane_, [&]() {
         return bridge_->ik(handle_, poses_to_tensor(poses));
       });
