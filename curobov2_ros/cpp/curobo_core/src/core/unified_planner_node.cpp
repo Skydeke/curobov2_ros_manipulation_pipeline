@@ -189,6 +189,12 @@ void UnifiedPlannerNode::setup()
               << ",\"urdf_path\":\"" << get_parameter("urdf_path").as_string() << "\""
               << ",\"asset_root_path\":\"" << get_parameter("asset_root_path").as_string()
               << "\""
+              // PORT: RobotModelManager.set_torque_mode - the pinocchio
+              // inverse-dynamics model is only built for torque-limited runs.
+              // Without this the bridge attached it unconditionally, adding a
+              // joint_torque (RNEA) term to every rollout iteration.
+              << ",\"load_dynamics\":"
+              << (get_parameter("load_dynamics").as_bool() ? "true" : "false")
               << ",\"seg_distance_threshold\":"
               << get_parameter("robot_segmentation_distance_threshold").as_double()
               << ",\"seg_mask_margin\":"
