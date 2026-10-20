@@ -18,10 +18,20 @@ namespace
 // PORT: fk_services._on_lane - run on lane_kin (PRIO_KIN, 120 s) unless this
 // thread already is the lane worker. Shared with IKServices, so it is what
 // serialises FK against IK (and therefore against itself).
+//
+// The barrier is owned here, never by the caller: a lane job already runs inside
+// barrier.shared() (GpuLane::run_job), so a caller that pre-acquired a read hold
+// would then block on the lane while a waiting capture (writer) blocks on that
+// read hold - a three-way deadlock. Only the no-lane (standalone/test) path
+// needs the barrier taken explicitly, like the Python _on_lane fallback.
 template<class F>
 auto on_kin_lane(curobo_runtime::GpuLane * lane, F && fn) -> decltype(fn())
 {
-  if (lane == nullptr || lane->owns_current_thread()) {
+  if (lane == nullptr) {
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+    return fn();
+  }
+  if (lane->owns_current_thread()) {
     return fn();
   }
   curobo_runtime::SubmitOptions opts;
@@ -90,8 +100,16 @@ void FKServices::init(int batch_size)
     // PORT: fk_services._gpu_guard - `with self._gpu_guard(): self._init(...)`
     // (blocking gpu_lock). Model construction + the warmup batch are eager CUDA
     // ops that must not overlap a CUDA-graph capture.
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-    compute_poses(qs, poses);
+    //
+    // Order matters: enter the `kin` lane FIRST and take the exclusive barrier
+    // *inside* the lane job (like IKServices::warmup). Taking the barrier before
+    // submitting makes GpuLane::submit_opts reject the wait on lane 'kin' with
+    // DeadlockRisk. compute_poses() is already running on the lane thread here,
+    // so its own on_kin_lane() re-enters inline.
+    on_kin_lane(lane_, [&]() {
+      auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+      compute_poses(qs, poses);
+    });
   }
 
   RCLCPP_INFO(node_->get_logger(), "FK model ready");
@@ -229,10 +247,10 @@ void FKServices::handle_fk(
   bool ok = false;
   std::vector<std::uint8_t> valid;
   try {
-    // PORT: fk_services._on_lane - FK jobs ran on the shared `kin` lane inside
-    // barrier.shared(); the port issued the kernels bare, so an FK solve could
-    // run while another thread captured a graph.
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+    // PORT: fk_services._on_lane - FK jobs run on the shared `kin` lane; the
+    // lane job itself holds barrier.shared() (GpuLane::run_job), so compute_poses
+    // and validate must not pre-acquire the barrier here - doing so would block
+    // on the lane while holding a read hold a waiting capture cannot get past.
     ok = compute_poses(qs, poses);
     if (ok) {
       valid = validate(qs);
@@ -294,8 +312,8 @@ void FKServices::handle_fk_batch(
   std::vector<std::uint8_t> valid;
   bool ok = false;
   try {
-    // PORT: fk_services._on_lane - shared `kin` lane, see handle_fk.
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+    // PORT: fk_services._on_lane - shared `kin` lane, see handle_fk: the lane
+    // job holds the shared barrier itself, so do not pre-acquire it here.
     ok = compute_poses(qs, poses);
     if (ok) {
       valid = validate(qs);
