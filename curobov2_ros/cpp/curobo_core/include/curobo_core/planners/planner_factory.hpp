@@ -14,6 +14,7 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include "curobo_core/planners/trajectory_planner.hpp"
+#include "curobo_runtime/gpu_lanes.hpp"
 
 namespace curobo_core
 {
@@ -36,7 +37,7 @@ public:
   static std::unique_ptr<TrajectoryPlanner> create(
     const std::string & planner_type, curobo_runtime::IBridge * bridge,
     curobo_runtime::RobotHandle handle, std::vector<std::string> joint_names,
-    rclcpp::Node * node = nullptr);
+    rclcpp::Node * node = nullptr, curobo_runtime::GpuLane * reactive_lane = nullptr);
 
   // PORT: PlannerFactory.get_available_planners
   static std::vector<std::string> available_planners();
@@ -57,6 +58,9 @@ public:
   TrajectoryPlanner * current() {return current_;}
   std::string current_type() const {return current_type_;}
 
+  // PORT: node.lane_reactive - handed to the reactive planners at build.
+  void set_reactive_lane(curobo_runtime::GpuLane * lane) {reactive_lane_ = lane;}
+
 private:
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
@@ -65,6 +69,7 @@ private:
   std::map<std::string, std::unique_ptr<TrajectoryPlanner>> planners_;
   TrajectoryPlanner * current_ = nullptr;
   std::string current_type_;
+  curobo_runtime::GpuLane * reactive_lane_ = nullptr;
 };
 
 }  // namespace curobo_core

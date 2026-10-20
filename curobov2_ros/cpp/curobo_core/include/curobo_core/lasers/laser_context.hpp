@@ -19,6 +19,7 @@
 
 #include "curobo_core/lasers/laser_cfg.hpp"
 #include "curobo_runtime/bridge.hpp"
+#include "curobo_runtime/gpu_lanes.hpp"
 
 namespace curobo_core
 {
@@ -28,7 +29,8 @@ class LaserContext
 public:
   LaserContext(
     rclcpp::Node * node, int image_height, int image_width,
-    curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle);
+    curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
+    curobo_runtime::GpuLane * lane = nullptr);
   ~LaserContext();
 
   // PORT: laser_context.add_laser (rate bookkeeping; strategies built by
@@ -55,6 +57,8 @@ private:
   int image_width_;
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
+  // PORT: node.lane_perception (shared with the depth integrates).
+  curobo_runtime::GpuLane * lane_ = nullptr;
 
   mutable std::mutex mutex_;
   std::condition_variable cond_;

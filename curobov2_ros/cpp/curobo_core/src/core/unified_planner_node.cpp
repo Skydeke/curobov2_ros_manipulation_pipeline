@@ -10,27 +10,25 @@
 #include <tf2/time.h>
 
 #include "curobo_core/core/frame_utils.hpp"
+#include "curobo_core/core/gpu_runtime.hpp"
 #include "curobo_core/planners/reactive_controller.hpp"
 #include "curobo_runtime/runtime.hpp"
 
-namespace curobo_core
-{
+namespace curobo_core {
 
-UnifiedPlannerNode::UnifiedPlannerNode(const rclcpp::NodeOptions & options)
-: rclcpp::Node("unified_planner", options)
-{
+UnifiedPlannerNode::UnifiedPlannerNode(const rclcpp::NodeOptions &options)
+    : rclcpp::Node("unified_planner", options) {
   declare_parameters();
   setup();
 }
 
-UnifiedPlannerNode::~UnifiedPlannerNode()
-{
-  // The Runtime/interpreter outlives the node (C1: one interpreter per process).
+UnifiedPlannerNode::~UnifiedPlannerNode() {
+  // The Runtime/interpreter outlives the node (C1: one interpreter per
+  // process).
 }
 
 // PORT: unified_planner_node.py parameter declarations (M2 subset)
-void UnifiedPlannerNode::declare_parameters()
-{
+void UnifiedPlannerNode::declare_parameters() {
   declare_parameter<std::string>("robot", "emulator");
   declare_parameter<std::string>("robot_config_file", "");
   // PORT: unified_planner_node.py warmup_ik / warmup_fk (default true)
@@ -45,7 +43,7 @@ void UnifiedPlannerNode::declare_parameters()
   declare_parameter<int>("max_batch_size", 1);
   // PORT: config_wrapper_motion._resolve_max_goalset default is 16 (launches
   // may pin it; the deployment does).
-  declare_parameter<int>("max_goalset", 16);
+  declare_parameter<int>("max_goalset", 1); // PORT: node default
   declare_parameter<int>("collision_cache_cuboid", 32);
   declare_parameter<int>("collision_cache_mesh", 4);
   // PORT: the benchmark's planner envelope + the params it reads/writes.
@@ -130,9 +128,8 @@ void UnifiedPlannerNode::declare_parameters()
 }
 
 // PORT: unified_planner_node.py:__init__ solver setup (M2 subset)
-void UnifiedPlannerNode::setup()
-{
-  curobo_runtime::Runtime & runtime = curobo_runtime::Runtime::instance();
+void UnifiedPlannerNode::setup() {
+  curobo_runtime::Runtime &runtime = curobo_runtime::Runtime::instance();
   if (!runtime.started()) {
     runtime.start();
   }
@@ -145,44 +142,68 @@ void UnifiedPlannerNode::setup()
   // is replayed instead of being re-captured, which faults the CUDA context.
   try {
     bridge_->set_global_flags(
-      true, get_parameter("enable_curobo_debug_mode").as_bool());
-  } catch (const std::exception & e) {
-    RCLCPP_WARN(
-      get_logger(), "could not enable CUDA-graph reset: %s", e.what());
+        true, get_parameter("enable_curobo_debug_mode").as_bool());
+  } catch (const std::exception &e) {
+    RCLCPP_WARN(get_logger(), "could not enable CUDA-graph reset: %s",
+                e.what());
+  }
+
+  // PORT: unified_planner_node.__init__ - create the GPU lanes BEFORE any
+  // camera or solver, so they exist when the first callback fires. Bound to the
+  // shared Runtime barrier (see the header): a lane job takes it shared inside
+  // GpuLane::run_job, and the capture/rebuild sites still take it exclusive.
+  {
+    curobo_runtime::GpuLaneOptions lane_opts;
+    lane_opts.on_poisoned = [this](curobo_runtime::GpuLane *lane,
+                                   std::exception_ptr error) {
+      on_gpu_poisoned(lane, error);
+    };
+    auto &gpu_barrier = runtime.barrier();
+    auto make_lane = [&](const char *name) {
+      return std::make_unique<curobo_runtime::GpuLane>(name, gpu_barrier,
+                                                       bridge_, lane_opts);
+    };
+    lane_reactive_ = make_lane("reactive");
+    lane_plan_ = make_lane("plan");
+    lane_kin_ = make_lane("kin");
+    lane_perception_ = make_lane("perception");
+    lane_viz_ = make_lane("viz");
   }
 
   // PORT: robot_description.load_robot_description. The descriptor (robots/
   // <robot>.yaml) selects the control strategy + its params, the base link and
-  // the cuRobo config, and carries the `home` named joint config; without it the
-  // node falls back to its parameter defaults (emulator / base_0).
+  // the cuRobo config, and carries the `home` named joint config; without it
+  // the node falls back to its parameter defaults (emulator / base_0).
   curobo_runtime::RobotDescriptionOutcome desc;
   try {
     desc = bridge_->robot_description(
-      get_parameter("robot").as_string(), get_parameter("robot_config_file").as_string());
-  } catch (const std::exception & e) {
+        get_parameter("robot").as_string(),
+        get_parameter("robot_config_file").as_string());
+  } catch (const std::exception &e) {
     RCLCPP_WARN(get_logger(), "robot descriptor load failed: %s", e.what());
   }
   if (desc.found) {
-    RCLCPP_INFO(
-      get_logger(), "Loaded robot descriptor '%s' (%s)", desc.name.c_str(),
-      desc.path.c_str());
+    RCLCPP_INFO(get_logger(), "Loaded robot descriptor '%s' (%s)",
+                desc.name.c_str(), desc.path.c_str());
   }
 
   // base_link: descriptor default unless overridden at launch.
   if (!has_parameter("base_link")) {
     declare_parameter<std::string>(
-      "base_link", (desc.found && !desc.base_link.empty()) ? desc.base_link : "base_0");
+        "base_link",
+        (desc.found && !desc.base_link.empty()) ? desc.base_link : "base_0");
   }
   base_link_ = get_parameter("base_link").as_string();
 
   // control_strategy: descriptor default unless overridden at launch.
   if (!has_parameter("control_strategy")) {
     declare_parameter<std::string>(
-      "control_strategy",
-      (desc.found && !desc.strategy.empty()) ? desc.strategy : "emulator");
+        "control_strategy",
+        (desc.found && !desc.strategy.empty()) ? desc.strategy : "emulator");
   }
 
-  std::string robot_config_file = get_parameter("robot_config_file").as_string();
+  std::string robot_config_file =
+      get_parameter("robot_config_file").as_string();
   if (robot_config_file.empty() && desc.found) {
     robot_config_file = desc.curobo_config;
   }
@@ -190,34 +211,35 @@ void UnifiedPlannerNode::setup()
   if (!robot_config_file.empty()) {
     // PORT: ConfigManager._translate_xrdf - xrdf configs need the urdf_path /
     // asset_root_path parameters (they are not inside the xrdf file).
-    // The robot-masking knobs ride along here because robot_segment() reads them
-    // from this handle's registry entry: without them the bridge silently falls
-    // back to its 0.05 / 0.0 defaults and robot_segmentation_distance_threshold /
-    // _mask_margin were accepted (declared) but never took effect.
+    // The robot-masking knobs ride along here because robot_segment() reads
+    // them from this handle's registry entry: without them the bridge silently
+    // falls back to its 0.05 / 0.0 defaults and
+    // robot_segmentation_distance_threshold / _mask_margin were accepted
+    // (declared) but never took effect.
     std::ostringstream model_cfg;
-    model_cfg << "{\"robot_config_file\":\"" << robot_config_file << "\""
-              << ",\"urdf_path\":\"" << get_parameter("urdf_path").as_string() << "\""
-              << ",\"asset_root_path\":\"" << get_parameter("asset_root_path").as_string()
-              << "\""
-              // PORT: RobotModelManager.set_torque_mode - the pinocchio
-              // inverse-dynamics model is only built for torque-limited runs.
-              // Without this the bridge attached it unconditionally, adding a
-              // joint_torque (RNEA) term to every rollout iteration.
-              << ",\"load_dynamics\":"
-              << (get_parameter("load_dynamics").as_bool() ? "true" : "false")
-              << ",\"seg_distance_threshold\":"
-              << get_parameter("robot_segmentation_distance_threshold").as_double()
-              << ",\"seg_mask_margin\":"
-              << get_parameter("robot_segmentation_mask_margin").as_double()
-              << "}";
+    model_cfg
+        << "{\"robot_config_file\":\"" << robot_config_file << "\""
+        << ",\"urdf_path\":\"" << get_parameter("urdf_path").as_string() << "\""
+        << ",\"asset_root_path\":\""
+        << get_parameter("asset_root_path").as_string()
+        << "\""
+        // PORT: RobotModelManager.set_torque_mode - the pinocchio
+        // inverse-dynamics model is only built for torque-limited runs.
+        // Without this the bridge attached it unconditionally, adding a
+        // joint_torque (RNEA) term to every rollout iteration.
+        << ",\"load_dynamics\":"
+        << (get_parameter("load_dynamics").as_bool() ? "true" : "false")
+        << ",\"seg_distance_threshold\":"
+        << get_parameter("robot_segmentation_distance_threshold").as_double()
+        << ",\"seg_mask_margin\":"
+        << get_parameter("robot_segmentation_mask_margin").as_double() << "}";
     try {
       bridge_->robot_model_build(handle_, model_cfg.str());
-    } catch (const std::exception & e) {
-      RCLCPP_FATAL(
-        get_logger(),
-        "Failed to build the robot model from '%s':\n  %s\n"
-        "Fix the robot config / parameters above and relaunch.",
-        robot_config_file.c_str(), e.what());
+    } catch (const std::exception &e) {
+      RCLCPP_FATAL(get_logger(),
+                   "Failed to build the robot model from '%s':\n  %s\n"
+                   "Fix the robot config / parameters above and relaunch.",
+                   robot_config_file.c_str(), e.what());
       throw;
     }
     const auto limits = bridge_->joint_limits(handle_);
@@ -227,40 +249,46 @@ void UnifiedPlannerNode::setup()
     // shared MotionPlanner with the frozen recipe.
     std::ostringstream cfg;
     cfg << "{\"num_ik_seeds\":" << get_parameter("num_ik_seeds").as_int()
-        << ",\"num_trajopt_seeds\":" << get_parameter("num_trajopt_seeds").as_int()
-        << ",\"use_cuda_graph\":" << (get_parameter("use_cuda_graph").as_bool() ? "true" : "false")
+        << ",\"num_trajopt_seeds\":"
+        << get_parameter("num_trajopt_seeds").as_int() << ",\"use_cuda_graph\":"
+        << (resolve_use_cuda_graph(this) ? "true" : "false")
         << ",\"collision_activation_distance\":"
         << get_parameter("collision_activation_distance").as_double()
-        << ",\"interpolation_dt\":" << get_parameter("interpolation_dt").as_double()
+        << ",\"interpolation_dt\":"
+        << get_parameter("interpolation_dt").as_double()
         << ",\"max_batch_size\":" << get_parameter("max_batch_size").as_int()
         << ",\"max_goalset\":" << get_parameter("max_goalset").as_int()
         << ",\"obstacle_collision_mode\":\""
         << get_parameter("obstacle_collision_mode").as_string() << "\""
-        << ",\"collision_cache\":{\"cuboid\":" << get_parameter("collision_cache_cuboid").as_int()
-        << ",\"mesh\":" << get_parameter("collision_cache_mesh").as_int()
+        << ",\"collision_cache\":{\"cuboid\":"
+        << get_parameter("collision_cache_cuboid").as_int() << ",\"mesh\":"
+        << get_parameter("collision_cache_mesh").as_int()
         // PORT: obstacle_manager.collision_cache["voxel"] - WITHOUT this the
         // solver allocates no voxel storage and the first ESDF world push
         // raises "Voxel cache not initialized".
         << ",\"voxel\":{\"layers\":1,\"dims\":[";
-    const auto cache_extent = get_parameter("mapper_extent_xyz").as_double_array();
+    const auto cache_extent =
+        get_parameter("mapper_extent_xyz").as_double_array();
     for (std::size_t i = 0; i < cache_extent.size(); ++i) {
       cfg << (i ? "," : "") << cache_extent[i];
     }
     // Three closers: voxel object, collision_cache object, top-level object.
-    cfg << "],\"voxel_size\":" << get_parameter("voxel_size").as_double() << "}}}";
+    cfg << "],\"voxel_size\":" << get_parameter("voxel_size").as_double()
+        << "}}}";
     // PORT: unified_planner_node "Warming up {type} planner..." / "  ->
     // Initializing MotionPlanner..." / "{type} planner ready".
     RCLCPP_INFO(get_logger(), "Warming up %s planner...",
-      get_parameter("planner_type").as_string().c_str());
+                get_parameter("planner_type").as_string().c_str());
     RCLCPP_INFO(get_logger(), "  -> Initializing MotionPlanner...");
     // PORT: the build (warmup) captures a CUDA graph -> hold the exclusive GPU
     // barrier (matches the other builders and the config-service rebuild path).
     {
-      auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+      auto gpu_guard =
+          curobo_runtime::Runtime::instance().barrier().exclusive();
       bridge_->motion_planner_build(handle_, cfg.str());
     }
     RCLCPP_INFO(get_logger(), "%s planner ready",
-      get_parameter("planner_type").as_string().c_str());
+                get_parameter("planner_type").as_string().c_str());
 
     // PORT: ObstacleManager._build_mapper (node mapper_* parameters). The cfg
     // itself is built by configure_mapper_from_params() (below) so that the
@@ -268,65 +296,88 @@ void UnifiedPlannerNode::setup()
     // than a cfg baked once at startup.
   }
 
-  config_services_ = std::make_unique<ConfigServices>(
-    this, bridge_, handle_, &joint_names_);
+  config_services_ =
+      std::make_unique<ConfigServices>(this, bridge_, handle_, &joint_names_);
   // `set_workspace` changes mapper_extent_xyz/mapper_grid_center: the Mapper
   // grid must be rebuilt to the new box and the marker redrawn, so hand the
   // node's own rebuild + the marker publisher to the service.
-  config_services_->set_mapper_reconfigure([this]() {configure_mapper_from_params();});
+  config_services_->set_mapper_reconfigure(
+      [this]() { configure_mapper_from_params(); });
   config_services_->set_workspace_republish([this]() {
-      if (ros_service_manager_) {
-        ros_service_manager_->publish_mapper_workspace();
-      }
-    });
-  config_services_->set_integration_frame_provider([this]() {return integration_frame();});
+    if (ros_service_manager_) {
+      ros_service_manager_->publish_mapper_workspace();
+    }
+  });
+  config_services_->set_integration_frame_provider(
+      [this]() { return integration_frame(); });
   obstacle_manager_ = std::make_unique<ObstacleManager>(bridge_, handle_);
   // PORT: unified_planner_node._esdf_refresh_min_interval (open-loop throttle).
   obstacle_manager_->set_esdf_refresh_min_interval(
-    get_parameter("esdf_refresh_min_interval").as_double());
+      get_parameter("esdf_refresh_min_interval").as_double());
   // A rebuild that could not push its world must not be mistaken for a fresh
   // perception world: invalidate so the next plan rebuilds + re-pushes.
   config_services_->set_world_invalidate([this]() {
-      if (obstacle_manager_) {
-        obstacle_manager_->invalidate_world();
-      }
-    });
+    if (obstacle_manager_) {
+      obstacle_manager_->invalidate_world();
+    }
+  });
   ros_service_manager_ = std::make_unique<RosServiceManager>(
-    this, bridge_, handle_, obstacle_manager_.get());
-  ros_service_manager_->set_integration_frame_provider([this]() {return integration_frame();});
+      this, bridge_, handle_, obstacle_manager_.get());
+  // PORT: ros_service_manager.init_services - the GPU-backed viz timers run on
+  // lane_viz and drop the cycle when it is busy.
+  ros_service_manager_->set_viz_lane(lane_viz_.get());
+  ros_service_manager_->set_integration_frame_provider(
+      [this]() { return integration_frame(); });
   ros_service_manager_->init_services();
 
-  // PORT: ConfigWrapperMotion.camera_system_manager / laser_system_manager. Both
-  // are no-ops with no `camera_topic` / `laser_topic` configured, and their
-  // config classes declare the perception parameter blocks on this node.
+  // PORT: ConfigWrapperMotion.camera_system_manager / laser_system_manager.
+  // Both are no-ops with no `camera_topic` / `laser_topic` configured, and
+  // their config classes declare the perception parameter blocks on this node.
   // A depth integrate bumps the perception epoch (drives should_refresh_world).
+  // PORT: unified_planner_node.__init__ - the depth/lidar integrates run on
+  // lane_perception (one owner thread for the shared Mapper) and drop the frame
+  // when the lane is busy, instead of every strategy worker taking the barrier
+  // inline and integrating concurrently.
   camera_system_manager_ = std::make_unique<CameraSystemManager>(
-    this, bridge_, handle_, nullptr,
-    [this]() {if (obstacle_manager_) {obstacle_manager_->bump_perception_epoch();}});
-  laser_system_manager_ = std::make_unique<LaserSystemManager>(this, bridge_, handle_);
+      this, bridge_, handle_, lane_perception_.get(), [this]() {
+        if (obstacle_manager_) {
+          obstacle_manager_->bump_perception_epoch();
+        }
+      });
+  // PORT: unified_planner_node.__init__ - the lidar integrates share
+  // lane_perception with the depth integrates (one Mapper owner thread).
+  laser_system_manager_ = std::make_unique<LaserSystemManager>(
+      this, bridge_, handle_, lane_perception_.get());
 
-  // PORT: obstacle_manager._resolve_time_decay - cuRobo applies decay_factor once
-  // per integrate() call, so anchor it on a HALF-LIFE and the combined
+  // PORT: obstacle_manager._resolve_time_decay - cuRobo applies decay_factor
+  // once per integrate() call, so anchor it on a HALF-LIFE and the combined
   // camera+laser rate; 1.0 means "no decay" and the map accumulates without
   // bound (edge noise crosses the occupancy threshold forever, so the collision
   // world fills up).
   {
     const double total_rate =
-      (camera_system_manager_ && camera_system_manager_->get_camera_context() ?
-        camera_system_manager_->get_camera_context()->get_total_frame_rate_hz() : 0.0) +
-      (laser_system_manager_ && laser_system_manager_->get_laser_context() ?
-        laser_system_manager_->get_laser_context()->get_total_frame_rate_hz() : 0.0);
+        (camera_system_manager_ && camera_system_manager_->get_camera_context()
+             ? camera_system_manager_->get_camera_context()
+                   ->get_total_frame_rate_hz()
+             : 0.0) +
+        (laser_system_manager_ && laser_system_manager_->get_laser_context()
+             ? laser_system_manager_->get_laser_context()
+                   ->get_total_frame_rate_hz()
+             : 0.0);
     const double half_life = get_parameter("decay_half_life_s").as_double();
     double decay = 1.0;
     if (half_life <= 0.0) {
       RCLCPP_INFO(
-        get_logger(), "decay_half_life_s <= 0: TSDF decay disabled (voxels never fade).");
+          get_logger(),
+          "decay_half_life_s <= 0: TSDF decay disabled (voxels never fade).");
     } else if (total_rate <= 0.0) {
-      RCLCPP_WARN(
-        get_logger(),
-        "No camera frame rate available: cannot convert decay_half_life_s=%gs into a "
-        "per-integrate factor. Falling back to no decay (the map will accumulate). "
-        "Declare 'camera_frame_rate_hz' in the camera params.", half_life);
+      RCLCPP_WARN(get_logger(),
+                  "No camera frame rate available: cannot convert "
+                  "decay_half_life_s=%gs into a "
+                  "per-integrate factor. Falling back to no decay (the map "
+                  "will accumulate). "
+                  "Declare 'camera_frame_rate_hz' in the camera params.",
+                  half_life);
     } else {
       decay = std::pow(0.5, 1.0 / (total_rate * half_life));
     }
@@ -354,12 +405,13 @@ void UnifiedPlannerNode::setup()
     mapper_image_h_ = mapper_h;
     mapper_decay_ = decay;
     // Depth is integrated around the robot base: `mapper_grid_center` is
-    // base-relative, so the Mapper box always sits in front of the robot and the
-    // voxels ride with it. See integration_frame() in camera_cfg.cpp.
+    // base-relative, so the Mapper box always sits in front of the robot and
+    // the voxels ride with it. See integration_frame() in camera_cfg.cpp.
     configure_mapper_from_params();
-    RCLCPP_INFO(
-      get_logger(), "Mapper configured: %dx%d, decay_factor=%.6f (half_life=%.2fs, "
-      "total_frame_rate=%.1fHz)", mapper_w, mapper_h, decay, half_life, total_rate);
+    RCLCPP_INFO(get_logger(),
+                "Mapper configured: %dx%d, decay_factor=%.6f (half_life=%.2fs, "
+                "total_frame_rate=%.1fHz)",
+                mapper_w, mapper_h, decay, half_life, total_rate);
     if (ros_service_manager_) {
       ros_service_manager_->publish_mapper_workspace();
     }
@@ -371,34 +423,42 @@ void UnifiedPlannerNode::setup()
   // registered on the shared RosServiceManager (node-namespaced).
   if (get_parameter("enable_robot_segmentation").as_bool()) {
     std::vector<PerceptionCameraCfg> seg_cfgs;
-    for (const auto & cfg : camera_system_manager_->camera_cfgs()) {
+    for (const auto &cfg : camera_system_manager_->camera_cfgs()) {
       if (cfg.for_segmentation() && !cfg.depth_topic.empty()) {
         seg_cfgs.push_back(cfg);
       }
     }
     if (seg_cfgs.empty()) {
       RCLCPP_WARN(
-        get_logger(),
-        "enable_robot_segmentation requires at least one camera with a depth "
-        "topic and a camera_purpose of 'all' or 'segmentation': set "
-        "'camera_topic' (and camera_info_topic) at launch. Segmentation disabled.");
+          get_logger(),
+          "enable_robot_segmentation requires at least one camera with a depth "
+          "topic and a camera_purpose of 'all' or 'segmentation': set "
+          "'camera_topic' (and camera_info_topic) at launch. Segmentation "
+          "disabled.");
     } else {
       robot_segmentation_ = std::make_unique<RobotSegmentation>(
-        this, bridge_, handle_, seg_cfgs,
-        [this]() {
-          const std::vector<float> pose = current_pose();
-          return std::vector<double>(pose.begin(), pose.end());
-        });
-      ros_service_manager_->register_robot_segmentation(robot_segmentation_.get());
+          this, bridge_, handle_, seg_cfgs, [this]() {
+            const std::vector<float> pose = current_pose();
+            return std::vector<double>(pose.begin(), pose.end());
+          });
+      ros_service_manager_->register_robot_segmentation(
+          robot_segmentation_.get());
     }
   }
 
-  fk_services_ = std::make_unique<FKServices>(this, bridge_, handle_, joint_names_);
-  ik_services_ = std::make_unique<IKServices>(this, bridge_, handle_, base_link_);
+  fk_services_ =
+      std::make_unique<FKServices>(this, bridge_, handle_, joint_names_);
+  ik_services_ =
+      std::make_unique<IKServices>(this, bridge_, handle_, base_link_);
+  // PORT: ik_services._on_lane / fk_services._on_lane - both solve services
+  // share lane_kin, so FK and IK never issue kinematics kernels concurrently.
+  fk_services_->set_lane(lane_kin_.get());
+  ik_services_->set_lane(lane_kin_.get());
   collision_distance_ = std::make_unique<CollisionDistance>(
-    this, bridge_, handle_, [this]() {return current_pose();});
+      this, bridge_, handle_, [this]() { return current_pose(); });
   attachment_services_ = std::make_unique<AttachmentServices>(
-    this, bridge_, handle_, obstacle_manager_.get(), [this]() {return current_pose();});
+      this, bridge_, handle_, obstacle_manager_.get(),
+      [this]() { return current_pose(); });
 
   // PORT: reachability_services.ReachabilityServices (/generate_rm).
   if (tf_buffer_ == nullptr) {
@@ -408,52 +468,63 @@ void UnifiedPlannerNode::setup()
     tf_buffer_->setUsingDedicatedThread(true);
   }
   reachability_services_ = std::make_unique<ReachabilityServices>(
-    this, ik_services_.get(), base_link_, tf_buffer_);
+      this, ik_services_.get(), base_link_, tf_buffer_);
 
   // Create the open-loop planning services (generate_trajectory is the
   // readiness signal the record/replay harness waits for), then the robot
   // context and the SendTrajectory action over it.
   planner_services_ = std::make_unique<PlannerServices>(
-    this, bridge_, handle_, joint_names_, obstacle_manager_.get());
+      this, bridge_, handle_, joint_names_, obstacle_manager_.get());
+  // PORT: unified_planner_node.lane_plan - the plan body runs on the plan lane.
+  planner_services_->set_plan_lane(lane_plan_.get());
+  // PORT: unified_planner_node.lane_reactive - MPC/retarget servo jobs.
+  planner_services_->set_reactive_lane(lane_reactive_.get());
+  // PORT: unified_planner_node.__init__ - warm the CONFIGURED planner type
+  // instead of always hard-coding "classic" (the manager ctor default).
+  planner_services_->manager().set_current_planner(
+      get_parameter("planner_type").as_string());
   // PORT: frame_utils.resolve_poses_to_base - the node owns the TF buffer, so
   // the plan path resolves a goalset's non-base frame through it.
   planner_services_->set_pose_resolver(
-    [this](const std::vector<geometry_msgs::msg::Pose> & poses, const std::string & frame) {
-      return resolve_poses_to_base(poses, frame, base_link_, tf_buffer_.get());
-    });
+      [this](const std::vector<geometry_msgs::msg::Pose> &poses,
+             const std::string &frame) {
+        return resolve_poses_to_base(poses, frame, base_link_,
+                                     tf_buffer_.get());
+      });
   // PORT: robot_context - the control strategy comes from `control_strategy`,
   // its params from the descriptor's strategy_params (falling back to the
   // emulator's joint_states topic), and the seed pose from `home`.
   std::map<std::string, std::string> strategy_params = desc.strategy_params;
   if (strategy_params.find("joint_states_topic") == strategy_params.end() &&
-    get_parameter("control_strategy").as_string() == "emulator")
-  {
+      get_parameter("control_strategy").as_string() == "emulator") {
     strategy_params["joint_states_topic"] = "/emulator/joint_states";
   }
   std::vector<double> default_home(joint_names_.size(), 0.0);
   if (desc.found && desc.home_names.size() == joint_names_.size()) {
     for (std::size_t i = 0; i < joint_names_.size(); ++i) {
-      const auto it = std::find(
-        desc.home_names.begin(), desc.home_names.end(), joint_names_[i]);
+      const auto it = std::find(desc.home_names.begin(), desc.home_names.end(),
+                                joint_names_[i]);
       if (it != desc.home_names.end()) {
-        default_home[i] = desc.home_positions[
-          static_cast<std::size_t>(it - desc.home_names.begin())];
+        default_home[i] = desc.home_positions[static_cast<std::size_t>(
+            it - desc.home_names.begin())];
       }
     }
   }
   robot_context_ = std::make_unique<RobotContext>(
-    this, get_parameter("interpolation_dt").as_double(), joint_names_,
-    get_parameter("control_strategy").as_string(), strategy_params, default_home);
+      this, get_parameter("interpolation_dt").as_double(), joint_names_,
+      get_parameter("control_strategy").as_string(), strategy_params,
+      default_home);
   // PORT: single_planner holds a reference to the RobotContext so a
   // compute-only plan can be staged into the command buffer for preview
   // (GhostStrategy publishes it on <node>/trajectory without executing it).
   planner_services_->set_robot_context(robot_context_.get());
   action_server_ = std::make_unique<TrajectoryActionServer>(
-    this, planner_services_.get(), robot_context_.get(), joint_names_);
+      this, planner_services_.get(), robot_context_.get(), joint_names_);
 
   // PORT: the collision-sphere viz reads the robot's live joint pose.
-  ros_service_manager_->set_pose_provider([this]() {return current_pose();});
-  planner_services_->set_current_pose_provider([this]() {return current_pose();});
+  ros_service_manager_->set_pose_provider([this]() { return current_pose(); });
+  planner_services_->set_current_pose_provider(
+      [this]() { return current_pose(); });
 
   // PORT: unified_planner_node.mpc_goal_callback - live reactive-goal updates.
   if (tf_buffer_ == nullptr) {
@@ -464,31 +535,35 @@ void UnifiedPlannerNode::setup()
   }
   // PORT: unified_planner_node._publish_tool_pose_callback (1 Hz, TF-driven).
   tool_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
-    std::string(get_name()) + "/current_tool_pose", 10);
-  tool_pose_timer_ = create_wall_timer(
-    std::chrono::seconds(1), [this]() {publish_tool_pose();});
+      std::string(get_name()) + "/current_tool_pose", 10);
+  tool_pose_timer_ = create_wall_timer(std::chrono::seconds(1),
+                                       [this]() { publish_tool_pose(); });
   mpc_goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
-    std::string(get_name()) + "/mpc_goal", 10,
-    [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
-      handle_mpc_goal(*msg);
-    });
+      std::string(get_name()) + "/mpc_goal", 10,
+      [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+        handle_mpc_goal(*msg);
+      });
 
   // PORT: the node's startup default warmup. The Python server warms both up in
   // __init__, so the recorded /warmup_ik and /warmup_fk replies are
   // "... already ready"; reproduce that here.
   if (get_parameter("warmup_ik").as_bool()) {
     try {
-      RCLCPP_INFO(get_logger(), "%s",
-        ik_services_->warmup(get_parameter("warmup_ik_batch_size").as_int()).c_str());
-    } catch (const std::exception & e) {
+      RCLCPP_INFO(
+          get_logger(), "%s",
+          ik_services_->warmup(get_parameter("warmup_ik_batch_size").as_int())
+              .c_str());
+    } catch (const std::exception &e) {
       RCLCPP_WARN(get_logger(), "IK startup warmup failed: %s", e.what());
     }
   }
   if (get_parameter("warmup_fk").as_bool()) {
     try {
-      RCLCPP_INFO(get_logger(), "%s",
-        fk_services_->warmup(get_parameter("warmup_fk_batch_size").as_int()).c_str());
-    } catch (const std::exception & e) {
+      RCLCPP_INFO(
+          get_logger(), "%s",
+          fk_services_->warmup(get_parameter("warmup_fk_batch_size").as_int())
+              .c_str());
+    } catch (const std::exception &e) {
       RCLCPP_WARN(get_logger(), "FK startup warmup failed: %s", e.what());
     }
   }
@@ -501,27 +576,27 @@ void UnifiedPlannerNode::setup()
 // mapper_grid_center and must reallocate the Mapper's grid to the new box.
 // Needs a positive image size (0 == auto never reaches here: the startup path
 // resolves it first).
-void UnifiedPlannerNode::configure_mapper_from_params()
-{
+void UnifiedPlannerNode::configure_mapper_from_params() {
   // PORT: ObstacleManager._build_mapper / _load_perception_params. Built fresh
   // from the node's mapper_* parameters every time, so set_workspace (which
-  // rewrites mapper_extent_xyz / mapper_grid_center) reallocates the grid to the
-  // new box. The TSDF voxel size is `mapper_voxel_size`; the ESDF size is
+  // rewrites mapper_extent_xyz / mapper_grid_center) reallocates the grid to
+  // the new box. The TSDF voxel size is `mapper_voxel_size`; the ESDF size is
   // `voxel_size`.
   std::ostringstream mapper_cfg;
-  mapper_cfg << "{\"voxel_size\":" << get_parameter("mapper_voxel_size").as_double()
-             << ",\"depth_min\":" << get_parameter("mapper_depth_min").as_double()
-             << ",\"depth_max\":" << get_parameter("mapper_depth_max").as_double()
-             << ",\"truncation_distance\":"
-             << get_parameter("mapper_truncation_distance").as_double()
-             << ",\"minimum_tsdf_weight\":"
-             << get_parameter("mapper_minimum_tsdf_weight").as_double()
-             << ",\"block_size\":" << get_parameter("mapper_block_size").as_int()
-             << ",\"seeding_method\":\""
-             << get_parameter("mapper_seeding_method").as_string() << "\""
-             << ",\"max_support_pixels_per_block_camera\":"
-             << get_parameter("mapper_max_support_pixels_per_block_camera").as_int()
-             << ",\"grid_center\":[";
+  mapper_cfg
+      << "{\"voxel_size\":" << get_parameter("mapper_voxel_size").as_double()
+      << ",\"depth_min\":" << get_parameter("mapper_depth_min").as_double()
+      << ",\"depth_max\":" << get_parameter("mapper_depth_max").as_double()
+      << ",\"truncation_distance\":"
+      << get_parameter("mapper_truncation_distance").as_double()
+      << ",\"minimum_tsdf_weight\":"
+      << get_parameter("mapper_minimum_tsdf_weight").as_double()
+      << ",\"block_size\":" << get_parameter("mapper_block_size").as_int()
+      << ",\"seeding_method\":\""
+      << get_parameter("mapper_seeding_method").as_string() << "\""
+      << ",\"max_support_pixels_per_block_camera\":"
+      << get_parameter("mapper_max_support_pixels_per_block_camera").as_int()
+      << ",\"grid_center\":[";
   const auto center = get_parameter("mapper_grid_center").as_double_array();
   for (std::size_t i = 0; i < center.size(); ++i) {
     mapper_cfg << (i ? "," : "") << center[i];
@@ -531,7 +606,8 @@ void UnifiedPlannerNode::configure_mapper_from_params()
   for (std::size_t i = 0; i < extent.size(); ++i) {
     mapper_cfg << (i ? "," : "") << extent[i];
   }
-  mapper_cfg << "],\"esdf_voxel_size\":" << get_parameter("voxel_size").as_double()
+  mapper_cfg << "],\"esdf_voxel_size\":"
+             << get_parameter("voxel_size").as_double()
              << ",\"image_width\":" << mapper_image_w_
              << ",\"image_height\":" << mapper_image_h_
              << ",\"decay_factor\":" << mapper_decay_ << "}";
@@ -548,46 +624,43 @@ void UnifiedPlannerNode::configure_mapper_from_params()
   }
 }
 
-// Frame the depth is integrated in: always the configured robot base. Exposed so
-// the mapper_workspace marker and the workspace service report the same frame the
-// voxels are in (see integration_frame() in camera_cfg.cpp).
-std::string UnifiedPlannerNode::integration_frame()
-{
-  return base_link_;
-}
+// Frame the depth is integrated in: always the configured robot base. Exposed
+// so the mapper_workspace marker and the workspace service report the same
+// frame the voxels are in (see integration_frame() in camera_cfg.cpp).
+std::string UnifiedPlannerNode::integration_frame() { return base_link_; }
 
 // PORT: unified_planner_node.mpc_goal_callback
-void UnifiedPlannerNode::handle_mpc_goal(const geometry_msgs::msg::PoseStamped & msg)
-{
-  TrajectoryPlanner * planner = planner_services_ ? planner_services_->manager().current() :
-    nullptr;
-  auto * reactive = dynamic_cast<ReactiveController *>(planner);
+void UnifiedPlannerNode::handle_mpc_goal(
+    const geometry_msgs::msg::PoseStamped &msg) {
+  TrajectoryPlanner *planner =
+      planner_services_ ? planner_services_->manager().current() : nullptr;
+  auto *reactive = dynamic_cast<ReactiveController *>(planner);
   if (reactive == nullptr) {
     RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000,
-      "Received reactive goal but current planner is %s - goal ignored",
-      planner != nullptr ? planner->get_planner_name().c_str() : "none");
+        get_logger(), *get_clock(), 5000,
+        "Received reactive goal but current planner is %s - goal ignored",
+        planner != nullptr ? planner->get_planner_name().c_str() : "none");
     return;
   }
   geometry_msgs::msg::Pose pose;
   try {
-    pose = resolve_to_base(msg.pose, msg.header.frame_id, base_link_, tf_buffer_.get());
-  } catch (const std::exception & e) {
-    RCLCPP_WARN_THROTTLE(
-      get_logger(), *get_clock(), 5000, "Reactive goal dropped (%s)", e.what());
+    pose = resolve_to_base(msg.pose, msg.header.frame_id, base_link_,
+                           tf_buffer_.get());
+  } catch (const std::exception &e) {
+    RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 5000,
+                         "Reactive goal dropped (%s)", e.what());
     return;
   }
-  reactive->set_live_goal(
-    {pose.position.x, pose.position.y, pose.position.z, pose.orientation.w,
-      pose.orientation.x, pose.orientation.y, pose.orientation.z});
-  RCLCPP_DEBUG(
-    get_logger(), "Reactive goal updated from topic: [%.3f, %.3f, %.3f]",
-    pose.position.x, pose.position.y, pose.position.z);
+  reactive->set_live_goal({pose.position.x, pose.position.y, pose.position.z,
+                           pose.orientation.w, pose.orientation.x,
+                           pose.orientation.y, pose.orientation.z});
+  RCLCPP_DEBUG(get_logger(),
+               "Reactive goal updated from topic: [%.3f, %.3f, %.3f]",
+               pose.position.x, pose.position.y, pose.position.z);
 }
 
 // PORT: unified_planner_node._publish_tool_pose_callback
-void UnifiedPlannerNode::publish_tool_pose()
-{
+void UnifiedPlannerNode::publish_tool_pose() {
   if (tool_pose_pub_ == nullptr || tf_buffer_ == nullptr) {
     return;
   }
@@ -597,8 +670,8 @@ void UnifiedPlannerNode::publish_tool_pose()
       return;
     }
     // The tool frame is the same frame /ik_batch solves for.
-    const auto tf = tf_buffer_->lookupTransform(
-      base_link_, frames[0], tf2::TimePointZero);
+    const auto tf =
+        tf_buffer_->lookupTransform(base_link_, frames[0], tf2::TimePointZero);
     geometry_msgs::msg::PoseStamped msg;
     msg.header.stamp = get_clock()->now();
     msg.header.frame_id = base_link_;
@@ -611,8 +684,7 @@ void UnifiedPlannerNode::publish_tool_pose()
 }
 
 // PORT: unified_planner_node.py emulator live pose (RobotContext at M3/M5)
-std::vector<float> UnifiedPlannerNode::current_pose() const
-{
+std::vector<float> UnifiedPlannerNode::current_pose() const {
   // PORT: the emulator's live joint pose (RobotContext owns it once built).
   if (robot_context_ != nullptr) {
     const auto pose = robot_context_->get_joint_pose();
@@ -623,4 +695,30 @@ std::vector<float> UnifiedPlannerNode::current_pose() const
   return std::vector<float>(joint_names_.size(), 0.0f);
 }
 
-}  // namespace curobo_core
+// PORT: unified_planner_node._on_gpu_poisoned - a lane hit a fatal CUDA error.
+// The context is unusable: fail loudly, then exit rather than keep serving.
+void UnifiedPlannerNode::on_gpu_poisoned(curobo_runtime::GpuLane *lane,
+                                         std::exception_ptr error) {
+  std::string what = "unknown error";
+  try {
+    std::rethrow_exception(error);
+  } catch (const std::exception &e) {
+    what = e.what();
+  } catch (...) {
+  }
+  RCLCPP_FATAL(get_logger(), "GPU lane '%s' poisoned: %s",
+               lane != nullptr ? lane->name().c_str() : "?", what.c_str());
+  const bool exit_flag = !has_parameter("exit_on_gpu_fault") ||
+                         get_parameter("exit_on_gpu_fault").as_bool();
+  if (!exit_flag) {
+    return;
+  }
+  RCLCPP_FATAL(
+      get_logger(),
+      "exit_on_gpu_fault=true: stopping instead of serving a corrupt context");
+  rclcpp::shutdown();
+  std::fflush(nullptr);
+  std::_Exit(EXIT_FAILURE);
+}
+
+} // namespace curobo_core

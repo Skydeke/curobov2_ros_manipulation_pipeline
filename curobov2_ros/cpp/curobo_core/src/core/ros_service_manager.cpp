@@ -510,14 +510,36 @@ void RosServiceManager::publish_mapper_workspace()
 }
 
 // PORT: ros_service_manager._publish_sparse_voxel_grid -> obstacle_manager.
+// PORT: ros_service_manager._publish_sparse_voxel_grid - lane_viz.submit_if_idle
+// (or a non-blocking gpu_lock) and SKIP this cycle when it is busy, instead of
+// blocking the 7 Hz timer on an in-flight capture.
+bool RosServiceManager::submit_viz_job(std::function<void()> job)
+{
+  if (lane_viz_ != nullptr) {
+    curobo_runtime::SubmitOptions opts;
+    opts.prio = curobo_runtime::PRIO_BULK;   // rate-limited viz work
+    return lane_viz_->submit_if_idle(opts, std::move(job)).has_value();
+  }
+  auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+  job();
+  return true;
+}
+
 void RosServiceManager::publish_sparse_voxel_grid()
 {
   if (sparse_voxel_pub_ == nullptr) {
     return;
   }
-  // PORT: a mapper query is GPU work -> shared barrier (so a concurrent CUDA
-  // graph capture can drain it).
-  auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+  if (!submit_viz_job([this]() {publish_sparse_voxel_grid_job();})) {
+    RCLCPP_DEBUG_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 5000,
+      "viz lane busy - skipping this voxel grid publish cycle");
+  }
+}
+
+// PORT: the GPU body of _publish_sparse_voxel_grid (runs on the viz lane).
+void RosServiceManager::publish_sparse_voxel_grid_job()
+{
   try {
     const auto grid = obstacle_manager_->get_voxel_grid();
     if (grid.shape.size() != 3) {
@@ -617,7 +639,18 @@ void RosServiceManager::publish_collision_spheres()
   {
     return;
   }
-  auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
+  // PORT: ros_service_manager.publish_collision_spheres - lane_viz.submit_if_idle
+  // (drop this cycle when busy), not a blocking shared hold on the timer.
+  if (!submit_viz_job([this]() {publish_collision_spheres_job();})) {
+    RCLCPP_DEBUG_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 5000,
+      "viz lane busy - skipping this collision-sphere publish cycle");
+  }
+}
+
+// PORT: the GPU body of publish_collision_spheres (runs on the viz lane).
+void RosServiceManager::publish_collision_spheres_job()
+{
   try {
     const std::vector<float> q = pose_provider_();
     if (q.empty()) {

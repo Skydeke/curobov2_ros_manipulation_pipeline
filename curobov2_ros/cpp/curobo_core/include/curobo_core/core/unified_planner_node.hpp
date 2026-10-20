@@ -8,15 +8,16 @@
 #ifndef CUROBO_CORE__CORE__UNIFIED_PLANNER_NODE_HPP_
 #define CUROBO_CORE__CORE__UNIFIED_PLANNER_NODE_HPP_
 
+#include <exception>
 #include <memory>
 #include <string>
 #include <vector>
 
-#include <memory>
-
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <tf2_ros/buffer.h>
+
+#include "curobo_runtime/gpu_lanes.hpp"
 
 #include "curobo_core/core/attachment_services.hpp"
 #include "curobo_core/core/camera_system_manager.hpp"
@@ -88,6 +89,23 @@ private:
   curobo_runtime::RobotHandle handle_ = -1;
   std::string base_link_;
   std::vector<std::string> joint_names_;
+
+  // PORT: unified_planner_node.__init__ - the five GPU lanes
+  // (reactive/plan/kin/perception/viz). Each owns one serialising worker thread;
+  // GPU work is submitted to a lane instead of running inline, which restores the
+  // Python's per-lane mutual exclusion, priority ordering and drop-if-busy
+  // policy. They are bound to Runtime::barrier() - the SAME barrier the few
+  // non-lane sites take - so a lane's shared hold and an inline exclusive hold
+  // still exclude each other (a scheduler-local barrier would be a second,
+  // independent lock). Created before the cameras/solvers so they exist when the
+  // first callback fires.
+  std::unique_ptr<curobo_runtime::GpuLane> lane_reactive_;
+  std::unique_ptr<curobo_runtime::GpuLane> lane_plan_;
+  std::unique_ptr<curobo_runtime::GpuLane> lane_kin_;
+  std::unique_ptr<curobo_runtime::GpuLane> lane_perception_;
+  std::unique_ptr<curobo_runtime::GpuLane> lane_viz_;
+  // PORT: unified_planner_node._on_gpu_poisoned - a lane hit a fatal CUDA error.
+  void on_gpu_poisoned(curobo_runtime::GpuLane * lane, std::exception_ptr error);
 
   std::unique_ptr<ObstacleManager> obstacle_manager_;
   std::unique_ptr<FKServices> fk_services_;

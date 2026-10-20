@@ -15,6 +15,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include "curobo_runtime/gpu_lanes.hpp"
 #include "curobov2_ros_interfaces/msg/scene_object.hpp"
 #include "curobov2_ros_interfaces/msg/sparse_voxel_grid.hpp"
 #include "visualization_msgs/msg/marker.hpp"
@@ -46,9 +47,16 @@ public:
 
   // PORT: ros_service_manager.init_services (M2 subset)
   void init_services();
+  // PORT: ros_service_manager.init_services - node.lane_viz. The GPU-backed viz
+  // timers (sparse voxel grid, collision spheres) run on this lane and SKIP the
+  // cycle when it is busy, instead of blocking the timer on the GPU barrier.
+  void set_viz_lane(curobo_runtime::GpuLane * lane) {lane_viz_ = lane;}
   // PORT: ros_service_manager.publish_mapper_workspace + _publish_sparse_voxel_grid
   void publish_mapper_workspace();
   void publish_sparse_voxel_grid();
+  // The actual GPU bodies, run on the viz lane (or inline with no lane).
+  void publish_sparse_voxel_grid_job();
+  void publish_collision_spheres_job();
   // PORT: ros_service_manager.publish_scene_obstacles
   void publish_scene_obstacles();
   // PORT: ros_service_manager.publish_collision_spheres (timer; pose provider
@@ -73,6 +81,11 @@ public:
     const curobov2_ros_interfaces::msg::SceneObject & object);
 
 private:
+  // PORT: node.lane_viz (null when the node was built without lanes).
+  curobo_runtime::GpuLane * lane_viz_ = nullptr;
+  // Run `job` on the viz lane, dropping the cycle when the lane is busy; falls
+  // back to an inline shared hold when there is no lane.
+  bool submit_viz_job(std::function<void()> job);
   void handle_add_object(
     const std::shared_ptr<curobov2_ros_interfaces::srv::AddObject::Request> request,
     std::shared_ptr<curobov2_ros_interfaces::srv::AddObject::Response> response);

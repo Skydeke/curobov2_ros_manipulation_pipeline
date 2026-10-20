@@ -13,6 +13,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
+#include "curobo_runtime/gpu_lanes.hpp"
 #include "curobov2_ros_interfaces/srv/get_planners.hpp"
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
 #include "curobov2_ros_interfaces/srv/trajectory_generation.hpp"
@@ -35,6 +36,16 @@ public:
     ObstacleManager * obstacle_manager = nullptr);
 
   PlannerManager & manager() {return manager_;}
+
+  // PORT: unified_planner_node.lane_plan - the plan body runs on this
+  // lane (PRIO_PLAN) so it is serialised and ordered, like the Python
+  // `lane_plan.call(_plan_trajectory_goal_impl, ...)`.
+  void set_plan_lane(curobo_runtime::GpuLane * lane) {lane_plan_ = lane;}
+
+  // PORT: node.lane_reactive - the reactive planners run their setup and
+  // step loop on it.
+  void set_reactive_lane(curobo_runtime::GpuLane * lane)
+  {manager_.set_reactive_lane(lane);}
 
   // PORT: joint_order.resolve_start_pose's `current` argument - the robot's
   // current joint pose, padded into a partial/empty start request.
@@ -112,6 +123,7 @@ private:
   // race the solver's pose criteria / seed RNG / reset_shape and fail
   // intermittently. Recursive: the batch surface calls the single-problem path.
   std::recursive_mutex plan_lane_mutex_;
+  curobo_runtime::GpuLane * lane_plan_ = nullptr;
   std::function<std::vector<geometry_msgs::msg::Pose>(
     const std::vector<geometry_msgs::msg::Pose> &, const std::string &)> pose_resolver_;
   curobo_runtime::IBridge * bridge_;

@@ -12,8 +12,8 @@ namespace curobo_core
 
 LaserSystemManager::LaserSystemManager(
   rclcpp::Node * node, curobo_runtime::IBridge * bridge,
-  curobo_runtime::RobotHandle handle)
-: node_(node), bridge_(bridge), handle_(handle)
+  curobo_runtime::RobotHandle handle, curobo_runtime::GpuLane * lane)
+: node_(node), bridge_(bridge), handle_(handle), lane_(lane)
 {
   configure();
 }
@@ -53,7 +53,7 @@ void LaserSystemManager::configure()
   }
 
   laser_context_ = std::make_unique<LaserContext>(
-    node_, lidar_image_height_, lidar_image_width_, bridge_, handle_);
+    node_, lidar_image_height_, lidar_image_width_, bridge_, handle_, lane_);
 
   for (auto & [name, cfg] : cfgs_by_name) {
     if (lidar_image_height_ == 1) {
