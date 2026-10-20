@@ -34,6 +34,7 @@ public:
   void sync_lane() override;
   void set_global_flags(bool cuda_graph_reset, bool debug_cuda_graphs) override;
   std::vector<std::string> bound_lanes() const override;
+  void prepare_solve_mode(RobotHandle handle, const std::string & mode) override;
 
   // ---- M2 ----
   void robot_model_build(RobotHandle handle, const std::string & cfg_json) override;
@@ -72,6 +73,7 @@ public:
   void reset_seed(RobotHandle handle) override;
   void robot_model_rebuild_locks(RobotHandle handle, const std::string & lock_json) override;
   void configure_mapper(RobotHandle handle, const std::string & cfg_json) override;
+  void warmup_mapper(RobotHandle handle) override;
   bool esdf_refresh(RobotHandle handle) override;
   bool world_push(RobotHandle handle) override;
   VoxelGrid voxel_grid(RobotHandle handle) override;

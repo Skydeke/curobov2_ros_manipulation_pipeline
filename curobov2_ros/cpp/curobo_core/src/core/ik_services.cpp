@@ -7,6 +7,8 @@
 #include <cstdlib>
 #include <stdexcept>
 
+#include "curobo_runtime/runtime.hpp"
+
 namespace curobo_core
 {
 
@@ -90,9 +92,16 @@ std::string IKServices::warmup(int batch_size, int num_seeds)
     use_cuda_graph ? "True" : "False", num_seeds,
     self_collision_check ? "True" : "False", use_lm_seed ? "True" : "False",
     batch_size);
-  bridge_->ik_config(
-    handle_, batch_size, num_seeds, self_collision_check, use_lm_seed,
-    use_cuda_graph);
+  {
+    // PORT: ik_services._gpu_guard + config_wrapper_ik.set_ik_config - building
+    // the solver (Re)CAPTURES its CUDA graph, so it takes the exclusive
+    // gpu_lock. Unguarded it could capture while the plan/camera lane was
+    // capturing, invalidating one of them.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+    bridge_->ik_config(
+      handle_, batch_size, num_seeds, self_collision_check, use_lm_seed,
+      use_cuda_graph);
+  }
   // PORT: config_wrapper_ik build - the torch_sync CPU/GPU ordering bridge.
   if (node_ != nullptr && node_->has_parameter("torch_sync") &&
     node_->get_parameter("torch_sync").as_bool())
@@ -197,6 +206,10 @@ bool IKServices::solve(
     if (!ready_ || needs_rebuild(requested, resolve_num_seeds())) {
       warmup(requested, -1);
     }
+    // PORT: ik_services._on_lane - every solve ran on lane_kin inside
+    // barrier.shared(); the port called the bridge bare, so a solve could issue
+    // kernels while another thread captured a graph.
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().shared();
     outcome = bridge_->ik(handle_, poses_to_tensor(poses));
     // PORT: ik_services._solve_call - the torch_sync CPU/GPU ordering bridge.
     if (node_ != nullptr && node_->has_parameter("torch_sync") &&

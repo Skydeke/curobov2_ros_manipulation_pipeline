@@ -178,3 +178,38 @@ TEST(ObstacleManager, InlineMeshRequiresBothVertexAndTriangleData)
   EXPECT_FALSE(manager.add_object(mesh, message));
   EXPECT_EQ(message, "Inline MESH requires both vertices and triangles");
 }
+
+// A scene mutation must NOT mark the perception world as pushed. Analytic
+// pushes (e.g. the MoveIt side syncing a collision object) carry only the
+// primitives; the camera voxels are re-attached by the next ESDF refresh. If the
+// mutation closed the freshness gate, the next plan would collide against a
+// scene whose voxel layer is stale or absent and solve straight through it.
+TEST(ObstacleManager, SceneMutationStillRequiresPerceptionRefresh)
+{
+  curobo_runtime::FakeBridge bridge;
+  ObstacleManager manager(&bridge, 1);
+  std::string message;
+
+  // Simulate a prior successful ESDF rebuild + push (gate now closed).
+  ASSERT_TRUE(manager.refresh_esdf());
+  manager.mark_world_pushed();
+  EXPECT_FALSE(manager.should_refresh_world(true));
+
+  // An analytic mutation must reopen the gate for the ESDF refresh.
+  ASSERT_TRUE(manager.add_object(cube("cube", 0.5), message));
+  EXPECT_TRUE(manager.should_refresh_world(true));
+}
+
+// A failed world push (the solver never got the voxel layer) must not be treated
+// as fresh: the next plan has to retry.
+TEST(ObstacleManager, InvalidateWorldForcesTheNextRefresh)
+{
+  curobo_runtime::FakeBridge bridge;
+  ObstacleManager manager(&bridge, 1);
+  ASSERT_TRUE(manager.refresh_esdf());
+  manager.mark_world_pushed();
+  EXPECT_FALSE(manager.should_refresh_world(true));
+
+  manager.invalidate_world();
+  EXPECT_TRUE(manager.should_refresh_world(true));
+}

@@ -33,18 +33,16 @@ inline constexpr const char * PURPOSE_ALL = "all";
 // PORT: camera_cfg.masked_depth_topic
 std::string masked_depth_topic(const std::string & depth_topic);
 
-// Frame the depth is integrated in — the Mapper's TSDF/ESDF frame — as an
-// ORDERED list of candidates to try against TF:
-//   1. the `mapper_frame` parameter when set (explicit override), else
-//   2. `map`, then 3. `odom` (a fixed world frame, so the map sticks to the
-//      world while the robot drives), then 4. the robot base `base_link`.
-// The caller tries each in order and uses the first that TF resolves; a static
-// map is preferred over odom, which is preferred over the (moving) base.
+// Frame the depth is integrated in — the Mapper's TSDF/ESDF frame — as a list of
+// candidates to try against TF: ALWAYS the configured robot base (`base_link`).
+// `mapper_grid_center` is base-relative, so the voxels ride the robot; a world
+// frame (map/odom) would not match the solver's voxel collision cache, which is
+// built around base_link. Kept as a list so the caller's try-each-in-order loop
+// stays unchanged.
 std::vector<std::string> integration_frame_candidates(rclcpp::Node * node);
 
-// Single best-effort pick (mapper_frame, else base_link). For callers without a
-// TF buffer (marker/service metadata); prefer integration_frame_candidates()
-// where a TF lookup is available.
+// Single pick for callers without a TF buffer (marker/service metadata): the
+// configured robot base, same frame as integration_frame_candidates().
 std::string integration_frame(rclcpp::Node * node);
 
 // PORT: camera_cfg._parse_floats

@@ -732,6 +732,17 @@ void PyBridge::configure_mapper(RobotHandle handle, const std::string & cfg_json
   }
 }
 
+// Force the Mapper's Warp kernels to compile/load now (see IBridge doc).
+void PyBridge::warmup_mapper(RobotHandle handle)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    bridge_module().attr("warmup_mapper")(handle);
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("config", e.what());
+  }
+}
+
 // PORT: obstacle_manager.refresh_esdf
 bool PyBridge::esdf_refresh(RobotHandle handle)
 {
@@ -749,6 +760,18 @@ bool PyBridge::world_push(RobotHandle handle)
   py::gil_scoped_acquire gil;
   try {
     return bridge_module().attr("world_push")(handle).cast<bool>();
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("programming", e.what());
+  }
+}
+
+// Reset + re-capture the trajopt CUDA graphs when the solve mode changes
+// (pose<->cspace), so a stale graph is never replayed.
+void PyBridge::prepare_solve_mode(RobotHandle handle, const std::string & mode)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    bridge_module().attr("prepare_solve_mode")(handle, mode);
   } catch (const py::error_already_set & e) {
     throw BridgeError("programming", e.what());
   }

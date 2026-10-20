@@ -62,6 +62,18 @@ def set_global_flags(cuda_graph_reset: bool, debug_cuda_graphs: bool) -> None:
 
     runtime_mod.cuda_graph_reset = bool(cuda_graph_reset)
     runtime_mod.debug_cuda_graphs = bool(debug_cuda_graphs)
+    # `curobo/runtime.py` re-exports these with `from curobo._src.runtime import`,
+    # so it holds its OWN binding. Consumers that do `from curobo import runtime`
+    # (is_cuda_graph_reset_available, cuda_graph_util) read THAT copy - setting
+    # only `curobo._src.runtime` here left the flag effectively off and made
+    # reset_cuda_graph() raise. Update both bindings.
+    try:
+        import curobo.runtime as runtime_pkg
+
+        runtime_pkg.cuda_graph_reset = bool(cuda_graph_reset)
+        runtime_pkg.debug_cuda_graphs = bool(debug_cuda_graphs)
+    except Exception:
+        pass
     _GLOBAL_FLAGS["cuda_graph_reset"] = bool(cuda_graph_reset)
     _GLOBAL_FLAGS["debug_cuda_graphs"] = bool(debug_cuda_graphs)
 
@@ -775,9 +787,19 @@ def scene_set(handle: int, objects_json: str, clear_first: bool):
 
     entry = _REGISTRY[handle]
     specs = json.loads(objects_json)
-    scene = Scene() if clear_first else entry.get("scene")
+    previous = entry.get("scene")
+    scene = Scene() if clear_first else previous
     if scene is None:
         scene = Scene()
+    # The perception voxel layer is NOT an analytic object. Rebuilding the
+    # primitive scene for a set_objects/clear must not drop the camera obstacles
+    # the last ESDF refresh installed on the previous scene: an empty
+    # `set_objects` (e.g. the MoveIt side's syncPlanningScene) would otherwise
+    # silently blind the solver to every camera-observed voxel.
+    if clear_first and previous is not None:
+        carried = getattr(previous, "voxel", None)
+        if carried:
+            scene.voxel = carried
     for spec in specs:
         primitive = _to_scene(spec)
         attr = {0: "cuboid", 1: "sphere", 2: "capsule", 3: "cylinder", 4: "mesh"}[
@@ -1117,6 +1139,159 @@ def detach_object(handle: int) -> str:
 # M3: planning
 # ---------------------------------------------------------------------------
 
+def _warmup_pose(planner, iterations: int = 1, joint_delta: float = 0.2) -> None:
+    """Record/refresh the POSE (``plan_pose``) CUDA graphs.
+
+    The pose counterpart of :func:`_warmup_cspace`; mirrors
+    :meth:`MotionPlanner.warmup`'s single-goalset branch.
+    """
+    current = planner.default_joint_state.clone().unsqueeze(0)
+    for _ in range(iterations):
+        goal = current.clone()
+        goal.position[..., 0] = goal.position[..., 0] + joint_delta
+        goal_tool_poses = planner.compute_kinematics(goal).tool_poses.as_goal()
+        planner.plan_pose(goal_tool_poses, current, max_attempts=1)
+        planner.reset_seed()
+
+
+def _reset_scene_cuda_graphs(planner, entry) -> None:
+    """Reset every CUDA graph that captured the shared scene collision buffers.
+
+    ``world_push`` rewrites those buffers (``scene_collision_checker
+    .load_collision_model``), and a CUDA graph baked against the old buffers
+    faults with "CUDA error: an illegal memory access" when it is replayed.
+    cuRobo's ``MotionPlanner`` keeps THREE graphs over the one shared
+    ``scene_collision_checker`` - ``ik_solver`` (pose plans only),
+    ``trajopt_solver`` and the PRM ``graph_planner`` - and its
+    ``SolverCore.reset_cuda_graph`` walks only the trajopt solver, so resetting
+    "the solver" silently leaves the other two stale. The auxiliary solvers the
+    node owns (IK services, MPC) hold graphs over the same checker too.
+
+    Reset them all; the warmup that follows re-captures the ones this solve
+    mode needs. Must be called under the exclusive GPU barrier (capture is
+    process-global).
+    """
+    targets = [
+        ("planner.ik_solver", getattr(planner, "ik_solver", None)),
+        ("planner.trajopt_solver", getattr(planner, "trajopt_solver", None)),
+        ("planner.graph_planner", getattr(planner, "graph_planner", None)),
+        ("ik services solver", entry.get("ik")),
+        ("mpc_ik_solver", entry.get("mpc_ik_solver")),
+    ]
+    for name, obj in targets:
+        if obj is None or not callable(getattr(obj, "reset_cuda_graph", None)):
+            continue
+        try:
+            obj.reset_cuda_graph()
+            if name == "planner.graph_planner":
+                # cuRobo's PRMGraphPlanner.reset_cuda_graph() resets only
+                # ``auxiliary_rollout`` - but that rollout is built WITHOUT a CUDA
+                # graph; the one that HAS a graph (use_cuda_graph_for_rollout) is
+                # ``feasibility_rollout``. Walk every rollout so the graph the
+                # PRM seeding actually replays gets reset too.
+                try:
+                    rollouts = obj.get_all_rollout_instances()
+                except Exception:
+                    rollouts = []
+                for rollout in rollouts or []:
+                    reset = getattr(rollout, "reset_cuda_graph", None)
+                    if callable(reset):
+                        reset()
+                # ...and its search tree is over the previous world.
+                for extra in ("reset_buffer", "reset_seed"):
+                    fn = getattr(obj, extra, None)
+                    if callable(fn):
+                        fn()
+        except Exception as exc:
+            print(
+                f"[curobo_bridge] reset {name} CUDA graph failed ({exc!r}); its "
+                f"stale graph may still be replayed", flush=True)
+
+
+def prepare_solve_mode(handle: int, mode: str) -> None:
+    """Make the trajopt solver's CUDA graphs match `mode` ("pose"/"cspace").
+
+    cuRobo captures ONE set of optimizer/rollout CUDA graphs on the first solve
+    and replays them blindly afterwards. A pose<->cspace switch changes the goal
+    buffer structure (link poses vs an explicit joint goal) under those graphs'
+    feet; replaying the stale graph reads freed/rewritten memory and the CUDA
+    context dies with "an illegal memory access" - which is exactly the
+    ``plan_cspace`` crash this port hit. cuRobo resets the graphs only from
+    ``SolverCore.reset_shape`` (never triggered by the plan path) and that reset
+    is gated on the ``cuda_graph_reset`` runtime flag.
+
+    So: on a mode change, reset the graphs and re-capture them. The caller MUST
+    hold the exclusive GPU barrier (the C++ plan path does), because capture is
+    process-global and a concurrent camera/ESDF kernel invalidates it.
+    """
+    entry = _REGISTRY[handle]
+    if entry.get("_solve_mode") == mode:
+        return
+    planner = entry.get("motion_planner")
+    if planner is None:
+        return
+
+    _reset_scene_cuda_graphs(planner, entry)
+    # Record the flag only once the graphs below were attempted, so a failure
+    # keeps retrying on the next request instead of locking in a bad state.
+    try:
+        if mode == "cspace":
+            _warmup_cspace(planner, iterations=1)
+        else:
+            _warmup_pose(planner, iterations=1)
+        # The PRM graph planner seeds the LATER attempts of both solve modes, so
+        # exercise it explicitly here: its graph (``feasibility_rollout``) must be
+        # re-captured under this exclusive barrier, not lazily inside the next
+        # plan where the capture would race the camera/ESDF lane. The per-mode
+        # warmups above only reach it when their first attempt happens to fail.
+        graph_planner = getattr(planner, "graph_planner", None)
+        if graph_planner is not None and callable(getattr(graph_planner, "warmup", None)):
+            try:
+                # Batch it exactly like the real seeding call does:
+                # `_get_graph_seed_trajectories` runs find_path over the trajopt
+                # seeds, and a CUDA graph has FIXED shapes - warming with any
+                # other batch would make the plan re-capture (or mis-copy) it.
+                solver = getattr(planner, "trajopt_solver", None)
+                seeds = int(getattr(getattr(solver, "config", None), "num_seeds", 4) or 4)
+                graph_planner.warmup(num_warmup_iterations=1, max_batch_size=seeds)
+            except Exception as exc:
+                # Advisory: must not fail the whole mode switch.
+                print(
+                    f"[curobo_bridge] graph-planner re-warmup failed ({exc!r}); its "
+                    f"graph is captured on first use instead", flush=True)
+        planner.reset_seed()
+    except Exception as exc:
+        print(
+            f"[curobo_bridge] prepare_solve_mode: {mode} graph capture failed "
+            f"({exc!r})", flush=True)
+        return
+    entry["_solve_mode"] = mode
+
+
+def _warmup_cspace(planner, iterations: int = 3, joint_delta: float = 0.2) -> None:
+    """Record the joint-space (``plan_cspace``) CUDA graphs at build time.
+
+    Mirrors :meth:`MotionPlanner.warmup`'s pose loop, but exercises ``plan_cspace``
+    (and, via ``enable_graph_attempt``, the graph-planner seed path) so every
+    graph the joint-space planner replays is captured while the caller holds the
+    exclusive GPU barrier. Without this the first joint-space request captures
+    them mid-plan next to the camera/ESDF lane, which can fault the CUDA context.
+
+    The start/goal shapes are the ones real requests use (``max_batch_size`` x
+    ``num_trajopt_seeds``), so later requests only replay, never re-capture.
+    """
+    current = planner.default_joint_state.clone().unsqueeze(0)
+    for _ in range(iterations):
+        goal = current.clone()
+        goal.position[..., 0] = goal.position[..., 0] + joint_delta
+        try:
+            planner.plan_cspace(goal, current, max_attempts=2, enable_graph_attempt=1)
+        except TypeError:
+            # Older/alternate signature without the graph-seed argument.
+            planner.plan_cspace(goal, current, max_attempts=1)
+        planner.reset_seed()
+
+
 def motion_planner_build(handle: int, cfg_json: str) -> None:
     """Build the shared MotionPlanner (PORT: ConfigWrapperMotion.set_motion_gen_config)."""
     import json
@@ -1139,6 +1314,14 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
     # Build against an EMPTY scene (PORT comment in the Python source): the live
     # world is pushed right after via scene_set/update_world.
     scene = Scene()
+    # ...and KEEP it as the entry's live scene. `scene_set` (the only other place
+    # that assigns entry["scene"]) runs on the first analytic object mutation, so
+    # with no analytic obstacles - the common case, e.g. MoveIt syncing an empty
+    # world while the camera sees a wall - the entry had NO scene at all. Then
+    # esdf_refresh had nowhere to attach the voxel layer and world_push hit
+    # `if scene is None: return False`: the perception world was silently never
+    # pushed and the planner collided against nothing.
+    entry["scene"] = scene
     kwargs = {
         "robot": entry["robot_cfg"],
         "scene_model": scene,
@@ -1196,6 +1379,20 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
             "blox=0): solvers see analytic primitives ONLY, no camera obstacles",
             flush=True)
     planner.warmup()
+    # `MotionPlanner.warmup()` only records the POSE (plan_pose) graphs. The
+    # joint-space path (plan_cspace -> solve_cspace) records its OWN CUDA graphs
+    # lazily on the first joint-space request - i.e. during planning. Capture is
+    # process-global, so a concurrent camera/ESDF kernel invalidates it and the
+    # next replay faults ("CUDA error: an illegal memory access") and bricks the
+    # context for every later request. The node calls motion_planner_build (and
+    # rebuild_planner) under the exclusive GPU barrier, so record the cspace
+    # graphs HERE, while nothing else is on the GPU.
+    try:
+        _warmup_cspace(planner)
+    except Exception as exc:  # a warmup must never block the build
+        print(
+            f"[curobo_bridge] cspace CUDA-graph warmup failed ({exc!r}); the first "
+            f"joint-space plan will capture its graphs unchecked", flush=True)
     entry["motion_planner"] = planner
     # PORT: config_wrapper_motion.set_motion_gen_config tail - a freshly built
     # solver arrives with every obstacle enabled, so an already-attached payload
@@ -1827,8 +2024,14 @@ def esdf_refresh(handle: int) -> bool:
     if not _inspect_esdf(entry, voxel_grid_result):
         return False
     scene = entry.get("scene")
-    if scene is not None:
-        scene.voxel = [voxel_grid_result]
+    if scene is None:
+        # Defensive: never drop a successfully computed ESDF for lack of a scene
+        # (see motion_planner_build - the entry owns a live scene from build on).
+        from curobo.scene import Scene
+
+        scene = Scene()
+        entry["scene"] = scene
+    scene.voxel = [voxel_grid_result]
     entry["scene_collision"] = None
     return True
 
@@ -2035,6 +2238,48 @@ def depth_integrate(handle: int, depth, intrinsics, camera_pose) -> None:
     camera_pose_t = Pose.from_list(list(camera_pose), device_cfg=dcfg)
     mapper.integrate(CameraObservation(
         depth_image=depth_t, rgb_image=rgb, intrinsics=intrinsics_t, pose=camera_pose_t))
+
+
+def warmup_mapper(handle: int, iterations: int = 2) -> None:
+    """Force the Mapper's Warp kernels to compile AND LOAD now.
+
+    Warp JIT-compiles one module per kernel specialization and loads it lazily
+    with ``cuModuleLoadData``. A load that happens while the plan lane is
+    capturing/replaying a CUDA graph fails with
+    ``Warp CUDA error 716: misaligned address (wp_cuda_load_module)`` and poisons
+    the CUDA context - the ``recycle_empty_blocks_kernel_bsN_<hash>`` failure
+    seen during depth integration. The recycle/decay kernels only load once
+    enough frames need block recycling, i.e. long after startup and right in the
+    middle of planning.
+
+    Warm them here by integrating a synthetic frame (which runs the decay path),
+    with the caller holding the exclusive GPU barrier so nothing else is on the
+    GPU, then clear the synthetic data back out.
+    """
+    import numpy as np
+
+    entry = _REGISTRY[handle]
+    cfg = entry.get("mapper_cfg") or dict(MAPPER_DEFAULTS)
+    h = int(cfg.get("image_height", 600))
+    w = int(cfg.get("image_width", 800))
+    depth = np.full((h, w), 0.8, dtype="float32")
+    intr = [[float(w), 0.0, w / 2.0], [0.0, float(h), h / 2.0], [0.0, 0.0, 1.0]]
+    cam = [0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+    for _ in range(int(iterations)):
+        try:
+            depth_integrate(handle, depth, intr, cam)
+        except Exception as exc:
+            # Keep the failure loud but do not block startup: the mapper will
+            # simply load the module on its first real frame.
+            print(
+                f"[curobo_bridge] mapper wakeup integrate failed ({exc!r}); the "
+                f"mapper's Warp modules will still load lazily", flush=True)
+            return
+    try:
+        clear_voxel_map(handle)
+        esdf_refresh(handle)
+    except Exception:
+        pass
 
 
 def lidar_integrate(handle, range_image, poses, valid_range, elevation_range) -> None:
@@ -3009,6 +3254,26 @@ def _solver_bound_scene(scene, mode="cuboid"):
     return _collision_supported(scene, mode)
 
 
+_LAST_WORLD_PUSH_ERROR_T = 0.0
+
+
+def _log_world_push_failure(reason: str, interval_s: float = 5.0) -> None:
+    """Report a world-push failure, throttled.
+
+    The plan path's freshness gate keeps retrying while the push fails, so an
+    unthrottled message would fire on every plan. Always report the FIRST
+    failure, then at most once per `interval_s`.
+    """
+    global _LAST_WORLD_PUSH_ERROR_T
+    import time
+
+    now = time.monotonic()
+    if now - _LAST_WORLD_PUSH_ERROR_T < interval_s:
+        return
+    _LAST_WORLD_PUSH_ERROR_T = now
+    print(f"[curobo_bridge] world_push FAILED: {reason}", flush=True)
+
+
 def world_push(handle: int) -> bool:
     """Push the shared scene (incl. the perception voxel layer) into every
     initialized solver's collision model.
@@ -3036,8 +3301,34 @@ def world_push(handle: int) -> bool:
         try:
             mp.update_world(solver_scene)
             pushed = True
-        except Exception:
-            pass
+        except Exception as exc:
+            # NEVER swallow this. A failed update leaves the solver on its
+            # PREVIOUS world - possibly with no camera voxels at all - while the
+            # perception map keeps publishing the obstacles. Silently continuing
+            # is how a plan ends up going straight through the wall. Report it and
+            # let the caller refuse to plan (throttled: the caller retries every
+            # plan while the failure persists).
+            _log_world_push_failure(
+                f"motion planner update_world raised {exc!r}; the solver keeps "
+                f"its previous world and camera voxels may be missing")
+        if pushed:
+            # Best-effort verification that the voxel layer actually landed in the
+            # solver's collision model (attributes vary by cuRobo build; only act
+            # when we can positively see an empty voxel store). Accessors can
+            # RAISE (properties on the planner do), so never let a probe turn a
+            # successful push into a crash.
+            try:
+                has_voxel_in = bool(getattr(solver_scene, "voxel", None))
+                data = getattr(getattr(mp, "scene_collision_checker", None), "data", None)
+                if has_voxel_in and data is not None and \
+                        getattr(data, "voxels", None) is None:
+                    _log_world_push_failure(
+                        "the scene carried a voxel layer but the motion planner "
+                        "has no voxel cache - camera obstacles are NOT being "
+                        "collided against")
+                    pushed = False
+            except Exception:
+                pass
     ik = entry.get("ik")
     if ik is not None:
         try:
@@ -3068,4 +3359,12 @@ def world_push(handle: int) -> bool:
     # set now or the static copy collides with the attached spheres again.
     # (PORT: unified_planner_node.update_all_solvers_world tail.)
     _reapply_attached_disables(entry)
+    if pushed:
+        # The captured trajopt/rollout CUDA graphs bake in the collision-scene
+        # buffers that load_collision_model just rewrote. Replaying one against
+        # the new world faults ("CUDA error: an illegal memory access") - exactly
+        # the crash the perception refresh triggered on the plan right after it.
+        # Leave no mode recorded so the next plan re-captures its graphs under
+        # the exclusive GPU barrier (see prepare_solve_mode).
+        entry["_solve_mode"] = None
     return pushed

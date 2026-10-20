@@ -49,6 +49,11 @@ public:
   // robot base); reported by get/set_workspace so the panel knows the box frame.
   void set_integration_frame_provider(std::function<std::string()> cb)
   {integration_frame_provider_ = std::move(cb);}
+  // Called when a rebuild's world push FAILED: the obstacle manager must treat
+  // the solvers as stale so the next plan rebuilds and re-pushes the perception
+  // (voxel) world instead of planning against an empty one.
+  void set_world_invalidate(std::function<void()> cb)
+  {world_invalidate_ = std::move(cb);}
 
   // Whether a Mapper actually exists (a camera/laser feeds it). Reported by
   // get/set_workspace so a UI knows an edit changed collision geometry or only
@@ -81,6 +86,7 @@ private:
   std::function<void()> mapper_reconfigure_;
   std::function<void()> workspace_republish_;
   std::function<std::string()> integration_frame_provider_;
+  std::function<void()> world_invalidate_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::SetCollisionCache>::SharedPtr cache_srv_;
   rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr motion_gen_srv_;

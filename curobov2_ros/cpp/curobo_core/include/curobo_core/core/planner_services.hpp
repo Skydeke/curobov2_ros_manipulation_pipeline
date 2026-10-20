@@ -82,6 +82,14 @@ private:
   curobo_runtime::PlanRequest build_request(
     const curobov2_ros_interfaces::msg::TrajectoryGoal & goal) const;
 
+  // PORT: gpu_lanes.py:GpuLane._run_job's fatal path. `fill_result` catches the
+  // planner exception and returns it as a service result string, so a CUDA fatal
+  // error (illegal memory access / device-side assert) never reaches
+  // GpuLane::run_job's poison logic and the node keeps serving a context that can
+  // only return garbage. This detects the marker and, when `exit_on_gpu_fault` is
+  // set, stops the process instead of limping. Returns true when a fault was seen.
+  bool handle_gpu_fault(const std::string & context, const std::string & message);
+
   // Continuous-joint target normalisation. A joint whose reported position
   // range spans a full turn (>= 2*pi) is continuous; cuRobo plans in the
   // NUMERIC joint space and never wraps, so a joint-space target written as

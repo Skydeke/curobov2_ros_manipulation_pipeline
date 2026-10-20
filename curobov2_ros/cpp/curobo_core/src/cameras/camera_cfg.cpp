@@ -27,38 +27,28 @@ std::string masked_depth_topic(const std::string & depth_topic)
   return topic.substr(0, idx) + "/masked_depth";
 }
 
-// The frames the depth may be integrated in. Depth and the Mapper's grid box
-// must share ONE frame, and the grid is a fixed volume allocated once, so this
-// is a single pinned frame: an explicit `mapper_frame` (set by the node at
-// startup, see UnifiedPlannerNode::setup) else the robot base. NO dynamic
-// per-frame switching — that would project depth into a frame the fixed grid is
-// not in.
+// The frame the depth is integrated in: ALWAYS the configured robot base
+// (`base_link`). Depth and the Mapper's grid box must share ONE frame, and the
+// grid is a fixed volume allocated once, so this is pinned — and
+// `mapper_grid_center` is base-relative, so the voxels ride the robot. That is
+// deliberate: the solver's voxel collision cache is built around `base_link`, so
+// integrating in a world frame (map/odom) would leave the ESDF pushed into the
+// cache in a different frame from the one the cache is expressed in.
 std::vector<std::string> integration_frame_candidates(rclcpp::Node * node)
 {
   std::vector<std::string> frames;
   std::string frame;
-  if (node != nullptr && node->has_parameter("mapper_frame")) {
-    frame = node->get_parameter("mapper_frame").as_string();
-  }
-  if (frame.empty() && node != nullptr && node->has_parameter("base_link")) {
+  if (node != nullptr && node->has_parameter("base_link")) {
     frame = node->get_parameter("base_link").as_string();
   }
   frames.push_back(frame.empty() ? "base_0" : frame);
   return frames;
 }
 
-// Single best-effort pick for callers WITHOUT a TF buffer to test existence
-// (marker/service metadata): the explicit `mapper_frame`, else the robot base.
-// Callers with a TF lookup should use integration_frame_candidates() so `map`/
-// `odom` are preferred when they exist.
+// Single pick for callers WITHOUT a TF buffer (marker/service metadata): the
+// configured robot base, same frame as integration_frame_candidates().
 std::string integration_frame(rclcpp::Node * node)
 {
-  if (node != nullptr && node->has_parameter("mapper_frame")) {
-    const std::string frame = node->get_parameter("mapper_frame").as_string();
-    if (!frame.empty()) {
-      return frame;
-    }
-  }
   return (node != nullptr && node->has_parameter("base_link")) ?
          node->get_parameter("base_link").as_string() : "base_0";
 }

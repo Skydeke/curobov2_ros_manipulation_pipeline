@@ -49,7 +49,13 @@ void UnifiedPlannerNode::declare_parameters()
   declare_parameter<int>("collision_cache_cuboid", 32);
   declare_parameter<int>("collision_cache_mesh", 4);
   // PORT: the benchmark's planner envelope + the params it reads/writes.
-  declare_parameter<int>("max_attempts", 1);
+  declare_parameter<int>("max_attempts", 2);
+  // PORT: the Python planner read this from its per-call config with a 1
+  // fallback (joint_space_planner.py / single_planner.py:
+  // `config.get("enable_graph_attempt", 1)`). `_get_planner_config()` never
+  // populated the key, so 1 is the reference value. cuRobo consults the PRM
+  // graph planner on attempts where `current_attempt >= enable_graph_attempt`.
+  declare_parameter<int>("enable_graph_attempt", 1);
   declare_parameter<bool>("reset_seed_per_plan", false);
   declare_parameter<bool>("load_dynamics", false);
   declare_parameter<double>("robot_payload_mass", 0.0);
@@ -87,14 +93,6 @@ void UnifiedPlannerNode::declare_parameters()
   declare_parameter<std::string>("urdf_path", "");
   declare_parameter<std::string>("asset_root_path", "");
   declare_parameter<std::string>("world_file", "");
-  // Frame the depth is INTEGRATED in (the Mapper's TSDF/ESDF frame). Empty =>
-  // the robot base (`base_link`) is used, which makes the map ride the robot:
-  // obstacle voxels stay put RELATIVE TO THE ROBOT and therefore appear to move
-  // through the map while it drives. Set it to a fixed world frame (e.g. `odom`)
-  // so the map sticks to the world. Note the arm planner's voxel collision cache
-  // is still built around `base_link`, so this is for a world-anchored map; the
-  // base pose offset is not applied to the solver's cache.
-  declare_parameter<std::string>("mapper_frame", "");
   declare_parameter<std::string>("cameras_config_file", "");
   declare_parameter<std::string>("planner_type", "classic");
   declare_parameter<bool>("use_mapper", true);
@@ -140,6 +138,18 @@ void UnifiedPlannerNode::setup()
   }
   bridge_ = &runtime.bridge();
   handle_ = runtime.handle();
+
+  // Enable cuRobo's CUDA-graph RESET (CUDA 12+). Without it
+  // SolverCore.reset_cuda_graph() - reached from reset_shape() when the solve
+  // structure changes, e.g. a pose<->cspace switch - raises and the stale graph
+  // is replayed instead of being re-captured, which faults the CUDA context.
+  try {
+    bridge_->set_global_flags(
+      true, get_parameter("enable_curobo_debug_mode").as_bool());
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(
+      get_logger(), "could not enable CUDA-graph reset: %s", e.what());
+  }
 
   // PORT: robot_description.load_robot_description. The descriptor (robots/
   // <robot>.yaml) selects the control strategy + its params, the base link and
@@ -274,6 +284,13 @@ void UnifiedPlannerNode::setup()
   // PORT: unified_planner_node._esdf_refresh_min_interval (open-loop throttle).
   obstacle_manager_->set_esdf_refresh_min_interval(
     get_parameter("esdf_refresh_min_interval").as_double());
+  // A rebuild that could not push its world must not be mistaken for a fresh
+  // perception world: invalidate so the next plan rebuilds + re-pushes.
+  config_services_->set_world_invalidate([this]() {
+      if (obstacle_manager_) {
+        obstacle_manager_->invalidate_world();
+      }
+    });
   ros_service_manager_ = std::make_unique<RosServiceManager>(
     this, bridge_, handle_, obstacle_manager_.get());
   ros_service_manager_->set_integration_frame_provider([this]() {return integration_frame();});
@@ -336,52 +353,13 @@ void UnifiedPlannerNode::setup()
     mapper_image_w_ = mapper_w;
     mapper_image_h_ = mapper_h;
     mapper_decay_ = decay;
-    // Pin the depth-integration frame ONCE and place the Mapper box in it. Depth
-    // and the grid volume must share ONE frame, and the grid is a fixed volume
-    // allocated once, so this cannot switch per frame: integrating in `map`
-    // while the box sits at the base-relative centre would put the box at the
-    // map origin, away from the robot, and no depth would land in it. Prefer a
-    // fixed world frame (map -> odom) so the map sticks to the world while
-    // driving; `mapper_grid_center` is base-relative, so translate it into the
-    // chosen frame. Falls back to the robot base when no world frame exists yet.
-    if (tf_buffer_ == nullptr) {
-      tf_buffer_ = std::make_shared<tf2_ros::Buffer>(get_clock());
-      tf_buffer_->setUsingDedicatedThread(true);
-    }
-    if (get_parameter("mapper_frame").as_string().empty()) {
-      const std::string frames = " " + tf_buffer_->allFramesAsString() + " ";
-      for (const char * candidate : {"map", "odom"}) {
-        // Frame-existence check without tf2's per-miss "Invalid frame ID" warn.
-        if (frames.find(std::string(" ") + candidate + " ") != std::string::npos) {
-          set_parameter(rclcpp::Parameter("mapper_frame", std::string(candidate)));
-          break;
-        }
-      }
-    }
-    const std::string integration = get_parameter("mapper_frame").as_string();
-    if (!integration.empty() && integration != base_link_) {
-      try {
-        const auto t = get_transform(*tf_buffer_, integration, base_link_);
-        auto center = get_parameter("mapper_grid_center").as_double_array();
-        if (center.size() == 3) {
-          center[0] += t.transform.translation.x;
-          center[1] += t.transform.translation.y;
-          center[2] += t.transform.translation.z;
-          set_parameter(rclcpp::Parameter("mapper_grid_center", center));
-        }
-        RCLCPP_INFO(
-          get_logger(), "Mapper integrates in '%s'; box centre placed there", integration.c_str());
-      } catch (const std::exception & e) {
-        RCLCPP_WARN(
-          get_logger(), "Could not place the mapper box in '%s': %s", integration.c_str(), e.what());
-      }
-    }
+    // Depth is integrated around the robot base: `mapper_grid_center` is
+    // base-relative, so the Mapper box always sits in front of the robot and the
+    // voxels ride with it. See integration_frame() in camera_cfg.cpp.
     configure_mapper_from_params();
     RCLCPP_INFO(
       get_logger(), "Mapper configured: %dx%d, decay_factor=%.6f (half_life=%.2fs, "
       "total_frame_rate=%.1fHz)", mapper_w, mapper_h, decay, half_life, total_rate);
-    // The integration frame may just have been pinned above; redraw the box in it
-    // so the marker frame matches the integrated voxels.
     if (ros_service_manager_) {
       ros_service_manager_->publish_mapper_workspace();
     }
@@ -557,17 +535,25 @@ void UnifiedPlannerNode::configure_mapper_from_params()
              << ",\"image_width\":" << mapper_image_w_
              << ",\"image_height\":" << mapper_image_h_
              << ",\"decay_factor\":" << mapper_decay_ << "}";
-  bridge_->configure_mapper(handle_, mapper_cfg.str());
+  // The mapper's Warp kernels load lazily; the recycle/decay kernels only load
+  // once frames need block recycling - long after startup and often while the
+  // plan lane is capturing a CUDA graph, where the load fails ("misaligned
+  // address" in wp_cuda_load_module) and poisons the CUDA context. Configure
+  // and warm the mapper under the exclusive GPU barrier so every module is
+  // compiled and resident before any planning.
+  {
+    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+    bridge_->configure_mapper(handle_, mapper_cfg.str());
+    bridge_->warmup_mapper(handle_);
+  }
 }
 
-// Frame the depth is integrated in. This is the frame pinned by setup() (a
-// fixed world frame when one exists, else the robot base); exposed so the
-// mapper_workspace marker and the workspace service report the same frame the
-// voxels are in.
+// Frame the depth is integrated in: always the configured robot base. Exposed so
+// the mapper_workspace marker and the workspace service report the same frame the
+// voxels are in (see integration_frame() in camera_cfg.cpp).
 std::string UnifiedPlannerNode::integration_frame()
 {
-  const std::string frame = get_parameter("mapper_frame").as_string();
-  return frame.empty() ? base_link_ : frame;
+  return base_link_;
 }
 
 // PORT: unified_planner_node.mpc_goal_callback

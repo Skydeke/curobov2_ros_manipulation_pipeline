@@ -338,6 +338,8 @@ void FakeBridge::robot_model_rebuild_locks(RobotHandle, const std::string & lock
 // (i+j+k) is even, so the occupied-index arithmetic is easy to assert.
 void FakeBridge::configure_mapper(RobotHandle, const std::string &) {}
 
+void FakeBridge::warmup_mapper(RobotHandle) {}
+
 bool FakeBridge::esdf_refresh(RobotHandle)
 {
   std::lock_guard<std::mutex> lk(mutex_);
@@ -371,6 +373,18 @@ VoxelGrid FakeBridge::voxel_grid(RobotHandle)
 bool FakeBridge::world_push(RobotHandle)
 {
   return true;
+}
+
+void FakeBridge::prepare_solve_mode(RobotHandle, const std::string & mode)
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  solve_mode_ = mode;
+}
+
+std::string FakeBridge::solve_mode() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return solve_mode_;
 }
 
 int FakeBridge::clear_voxel_map(RobotHandle)

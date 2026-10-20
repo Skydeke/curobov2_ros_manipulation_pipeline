@@ -29,8 +29,7 @@ DepthMapCameraStrategy::DepthMapCameraStrategy(
   bridge_(bridge), handle_(handle), lane_(lane),
   mapper_image_width_(mapper_image_width), mapper_image_height_(mapper_image_height)
 {
-  // Map is integrated in `mapper_frame` (a fixed world frame) when set, else the
-  // robot base — see integration_frame().
+  // The map is integrated around the robot base — see integration_frame().
   base_frame_ = integration_frame(node_);
 
   // The mapper's depth-projection resolution is resolved by the owning
