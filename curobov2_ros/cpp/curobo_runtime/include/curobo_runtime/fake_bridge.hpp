@@ -67,6 +67,8 @@ public:
   PlanOutcome plan_cspace(RobotHandle handle, const PlanRequest & request) override;
   void reset_seed(RobotHandle handle) override;
   void robot_model_rebuild_locks(RobotHandle handle, const std::string & lock_json) override;
+  void robot_model_update_lock_joints(
+    RobotHandle handle, const std::string & lock_json) override;
   void configure_mapper(RobotHandle handle, const std::string & cfg_json) override;
   void warmup_mapper(RobotHandle handle) override;
   bool esdf_refresh(RobotHandle handle) override;
@@ -189,6 +191,7 @@ private:
   int depth_integrates_ = 0;
   int lidar_integrates_ = 0;
   std::string model_lock_json_;
+  std::string model_update_lock_json_;
 };
 
 }  // namespace curobo_runtime

@@ -2,6 +2,7 @@
 // PORT: curobov2_ros/core/unified_planner_node.py (M2 subset)
 #include "curobo_core/core/unified_planner_node.hpp"
 
+#include <algorithm>
 #include <sstream>
 
 #include <chrono>
@@ -110,6 +111,10 @@ void UnifiedPlannerNode::declare_parameters() {
   // PORT: Mapper / ESDF tunables.
   declare_parameter<double>("decay_half_life_s", 0.7);
   declare_parameter<double>("esdf_refresh_min_interval", 2.0);
+  // How often the collision model is refreshed from the unpinned lock joints
+  // (lock_joints: {joint: null}, e.g. the PTU gimbal). Cheap: only calls the
+  // bridge when a value actually changed.
+  declare_parameter<double>("unpinned_lock_update_period", 0.1);
   declare_parameter<bool>("push_esdf_to_solvers", true);
   declare_parameter<double>("mapper_stats_period", 60.0);
   declare_parameter<double>("curobo_mesh_cache_log_interval", 5.0);
@@ -244,6 +249,21 @@ void UnifiedPlannerNode::setup() {
     }
     const auto limits = bridge_->joint_limits(handle_);
     joint_names_ = limits.joint_names;
+    // `lock_joints: {joint: null}` - held out of the cspace but NOT pinned: the
+    // collision model must follow them from the joint state (see
+    // push_unpinned_lock_joints), e.g. the PTU gimbal.
+    unpinned_lock_joint_names_ = limits.unpinned_lock_joint_names;
+    if (!unpinned_lock_joint_names_.empty()) {
+      for (const auto & name : unpinned_lock_joint_names_) {
+        unpinned_lock_joint_list_ +=
+            (unpinned_lock_joint_list_.empty() ? "" : ", ") + name;
+      }
+      RCLCPP_INFO(
+          get_logger(),
+          "Collision model tracks %zu unpinned lock joint(s) from the joint "
+          "state: %s", unpinned_lock_joint_names_.size(),
+          unpinned_lock_joint_list_.c_str());
+    }
 
     // PORT: ConfigWrapperMotion.set_motion_gen_config (M3 subset). Build the
     // shared MotionPlanner with the frozen recipe.
@@ -523,6 +543,21 @@ void UnifiedPlannerNode::setup() {
       this, get_parameter("interpolation_dt").as_double(), joint_names_,
       get_parameter("control_strategy").as_string(), strategy_params,
       default_home);
+  // The unpinned lock joints (lock_joints: {joint: null}) ride the control
+  // strategy's joint-state topic but are not part of the cspace pose. The
+  // strategy forwards the raw message; a low-rate timer pushes the values into
+  // the collision model on the perception lane. Nothing is wired up when the
+  // robot has none.
+  if (!unpinned_lock_joint_names_.empty()) {
+    robot_context_->set_joint_state_callback(
+        [this](const sensor_msgs::msg::JointState &msg) {
+          handle_joint_state_for_locks(msg);
+        });
+    unpinned_lock_timer_ = create_wall_timer(
+        std::chrono::duration<double>(
+            get_parameter("unpinned_lock_update_period").as_double()),
+        [this]() {push_unpinned_lock_joints();});
+  }
   // PORT: single_planner holds a reference to the RobotContext so a
   // compute-only plan can be staged into the command buffer for preview
   // (GhostStrategy publishes it on <node>/trajectory without executing it).
@@ -689,6 +724,93 @@ void UnifiedPlannerNode::publish_tool_pose() {
     tool_pose_pub_->publish(msg);
   } catch (const std::exception &) {
     // TF/solver not ready yet; retry next tick.
+  }
+}
+
+// The control strategy forwards its raw joint-state message, before it reduces
+// it to the cspace pose. Keep the latest value of every unpinned lock joint.
+void UnifiedPlannerNode::handle_joint_state_for_locks(
+    const sensor_msgs::msg::JointState &msg) {
+  if (unpinned_lock_joint_names_.empty() || msg.name.empty()) {
+    return;
+  }
+  std::lock_guard<std::mutex> lk(unpinned_lock_mutex_);
+  for (const auto &name : unpinned_lock_joint_names_) {
+    const auto it = std::find(msg.name.begin(), msg.name.end(), name);
+    if (it == msg.name.end()) {
+      continue;
+    }
+    const auto index = static_cast<std::size_t>(it - msg.name.begin());
+    if (index < msg.position.size()) {
+      unpinned_lock_positions_[name] = msg.position[index];
+    }
+  }
+}
+
+// Push the latest unpinned lock values into the collision model. Submitted to
+// lane_perception at PRIO_PERCEPTION (drop-if-busy) - the same lane the depth
+// integrates use - so it is ordered with the rest of the perception work and can
+// never queue up behind a plan. The bridge rewrites the joints' baked transforms
+// in place (no model rebuild, no solver rebuild) and this returns early when
+// nothing moved, so the periodic call is essentially free at rest.
+void UnifiedPlannerNode::push_unpinned_lock_joints() {
+  if (unpinned_lock_joint_names_.empty()) {
+    return;
+  }
+  std::map<std::string, double> latest;
+  {
+    std::lock_guard<std::mutex> lk(unpinned_lock_mutex_);
+    if (unpinned_lock_positions_.empty()) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 10000,
+          "the collision model tracks the unpinned lock joints [%s] but none of "
+          "them has appeared on the joint-state topic yet - the model keeps "
+          "their configured values and the collision geometry does not follow "
+          "the real mechanism", unpinned_lock_joint_list_.c_str());
+      return;
+    }
+    bool changed =
+        unpinned_lock_positions_.size() != pushed_unpinned_lock_positions_.size();
+    if (!changed) {
+      for (const auto &[name, value] : unpinned_lock_positions_) {
+        const auto it = pushed_unpinned_lock_positions_.find(name);
+        if (it == pushed_unpinned_lock_positions_.end() || it->second != value) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (!changed) {
+      return;
+    }
+    latest = unpinned_lock_positions_;
+  }
+  std::ostringstream json;
+  json << "{";
+  bool first = true;
+  for (const auto &[name, value] : latest) {
+    json << (first ? "" : ",") << "\"" << name << "\":" << value;
+    first = false;
+  }
+  json << "}";
+  const std::string payload = json.str();
+  auto job = [this, payload, latest]() {
+    try {
+      bridge_->robot_model_update_lock_joints(handle_, payload);
+      std::lock_guard<std::mutex> lk(unpinned_lock_mutex_);
+      pushed_unpinned_lock_positions_ = latest;
+    } catch (const std::exception &e) {
+      RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "Failed to update the unpinned lock joints: %s", e.what());
+    }
+  };
+  if (lane_perception_ != nullptr) {
+    curobo_runtime::SubmitOptions opts;
+    opts.prio = curobo_runtime::PRIO_PERCEPTION;
+    lane_perception_->submit_if_idle(opts, std::move(job));
+  } else {
+    job();
   }
 }
 

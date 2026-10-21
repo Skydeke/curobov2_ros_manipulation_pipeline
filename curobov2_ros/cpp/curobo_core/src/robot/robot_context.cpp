@@ -59,9 +59,25 @@ void RobotContext::select_strategy(const std::string & key)
     return;
   }
   robot_strategy_ = std::move(strategy);
+  if (joint_state_callback_) {
+    // Re-apply on a strategy switch: the new strategy forwards its joint state
+    // to the node so unpinned lock joints keep feeding the collision model.
+    robot_strategy_->set_joint_state_callback(joint_state_callback_);
+  }
   current_strategy_name_ = key;
   ghost_strategy_ = std::make_unique<GhostStrategy>(
     node_, dt_, joint_names_, strategy_params_);
+}
+
+// PORT: the node's hook for unpinned lock joints (lock_joints: {joint: null}).
+void RobotContext::set_joint_state_callback(
+  std::function<void(const sensor_msgs::msg::JointState &)> callback)
+{
+  std::lock_guard<std::mutex> lk(strategy_lock_);
+  joint_state_callback_ = std::move(callback);
+  if (robot_strategy_ != nullptr) {
+    robot_strategy_->set_joint_state_callback(joint_state_callback_);
+  }
 }
 
 // PORT: RobotContext.set_command

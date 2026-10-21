@@ -334,6 +334,12 @@ void FakeBridge::robot_model_rebuild_locks(RobotHandle, const std::string & lock
   model_lock_json_ = lock_json;
 }
 
+void FakeBridge::robot_model_update_lock_joints(RobotHandle, const std::string & lock_json)
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  model_update_lock_json_ = lock_json;
+}
+
 // M4 perception doubles: a fixed 4x4x4 grid whose cell (i,j,k) is occupied when
 // (i+j+k) is even, so the occupied-index arithmetic is easy to assert.
 void FakeBridge::configure_mapper(RobotHandle, const std::string &) {}

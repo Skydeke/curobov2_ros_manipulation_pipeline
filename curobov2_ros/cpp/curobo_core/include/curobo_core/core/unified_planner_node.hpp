@@ -9,12 +9,16 @@
 #define CUROBO_CORE__CORE__UNIFIED_PLANNER_NODE_HPP_
 
 #include <exception>
+#include <functional>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <tf2_ros/buffer.h>
 
 #include "curobo_runtime/gpu_lanes.hpp"
@@ -89,6 +93,25 @@ private:
   curobo_runtime::RobotHandle handle_ = -1;
   std::string base_link_;
   std::vector<std::string> joint_names_;
+
+  // PORT: the collision model's unpinned lock joints - `lock_joints: {joint: null}`
+  // in the robot YAML. They are held out of the planning cspace (never planned)
+  // but are NOT pinned: their value follows the joint state, so the model's
+  // collision geometry tracks the real mechanism (e.g. the PTU camera gimbal).
+  // Learned from joint_limits() at startup.
+  std::vector<std::string> unpinned_lock_joint_names_;
+  std::mutex unpinned_lock_mutex_;
+  // Latest values seen on the joint state vs. the ones last pushed to the model,
+  // so the periodic push only calls the bridge when something actually moved.
+  std::map<std::string, double> unpinned_lock_positions_;
+  std::map<std::string, double> pushed_unpinned_lock_positions_;
+  // "ptu_pan, ptu_tilt" - for the diagnostics only.
+  std::string unpinned_lock_joint_list_;
+  rclcpp::TimerBase::SharedPtr unpinned_lock_timer_;
+  // PORT: the active strategy's raw joint state -> the unpinned lock values.
+  void handle_joint_state_for_locks(const sensor_msgs::msg::JointState & msg);
+  // Push the latest unpinned lock values into the model (no rebuild).
+  void push_unpinned_lock_joints();
 
   // PORT: unified_planner_node.__init__ - the five GPU lanes
   // (reactive/plan/kin/perception/viz). Each owns one serialising worker thread;

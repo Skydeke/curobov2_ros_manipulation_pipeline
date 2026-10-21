@@ -96,6 +96,7 @@ void JointPoseStrategy::callback_trajectory_state(const std_msgs::msg::Float32 &
 // PORT: JointPoseStrategy.callback_joint_pose
 void JointPoseStrategy::callback_joint_pose(const sensor_msgs::msg::JointState & msg)
 {
+  notify_joint_state(msg);
   // Prefer a NAME-based remap against the canonical cspace arm joints when the
   // message names every one of them (order-agnostic; drops interleaved non-arm
   // joints). Falls back to a positional read when the names do not line up.

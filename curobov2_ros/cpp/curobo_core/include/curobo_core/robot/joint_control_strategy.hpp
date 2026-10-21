@@ -10,6 +10,7 @@
 #include <atomic>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -20,6 +21,7 @@
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 
 namespace curobo_core
 {
@@ -80,7 +82,20 @@ public:
   const std::vector<std::string> & joint_names() const {return joint_names_;}
   std::size_t dof() const {return joint_names_.size();}
 
+  // PORT: forwards the raw joint-state message before it is reduced to the cspace
+  // pose. Unpinned lock joints (`lock_joints: {joint: null}`) appear in the
+  // message but not in joint_names(), so this is how the node learns their value
+  // (robot_model_update_lock_joints). Node-owned: set once, before spinning.
+  void set_joint_state_callback(
+    std::function<void(const sensor_msgs::msg::JointState &)> callback)
+  {joint_state_callback_ = std::move(callback);}
+
 protected:
+  // Called from the strategy's joint-state subscription, before the cspace remap.
+  void notify_joint_state(const sensor_msgs::msg::JointState & msg)
+  {
+    if (joint_state_callback_) {joint_state_callback_(msg);}
+  }
   // PORT: _send_as_action / _get_progression / _cancel_action /
   // _ensure_action_client (the FollowJointTrajectory execution path).
   void send_as_action(
@@ -92,6 +107,7 @@ protected:
   double dt_;
   std::vector<std::string> joint_names_;
   std::map<std::string, std::string> params_;
+  std::function<void(const sensor_msgs::msg::JointState &)> joint_state_callback_;
 
   mutable std::recursive_mutex buffer_lock_;
   std::vector<std::vector<double>> position_command_;
