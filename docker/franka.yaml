@@ -13,7 +13,7 @@
 # --symlink-install) without rebuilding the image.
 #
 # The image is pulled from the pipeline-built fork image on GHCR by default,
-# or rebuilt locally from docker/Dockerfile.cumotion with --build.
+# or rebuilt locally from docker/Dockerfile with --build.
 #
 # Usage:
 #   docker compose -f docker/franka.yaml up
@@ -29,7 +29,7 @@ services:
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.cumotion
+      dockerfile: docker/Dockerfile
     runtime: nvidia
     network_mode: host
     ipc: host

@@ -27,7 +27,7 @@
 # ALREADY IN THE IMAGE, deliberately not repeated: torch (pulled in by
 # torchvision), numpy<2, cuda-python, cuda-bindings~=12.9, cuda-core[cu12],
 # cupy-cuda12x, timm, einops, hdbscan, viser -- all installed by the
-# "Core numerical stack" layer in docker/Dockerfile.cumotion, which is itself
+# "Core numerical stack" layer in docker/Dockerfile, which is itself
 # already ahead of any source COPY.
 
 # --- curobo runtime (pyproject [project.dependencies]) ---

@@ -35,7 +35,7 @@ The fastest way to try the fork is the interactive compose sessions: RViz +
 cuRobo planner, with an emulated robot and no physical driver. Both robots use
 the same pipeline-built image (`ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest`),
 selected by `robot:=...` at launch; `--build` instead rebuilds locally from
-`docker/Dockerfile.cumotion`.
+`docker/Dockerfile`.
 
 ```bash
 # On the host: let the container's root user reach your X server (for RViz)

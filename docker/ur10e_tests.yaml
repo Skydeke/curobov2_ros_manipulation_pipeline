@@ -36,7 +36,7 @@ services:
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.cumotion
+      dockerfile: docker/Dockerfile
     restart: "no"
     runtime: nvidia
     network_mode: host
