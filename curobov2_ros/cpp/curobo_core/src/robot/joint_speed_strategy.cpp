@@ -196,6 +196,7 @@ void JointSpeedStrategy::callback_trajectory_state(const std_msgs::msg::Float32 
 // PORT: JointSpeedStrategy.callback_joint_pose
 void JointSpeedStrategy::callback_joint_pose(const sensor_msgs::msg::JointState & msg)
 {
+  notify_joint_state(msg);
   std::vector<std::size_t> remap;
   if (!expected_joint_names_.empty() && !msg.name.empty()) {
     bool ok = true;

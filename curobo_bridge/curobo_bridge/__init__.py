@@ -172,6 +172,28 @@ def _translate_xrdf(xrdf_path: str, urdf_path: str, asset_root: str) -> str:
     return resolved_path
 
 
+def _robot_kinematics_block(data: dict) -> dict:
+    """The kinematics mapping of a robot YAML, structure-aware.
+
+    cuRobo's loader accepts three shapes: ``robot_cfg.kinematics.*``, a
+    root-level ``kinematics`` block (``kate.curobo.yaml``), or a flat config with
+    the kinematics keys at the document root. Reading ``data["lock_joints"]``
+    directly therefore found nothing for ``kate.curobo.yaml`` - which silently
+    left the unpinned lock joints (``lock_joints: {joint: null}``) unreported, so
+    nothing ever drove them from the joint state.
+    """
+    if not isinstance(data, dict):
+        return {}
+    root = data.get("kinematics")
+    if isinstance(root, dict):
+        return root
+    robot_cfg = data.get("robot_cfg")
+    if isinstance(robot_cfg, dict):
+        block = robot_cfg.get("kinematics")
+        return block if isinstance(block, dict) else robot_cfg
+    return data
+
+
 def robot_model_build(handle: int, cfg_json: str) -> None:
     """Build the shared Kinematics from the robot YAML (PORT: RobotModelManager.__init__)."""
     import hashlib
@@ -216,13 +238,7 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
         # (see curobo's load_robot_yaml fallback), and injecting an empty
         # ``robot_cfg.kinematics`` would hide the root keys from that fallback.
         base = os.path.dirname(os.path.abspath(robot_config_file))
-        robot_cfg = data.get("robot_cfg")
-        if isinstance(robot_cfg, dict):
-            kinematics = robot_cfg.get("kinematics")
-            if not isinstance(kinematics, dict):
-                kinematics = robot_cfg
-        else:
-            kinematics = data
+        kinematics = _robot_kinematics_block(data)
 
         changed = False
         for key in ("urdf_path", "asset_root_path"):
@@ -290,19 +306,20 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
     entry["resolved_config"] = resolved
     # PORT: the lock_joints map, structure-aware (robot_cfg.kinematics.* or the
     # kinematics keys at the document root).
-    _robot_cfg = data.get("robot_cfg")
-    if isinstance(_robot_cfg, dict):
-        _kin = _robot_cfg.get("kinematics")
-        if not isinstance(_kin, dict):
-            _kin = _robot_cfg
-    else:
-        _kin = data
-    entry["lock_joints"] = dict((_kin.get("lock_joints")) or {})
+    _root_kin = _robot_kinematics_block(data)
+    _lock_joints = _root_kin.get("lock_joints") or {}
+    # A `null` value marks an *unpinned* lock: the joint stays out of the planning
+    # cspace but is not pinned, its value coming from the joint state (see
+    # robot_model_update_lock_joints). Keep it out of the pinned map so nothing
+    # here has to float(None) it.
+    entry["lock_joints"] = {
+        str(k): float(v) for k, v in _lock_joints.items() if v is not None
+    }
+    entry["unpinned_lock_joints"] = [
+        str(k) for k, v in _lock_joints.items() if v is None
+    ]
     # The URDF link the payload is fixed to, used to publish the attached
     # spheres LINK-RELATIVE so a trajectory preview can ride the gripper.
-    _root_kin = data.get("kinematics")
-    if not isinstance(_root_kin, dict):
-        _root_kin = _kin
     _extra_links = _root_kin.get("extra_links") or {}
     _attach = _extra_links.get(ATTACH_LINK) or {}
     entry["attach_parent_link"] = (
@@ -324,6 +341,8 @@ def joint_limits(handle: int):
         "joint_names": list(limits.joint_names),
         "locked_joint_names": list(locked.keys()),
         "locked_positions": [float(v) for v in locked.values()],
+        # lock_joints written {joint: null}: out of the cspace but not pinned.
+        "unpinned_lock_joint_names": list(entry.get("unpinned_lock_joints", [])),
     }
 
 
@@ -1811,9 +1830,17 @@ def robot_model_rebuild_locks(handle: int, lock_json: str) -> None:
         raise ValueError(
             "robot_model_rebuild_locks: no resolved robot config on record; "
             "build the robot model first")
-    # Empty locks -> rebuild from the YAML's OWN lock_joints (restore).
-    kin_cfg = KinematicsCfg.from_robot_yaml_file(resolved, lock_joints=locks) if locks \
-        else KinematicsCfg.from_robot_yaml_file(resolved)
+    # Empty locks -> rebuild from the YAML's OWN lock_joints (restore). A
+    # non-empty override REPLACES the YAML's lock_joints, so the YAML's unpinned
+    # locks (`lock_joints: {joint: null}`) must be merged back in - they are not
+    # part of an override map, but dropping them would leave those joints neither
+    # in the cspace nor locked and the model would refuse to build.
+    if not locks:
+        kin_cfg = KinematicsCfg.from_robot_yaml_file(resolved)
+    else:
+        _unpinned = {name: None for name in entry.get("unpinned_lock_joints", [])}
+        kin_cfg = KinematicsCfg.from_robot_yaml_file(
+            resolved, lock_joints={**_unpinned, **locks})
     robot_cfg = RobotCfg(
         kinematics=kin_cfg, dynamics=entry["robot_cfg"].dynamics)
     entry["kin_cfg"] = kin_cfg
@@ -1821,6 +1848,8 @@ def robot_model_rebuild_locks(handle: int, lock_json: str) -> None:
     entry["kin"] = Kinematics(robot_cfg.kinematics)
     entry["joint_names"] = list(entry["kin"].joint_names)
     entry["dof"] = int(entry["kin"].get_dof())
+    entry["unpinned_lock_joints"] = list(
+        entry["kin"].config.kinematics_config.unpinned_lock_joints or [])
     if locks:
         entry["lock_joints"] = dict(locks)
     else:
@@ -1832,13 +1861,49 @@ def robot_model_rebuild_locks(handle: int, lock_json: str) -> None:
             import yaml as _yaml
             with open(resolved) as _fh:
                 _cfg = _yaml.safe_load(_fh) or {}
-            _kin = ((_cfg.get("robot_cfg") or {}).get("kinematics") or {})
+            _kin = _robot_kinematics_block(_cfg)
             entry["lock_joints"] = {
-                str(k): float(v) for k, v in (_kin.get("lock_joints") or {}).items()}
+                str(k): float(v)
+                for k, v in (_kin.get("lock_joints") or {}).items()
+                if v is not None
+            }
         except Exception:
             entry["lock_joints"] = {}
     entry["motion_planner"] = None
     entry["ik"] = None
+
+
+def robot_model_update_lock_joints(handle: int, lock_json: str) -> None:
+    """Update the values of the robot's unpinned lock joints, in place.
+
+    PORT: robot_model_manager.update_lock_joints. These are the joints written
+    ``lock_joints: {joint: null}`` in the robot YAML: locked out of the planning
+    cspace (never planned) but NOT pinned, so their value follows the joint state.
+    The baked transform of each joint's own link is rewritten in place, so no model
+    re-parse and no solver rebuild is needed (unlike robot_model_rebuild_locks).
+    """
+    import json
+
+    entry = _REGISTRY[handle]
+    values = {str(k): float(v) for k, v in json.loads(lock_json).items()}
+    if not values:
+        return
+    # The shared Kinematics drives FK and segmentation. The solvers keep their own
+    # kinematics, so push the same rewrite into them where they expose one.
+    targets = [entry["kin"]]
+    planner = entry.get("motion_planner")
+    if planner is not None:
+        targets.append(getattr(planner, "kinematics", None))
+    ik = entry.get("ik")
+    if ik is not None:
+        targets.append(getattr(ik, "kinematics", ik))
+    updated = set()
+    for target in targets:
+        config = getattr(getattr(target, "config", None), "kinematics_config", None)
+        if config is None or id(config) in updated:
+            continue
+        updated.add(id(config))
+        target.update_lock_joints(values)
 
 
 def plan_cspace(handle: int, req) -> dict:

@@ -568,6 +568,9 @@ JointLimitsOutcome PyBridge::joint_limits(RobotHandle handle){
       result.attr("__getitem__")("locked_joint_names").cast<std::vector<std::string>>();
     outcome.locked_positions =
       result.attr("__getitem__")("locked_positions").cast<std::vector<double>>();
+    outcome.unpinned_lock_joint_names =
+      result.attr("__getitem__")("unpinned_lock_joint_names")
+        .cast<std::vector<std::string>>();
     return outcome;
   } catch (const py::error_already_set & e) {
     throw BridgeError("programming", e.what());
@@ -716,6 +719,18 @@ void PyBridge::robot_model_rebuild_locks(RobotHandle handle, const std::string &
   py::gil_scoped_acquire gil;
   try {
     bridge_module().attr("robot_model_rebuild_locks")(handle, lock_json);
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("config", e.what());
+  }
+}
+
+// PORT: robot_model_manager.update_lock_joints
+void PyBridge::robot_model_update_lock_joints(
+  RobotHandle handle, const std::string & lock_json)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    bridge_module().attr("robot_model_update_lock_joints")(handle, lock_json);
   } catch (const py::error_already_set & e) {
     throw BridgeError("config", e.what());
   }

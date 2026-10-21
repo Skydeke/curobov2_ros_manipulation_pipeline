@@ -6,12 +6,14 @@
 #ifndef CUROBO_CORE__ROBOT__ROBOT_CONTEXT_HPP_
 #define CUROBO_CORE__ROBOT__ROBOT_CONTEXT_HPP_
 
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
 #include "curobov2_ros_interfaces/srv/get_robot_strategies.hpp"
@@ -62,6 +64,12 @@ public:
 
   const std::string & current_strategy_name() const {return current_strategy_name_;}
 
+  // PORT: forwards the raw joint-state message from the active control strategy
+  // (see JointCommandStrategy::set_joint_state_callback). Re-applied on every
+  // strategy switch. Node-owned: set once, before spinning.
+  void set_joint_state_callback(
+    std::function<void(const sensor_msgs::msg::JointState &)> callback);
+
 private:
   // PORT: set_robot_strategy_callback / get_robot_strategy_callback
   void handle_set_robot_strategy(
@@ -88,6 +96,7 @@ private:
 
   std::mutex strategy_lock_;
   std::unique_ptr<JointCommandStrategy> robot_strategy_;
+  std::function<void(const sensor_msgs::msg::JointState &)> joint_state_callback_;
   // PORT: RobotContext.ghost_strategy - always present, independent of the
   // active control strategy; publishes /<node>/trajectory for the RViz display.
   std::unique_ptr<JointCommandStrategy> ghost_strategy_;

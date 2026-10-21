@@ -59,6 +59,10 @@ struct JointLimitsOutcome
   std::vector<std::string> joint_names;       // cspace order
   std::vector<std::string> locked_joint_names;
   std::vector<double> locked_positions;
+  //: Lock joints written `lock_joints: {joint: null}` in the robot YAML: out of
+  //: the planning cspace but not pinned, their value follows the joint state
+  //: (robot_model_update_lock_joints). Ordered as in the YAML.
+  std::vector<std::string> unpinned_lock_joint_names;
 };
 
 // PORT: obstacle_manager.get_voxel_grid - the dense occupancy grid (nav2
@@ -420,6 +424,12 @@ public:
   // PORT: robot_model_manager.set_lock_joints / update_lock_joints (rebuild the
   // model with a lock_joints override; the solvers must be rebuilt after).
   virtual void robot_model_rebuild_locks(
+    RobotHandle handle, const std::string & lock_json) = 0;
+  // PORT: robot_model_manager.update_lock_joints - rewrite the values of the
+  // YAML's unpinned lock joints (`lock_joints: {joint: null}`) in place. No model
+  // rebuild and no solver rebuild, unlike robot_model_rebuild_locks. lock_json is
+  // a flat {joint_name: value} map.
+  virtual void robot_model_update_lock_joints(
     RobotHandle handle, const std::string & lock_json) = 0;
 
   // ---- M4: perception ---------------------------------------------------
