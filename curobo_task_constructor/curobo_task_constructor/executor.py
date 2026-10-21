@@ -77,6 +77,30 @@ def _max_joint_delta(a, b) -> float:
     return max(abs(x - y) for x, y in zip(pa[:n], pb[:n]))
 
 
+def _align_waypoint_positions(wp, names) -> Optional[list]:
+    """Waypoint values in ``names`` order, or None when it cannot be aligned.
+
+    A plan response and a ``/joint_states`` reading can carry the SAME joints
+    in a different order (or a different subset, e.g. a 16-joint reading next
+    to an 8-joint cspace). Appending positions positionally would then paint
+    the wrong joint — visible as a gripper that folds while the arm is still.
+    """
+    pos = _joint_positions(wp)
+    wp_names = [str(n) for n in (getattr(wp, "name", None) or [])]
+    if not wp_names or wp_names == names:
+        return pos
+    by_name = {n: i for i, n in enumerate(wp_names)}
+    if any(n not in by_name for n in names):
+        return None
+    out = []
+    for n in names:
+        i = by_name[n]
+        if i >= len(pos):
+            return None
+        out.append(pos[i])
+    return out
+
+
 def _replay_trajectory_dict(waypoints) -> Optional[dict]:
     """Pack a solved segment's waypoints for verbatim replay.
 
@@ -96,7 +120,14 @@ def _replay_trajectory_dict(waypoints) -> Optional[dict]:
     for wp in wps:
         if not names:
             names = [str(n) for n in (getattr(wp, "name", None) or [])]
-        points.append(_joint_positions(wp))
+        aligned = _align_waypoint_positions(wp, names) if names else None
+        if aligned is None:
+            raw = _joint_positions(wp)
+            # Legacy positional layout: safe only while the width agrees.
+            aligned = raw if len(raw) == len(names) else None
+        if aligned is None:
+            continue
+        points.append(aligned)
         vel = getattr(wp, "velocity", None)
         velocities.append([float(v) for v in vel] if vel else [])
     return {"joint_names": names, "points": points, "velocities": velocities}
@@ -792,8 +823,13 @@ class TaskExecutor:
         names = list(getattr(traj[0], "name", []) or []) if traj else []
         points, velocities = [], []
         for wp in traj:
-            points.append(
-                [float(v) for v in (getattr(wp, "position", []) or [])])
+            aligned = _align_waypoint_positions(wp, names) if names else None
+            if aligned is None:
+                raw = [float(v) for v in (getattr(wp, "position", []) or [])]
+                aligned = raw if len(raw) == len(names) else None
+            if aligned is None:
+                continue
+            points.append([float(v) for v in aligned])
             vel = getattr(wp, "velocity", None) or []
             velocities.append([float(v) for v in vel])
         return {

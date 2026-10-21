@@ -429,6 +429,8 @@ SphereSetOutcome FakeBridge::collision_spheres_with_attached(
   const float x = q.empty() ? 0.0f : q[0];
   out.spheres.data = {x, 0.0f, 0.0f, 0.05f, 0.0f, 0.0f, 0.0f, -100.0f};
   out.attached = {0, 1};
+  out.attached_local = out.spheres;
+  out.attach_frame = "tool0";
   return out;
 }
 

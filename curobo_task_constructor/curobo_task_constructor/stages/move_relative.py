@@ -35,6 +35,7 @@ from curobo_task_constructor.stages._util import (
     cost_of,
     full_request,
     goalset_for_scene,
+    joint_positions_in_cspace,
 )
 
 
@@ -116,7 +117,10 @@ class MoveRelative(PropagatingEitherWay):
                            f"move_relative joint offset for unknown joint {joint!r}")
                 return True
             by_name[joint] += delta
-        goal = [by_name[n] for n in names] if names else list(by_name.values())
+        from curobo_task_constructor.core.state import JointStateStub
+        offset_state = JointStateStub(
+            names=names, positions=[by_name[n] for n in names])
+        goal = joint_positions_in_cspace(self.robot, offset_state)
         goalset = goalset_for_scene(state.scene, joint_positions=goal)
         req = full_request(self.robot, state.joint_state, [goalset], self.params,
                            scene=state.scene)
@@ -177,7 +181,9 @@ class MoveRelative(PropagatingEitherWay):
         by_name = dict(zip(names, positions))
         start_positions = [by_name.get(n, 0.0) - offsets.get(n, 0.0) for n in names]
         goalset = goalset_for_scene(
-            state.scene, joint_positions=list(positions))
+            state.scene,
+            joint_positions=joint_positions_in_cspace(
+                self.robot, state.joint_state))
         req = full_request(self.robot, None, [goalset], self.params,
                            scene=state.scene)
         # Seed the solve from the offset-back joints by issuing the request

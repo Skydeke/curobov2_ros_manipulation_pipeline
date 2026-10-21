@@ -29,7 +29,8 @@ public:
   RobotSegmentation(
     rclcpp::Node * node, curobo_runtime::IBridge * bridge,
     curobo_runtime::RobotHandle handle, const std::vector<PerceptionCameraCfg> & camera_cfgs,
-    std::function<std::vector<double>()> joint_pose);
+    std::function<std::vector<double>()> joint_pose,
+    rclcpp::CallbackGroup::SharedPtr callback_group = nullptr);
 
   // PORT: RobotSegmentation.set_mask_callback
   void handle_set_mask(

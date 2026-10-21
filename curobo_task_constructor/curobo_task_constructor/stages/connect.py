@@ -14,7 +14,11 @@ from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.robot import GoalsetSpec
 from curobo_task_constructor.core.stage import ConnectingStage, Solution
 from curobo_task_constructor.core.state import InterfaceState
-from curobo_task_constructor.stages._util import cost_of, full_request
+from curobo_task_constructor.stages._util import (
+    cost_of,
+    full_request,
+    joint_positions_in_cspace,
+)
 
 
 @register_stage("connect")
@@ -33,7 +37,8 @@ class Connect(ConnectingStage):
         if e.scene is not None:
             allowed.update(e.scene.all_allowed_links())
         goalset = GoalsetSpec(
-            target_joint_positions=list(getattr(e.joint_state, "position", []) or []),
+            target_joint_positions=joint_positions_in_cspace(
+                self.robot, e.joint_state),
             allowed_collisions=sorted(allowed))
         req = full_request(self.robot, s.joint_state, [goalset], self.params,
                            scene=s.scene)

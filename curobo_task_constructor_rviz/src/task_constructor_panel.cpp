@@ -33,6 +33,7 @@
 #include <QVBoxLayout>
 #include <visualization_msgs/msg/marker.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 #include <functional>
@@ -1739,8 +1740,41 @@ void TaskView::publishSolutionTrajectory(
     msg.joint_names = waypoints.front().name;
     double t = 0.0;
     for (const auto& wp : waypoints) {
+      // A later waypoint can carry the same joints in a different order (a
+      // plan response vs. a /joint_states-seeded point, or a different
+      // subset). Appending positions positionally would then drive the wrong
+      // joint in the ghost — the "gripper folds while the arm is still" look.
+      std::vector<double> positions;
+      if (wp.name.empty() || wp.name == msg.joint_names) {
+        positions = wp.position;
+      } else {
+        positions.assign(msg.joint_names.size(), 0.0);
+        bool aligned = true;
+        for (size_t j = 0; j < msg.joint_names.size(); ++j) {
+          const auto it = std::find(
+              wp.name.begin(), wp.name.end(), msg.joint_names[j]);
+          const size_t idx =
+              (it == wp.name.end()) ? wp.name.size()
+                                    : static_cast<size_t>(it - wp.name.begin());
+          if (idx >= wp.position.size()) {
+            aligned = false;
+            break;
+          }
+          positions[j] = wp.position[idx];
+        }
+        if (!aligned) {
+          // No shared ordering: keep the point only when the width agrees
+          // (legacy positional layout), otherwise drop it.
+          if (wp.position.size() != msg.joint_names.size())
+            continue;
+          positions = wp.position;
+        }
+      }
+      if (positions.size() < msg.joint_names.size())
+        continue;
+      positions.resize(msg.joint_names.size());
       trajectory_msgs::msg::JointTrajectoryPoint pt;
-      pt.positions = wp.position;
+      pt.positions = std::move(positions);
       pt.time_from_start.sec = static_cast<int32_t>(t);
       pt.time_from_start.nanosec = static_cast<uint32_t>((t - static_cast<int32_t>(t)) * 1e9);
       t += 0.05;

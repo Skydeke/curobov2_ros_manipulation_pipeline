@@ -28,6 +28,18 @@ TEST(ZeroMotion, DetectsEqualAndDifferentJointVectors)
   EXPECT_FALSE(is_zero_delta({}, {}));
 }
 
+TEST(ZeroMotion, ToleratesFloat32QuantizationAtTheJointLimits)
+{
+  // A continuous joint whose target was snapped to `hi - 1e-3` lands a few
+  // float32 ulps (~1e-6 at 2*pi) from the measured start. That is still "no
+  // motion": passing it on would feed cuRobo a degenerate ~1e-6 rad solve,
+  // whose CUDA-graph replay faults with an illegal memory access.
+  EXPECT_TRUE(is_zero_delta({6.2790012f}, {6.2789998f}));
+  EXPECT_TRUE(is_zero_delta({0.0f}, {5e-5f}));
+  // ...but a real (if small) motion still plans.
+  EXPECT_FALSE(is_zero_delta({0.0f}, {1e-3f}));
+}
+
 TEST(PlannerFactory, CatalogAndCreation)
 {
   // PORT: PlannerFactory._PLANNER_CATALOG

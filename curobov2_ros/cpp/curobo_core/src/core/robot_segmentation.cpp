@@ -28,7 +28,8 @@ RobotSegmentation::RobotSegmentation(
   rclcpp::Node * node, curobo_runtime::IBridge * bridge,
   curobo_runtime::RobotHandle handle,
   const std::vector<PerceptionCameraCfg> & camera_cfgs,
-  std::function<std::vector<double>()> joint_pose)
+  std::function<std::vector<double>()> joint_pose,
+  rclcpp::CallbackGroup::SharedPtr callback_group)
 : node_(node), bridge_(bridge), handle_(handle)
 {
   base_frame_ = integration_frame(node_);
@@ -49,7 +50,7 @@ RobotSegmentation::RobotSegmentation(
     auto strategy = std::make_shared<RobotSegmentationCameraStrategy>(
       node_, cfg.name, cfg.depth_topic, cfg.camera_info_topic, cfg.frame_id,
       cfg.intrinsics, cfg.extrinsics, bridge_, handle_, joint_pose,
-      [this]() {return masks_json();});
+      [this]() {return masks_json();}, callback_group);
     streams_.push_back(strategy);
     RCLCPP_INFO(
       node_->get_logger(),

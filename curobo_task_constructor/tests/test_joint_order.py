@@ -15,6 +15,8 @@ from curobo_task_constructor.core.robot_config import (
     canonical_joint_order,
     reorder_joint_vectors,
 )
+from curobo_task_constructor.core.state import InterfaceState, JointStateStub
+from curobo_task_constructor.stages.move_to import MoveTo
 
 ARM7 = [f"joint_{i}" for i in range(1, 8)]
 KORTEX_ORDER = ARM7 + ["finger_joint"]  # the cspace order
@@ -100,3 +102,80 @@ def test_reorder_drops_unknown_joints():
         KORTEX_ORDER, names, positions)
     assert out_names == ["joint_1", "joint_2", "finger_joint"]
     assert out_pos == [0.2, 0.4, 0.1]
+
+
+# ---------------------------------------------------------------------------
+# Sparse joint goals are projected onto the cspace, not onto the raw reading
+# ---------------------------------------------------------------------------
+
+
+class _FakeRobot:
+    def __init__(self, joint_order=None):
+        self._joint_order = list(joint_order) if joint_order else None
+
+
+def _sparse_goal(**joints):
+    stage = MoveTo("close")
+    stage.robot = _FakeRobot(KORTEX_ORDER)
+    stage.params = {"goal": {"joints": dict(joints)}}
+    return stage
+
+
+def _state(names, positions):
+    return InterfaceState(joint_state=JointStateStub(names=names,
+                                                    positions=positions))
+
+
+def test_sparse_goal_uses_cspace_order_not_the_reading():
+    """The KATE failure: a 16-joint reading, an 8-DOF cspace.
+
+    ``/joint_states`` carries the whole robot (arm, fingers, tips, base/PTU)
+    while cuRobo plans the 8 active joints. Merging a finger-only goal onto
+    the reading key-for-key produced a 16-value ``target_joint_positions``
+    and the server rejected it with "q should have dof = 8, got 16".
+    """
+    full = KORTEX_ORDER + [f"extra_{i}" for i in range(8)]
+    positions = [0.1] * len(full)
+    goal = _sparse_goal(finger_joint=0.0)._goal_positions(
+        _state(full, positions))
+    assert len(goal) == len(KORTEX_ORDER)
+    assert goal[-1] == 0.0, "the finger is the cspace's last DOF"
+    assert goal[:-1] == positions[:7], "the arm values are carried through"
+
+
+def test_sparse_goal_drops_joints_the_cspace_does_not_own():
+    full = KORTEX_ORDER + ["gripper_tip", "base_wheel"]
+    stage = _sparse_goal(joint_2=1.5)
+    goal = stage._goal_positions(_state(full, [0.0, 0.0, 0.0, 0.0, 0.0,
+                                               0.0, 0.0, 0.1, 1.0, 2.0]))
+    assert len(goal) == 8
+    assert goal[1] == 1.5
+
+
+def test_sparse_goal_falls_back_to_the_reading_without_a_cspace_order():
+    """ROS-free robots (mocks) keep the old state-order behaviour."""
+    stage = MoveTo("close")
+    stage.robot = _FakeRobot()
+    stage.params = {"goal": {"joints": {"finger_joint": 0.0}}}
+    goal = stage._goal_positions(
+        _state(KORTEX_ORDER, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4]))
+    assert goal == [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+
+def test_named_config_goal_keeps_the_cspace_length():
+    class _Cfg:
+        names = ["joint_1"]
+        positions = [0.5]
+
+        def as_dict(self):
+            return dict(zip(self.names, self.positions))
+
+    stage = MoveTo("named")
+    stage.robot = _FakeRobot(KORTEX_ORDER)
+    stage.robot.get_named_joint_config = lambda name: _Cfg()
+    stage.params = {"goal": {"name": "home"}}
+    goal = stage._goal_positions(
+        _state(KORTEX_ORDER, [0.1] * 8))
+    assert len(goal) == 8
+    assert goal[0] == 0.5, "the named joint wins"
+    assert goal[1:] == [0.1] * 7, "everything else holds"

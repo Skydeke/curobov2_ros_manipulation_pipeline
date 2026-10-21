@@ -298,6 +298,15 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
     else:
         _kin = data
     entry["lock_joints"] = dict((_kin.get("lock_joints")) or {})
+    # The URDF link the payload is fixed to, used to publish the attached
+    # spheres LINK-RELATIVE so a trajectory preview can ride the gripper.
+    _root_kin = data.get("kinematics")
+    if not isinstance(_root_kin, dict):
+        _root_kin = _kin
+    _extra_links = _root_kin.get("extra_links") or {}
+    _attach = _extra_links.get(ATTACH_LINK) or {}
+    entry["attach_parent_link"] = (
+        _attach.get("parent_link_name") if isinstance(_attach, dict) else None)
     entry["built"] = True
 
 
@@ -3235,9 +3244,47 @@ def collision_spheres_with_attached(handle: int, q):
         link_ids = link_map.reshape(-1).cpu().tolist()
         if len(link_ids) == len(mask):
             mask = [li == attached_idx for li in link_ids]
+    # Link-relative copy of the attached spheres. The consumer (trajectory
+    # preview) re-applies FK of this URDF link at every waypoint, so the
+    # payload rides the ghost instead of staying at the live pose. We derive
+    # the link frame from the solver's own FK rather than the YAML transform
+    # so it is exact for whatever `fixed_transform` the config uses.
+    world = spheres.detach().cpu().numpy().astype(np.float32)
+    attached_frame = ""
+    attached_local = np.zeros_like(world)
+    parent = entry.get("attach_parent_link")
+    if parent and any(mask):
+        try:
+            q_t = torch.tensor(
+                [list(np.asarray(q, dtype=np.float32))], dtype=torch.float32,
+                device=torch.device("cuda", torch.cuda.current_device()))
+            link_pose = kin.get_link_poses(q_t, [parent])
+            p = link_pose.position[0, 0].detach().cpu().numpy()
+            # Pose.get_rotation() only accepts a flat [b, 4] quaternion, and FK
+            # returns [b, n_links, 4]; convert the quaternion here instead of
+            # relying on that shape contract.
+            w, x, y, z = link_pose.quaternion[0, 0].detach().cpu().numpy()
+            rot = np.array([
+                [1 - 2 * (y * y + z * z), 2 * (x * y - w * z),
+                 2 * (x * z + w * y)],
+                [2 * (x * y + w * z), 1 - 2 * (x * x + z * z),
+                 2 * (y * z - w * x)],
+                [2 * (x * z - w * y), 2 * (y * z + w * x),
+                 1 - 2 * (x * x + y * y)],
+            ], dtype=np.float64)
+            keep = np.asarray(mask, dtype=bool)
+            # world -> link-local: R^T (p_world - p_link); v @ R == R^T v.
+            attached_local[keep, :3] = (world[keep, :3] - p) @ rot
+            attached_local[keep, 3] = world[keep, 3]
+            attached_frame = parent
+        except Exception:
+            attached_frame = ""
+            attached_local = np.zeros_like(world)
     return {
-        "spheres": spheres.detach().cpu().numpy().astype(np.float32),
+        "spheres": world,
         "attached": mask,
+        "attached_local": attached_local,
+        "attach_frame": attached_frame,
     }
 
 
