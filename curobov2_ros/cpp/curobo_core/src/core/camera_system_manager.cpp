@@ -16,9 +16,11 @@ namespace curobo_core
 CameraSystemManager::CameraSystemManager(
   rclcpp::Node * node, curobo_runtime::IBridge * bridge,
   curobo_runtime::RobotHandle handle, curobo_runtime::GpuLane * lane,
-  std::function<void()> on_integrated)
+  std::function<void()> on_integrated,
+  rclcpp::CallbackGroup::SharedPtr callback_group)
 : node_(node), bridge_(bridge), handle_(handle), lane_(lane),
-  on_integrated_(std::move(on_integrated))
+  on_integrated_(std::move(on_integrated)),
+  callback_group_(std::move(callback_group))
 {
   configure();
 }
@@ -138,7 +140,7 @@ void CameraSystemManager::configure()
 
   camera_context_ = std::make_unique<CameraContext>(node_);
   // PORT: callback_group=getattr(node, '_perception_callback_group', None).
-  rclcpp::CallbackGroup::SharedPtr group = nullptr;
+  rclcpp::CallbackGroup::SharedPtr group = callback_group_;
   for (const auto & cfg : cfgs) {
     RCLCPP_INFO(
       node_->get_logger(),

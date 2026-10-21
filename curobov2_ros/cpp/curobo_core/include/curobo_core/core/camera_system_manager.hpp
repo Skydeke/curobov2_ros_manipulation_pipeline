@@ -28,7 +28,8 @@ public:
   CameraSystemManager(
     rclcpp::Node * node, curobo_runtime::IBridge * bridge,
     curobo_runtime::RobotHandle handle, curobo_runtime::GpuLane * lane = nullptr,
-    std::function<void()> on_integrated = nullptr);
+    std::function<void()> on_integrated = nullptr,
+    rclcpp::CallbackGroup::SharedPtr callback_group = nullptr);
 
   CameraContext * get_camera_context() {return camera_context_.get();}
   const std::vector<PerceptionCameraCfg> & camera_cfgs() const {return camera_cfgs_;}
@@ -54,6 +55,7 @@ private:
   curobo_runtime::RobotHandle handle_;
   curobo_runtime::GpuLane * lane_;
   std::function<void()> on_integrated_;
+  rclcpp::CallbackGroup::SharedPtr callback_group_;
   std::unique_ptr<CameraContext> camera_context_;
   std::vector<PerceptionCameraCfg> camera_cfgs_;
   int mapper_image_width_ = 0;

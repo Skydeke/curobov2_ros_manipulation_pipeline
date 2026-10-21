@@ -123,6 +123,14 @@ struct SphereSetOutcome
 {
   TensorF32 spheres;                          // [S, 4] (cx, cy, cz, radius)
   std::vector<std::uint8_t> attached;         // [S]
+  // The spheres above are in the robot base frame. Attached-object spheres are
+  // ALSO provided in the frame of the URDF link the payload is fixed to, so a
+  // consumer that replays a trajectory can ride the link with FK instead of
+  // leaving the object behind at the live pose. Rows are aligned 1:1 with
+  // `spheres` (non-attached rows are zero); `attach_frame` is empty when
+  // nothing is attached or the parent link is unknown.
+  TensorF32 attached_local;                   // [S, 4] (cx, cy, cz, radius)
+  std::string attach_frame;                   // URDF link (e.g. *end_effector)
 };
 
 // PORT: collision_distance._attributed_collisions - one world contact: a robot

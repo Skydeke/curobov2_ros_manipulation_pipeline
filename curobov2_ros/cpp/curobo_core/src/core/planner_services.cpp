@@ -23,6 +23,7 @@
 #include "curobo_core/core/obstacle_manager.hpp"
 #include "curobo_core/core/collision_diagnostics.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
+#include "curobo_core/planners/zero_motion.hpp"
 #include "curobo_core/robot/robot_context.hpp"
 #include "curobo_runtime/runtime.hpp"
 #include "curobo_core/planners/reactive_controller.hpp"
@@ -194,18 +195,25 @@ PlannerServices::PlannerServices(
     std::bind(
       &PlannerServices::handle_get_planners, this,
       std::placeholders::_1, std::placeholders::_2));
+  // Dedicated mutually exclusive group: plans still serialize among themselves
+  // (one plan lane, one GPU), but they no longer starve the quick services and
+  // the viz timers that live in the default group.
+  plan_callback_group_ = node_->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive);
   generate_trajectory_srv_ =
     node_->create_service<curobov2_ros_interfaces::srv::TrajectoryGeneration>(
     name + "/generate_trajectory",
     std::bind(
       &PlannerServices::handle_generate_trajectory, this,
-      std::placeholders::_1, std::placeholders::_2));
+      std::placeholders::_1, std::placeholders::_2),
+    rmw_qos_profile_services_default, plan_callback_group_);
   generate_trajectory_batch_srv_ =
     node_->create_service<curobov2_ros_interfaces::srv::TrajectoryGenerationBatch>(
     name + "/trajectory_generation_batch",
     std::bind(
       &PlannerServices::handle_generate_trajectory_batch, this,
-      std::placeholders::_1, std::placeholders::_2));
+      std::placeholders::_1, std::placeholders::_2),
+    rmw_qos_profile_services_default, plan_callback_group_);
 }
 
 // PORT: joint_order.resolve_start_pose (name reorder, prefix padding from the
@@ -351,6 +359,14 @@ void PlannerServices::wrap_full_turn_targets(curobo_runtime::PlanRequest & reque
     // A target typed straight onto an end stop (the Joints tab slider's limit)
     // needs the same margin, or it stays pinned to the boundary.
     best = std::clamp(best, inner_lo, inner_hi);
+    // If the wrapped equivalent landed within no-motion range of the start,
+    // keep the start verbatim. The boundary-margin clamp above can leave a gap
+    // of a few float32 ulps (~1e-6 at 2*pi), which the zero-delta guard would
+    // otherwise miss - sending a stationary request to the solver as a ~1e-6
+    // rad motion and faulting the CUDA-graph solve.
+    if (std::abs(best - start) <= ZERO_DELTA_TOL) {
+      best = start;
+    }
     if (best != target) {
       RCLCPP_INFO(
         node_->get_logger(),

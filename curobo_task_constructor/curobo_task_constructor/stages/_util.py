@@ -40,6 +40,39 @@ def planner_key(params: dict):
         ) from None
 
 
+def joint_order(robot, joint_state) -> list:
+    """Canonical cspace joint order for a joint goal.
+
+    ``CuroboServerInterface`` derives this from the robot descriptor (or the
+    named joint configs) and uses it to normalize every ``/joint_states``
+    reading. Reusing it keeps a joint goal the same length and order as the
+    start poses it is planned from: the server resolves a start pose by NAME,
+    but takes ``target_joint_positions`` VERBATIM.
+    """
+    order = list(getattr(robot, "_joint_order", None) or [])
+    if order:
+        return order
+    return list(getattr(joint_state, "name", []) or [])
+
+
+def joint_positions_in_cspace(robot, joint_state) -> list:
+    """Positions in the planner's canonical cspace order.
+
+    ``/joint_states`` can carry MORE joints than the planner's cspace (the
+    whole robot: arm, fingers, tips, base/PTU). A joint goal derived from that
+    reading key-for-key produces a goal as long as the reading (16 values for
+    an 8-DOF cspace) and the server rejects it with "q should have dof = 8,
+    got 16". Project onto the cspace order and drop foreign joints.
+    """
+    positions = list(getattr(joint_state, "position", []) or [])
+    names = list(getattr(joint_state, "name", []) or [])
+    order = list(getattr(robot, "_joint_order", None) or [])
+    if not order or not names:
+        return positions
+    by_name = dict(zip(names, positions))
+    return [by_name[n] for n in order if n in by_name]
+
+
 def pose_from_params(cfg: dict, robot) -> object:
     """Build a Pose-like from a params dict ``{x,y,z,qx,qy,qz,qw}``."""
     p = cfg if isinstance(cfg, dict) else {}

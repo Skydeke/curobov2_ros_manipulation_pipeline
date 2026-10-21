@@ -152,18 +152,24 @@ void RosServiceManager::init_services()
   collision_spheres_pub_ =
     node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     name + "/collision_spheres", 10);
+  // Both viz timers live in their own mutually exclusive group. In the default
+  // group they share it with every service callback, and a single (multi-second)
+  // generate_trajectory call then starves the 200 ms sphere timer for the whole
+  // plan burst -- the gripper/robot spheres simply stop updating while the
+  // orchestrator keeps replanning.
+  viz_callback_group_ = node_->create_callback_group(
+    rclcpp::CallbackGroupType::MutuallyExclusive);
   const bool sphere_viz = node_->has_parameter("publish_collision_spheres") ?
     node_->get_parameter("publish_collision_spheres").as_bool() : true;
   if (sphere_viz) {
     collision_spheres_timer_ = node_->create_wall_timer(
       std::chrono::milliseconds(200),
-      std::bind(&RosServiceManager::publish_collision_spheres, this));
+      std::bind(&RosServiceManager::publish_collision_spheres, this),
+      viz_callback_group_);
   }
   const double sparse_rate = node_->has_parameter("sparse_voxel_publish_rate") ?
     node_->get_parameter("sparse_voxel_publish_rate").as_double() : 7.0;
   if (sparse_rate > 0.0) {
-    viz_callback_group_ = node_->create_callback_group(
-      rclcpp::CallbackGroupType::MutuallyExclusive);
     sparse_voxel_timer_ = node_->create_wall_timer(
       std::chrono::duration<double>(1.0 / sparse_rate),
       std::bind(&RosServiceManager::publish_sparse_voxel_grid, this),
@@ -679,6 +685,14 @@ void RosServiceManager::publish_collision_spheres_job()
 
     const std::string frame = node_->has_parameter("base_link") ?
       node_->get_parameter("base_link").as_string() : "base_link";
+    // Link-relative payload spheres (newer bridge). Their frame is the URDF
+    // link the payload is fixed to, so a trajectory preview can FK that link
+    // per waypoint and keep the object in the gripper.
+    const bool has_attached_local =
+      !sphere_set.attach_frame.empty() &&
+      sphere_set.attached_local.shape.size() == 2 &&
+      sphere_set.attached_local.shape[1] == 4 &&
+      sphere_set.attached_local.shape[0] == spheres.shape[0];
     const std::int64_t n = spheres.shape[0];
     for (std::int64_t i = 0; i < n; ++i) {
       const std::size_t base = static_cast<std::size_t>(i) * 4;
@@ -687,19 +701,23 @@ void RosServiceManager::publish_collision_spheres_job()
         continue;   // disabled sphere (radius -100)
       }
       visualization_msgs::msg::Marker marker;
-      marker.header.frame_id = frame;
-      marker.header.stamp = node_->get_clock()->now();
       // PORT: the attached-object spheres carry their own namespace so a
       // consumer can show the grasped object separately.
       const bool attached = static_cast<std::size_t>(i) < sphere_set.attached.size() &&
         sphere_set.attached[static_cast<std::size_t>(i)] != 0;
+      const bool link_relative = attached && has_attached_local &&
+        sphere_set.attached_local.data[base + 3] > 0.0f;
+      marker.header.frame_id = link_relative ? sphere_set.attach_frame : frame;
+      marker.header.stamp = node_->get_clock()->now();
       marker.ns = attached ? "attached_spheres" : "collision_spheres";
       marker.type = visualization_msgs::msg::Marker::SPHERE;
       marker.action = visualization_msgs::msg::Marker::ADD;
       marker.id = static_cast<int>(i);
-      marker.pose.position.x = spheres.data[base + 0];
-      marker.pose.position.y = spheres.data[base + 1];
-      marker.pose.position.z = spheres.data[base + 2];
+      const auto & pos = link_relative ? sphere_set.attached_local.data
+                                       : spheres.data;
+      marker.pose.position.x = pos[base + 0];
+      marker.pose.position.y = pos[base + 1];
+      marker.pose.position.z = pos[base + 2];
       marker.pose.orientation.w = 1.0;
       marker.scale.x = marker.scale.y = marker.scale.z = radius * 2.0;
       marker.color.a = 0.5;
@@ -730,8 +748,13 @@ void RosServiceManager::publish_collision_spheres_job()
         "collision_spheres: sphere(s) in collision (indices: %s)", indices.c_str());
     }
     collision_spheres_pub_->publish(array);
-  } catch (const std::exception &) {
-    // PORT: a viz failure must not break the node.
+  } catch (const std::exception & e) {
+    // A viz failure must not break the node, but it must not be silent either:
+    // an exception thrown by the bridge (e.g. a stale/incompatible Python
+    // helper) disables ALL sphere output, which is invisible in RViz.
+    RCLCPP_WARN_THROTTLE(
+      node_->get_logger(), *node_->get_clock(), 5000,
+      "collision_spheres publish failed: %s", e.what());
   }
 }
 

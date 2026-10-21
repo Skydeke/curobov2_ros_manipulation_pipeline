@@ -13,7 +13,15 @@ namespace curobo_core
 {
 
 // PORT: zero_motion.ZERO_DELTA_TOL
-inline constexpr double ZERO_DELTA_TOL = 1e-9;
+//
+// Radians. A tolerance below float32 resolution can never fire for "already
+// there": float32 quantizes the joint limits at ~5e-7 (ulp(2*pi)), and the
+// continuous-joint snapper clamps a wrapped target to `hi - 1e-3`, which leaves
+// a few ulps (~1e-6) between the snapped goal and the start. A 1e-9 tolerance
+// missed those, so a stationary request went to cuRobo as a ~1e-6 rad motion -
+// the degenerate CUDA-graph solve this guard exists to prevent. 1e-4 rad
+// (0.006 deg) is still far below any motion worth planning.
+inline constexpr double ZERO_DELTA_TOL = 1e-4;
 
 // PORT: zero_motion.is_zero_delta
 inline bool is_zero_delta(

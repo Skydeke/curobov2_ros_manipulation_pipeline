@@ -338,12 +338,20 @@ void UnifiedPlannerNode::setup() {
   // lane_perception (one owner thread for the shared Mapper) and drop the frame
   // when the lane is busy, instead of every strategy worker taking the barrier
   // inline and integrating concurrently.
+  // PORT: unified_planner_node._perception_callback_group - a dedicated group
+  // so long generate_trajectory service callbacks cannot starve the camera
+  // streams (see the header). Reentrant: the two feeds may decode in parallel;
+  // the GPU barrier serializes the actual bridge calls.
+  perception_callback_group_ = create_callback_group(
+      rclcpp::CallbackGroupType::Reentrant);
+
   camera_system_manager_ = std::make_unique<CameraSystemManager>(
       this, bridge_, handle_, lane_perception_.get(), [this]() {
         if (obstacle_manager_) {
           obstacle_manager_->bump_perception_epoch();
         }
-      });
+      },
+      perception_callback_group_);
   // PORT: unified_planner_node.__init__ - the lidar integrates share
   // lane_perception with the depth integrates (one Mapper owner thread).
   laser_system_manager_ = std::make_unique<LaserSystemManager>(
@@ -440,7 +448,8 @@ void UnifiedPlannerNode::setup() {
           this, bridge_, handle_, seg_cfgs, [this]() {
             const std::vector<float> pose = current_pose();
             return std::vector<double>(pose.begin(), pose.end());
-          });
+          },
+          perception_callback_group_);
       ros_service_manager_->register_robot_segmentation(
           robot_segmentation_.get());
     }

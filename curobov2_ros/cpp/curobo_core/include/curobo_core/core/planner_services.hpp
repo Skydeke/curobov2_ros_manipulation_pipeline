@@ -138,6 +138,12 @@ private:
 
   rclcpp::Service<curobov2_ros_interfaces::srv::SetPlanner>::SharedPtr set_planner_srv_;
   rclcpp::Service<curobov2_ros_interfaces::srv::GetPlanners>::SharedPtr get_planners_srv_;
+  // Planning is the only multi-second callback on this node. It must NOT share
+  // the default (mutually exclusive) callback group with the cheap services and
+  // timers: one 7 s solve otherwise blocks /fk, /ik, /attach_object and the
+  // sphere timer until the whole plan burst drains (that is a 30 s /fk timeout
+  // in the task constructor while the orchestrator keeps replanning).
+  rclcpp::CallbackGroup::SharedPtr plan_callback_group_;
   rclcpp::Service<curobov2_ros_interfaces::srv::TrajectoryGeneration>::SharedPtr
     generate_trajectory_srv_;
   rclcpp::Service<curobov2_ros_interfaces::srv::TrajectoryGenerationBatch>::SharedPtr

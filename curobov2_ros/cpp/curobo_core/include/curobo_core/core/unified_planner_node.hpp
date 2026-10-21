@@ -141,6 +141,13 @@ private:
   std::unique_ptr<CameraSystemManager> camera_system_manager_;
   std::unique_ptr<LaserSystemManager> laser_system_manager_;
   std::unique_ptr<RobotSegmentation> robot_segmentation_;
+  // PORT: unified_planner_node._perception_callback_group. Perception
+  // subscriptions (mapper depth + robot segmentation) must NOT share the node's
+  // default mutually-exclusive group: a generate_trajectory service callback
+  // runs for seconds and would starve every camera stream, dropping the mask /
+  // mapper rate to "only between plans". A reentrant group lets the two camera
+  // feeds run concurrently (the GPU barrier still serializes the actual work).
+  rclcpp::CallbackGroup::SharedPtr perception_callback_group_;
 };
 
 }  // namespace curobo_core

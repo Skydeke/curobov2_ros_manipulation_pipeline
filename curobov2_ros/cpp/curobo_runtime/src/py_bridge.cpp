@@ -900,6 +900,22 @@ SphereSetOutcome PyBridge::collision_spheres_with_attached(
     for (bool v : result.attr("__getitem__")("attached").cast<std::vector<bool>>()) {
       out.attached.push_back(v ? 1 : 0);
     }
+    // Optional link-relative payload spheres (newer Python bridge). Absent in
+    // an older bridge: leave them empty and the publisher falls back to the
+    // base-frame spheres.
+    try {
+      out.attached_local = array_to_tensor(result.attr("__getitem__")("attached_local"));
+    } catch (const py::error_already_set &) {
+      PyErr_Clear();
+      out.attached_local = TensorF32{};
+    }
+    try {
+      out.attach_frame =
+        result.attr("__getitem__")("attach_frame").cast<std::string>();
+    } catch (const py::error_already_set &) {
+      PyErr_Clear();
+      out.attach_frame.clear();
+    }
     return out;
   } catch (const py::error_already_set & e) {
     throw BridgeError("programming", e.what());

@@ -16,6 +16,7 @@ from curobo_task_constructor.stages._util import (
     cost_of,
     full_request,
     goalset_for_scene,
+    joint_order,
     pose_from_params,
 )
 
@@ -32,11 +33,29 @@ class MoveTo(PropagatingEitherWay):
     # Goal resolution
     # ------------------------------------------------------------------
     def _goal_positions(self, start: InterfaceState) -> list:
-        """Joint-space goal aligned to the start state's joint-name order."""
+        """Joint-space goal aligned to the PLANNER's cspace order.
+
+        The start state can carry MORE joints than the planner's cspace: in
+        simulation ``/joint_states`` is the whole robot (arm + fingers + tips +
+        base/PTU), while cuRobo's cspace is only the active joints. Merging a
+        sparse goal onto the raw reading key-for-key produced a goal as long as
+        the reading (16 values for a 8-DOF cspace) and the server rejected it
+        with "q should have dof = 8, got 16". The robot interface already
+        knows the canonical cspace order (it is the same order every
+        ``start_pose`` is sent in), so project onto THAT and drop joints the
+        planner does not own.
+        """
         goal = self.params.get("goal") or {}
-        names = getattr(start.joint_state, "name", None)
+        names = self._goal_joint_order(start.joint_state)
         if "name" in goal:
             cfg = self.robot.get_named_joint_config(goal["name"])
+            if cfg is None:
+                # An unresolved name used to become an EMPTY joint goal (and
+                # then a bogus free pose request). Fail loudly instead: the
+                # descriptor that defines the config is part of the stack.
+                raise ValueError(
+                    f"MoveTo {self.name!r}: named joint config "
+                    f"{goal['name']!r} not found in the robot descriptor")
             return self._merge_named(cfg, names, start.joint_state)
         joints = goal.get("joints")
         if isinstance(joints, dict):
@@ -48,6 +67,9 @@ class MoveTo(PropagatingEitherWay):
         if joints is not None:
             return [float(j) for j in joints]
         return None
+
+    def _goal_joint_order(self, start_joint_state):
+        return joint_order(self.robot, start_joint_state)
 
     @staticmethod
     def _merge_sparse(values: dict, names, start_joint_state) -> list:
@@ -69,7 +91,7 @@ class MoveTo(PropagatingEitherWay):
                         getattr(start_joint_state, "position", [])))
         if getattr(cfg, "names", None):
             base.update(cfg.as_dict())
-            return [base[n] for n in (names or cfg.names)]
+            return [base[n] for n in (names or cfg.names) if n in base]
         return [float(p) for p in getattr(cfg, "positions", [])]
 
     def _goal_pose(self):
