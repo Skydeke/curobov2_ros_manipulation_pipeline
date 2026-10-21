@@ -10,7 +10,7 @@
 # Neither service needs the planner server (compose_benchmark.yaml), so they
 # live here, separate from the parity compose. Both run pytest directly on the
 # mounted src tree, so a container rebuild is NOT required to pick up new
-# sources (the image itself must have pytest, which Dockerfile.cumotion gets
+# sources (the image itself must have pytest, which Dockerfile gets
 # via curobo[benchmark]).
 #
 # Run:  docker compose -f docker/compose_tests.yaml up

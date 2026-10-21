@@ -104,7 +104,7 @@
 # The benchmark module is executed with `python3 -m` + an explicit PYTHONPATH
 # to the mounted src package, so a container rebuild is NOT required to pick
 # up new curobov2_ros_extra sources (only the docker image itself must
-# have curobo[benchmark] + robometrics, which Dockerfile.cumotion installs).
+# have curobo[benchmark] + robometrics, which Dockerfile installs).
 #
 # Run:  docker compose -f docker/compose_benchmark.yaml up
 #       docker compose -f docker/compose_benchmark.yaml exec curobo_benchmark \
@@ -115,7 +115,7 @@ services:
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.cumotion
+      dockerfile: docker/Dockerfile
     runtime: nvidia
     network_mode: host
     ipc: host

@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - docker/Dockerfile.cumotion
+      - docker/Dockerfile
       - curobov2_ros/**
       - curobov2_ros_interfaces/**
       - curobov2_ros_moveit/**
@@ -80,7 +80,7 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: docker/Dockerfile.cumotion
+          file: docker/Dockerfile
           push: true
           network: host
           tags: ${{ steps.meta.outputs.tags }}

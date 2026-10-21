@@ -7,7 +7,7 @@
 # package://curobov2_ros/config/ur10e.curobo.yml).
 #
 # The image is pulled from the pipeline-built fork image on GHCR by default,
-# or rebuilt locally from docker/Dockerfile.cumotion with --build. Franka and
+# or rebuilt locally from docker/Dockerfile with --build. Franka and
 # UR10e sessions share the same image — only robot:=... selects the model, so
 # there is no per-robot tag. The fork root is bind-mounted at the ROS workspace
 # src, so launch/config/robots edits apply live (colcon build uses
@@ -27,7 +27,7 @@ services:
     image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
     build:
       context: ..
-      dockerfile: docker/Dockerfile.cumotion
+      dockerfile: docker/Dockerfile
     runtime: nvidia
     network_mode: host
     ipc: host
