@@ -146,25 +146,22 @@ RUN add-apt-repository -y universe && \
 COPY curobo/requirements.txt /tmp/curobo_requirements.txt
 RUN pip install --no-cache-dir -r /tmp/curobo_requirements.txt
 
-# --- curobov2_ros packages ---
-COPY --chown=${USERNAME}:${USERNAME} curobov2_ros ${ROS_WS}/src/curobov2_ros
-COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_interfaces ${ROS_WS}/src/curobov2_ros_interfaces
-COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_moveit ${ROS_WS}/src/curobov2_ros_moveit
-COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_rviz ${ROS_WS}/src/curobov2_ros_rviz
-COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_extra ${ROS_WS}/src/curobov2_ros_extra
-
-# --- C++ port: the bridge (the C++ server now lives inside curobov2_ros, cpp/) ---
-COPY --chown=${USERNAME}:${USERNAME} curobo_bridge ${ROS_WS}/src/curobo_bridge
-
-# --- task-constructor packages ---
-COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_interfaces ${ROS_WS}/src/curobo_task_constructor_interfaces
-COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor ${ROS_WS}/src/curobo_task_constructor
-COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_rviz ${ROS_WS}/src/curobo_task_constructor_rviz
-
-# --- cuRobo v2 ---
-COPY --chown=${USERNAME}:${USERNAME} curobo ${ROS_WS}/src/curobo
-
 WORKDIR ${ROS_WS}
+
+# --- ROS deps (rosdep -> apt): manifests ONLY, before the sources ------------
+# This is the slow apt/rosdep layer. It is keyed on the package.xml files, so
+# editing any C++/Python source below does NOT re-run rosdep/apt. Everything
+# after this point is rebuilt on a source change.
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros/package.xml ${ROS_WS}/src/curobov2_ros/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_interfaces/package.xml ${ROS_WS}/src/curobov2_ros_interfaces/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_moveit/package.xml ${ROS_WS}/src/curobov2_ros_moveit/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_rviz/package.xml ${ROS_WS}/src/curobov2_ros_rviz/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_extra/package.xml ${ROS_WS}/src/curobov2_ros_extra/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobo_bridge/package.xml ${ROS_WS}/src/curobo_bridge/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_interfaces/package.xml ${ROS_WS}/src/curobo_task_constructor_interfaces/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor/package.xml ${ROS_WS}/src/curobo_task_constructor/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_rviz/package.xml ${ROS_WS}/src/curobo_task_constructor_rviz/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobo/package.xml ${ROS_WS}/src/curobo/package.xml
 
 USER ${USERNAME}
 
@@ -191,6 +188,24 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
   $SUDO rm -rf /var/lib/apt/lists/*
 # NOTE: rosdep -r tolerates the iki_kortex_description exec key of
 # curobov2_ros_extra (kortex-only, runtime-only); the package still builds.
+
+# --- curobov2_ros packages (sources; a source edit invalidates from here) ---
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros ${ROS_WS}/src/curobov2_ros
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_interfaces ${ROS_WS}/src/curobov2_ros_interfaces
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_moveit ${ROS_WS}/src/curobov2_ros_moveit
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_rviz ${ROS_WS}/src/curobov2_ros_rviz
+COPY --chown=${USERNAME}:${USERNAME} curobov2_ros_extra ${ROS_WS}/src/curobov2_ros_extra
+
+# --- C++ port: the bridge (the C++ server now lives inside curobov2_ros, cpp/) ---
+COPY --chown=${USERNAME}:${USERNAME} curobo_bridge ${ROS_WS}/src/curobo_bridge
+
+# --- task-constructor packages ---
+COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_interfaces ${ROS_WS}/src/curobo_task_constructor_interfaces
+COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor ${ROS_WS}/src/curobo_task_constructor
+COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_rviz ${ROS_WS}/src/curobo_task_constructor_rviz
+
+# --- cuRobo v2 ---
+COPY --chown=${USERNAME}:${USERNAME} curobo ${ROS_WS}/src/curobo
 
 # --base-paths is limited to the directories copied above: a base image may
 # already carry other copies of these packages (e.g. as part of a larger
