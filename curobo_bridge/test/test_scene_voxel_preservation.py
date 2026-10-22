@@ -1,21 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Regressions for the perception voxel layer surviving scene edits.
-
-These pin the safety property that the solvers are never silently blinded to
+"""Regressions for the perception voxel layer surviving scene edits. These pin the safety property that the solvers are never silently blinded to
 camera-observed voxels:
 
 * ``scene_set(clear_first=True)`` (what a ``set_objects`` / clear - e.g. the
   MoveIt side's ``syncPlanningScene`` - calls) must carry the perception voxel
   layer over onto the rebuilt scene. The voxels are not an analytic object; they
-  are installed on the scene by the ESDF refresh. Dropping them leaves the solver
-  collision-checking against an empty world while the map keeps publishing the
-  obstacle, so a plan goes straight through it.
-* ``world_push`` must report a failed solver update instead of swallowing it, so
-  the caller can refuse to plan against an unverified world.
-
-The cuRobo ``Scene`` is stubbed, so these run with no GPU/cuRobo install.
-"""
+  are installed on the scene by the ESDF refresh."""
 
 import sys
 import types

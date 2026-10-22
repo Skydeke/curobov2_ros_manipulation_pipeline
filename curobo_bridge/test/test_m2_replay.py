@@ -1,15 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""M2 parity: replay the recorded kinematics requests through curobo_bridge.
-
-Uses the recordings captured from the (unmodified) Python server
-(`recordings/m2_kinematics_franka/`) as the expectation (design section 11.5).
-Needs a GPU and the recordings; skips otherwise.
-
-Acceptance asserted here (design section 10, M2):
-  * FK within 1e-5 of the recorded response;
-  * IK validity flags identical.
-"""
+"""M2 parity: replay the recorded kinematics requests through curobo_bridge. Uses the recordings captured from the (unmodified) Python server
+(`recordings/m2_kinematics_franka/`) as the expectation (design section 11.5). Needs a GPU and the recordings; skips otherwise."""
 
 import json
 import os
