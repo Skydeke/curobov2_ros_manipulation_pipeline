@@ -1,6 +1,4 @@
-"""kortex_mtc_test.py as a StageSpec tree — validation target #1.
-
-The legacy MoveIt-pipeline test asked for this stage sequence:
+"""kortex_mtc_test.py as a StageSpec tree — validation target #1. The legacy MoveIt-pipeline test asked for this stage sequence:
 
     current_state
     -> move_to (pose goal, base_link)
@@ -11,15 +9,8 @@ The legacy MoveIt-pipeline test asked for this stage sequence:
     -> move_to (named "close", gripper)
 
 Reproduced here 1:1 under the declarative format, solved and executed against
-the MockCuroboServer — same ordering, same goals.
-
-The "cartesian path variant" leg is a ``cartesian_path`` stage rather than a
-pose ``move_to``. That is the point of the leg: as a plain ``move_to`` it was
-a free pose goal, so the planner picked whichever curved joint-space path it
-liked and the tool swung round instead of tracking the line. As a
-``cartesian_path`` the goalset carries whole-path axis holds and the leg is
-solved as a straight line — see ``stages/cartesian_path.py``.
-"""
+the MockCuroboServer — same ordering, same goals. The "cartesian path variant" leg is a ``cartesian_path`` stage rather than a
+pose ``move_to``."""
 
 from __future__ import annotations
 

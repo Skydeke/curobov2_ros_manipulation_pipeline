@@ -1,0 +1,333 @@
+"""ROS message converters for task solutions (MTC Solution.toMsg surface). ``executor.solution_to_dict`` produces ROS-free dicts with MTC ``Solution``
+field names; this module converts those dicts to/from
+``curobo_task_constructor_interfaces`` messages. ROS message classes are
+imported lazily inside the converters (the ``viz.py`` pattern), so the core
+stays importable without ROS and unit tests inject duck-typed stand-ins."""
+
+from __future__ import annotations
+
+import math
+from typing import Any, Optional
+
+try:
+    import yaml
+except Exception:  # pragma: no cover - exotic envs without yaml
+    yaml = None
+
+
+#: Reserved collision-object id carrying the "clear the whole world" /
+#: "release whatever is attached" scene ops across the wire. ``moveit_msgs``'
+#: PlanningScene is a NAME-KEYED diff (there is no wildcard REMOVE), so the
+#: clear-all ops — which the in-process executor applies as the robot's
+#: ``remove_all_objects()`` / ``detach_object(None)`` — need their own marker
+#: to survive the message round trip. A generic PlanningScene consumer reads it
+#: as a plain REMOVE of an unknown id, i.e. a no-op; ``msg_to_scene_diff``
+#: recognizes it and restores the boolean op. Without it a scene-setup task
+#: cannot clear the server world, its re-adds are refused as duplicate names,
+#: and the pipeline plans against the previous cycle's objects forever.
+
+from curobo_task_constructor.msg_convert_to import *
+
+def msg_to_solution_info(msg) -> dict:
+    cost = float(getattr(msg, "cost", float("inf")))
+    if isinstance(cost, float) and math.isnan(cost):
+        cost = float("inf")
+    return {
+        "id": int(getattr(msg, "id", 0) or 0),
+        "cost": cost,
+        "comment": str(getattr(msg, "comment", "") or ""),
+        "stage_id": int(getattr(msg, "stage_id", 0) or 0),
+        "planner_id": str(getattr(msg, "planner_id", "") or ""),
+    }
+
+
+def msg_to_joint_trajectory(msg) -> dict:
+    jt = getattr(msg, "joint_trajectory", msg)
+    return {
+        "joint_names": [str(n) for n in (getattr(jt, "joint_names", []) or [])],
+        "points": [[float(v) for v in (getattr(pt, "positions", []) or [])]
+                   for pt in (getattr(jt, "points", []) or [])],
+        # MTC parity: velocities ride the RobotTrajectory and are replayed as
+        # sent. Empty when the producing solver did not populate them.
+        "velocities": [[float(v) for v in (getattr(pt, "velocities", []) or [])]
+                       for pt in (getattr(jt, "points", []) or [])],
+    }
+
+
+def _pose_to_dict(pose: Any) -> Optional[dict]:
+    """Pose-like -> flat ``{x,y,z,qx,qy,qz,qw}`` dict (for markers).
+
+    Accepts flat dicts, ``Pose3`` (list position/orientation), ROS
+    geometry_msgs poses and duck-typed equivalents; anything else (None,
+    partial dicts) yields None. The missing function that kept every
+    attempt/failure marker empty: callers referenced it, msg_convert never
+    defined it, and the callers' broad excepts swallowed the AttributeError.
+    """
+    if pose is None:
+        return None
+    if isinstance(pose, dict):
+        if {"x", "y", "z"} <= set(pose):
+            out = {k: float(pose.get(k, 0.0)) for k in ("x", "y", "z")}
+            for k, default in (("qx", 0.0), ("qy", 0.0),
+                               ("qz", 0.0), ("qw", 1.0)):
+                try:
+                    out[k] = float(pose.get(k, default))
+                except (TypeError, ValueError):
+                    return None
+            return out
+        return None
+
+    def component(obj: Any, keys: tuple, defaults: tuple):
+        if isinstance(obj, (list, tuple)):
+            if len(obj) < len(keys):
+                return None
+            try:
+                return [float(obj[i]) for i in range(len(keys))]
+            except (TypeError, ValueError, IndexError):
+                return None
+        if isinstance(obj, dict):
+            try:
+                return [float(obj.get(k, d)) for k, d in zip(keys, defaults)]
+            except (TypeError, ValueError):
+                return None
+        try:
+            return [float(getattr(obj, k)) for k in keys]
+        except (TypeError, ValueError, AttributeError):
+            return None
+
+    pos = component(getattr(pose, "position", None), ("x", "y", "z"),
+                    (0.0, 0.0, 0.0))
+    ori = component(getattr(pose, "orientation", None), ("x", "y", "z", "w"),
+                    (0.0, 0.0, 0.0, 1.0))
+    if pos is None or ori is None:
+        return None
+    return {"x": pos[0], "y": pos[1], "z": pos[2],
+            "qx": ori[0], "qy": ori[1], "qz": ori[2], "qw": ori[3]}
+
+
+def msg_to_pose(pose) -> dict:
+    pos = getattr(pose, "position", pose)
+    ori = getattr(pose, "orientation", None)
+    get = lambda o, k, default=0.0: float(
+        getattr(o, k, default) if not isinstance(o, dict)
+        else o.get(k, default))
+    return {
+        "x": get(pos, "x"), "y": get(pos, "y"), "z": get(pos, "z"),
+        "qx": get(ori, "x") if ori is not None else 0.0,
+        "qy": get(ori, "y") if ori is not None else 0.0,
+        "qz": get(ori, "z") if ori is not None else 0.0,
+        "qw": get(ori, "w", 1.0) if ori is not None else 1.0,
+    }
+
+
+def _byte_to_int(value, default=0) -> int:
+    """A ``byte``-typed field value (or int) -> plain int. ``moveit_msgs/CollisionObject.operation`` is ``byte``: the generated
+    constants are single bytes (``ADD == b'\x00'``) and after a DDS round
+    trip the field reads back as ``bytes``. ``int()`` on that raises
+    ``ValueError: invalid literal for int() with base 10`` — which is how
+    the execute server rejected every scene-carrying goal while pure-motion
+    goals (empty diffs, loop body never runs) sailed through."""
+    if isinstance(value, (bytes, bytearray)):
+        return int(value[0]) if len(value) else int(default or 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default or 0)
+
+
+def msg_to_scene_diff(msg) -> dict:
+    """PlanningScene -> scene_diff dict (inverse of scene_diff_to_msg)."""
+    from moveit_msgs.msg import CollisionObject
+    out = {"added": [], "removed": [], "attached": None, "detached": None,
+           "remove_all": False, "detach_all": False}
+    world = getattr(msg, "world", None)
+    for co in (getattr(world, "collision_objects", []) or []):
+        op = _byte_to_int(getattr(co, "operation", None), 0)
+        if op == _byte_to_int(CollisionObject.REMOVE):
+            name = str(getattr(co, "id", ""))
+            if name == SCENE_CLEAR_ALL_ID:
+                out["remove_all"] = True
+            else:
+                out["removed"].append(name)
+            continue
+        spec = {"name": str(getattr(co, "id", "")), "shape": "cuboid",
+                "pose": None, "dimensions": None, "mesh_path": None,
+                "vertices": None, "triangles": None}
+        poses = list(getattr(co, "primitive_poses", []) or [])
+        primitives = list(getattr(co, "primitives", []) or [])
+        if primitives:
+            from shape_msgs.msg import SolidPrimitive
+            prim = primitives[0]
+            dims = [float(v) for v in (getattr(prim, "dimensions", []) or [])]
+            t = int(getattr(prim, "type", SolidPrimitive.BOX))
+            if t == int(SolidPrimitive.SPHERE):
+                spec["shape"] = "sphere"
+            elif t == int(SolidPrimitive.CYLINDER):
+                spec["shape"] = "cylinder"
+            spec["dimensions"] = dims
+        if poses:
+            spec["pose"] = msg_to_pose(poses[0])
+        out["added"].append(spec)
+    state = getattr(msg, "robot_state", None)
+    for entry in (getattr(state, "attached_collision_objects", []) or []):
+        obj = getattr(entry, "object", entry)
+        name = str(getattr(obj, "id", ""))
+        op = _byte_to_int(getattr(obj, "operation", None), 0)
+        if op == _byte_to_int(CollisionObject.REMOVE):
+            if name == SCENE_CLEAR_ALL_ID:
+                out["detach_all"] = True
+            else:
+                out["detached"] = name
+        else:
+            out["attached"] = name
+    return out
+
+
+def msg_to_sub_trajectory(msg) -> dict:
+    traj = getattr(msg, "trajectory", None)
+    return {
+        "info": msg_to_solution_info(getattr(msg, "info", None)),
+        "execution_info": {
+            "controller_names": [
+                str(n) for n in (getattr(
+                    getattr(msg, "execution_info", None),
+                    "controller_names", []) or [])],
+        },
+        "trajectory": msg_to_joint_trajectory(traj) if traj is not None
+        else {"joint_names": [], "points": []},
+        "scene_diff": {
+            "before": msg_to_scene_diff(getattr(msg, "scene_diff", None)),
+            "after": {"added": [], "removed": [], "attached": None,
+                      "detached": None, "remove_all": False,
+                      "detach_all": False},
+        },
+        "replay_goal": _load_yaml(getattr(msg, "replay_goal_yaml", "")),
+    }
+
+
+def msg_to_solution_dict(msg) -> dict:
+    """Solution message -> solution_to_dict-shaped dict (for execute_dict)."""
+    return {
+        "task_id": str(getattr(msg, "task_id", "") or ""),
+        "start_scene": [],
+        "sub_solution": [
+            {"info": msg_to_solution_info(getattr(sub, "info", None)),
+             "sub_solution_id": [int(i) for i in (
+                 getattr(sub, "sub_solution_id", []) or [])]}
+            for sub in (getattr(msg, "sub_solution", []) or [])
+        ],
+        "sub_trajectories": [
+            msg_to_sub_trajectory(sub)
+            for sub in (getattr(msg, "sub_trajectory", []) or [])
+        ],
+    }
+
+
+# ----------------------------------------------------------------------
+# StageDescription / Property helpers (panel + TaskDescription)
+# ----------------------------------------------------------------------
+def interface_flags(stage) -> int:
+    """Resolved interface as MTC StageDescription.flags bits (0x01 reads
+    start, 0x02 reads end, 0x04 writes next start, 0x08 writes prev end)."""
+    try:
+        start, end = stage.interface_flags()
+    except Exception:
+        return 0
+    flags = 0
+    if getattr(start, "read", False):
+        flags |= 0x01
+    if getattr(end, "read", False):
+        flags |= 0x02
+    if getattr(end, "write", False):
+        flags |= 0x04
+    if getattr(start, "write", False):
+        flags |= 0x08
+    return flags
+
+
+def sphere_marker(ns: str, marker_id: int, pose: dict, size: float,
+                  color, marker_cls=None):
+    """One SPHERE marker (MTC stage start/goal frames)."""
+    if marker_cls is None:
+        from visualization_msgs.msg import Marker
+        marker_cls = Marker
+    mark = marker_cls()
+    mark.header.frame_id = "world"
+    mark.ns = str(ns)
+    mark.id = int(marker_id)
+    mark.type = marker_cls.SPHERE
+    mark.action = marker_cls.ADD
+    mark.pose = _pose_to_msg(pose)
+    mark.scale.x = mark.scale.y = mark.scale.z = float(size)
+    mark.color.r, mark.color.g, mark.color.b, mark.color.a = (
+        float(color[0]), float(color[1]), float(color[2]), float(color[3]))
+    return mark
+
+
+def sphere_list_marker(ns: str, marker_id: int, positions: list, size: float,
+                       color, marker_cls=None):
+    """One SPHERE_LIST marker (goal candidates)."""
+    if marker_cls is None:
+        from visualization_msgs.msg import Marker
+        marker_cls = Marker
+    from geometry_msgs.msg import Point
+    mark = marker_cls()
+    mark.header.frame_id = "world"
+    mark.ns = str(ns)
+    mark.id = int(marker_id)
+    mark.type = marker_cls.SPHERE_LIST
+    mark.action = marker_cls.ADD
+    mark.scale.x = mark.scale.y = mark.scale.z = float(size)
+    mark.color.r, mark.color.g, mark.color.b, mark.color.a = (
+        float(color[0]), float(color[1]), float(color[2]), float(color[3]))
+    for pose in (positions or []):
+        pt = Point()
+        pt.x, pt.y, pt.z = (float(pose.get("x", 0.0)),
+                            float(pose.get("y", 0.0)),
+                            float(pose.get("z", 0.0)))
+        mark.points.append(pt)
+    return mark
+def property_to_msg(name: str, value: Any, description: str = "",
+                    type_name: str = "", msg_cls=None):
+    """One Property message (MTC Property shape)."""
+    if msg_cls is None:
+        from curobo_task_constructor_interfaces.msg import Property
+        msg_cls = Property
+    msg = msg_cls()
+    msg.name = str(name)
+    msg.description = str(description or "")
+    msg.type = str(type_name or type(value).__name__)
+    msg.value = _dump_yaml(value)
+    return msg
+
+
+def stage_description_to_msg(stage_id: int, parent_id: int, name: str,
+                             flags: int, properties: list, msg_cls=None):
+    """StageDescription message (MTC shape)."""
+    if msg_cls is None:
+        from curobo_task_constructor_interfaces.msg import StageDescription
+        msg_cls = StageDescription
+    msg = msg_cls()
+    msg.id = int(stage_id)
+    msg.parent_id = int(parent_id)
+    msg.name = str(name)
+    msg.flags = int(flags)
+    for prop in (properties or []):
+        msg.properties.append(prop)
+    return msg
+
+__all__ = [
+    'msg_to_solution_info',
+    'msg_to_joint_trajectory',
+    '_pose_to_dict',
+    'msg_to_pose',
+    '_byte_to_int',
+    'msg_to_scene_diff',
+    'msg_to_sub_trajectory',
+    'msg_to_solution_dict',
+    'interface_flags',
+    'sphere_marker',
+    'sphere_list_marker',
+    'property_to_msg',
+    'stage_description_to_msg',
+]

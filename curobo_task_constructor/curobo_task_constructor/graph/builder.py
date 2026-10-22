@@ -1,16 +1,10 @@
-"""Build a stage tree from a declarative ``StageSpec`` (Sec. 1/2 of the plan).
-
-The wire format is generic: containers are created from
+"""Build a stage tree from a declarative ``StageSpec`` (Sec. 1/2 of the plan). The wire format is generic: containers are created from
 ``spec.container_type`` (an open map below), leaf/wrapper stages from
 ``spec.stage_type`` through the open ``STAGE_REGISTRY``. The builder never
 needs to know a stage type by name — a stage declares children by accepting
 them (a ``ContainerStage`` via ``add``, a wrapper such as ``ComputeIK`` via
 ``set_child``); anything else with children that cannot take them is a
-validation error at build time.
-
-The root of a task may be a container (the common case — a task root is
-normally a ``SerialContainer``) or a single stage.
-"""
+validation error at build time."""
 
 from __future__ import annotations
 

@@ -1,16 +1,10 @@
-"""Task.publish publishes ONE Solution message - MTC's exact contract.
-
-MTC binds ``Task.publish`` to *only*
+"""Task.publish publishes ONE Solution message - MTC's exact contract. MTC binds ``Task.publish`` to *only*
 ``self.introspection().publishSolution(*solution)``
 (``moveit_task_constructor/core/python/bindings/src/core.cpp:481``), documented
 as "Publish the given solution to the ROS topic ``solution``". Nothing else:
 rendering is the consumer's job (MTC's RViz Display subscribes to ``solution``;
 our panel fetches via GetSolution and republishes the trajectory for the
-CuroboTrajectoryDisplay).
-
-These tests pin that contract so a second publish on the trajectory topic
-cannot creep back in: the trajectory publisher is counted and must stay 0.
-"""
+CuroboTrajectoryDisplay)."""
 
 from curobo_task_constructor import viz
 from curobo_task_constructor.mtc import core, stages

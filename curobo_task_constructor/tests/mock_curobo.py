@@ -154,6 +154,8 @@ class MockCuroboServer(RobotInterface):
         self._plan_scene_original = set()
         self._plan_scene_attached = None
         self.executed = []  # PlanRequests driven via execute()
+        #: GripperCommand calls recorded by the non-planned gripper path.
+        self.gripper_commands: list = []
         #: Trajectory dicts replayed verbatim via execute(req, trajectory=...)
         #: (MTC Task::execute parity). One entry per driven motion segment.
         self.replayed: list = []
@@ -373,6 +375,10 @@ class MockCuroboServer(RobotInterface):
                 wp.velocity = [float(v) for v in vels[i]]
             waypoints.append(wp)
         return PlanResult(True, "replayed", trajectory=waypoints)
+
+    def gripper_command(self, **cmd) -> PlanResult:
+        self.gripper_commands.append(dict(cmd))
+        return PlanResult(True, f"gripper {cmd.get('position')}")
 
     # ------------------------------------------------------------------
     # scene

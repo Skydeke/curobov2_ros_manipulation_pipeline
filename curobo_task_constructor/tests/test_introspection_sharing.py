@@ -1,15 +1,7 @@
-"""Introspection must not accumulate DDS entities across tasks.
-
-The pipeline builds a fresh ``Task`` for every motion of every pick cycle.
-The introspection node is process-shared, so anything created per task on it
+"""Introspection must not accumulate DDS entities across tasks. The pipeline builds a fresh ``Task`` for every motion of every pick cycle. The introspection node is process-shared, so anything created per task on it
 and never destroyed is a per-motion leak in long-running nodes (the grasp
 orchestrator in continuous mode): 3 TRANSIENT_LOCAL publishers per task made
-process RSS ratchet once per motion. The publishers are therefore shared —
-one handle per topic for the whole process — while the
-``get_solution_<task_id>`` service stays per task with deterministic
-takeover. This pins both halves: publisher count stays flat across tasks,
-and no service handle survives its task's release.
-"""
+process RSS ratchet once per motion."""
 
 import gc
 import time

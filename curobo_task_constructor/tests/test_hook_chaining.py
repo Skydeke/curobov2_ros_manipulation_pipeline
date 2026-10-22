@@ -1,15 +1,11 @@
 """Regression: introspection hooks attached after ``init()`` must chain onto
-the container threading handlers — never replace them.
-
-node.py attaches its publish hooks to every stage AFTER ``executor.init()``
+the container threading handlers — never replace them. node.py attaches its publish hooks to every stage AFTER ``executor.init()``
 has already wrapped each child's ``on_solution`` with the container's
 chain-lifting handler (``ContainerStage._on_child_solution`` / ``_lift_chain``
 in ``core/container.py``). A plain assignment severs that chain: leaves still
 emit and publish, but the root never lifts a full solution, so
 ``executor.plan()`` reports no complete solution even though the server plans
-fine. ``core.chain_hook`` is the contract every post-init hook attach point
-(the action server's publishers, ComputeIK's collection) relies on.
-"""
+fine."""
 
 from __future__ import annotations
 

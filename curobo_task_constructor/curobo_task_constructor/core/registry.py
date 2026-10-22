@@ -1,17 +1,9 @@
-"""The open stage registry (MTC's ``StageRegistry`` equivalent).
-
-Task graphs reference stage types by string name (``StageSpec.stage_type``),
+"""The open stage registry (MTC's ``StageRegistry`` equivalent). Task graphs reference stage types by string name (``StageSpec.stage_type``),
 resolved here — never through a closed enum. Adding a capability is exactly
 "write a ``Stage`` subclass, decorate it, done":
 
     @register_stage("move_to")
-    class MoveTo(stages.PropagatingEitherWay): ...
-
-That is the whole extension surface; the executor, the graph builder and the
-ROS wiring never need to change for a new stage type. This mirrors the
-`CostManager`/`BaseCost.register` extension idiom cuRoboV2 already uses for
-its cost terms.
-"""
+    class MoveTo(stages.PropagatingEitherWay): ..."""
 
 from __future__ import annotations
 

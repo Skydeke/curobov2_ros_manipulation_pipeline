@@ -1,18 +1,8 @@
-"""A plan burst must forget a planner belief formed before a remote execute.
-
-The adapter skips a redundant ``SetPlanner`` when it believes the requested
+"""A plan burst must forget a planner belief formed before a remote execute. The adapter skips a redundant ``SetPlanner`` when it believes the requested
 planner is already active. That belief is only sound WITHIN one planning
 burst: ``task.execute()`` hands the solution to the execute server in ANOTHER
 process, which drives every segment through its OWN interface and mutates the
-shared ``/curobo_server`` planner. If the belief survives, the next task's
-first leg can skip its ``SetPlanner`` and be planned under the wrong planner —
-a joint-space ``home`` leg landing on Classic, say (Classic rejects joint
-goals), and because that comes back as a graceful failure rather than a
-service error the session never self-heals and the failure spams.
-
-So both burst boundaries drop it: ``Task.plan`` at the start, ``Task.execute``
-at the end. These tests observe the drop on the robot interface, ROS-free.
-"""
+shared ``/curobo_server`` planner."""
 from curobo_task_constructor.mtc import core, stages
 
 from tests.mock_curobo import MockCuroboServer

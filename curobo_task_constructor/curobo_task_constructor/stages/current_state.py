@@ -1,14 +1,10 @@
-"""CurrentState — MTC's seed generator: the robot's live state.
-
-Reads the current joint state from the robot interface and emits it on both
+"""CurrentState — MTC's seed generator: the robot's live state. Reads the current joint state from the robot interface and emits it on both
 interfaces with the task's base scene. Optional declarative predicates port
 the pick&place task's ``PredicateFilter`` use-case without shipping Python
 callables through the StageSpec wire format:
 
 - ``require_not_attached: ["object"]``  — refuse when the object is already
-  attached (MTC's "object already attached and cannot be picked" filter).
-- ``require_attached: ["name"]``       — require the object IS attached.
-"""
+  attached (MTC's "object already attached and cannot be picked" filter)."""
 
 from __future__ import annotations
 

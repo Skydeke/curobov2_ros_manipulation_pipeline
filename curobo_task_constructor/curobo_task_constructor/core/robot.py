@@ -1,12 +1,7 @@
-"""Normalized planning request/result types and the abstract RobotInterface.
-
-The core is ROS-free: stages talk to a ``RobotInterface`` (the cuRobo server
+"""Normalized planning request/result types and the abstract RobotInterface. The core is ROS-free: stages talk to a ``RobotInterface`` (the cuRobo server
 surface) through these lightweight dataclasses. The ROS deployment adapter
 (``robot/curobo.py``) converts them to/from curobov2_ros_interfaces
-message types. Unit tests inject a ``MockCuroboServer`` implementing the
-same interface — this is what makes the framework testable without a GPU or
-a running curobo_server.
-"""
+message types."""
 
 from __future__ import annotations
 
@@ -34,17 +29,8 @@ class GoalsetSpec:
 
 @dataclass
 class PlanRequest:
-    """A whole-task planning request (mirror of TrajectoryGoal.msg).
-
-    ``start_pose`` is a JointStateLike — the state the task starts from. Each
-    goalset is one segment; cuRobo solves the whole path in one call.
-
-    ``cartesian_*`` are the MTC ``solvers::CartesianPath`` interpolation
-    properties for this leg (mirror of ``TrajectoryGoal.cartesian_*``);
-    consumed only by the Cartesian planner (SetPlanner CARTESIAN). Sentinels:
-    ``cartesian_step_size <= 0`` and ``cartesian_precision <= 0`` mean the
-    planner default.
-    """
+    """A whole-task planning request (mirror of TrajectoryGoal.msg). ``start_pose`` is a JointStateLike — the state the task starts from. Each
+    goalset is one segment; cuRobo solves the whole path in one call."""
 
     goalsets: list = field(default_factory=list)
     start_pose: Any = None  # JointStateLike or None (server uses current)
@@ -169,17 +155,11 @@ class RobotInterface(ABC):
         """Select the active cuRobo planner (SetPlanner)."""
 
     def invalidate_planner_session(self) -> None:
-        """Forget any cached "planner already active" belief.
-
-        The adapter may skip a redundant ``SetPlanner`` round trip when it
+        """Forget any cached "planner already active" belief. The adapter may skip a redundant ``SetPlanner`` round trip when it
         believes the requested planner is already active. That belief is only
         valid WITHIN one planning burst: the remote execute server replays a
         solution through its OWN interface and mutates the shared
-        ``/curobo_server`` planner, and another node can switch it too. A
-        caller that is about to start a fresh burst — or that just finished a
-        remote execution — must forget the belief so the next request
-        re-asserts its planner. Default: no-op (interfaces that never cache).
-        """
+        ``/curobo_server`` planner, and another node can switch it too."""
 
     @abstractmethod
     def plan(self, request: PlanRequest) -> PlanResult:
@@ -192,20 +172,12 @@ class RobotInterface(ABC):
 
     # ----- plan-time planning scene ------------------------------------
     def plan_scene(self, scene: Any, joint_state: Any = None) -> None:
-        """Reconcile the server's scene to ``scene`` for planning.
-
-        MTC parity: ``ModifyPlanningScene`` mutates the planning scene during
+        """Reconcile the server's scene to ``scene`` for planning. MTC parity: ``ModifyPlanningScene`` mutates the planning scene during
         ``compute()``, so the motion stages that follow plan against the object
         already attached. Here the shared cuRobo server holds that scene, so a
         leg about to be solved reconciles the server's attach state to the
         scene it carries — fitting the payload's spheres at ``joint_state`` (the
-        leg's start, i.e. the grasp pose) when it attaches.
-
-        This is a PLANNING preview: the adapter captures the pre-plan attach
-        state on the first call and restores it in ``end_plan_scene``, so
-        execution still materializes scene ops in chain order from the task's
-        own base scene. Default: no-op (offline/mock interfaces that keep no
-        shared scene)."""
+        leg's start, i.e. the grasp pose) when it attaches."""
         return None
 
     def end_plan_scene(self) -> None:
@@ -216,16 +188,12 @@ class RobotInterface(ABC):
 
     @abstractmethod
     def execute(self, request: PlanRequest, trajectory) -> PlanResult:
-        """Drive one segment (SendTrajectory action).
-
-        ``trajectory`` (MTC ``Task::execute`` parity): the pre-validated
+        """Drive one segment (SendTrajectory action). ``trajectory`` (MTC ``Task::execute`` parity): the pre-validated
         trajectory — ``{"joint_names", "points", "velocities"}`` — to replay
         VERBATIM. MTC's ExecuteTaskSolution drives each SubTrajectory's stored
         RobotTrajectory and never re-derives it, so the adapter streams exactly
         this instead of letting the server re-match or re-solve the
-        ``request``'s goal. There is no cache-reuse path: the caller always
-        supplies the trajectory it validated.
-        """
+        ``request``'s goal."""
 
     def allowance_scope(self, requests):
         """Hold a collision allowance OFF across nested planning calls.
@@ -236,6 +204,20 @@ class RobotInterface(ABC):
         Default: no tracking (offline mocks, tests) — plain nested calls.
         """
         return contextlib.nullcontext()
+
+    def gripper_command(self, gripper: str = "", joint: str = "",
+                        position: float = 0.0, effort: float = 0.0,
+                        controller: str = "", action_ns: str = "",
+                        max_effort: float = 0.0, **_) -> PlanResult:
+        """Command one end effector's gripper directly, WITHOUT planning.
+
+        ``gripper`` selects an entry from the descriptor's
+        ``gripper_controllers`` map (a bimanual robot names ``left``/``right``);
+        blank falls back to the first entry. The adapter sends the position to
+        that gripper's controller action (``GripperCommand`` or
+        ``ParallelGripperCommand``). Default: no-op success for mocks.
+        """
+        return PlanResult(True, "gripper command (no handler)")
 
     # ----- scene -------------------------------------------------------
     @abstractmethod

@@ -1,19 +1,11 @@
-"""ExecuteTaskSolution action server (MTC ExecuteTaskSolutionCapability equivalent).
-
-Planning is local (in-process, like MoveIt: ``core.Task.plan()`` publishes
+"""ExecuteTaskSolution action server (MTC ExecuteTaskSolutionCapability equivalent). Planning is local (in-process, like MoveIt: ``core.Task.plan()`` publishes
 introspection itself); this node only executes. It hosts the
 ``execute_task_solution`` action at ``/curobo_task_constructor/``: the goal
 carries a full ``Solution`` message, whose sub-trajectories drive in order
 with no replanning — MTC ``Task::execute`` parity, each segment's stored
 ``RobotTrajectory`` is replayed verbatim (``SendTrajectory`` ``replay``), so
 there is no trajectory-cache lookup and no re-solve, and each segment's scene
-ops apply in chain order first.
-
-Result is a ``moveit_msgs/MoveItErrorCodes`` (SUCCESS, INVALID_MOTION_PLAN
-for an unusable goal, CONTROL_FAILED for a failed drive, PREEMPTED on
-cancel); feedback reports ``sub_id``/``sub_no`` per driven sub-trajectory,
-exactly like MoveIt.
-"""
+ops apply in chain order first."""
 
 from __future__ import annotations
 
