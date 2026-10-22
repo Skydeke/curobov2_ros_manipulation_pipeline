@@ -58,6 +58,8 @@ public:
   void stop_robot();
   double get_progression();
   RobotState get_robot_state() const {return RobotState::kIdle;}
+  // PORT: action_failure_summary passthrough (the FollowJointTrajectory Result).
+  std::string action_failure_summary();
 
   // PORT: RobotContext.send_trajectrory (note the source spelling)
   bool send_trajectrory(std::optional<int> expect_epoch = std::nullopt);

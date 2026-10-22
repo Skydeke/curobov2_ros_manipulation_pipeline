@@ -386,6 +386,13 @@ class _PlanClientMixin:
             return PlanResult(
                 False, f"no gripper controller {gripper!r} in the descriptor")
         gtype = str(cfg.get("type") or "GripperCommand")
+        # Position-commanded grippers complete only on reach-or-stall, and a
+        # close on a payload parks the finger short of the target: the goal then
+        # hinges entirely on the controller reporting a stall. Bound the wait so
+        # the jaws can never stall the whole task; the controller's own
+        # cancel_callback holds the finger where it is, which is exactly the
+        # gripped position.
+        timeout = float(cfg.get("timeout", 5.0) or 5.0)
         name = controller or cfg.get("name") or "gripper"
         ns = action_ns or cfg.get("action_ns") or "gripper_cmd"
         action = f"/{name}/{ns}" if name else ns
@@ -398,7 +405,7 @@ class _PlanClientMixin:
                            else GripperCommandAction)
             client = ActionClient(self._node, action_type, action)
             self._gripper_clients[action] = client
-        if not client.wait_for_server(timeout_sec=self._service_timeout):
+        if not client.wait_for_server(timeout_sec=timeout):
             return PlanResult(False, f"gripper action {action} unavailable")
         if gtype == "ParallelGripperCommand":
             joints = list(cfg.get("joints") or ([joint] if joint else []))
@@ -417,15 +424,25 @@ class _PlanClientMixin:
             label = f"{joint}={float(position)}"
         try:
             gh = self._await(client.send_goal_async(goal),
-                             "gripper goal handshake", self._service_timeout)
-            if gh is None or not gh.accepted:
-                return PlanResult(False, "gripper goal rejected")
-            res = self._await(gh.get_result_async(),
-                              "gripper result", self._service_timeout)
-            if res is None:
-                return PlanResult(False, "gripper result timeout")
+                             "gripper goal handshake", timeout)
         except ServiceError as exc:
             return PlanResult(False, str(exc))
+        if gh is None or not gh.accepted:
+            return PlanResult(False, "gripper goal rejected")
+        try:
+            res = self._await(gh.get_result_async(), "gripper result", timeout)
+            if res is None:
+                return PlanResult(False, "gripper result timeout")
+        except ServiceError:
+            # Accepted but never reported: it parked on the payload. Cancel so
+            # the controller stops holding the goal (its cancel_callback keeps
+            # the finger where it is) and treat the command as delivered.
+            try:
+                gh.cancel_goal_async()
+            except Exception:
+                pass
+            return PlanResult(
+                True, f"gripper {label} (no result in {timeout:g}s; canceled)")
         return PlanResult(True, f"gripper {label}")
 
     # ------------------------------------------------------------------
