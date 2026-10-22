@@ -157,6 +157,11 @@ def _normalize_gripper(cfg: dict) -> dict:
         "close": float(cfg.get("close", 0.0) or 0.0),
         "max_effort": float(cfg.get("max_effort", 0.0) or 0.0),
         "allow_stalling": bool(cfg.get("allow_stalling", False)),
+        #: Result budget [s] for one GripperCommand. A position-commanded
+        #: gripper completes only on reach-or-stall; closing on a payload parks
+        #: the finger short of the target, so a bounded wait keeps the jaws from
+        #: stalling the whole task when the controller never reports.
+        "timeout": float(cfg.get("timeout", 5.0) or 5.0),
     }
 
 

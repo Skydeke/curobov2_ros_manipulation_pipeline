@@ -3,9 +3,6 @@
 #include "curobo_runtime/runtime.hpp"
 #include "curobo_core/cameras/camera_robot_segmentation_strategy.hpp"
 
-#include <tf2/exceptions.h>
-#include <tf2/time.h>
-
 #include <cstring>
 
 #include <Eigen/Geometry>
@@ -40,10 +37,11 @@ RobotSegmentationCameraStrategy::RobotSegmentationCameraStrategy(
   const std::optional<std::vector<double>> & intrinsics,
   const std::optional<std::vector<double>> & extrinsics,
   curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
-  std::function<std::vector<double>()> joint_pose, std::function<std::string()> masks_json,
+  std::function<std::vector<double>(std::int64_t)> joint_pose_at,
+  std::function<std::string()> masks_json,
   rclcpp::CallbackGroup::SharedPtr callback_group)
 : CameraStrategy(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics),
-  bridge_(bridge), handle_(handle), joint_pose_(std::move(joint_pose)),
+  bridge_(bridge), handle_(handle), joint_pose_at_(std::move(joint_pose_at)),
   masks_json_(std::move(masks_json))
 {
   output_topic_ = leaf_topic(topic_, "masked_depth");
@@ -102,32 +100,48 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
       static_cast<float>((*intrinsics)[0]), static_cast<float>((*intrinsics)[4]),
       static_cast<float>((*intrinsics)[2]), static_cast<float>((*intrinsics)[5])};
 
+    const std::int64_t stamp_ns =
+      static_cast<std::int64_t>(msg.header.stamp.sec) * 1000000000LL +
+      static_cast<std::int64_t>(msg.header.stamp.nanosec);
+
     std::array<double, 7> cam_pose{0, 0, 0, 1, 0, 0, 0};
-    if (static_pose_.has_value()) {
+    bool have_pose = static_pose_.has_value();
+    if (have_pose) {
       cam_pose = *static_pose_;
     } else if (!frame_id_.empty()) {
-      // Same fixed-world-frame preference as the depth strategy (map -> odom ->
-      // base) so the robot is projected into the same frame the map uses.
-      geometry_msgs::msg::TransformStamped transform;
-      bool resolved = false;
+      // PORT: _transform_points_to_base - camera -> base at the CAPTURE stamp
+      // (not the latest), so a moving wrist camera masks the right pixels.
       for (const std::string & base : integration_frame_candidates(node_)) {
-        try {
-          transform = get_transform(*tf_buffer_, base, frame_id_);
-          resolved = true;
-          break;
-        } catch (const std::exception &) {
+        const auto transform =
+          lookup_transform_at(*tf_buffer_, base, frame_id_, msg.header.stamp);
+        if (!transform.has_value()) {
+          continue;
         }
+        const auto & t = transform->transform.translation;
+        const auto & r = transform->transform.rotation;
+        const auto q = normalize_quat_wxyz({r.w, r.x, r.y, r.z});
+        cam_pose = {t.x, t.y, t.z, q[0], q[1], q[2], q[3]};
+        have_pose = true;
+        break;
       }
-      if (!resolved) {
-        return;
-      }
-      const auto & t = transform.transform.translation;
-      const auto & r = transform.transform.rotation;
-      const auto q = normalize_quat_wxyz({r.w, r.x, r.y, r.z});
-      cam_pose = {t.x, t.y, t.z, q[0], q[1], q[2], q[3]};
+    }
+    if (!have_pose) {
+      // PORT: _transform_points_to_base None -> mask EVERYTHING (a dropped
+      // frame is harmless; an unmasked robot is a permanent voxel error) but
+      // still publish, so the masked-depth stream does not stall.
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "[%s] TF %s -> base unavailable; masking the whole frame",
+        name_.c_str(), frame_id_.c_str());
+      std::vector<float> zeros(frame.data.size(), 0.0f);
+      publish_masked(zeros, frame.height, frame.width, frame.encoding, msg.header.stamp);
+      return;
     }
 
-    const std::vector<double> q = joint_pose_ ? joint_pose_() : std::vector<double>{};
+    // PORT: _joint_pose_at - joint pose at the frame's capture time, live pose
+    // while the timestamped feedback buffer is still filling.
+    const std::vector<double> q =
+      joint_pose_at_ ? joint_pose_at_(stamp_ns) : std::vector<double>{};
     std::vector<float> qf(q.begin(), q.end());
     // PORT: camera_robot_segmentation_strategy.callback_depth - the Python takes
     // the EXCLUSIVE gpu_lock here (blocking), not a shared lane hold: the CPU->GPU
@@ -136,7 +150,7 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
     auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     const auto masked = bridge_->robot_segment(
       handle_, depth, k, cam_pose, qf, masks_json_ ? masks_json_() : "[]");
-    publish_masked(masked.data, frame.height, frame.width, msg.header.stamp);
+    publish_masked(masked.data, frame.height, frame.width, frame.encoding, msg.header.stamp);
 
     // PORT: the points masked OUT as robot, in the base frame, for debug.
     // Gated on an actual subscriber (the transform + serialization is not free).
@@ -205,10 +219,13 @@ void RobotSegmentationCameraStrategy::publish_robot_pointcloud(
 
 void RobotSegmentationCameraStrategy::publish_masked(
   const std::vector<float> & masked, std::uint32_t h, std::uint32_t w,
-  const builtin_interfaces::msg::Time & stamp)
+  const std::string & encoding, const builtin_interfaces::msg::Time & stamp)
 {
-  // PORT: depth_tensor_to_image_msg (32FC1).
-  auto msg = encode_depth(masked, h, w, "32FC1", stamp);
+  // PORT: depth_tensor_to_image_msg - the masked output keeps the SOURCE
+  // encoding (16UC1 -> uint16 mm, 32FC1 -> float32 m), byte-compatible with
+  // the input stream (the Python did the same).
+  const std::string enc = (encoding == "16UC1") ? "16UC1" : "32FC1";
+  auto msg = encode_depth(masked, h, w, enc, stamp);
   msg.header.frame_id = depth_frame_id_;
   publisher_->publish(msg);
 }

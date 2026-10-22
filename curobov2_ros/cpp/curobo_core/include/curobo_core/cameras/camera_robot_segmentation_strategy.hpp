@@ -7,6 +7,7 @@
 #ifndef CUROBO_CORE__CAMERAS__CAMERA_ROBOT_SEGMENTATION_STRATEGY_HPP_
 #define CUROBO_CORE__CAMERAS__CAMERA_ROBOT_SEGMENTATION_STRATEGY_HPP_
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
@@ -31,7 +32,7 @@ public:
     const std::optional<std::vector<double>> & intrinsics,
     const std::optional<std::vector<double>> & extrinsics,
     curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
-    std::function<std::vector<double>()> joint_pose,
+    std::function<std::vector<double>(std::int64_t)> joint_pose_at,
     std::function<std::string()> masks_json,
     rclcpp::CallbackGroup::SharedPtr callback_group = nullptr);
   ~RobotSegmentationCameraStrategy() override;
@@ -49,11 +50,11 @@ private:
     const std::array<double, 7> & cam_pose, const builtin_interfaces::msg::Time & stamp);
   void publish_masked(
     const std::vector<float> & masked, std::uint32_t h, std::uint32_t w,
-    const builtin_interfaces::msg::Time & stamp);
+    const std::string & encoding, const builtin_interfaces::msg::Time & stamp);
 
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
-  std::function<std::vector<double>()> joint_pose_;
+  std::function<std::vector<double>(std::int64_t)> joint_pose_at_;
   std::function<std::string()> masks_json_;
   std::string output_topic_;
   std::string depth_frame_id_;

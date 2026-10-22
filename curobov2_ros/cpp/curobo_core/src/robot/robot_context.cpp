@@ -201,6 +201,17 @@ double RobotContext::get_progression()
   return robot_strategy_->get_progression();
 }
 
+// PORT: RobotContext.action_failure_summary (the strategy's FollowJointTrajectory
+// Result, empty when the last action succeeded or is still running).
+std::string RobotContext::action_failure_summary()
+{
+  std::lock_guard<std::mutex> lk(strategy_lock_);
+  if (robot_strategy_ == nullptr) {
+    return "";
+  }
+  return robot_strategy_->action_failure_summary();
+}
+
 // PORT: RobotContext.send_trajectrory
 bool RobotContext::send_trajectrory(std::optional<int> expect_epoch)
 {

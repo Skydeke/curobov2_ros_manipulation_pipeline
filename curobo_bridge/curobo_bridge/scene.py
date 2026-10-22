@@ -33,6 +33,9 @@ def _scene_collision(entry, dcfg):
         checker = SceneCollision.from_config(
             SceneCollisionCfg(device_cfg=dcfg, scene_model=scene))
         entry["scene_collision"] = checker
+        # Built lazily on the first distance query, which is usually AFTER an
+        # attach, so re-assert the attached-object disables on the fresh buffer.
+        _reapply_attached_disables(entry)
     return checker
 def _to_scene(obj) -> "object":
     """Build cuRobo scene primitives from a SceneObject-shaped dict.
@@ -210,6 +213,16 @@ def _solver_scene_checkers(entry):
     if fk_checker not in (None, False) and id(fk_checker) not in seen:
         seen.add(id(fk_checker))
         checkers.append(fk_checker)
+    # The DIAGNOSTIC scene checker (`_scene_collision` - the one the collision
+    # feedback and the collision-spheres publisher read) is a separate
+    # SceneCollision with its own `enable` buffer. Leaving it out made the
+    # printed "collision feedback" list the attached object's own world copy as
+    # a contact (`attached_object -> object_0`): the planner had it disabled but
+    # the diagnostics never did, so the report overstated the start collision.
+    diag_checker = entry.get("scene_collision")
+    if diag_checker not in (None, False) and id(diag_checker) not in seen:
+        seen.add(id(diag_checker))
+        checkers.append(diag_checker)
     return checkers
 def _reapply_attached_disables(entry) -> None:
     """Re-assert the attached obstacles' disabled flag on every solver. PORT: obstacle_manager.reapply_attached_disables. cuRobo's per-obstacle
@@ -305,6 +318,16 @@ def attach_object(handle: int, name: str, q) -> None:
         sphere_fit_type=SphereFitType.SURFACE)
     centers = sphere_tensor[:, :3].contiguous()
     radii = sphere_tensor[:, 3].unsqueeze(-1)
+    # Payload world envelope: the fitted spheres are world-frame (the fit bakes
+    # the obstacle's pose in), so this is where the attached collision model
+    # actually sits. If the low edge is below the support plane's top the start
+    # state is rejected by every planner ("Start or End state in collision"),
+    # which is what a too-small object_lift looks like.
+    if centers.numel() > 0:
+        print(
+            f"[curobo_bridge] Attached '{name}': {int(centers.shape[0])} spheres, "
+            f"world z [{float(centers[:, 2].min()) - float(radii.min()):.4f}, "
+            f"{float(centers[:, 2].max()) + float(radii.max()):.4f}] m", flush=True)
 
     q_t = torch.tensor([list(np.asarray(q, dtype=np.float32))],
                        dtype=torch.float32, device=device)

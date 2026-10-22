@@ -3,8 +3,10 @@
 #include "curobo_core/core/frame_utils.hpp"
 
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 
+#include <rclcpp/time.hpp>
 #include <tf2/exceptions.h>
 #include <tf2/time.h>
 
@@ -88,6 +90,39 @@ geometry_msgs::msg::TransformStamped get_transform(
   } catch (const tf2::TransformException & e) {
     throw std::runtime_error(
       "cannot transform '" + source_frame + "' -> '" + target_frame + "': " + e.what());
+  }
+}
+
+// frame_utils.get_transform at an explicit stamp.
+geometry_msgs::msg::TransformStamped get_transform(
+  const tf2_ros::Buffer & tf_buffer, const std::string & target_frame,
+  const std::string & source_frame, const builtin_interfaces::msg::Time & stamp,
+  double timeout_sec)
+{
+  try {
+    return tf_buffer.lookupTransform(
+      target_frame, source_frame, rclcpp::Time(stamp),
+      tf2::durationFromSec(timeout_sec));
+  } catch (const tf2::TransformException & e) {
+    throw std::runtime_error(
+      "cannot transform '" + source_frame + "' -> '" + target_frame + "': " + e.what());
+  }
+}
+
+// PORT: camera_robot_segmentation_strategy._tf_matrix
+std::optional<geometry_msgs::msg::TransformStamped> lookup_transform_at(
+  const tf2_ros::Buffer & tf_buffer, const std::string & target_frame,
+  const std::string & source_frame, const builtin_interfaces::msg::Time & stamp,
+  double timeout_sec)
+{
+  try {
+    return get_transform(tf_buffer, target_frame, source_frame, stamp, timeout_sec);
+  } catch (const std::runtime_error &) {
+  }
+  try {
+    return get_transform(tf_buffer, target_frame, source_frame, timeout_sec);
+  } catch (const std::runtime_error &) {
+    return std::nullopt;
   }
 }
 

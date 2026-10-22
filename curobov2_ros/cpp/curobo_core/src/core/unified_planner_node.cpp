@@ -465,7 +465,19 @@ void UnifiedPlannerNode::setup() {
           "disabled.");
     } else {
       robot_segmentation_ = std::make_unique<RobotSegmentation>(
-          this, bridge_, handle_, seg_cfgs, [this]() {
+          this, bridge_, handle_, seg_cfgs, [this](std::int64_t stamp_ns) {
+            // PORT: _joint_pose_at - the capture-time pose wins; the live pose
+            // is the fallback while the timestamped feedback buffer fills.
+            if (robot_context_ != nullptr) {
+              const auto pose_at = robot_context_->get_joint_pose_at(stamp_ns);
+              if (pose_at.has_value() && !pose_at->empty()) {
+                return *pose_at;
+              }
+              const auto live = robot_context_->get_joint_pose();
+              if (!live.empty()) {
+                return live;
+              }
+            }
             const std::vector<float> pose = current_pose();
             return std::vector<double>(pose.begin(), pose.end());
           },

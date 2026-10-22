@@ -8,8 +8,10 @@
 #define CUROBO_CORE__CORE__FRAME_UTILS_HPP_
 
 #include <array>
+#include <optional>
 #include <vector>
 
+#include <builtin_interfaces/msg/time.hpp>
 #include <Eigen/Core>
 #include <geometry_msgs/msg/pose.hpp>
 #include <geometry_msgs/msg/transform_stamped.hpp>
@@ -36,6 +38,23 @@ geometry_msgs::msg::Pose apply_transform(
 geometry_msgs::msg::TransformStamped get_transform(
   const tf2_ros::Buffer & tf_buffer, const std::string & target_frame,
   const std::string & source_frame, double timeout_sec = 0.5);
+
+// frame_utils.get_transform at an explicit stamp (a zero stamp means latest),
+// throwing like the latest-transform overload above.
+geometry_msgs::msg::TransformStamped get_transform(
+  const tf2_ros::Buffer & tf_buffer, const std::string & target_frame,
+  const std::string & source_frame, const builtin_interfaces::msg::Time & stamp,
+  double timeout_sec = 0.5);
+
+// PORT: camera_robot_segmentation_strategy._tf_matrix - look up at ``stamp``
+// first, then fall back to the latest transform (a wrist camera moves with the
+// arm, so the capture-time pose is what masks the pixels the camera actually
+// saw; the image stamp routinely runs a few ms ahead of TF). nullopt only when
+// both lookups fail.
+std::optional<geometry_msgs::msg::TransformStamped> lookup_transform_at(
+  const tf2_ros::Buffer & tf_buffer, const std::string & target_frame,
+  const std::string & source_frame, const builtin_interfaces::msg::Time & stamp,
+  double timeout_sec = 0.1);
 
 // PORT: frame_utils.resolve_to_base / resolve_poses_to_base
 geometry_msgs::msg::Pose resolve_to_base(

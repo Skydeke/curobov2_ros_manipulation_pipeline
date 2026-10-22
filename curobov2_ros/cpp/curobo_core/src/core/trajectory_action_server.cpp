@@ -241,7 +241,13 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
       return;
     }
 
-    // Feedback timeline until the trajectory plays out (or is cancelled).
+    // Feedback timeline until the trajectory plays out (or is cancelled). A
+    // non-success FollowJointTrajectory Result reports progression -1.0
+    // (rejected goal, aborted path, ...) and must END the wait instead of
+    // spinning until the caller's budget expires. A slow-but-in-progress
+    // execution is NOT interrupted: Gazebo's real-time factor drops while a
+    // grasped object is carried, so wall-clock time is not a reliable budget
+    // here — the caller's own action timeout is.
     while (rclcpp::ok()) {
       if (goal_handle->is_canceling()) {
         result->result.success = false;
@@ -250,9 +256,20 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
         return;
       }
       const double progression = robot_context_->get_progression();
-      publish_feedback(goal_handle, "EXECUTING", progression, false);
+      publish_feedback(goal_handle, "EXECUTING", std::max(0.0, progression), false);
       if (progression >= 1.0) {
         break;
+      }
+      if (progression < 0.0) {
+        const std::string reason = robot_context_->action_failure_summary();
+        result->result.success = false;
+        result->result.message = planner->get_planner_name() +
+          ": trajectory execution failed: " +
+          (reason.empty() ? "controller reported a non-success result" : reason);
+        RCLCPP_ERROR(node_->get_logger(), "%s", result->result.message.c_str());
+        robot_context_->stop_robot();
+        goal_handle->abort(result);
+        return;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
