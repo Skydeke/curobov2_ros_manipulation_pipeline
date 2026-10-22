@@ -1,25 +1,9 @@
 #!/usr/bin/env python3
-"""Launch the curobo_task_constructor ExecuteTaskSolution server.
-
-Runs inside the kortex_moveit / kortex_cumotion container (NOT with the grasp
+"""Launch the curobo_task_constructor ExecuteTaskSolution server. Runs inside the kortex_moveit / kortex_cumotion container (NOT with the grasp
 orchestrator): the same container that hosts curobo_server and move_group, so
 the execute server can drive SendTrajectory, /joint_states and the planning-scene
 services without cross-container networking. Planning is local (in-process,
-like MoveIt); only execution goes over the wire.
-
-Params mirror curobo_task_constructor.node.TaskConstructorNode:
-
-- ``robot_config_path``  robot descriptor YAML (named_joint_configs section),
-                          optional ("" = none).
-- ``planner``            SetPlanner enum for the default planner (-1 = stage
-                          params decide per move; the pick orchestrator drives
-                          joint_space/classic per stage).
-- ``joint_states_topic`` the robot's joint-state topic (/joint_states).
-- ``service_timeout``    per-call budget for curobo_server services/actions
-                          (default 60s; the first solve after a planner switch
-                          re-records the ESDF CUDA graph and compiles kernels,
-                          so keep this generous).
-"""
+like MoveIt); only execution goes over the wire."""
 
 import os
 

@@ -1,11 +1,7 @@
-"""Joint-order normalization tests (ROS-free).
-
-``/joint_states`` order is publisher-defined; the curobo_server resolves
+"""Joint-order normalization tests (ROS-free). ``/joint_states`` order is publisher-defined; the curobo_server resolves
 ``start_pose`` position lists VERBATIM in cspace order
 (``kinematics.cspace.joint_names``). The kortex sim emits the finger joint
-FIRST, so readings must be reordered by name before they reach the wire.
-These tests pin the canonical-order derivation and the pure reorder helper.
-"""
+FIRST, so readings must be reordered by name before they reach the wire."""
 
 from __future__ import annotations
 

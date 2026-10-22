@@ -33,6 +33,31 @@ via `to_spec()` — so it can be built and unit-tested without ROS.
 | `cartesian_path` | `CartesianPath` | Plan a **straight line**. See below. |
 | `connect` | `Connect` | Plan a motion between two already-known states. |
 | `modify_scene` | `ModifyScene` | `add` (an object spec: `name`, `shape`, `pose` as a flat `{x,y,z,qx,qy,qz,qw}` dict, `dimensions`) / `remove` (by name) / `remove_all` (clear the server world) / `attach` / `detach` an object, `detach_all` (release whatever is attached — clears the attach state that `remove_all` does not), or `allow_collisions: {object, links, enabled}`. |
+| `gripper_command` | `GripperCommand` | Move one end effector's jaws **without planning**: `gripper` (a key of the descriptor's `gripper_controllers` map; blank = first entry), `position`, optional `joint`/`effort`/`max_effort`/`controller`/`action_ns`. Executed as a `control_msgs` `GripperCommand` (single position) or `ParallelGripperCommand` (one position per joint). |
+
+## Gripper execution
+
+A gripper is never a planning DOF. The descriptor carries a
+`gripper_controllers:` map — one entry per end effector, so a bimanual robot can
+name `left`/`right`:
+
+```yaml
+gripper_controllers:
+  left:
+    type: GripperCommand          # or ParallelGripperCommand
+    name: left_gripper            # ros2_control controller name
+    action_ns: gripper_cmd        # action is /<name>/<action_ns>
+    joints: [l_finger]
+    command_joint: l_finger
+    open: 0.0
+    close: 0.04
+    max_effort: 0.0
+    allow_stalling: true
+```
+
+A legacy single `gripper_controller:` block is accepted as the `default` entry.
+The `GripperCommand` stage names the entry; the adapter sends the goal to that
+controller's action (MoveIt's simple-controller-manager semantics).
 
 `goal: {joints: {j: v}}` is a **sparse** goal: the listed joints are merged onto
 the start state and everything else holds. That is the "close the fingers, park

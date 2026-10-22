@@ -1,34 +1,11 @@
-"""curobo_task_constructor — an open MTC-equivalent for cuRobo.
-
-Package layout
+"""curobo_task_constructor — an open MTC-equivalent for cuRobo. Package layout
 --------------
 ``curobo_task_constructor.core``
     Pure-python, ROS-free framework: InterfaceState / Solution / Stage /
     ContainerStage / StageRegistry plus the abstract RobotInterface the
     stages talk to (a mocked ``curobo_server`` in unit tests, a real rclpy
     client in deployment). This is migration step 1 of the plan: no ROS,
-    unit-testable against a mocked curobo_server.
-
-``curobo_task_constructor.stages``
-    The built-in Stage subclasses (open catalog): CurrentState, FixedState,
-    GenerateGraspPose, ComputeIK, MoveTo, MoveRelative, ModifyScene, Connect.
-
-``curobo_task_constructor.graph``
-    Declarative task description: StageSpec trees, the registry-based
-    spec->Stage tree builder and interface-adjacency validation.
-
-``curobo_task_constructor.executor`` / ``node``
-    The MTC ``Task::init()/plan()/execute()`` equivalent (planning is local,
-    in-process) and the ExecuteTaskSolution action server. ``node``
-    serves ``/curobo_task_constructor/execute_task_solution`` and drives a
-    full Solution message's sub-trajectories with no replanning.
-
-``curobo_task_constructor.robot``
-    Deployment adapter (rclpy): ``CuroboServerInterface`` converts the core's
-    ROS-free request/result types to/from ``curobov2_ros_interfaces``
-    messages. The core never imports this module — that is what keeps it
-    unit-testable against a mocked ``curobo_server``.
-"""
+    unit-testable against a mocked curobo_server."""
 
 from curobo_task_constructor.core.registry import STAGE_REGISTRY, register_stage
 

@@ -1,13 +1,8 @@
-"""Remote execute reuses one shared action endpoint across tasks.
-
-``Task.execute`` runs once per motion, so a private action node per execute
+"""Remote execute reuses one shared action endpoint across tasks. ``Task.execute`` runs once per motion, so a private action node per execute
 is a node per motion — and node create/destroy cycles leak (~350KB each at
 the rcl layer, measured with flat entity counts) even with
 ``destroy_node()``. The endpoint (node + executor + client) is therefore
-shared per action rendezvous. This drives the full ``_execute_remote`` path
-(plan against the mock, serialize, send, spin-drive, result) against a stub
-action server and pins both the result and the single endpoint.
-"""
+shared per action rendezvous."""
 
 import threading
 import time

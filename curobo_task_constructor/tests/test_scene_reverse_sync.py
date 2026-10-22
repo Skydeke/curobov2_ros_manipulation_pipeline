@@ -1,18 +1,7 @@
-"""build_base_scene must rebuild the world from the SERVER, not from a mirror.
-
-`build_base_scene` is the executor's reverse sync: it asks the robot interface
+"""build_base_scene must rebuild the world from the SERVER, not from a mirror. `build_base_scene` is the executor's reverse sync: it asks the robot interface
 what is in the scene and hands that to the planner as the task's base scene. If
 it describes the world wrongly, every plan made against that base scene is
-planned against a world that does not exist.
-
-Two defects this pins down, both of which were real:
-
-1. `shape` was hardcoded to "mesh" for every object, so any sphere or cuboid in
-   the world was described to the planner as a mesh.
-2. The interface kept a local mirror of its OWN `add_object` calls, so it could
-   not see an object another client added — and reported a stale pose for a name
-   that had been removed and re-added.
-"""
+planned against a world that does not exist."""
 
 from __future__ import annotations
 

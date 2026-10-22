@@ -1,12 +1,6 @@
-"""Declarative task description — the ``StageSpec`` tree.
-
-One node per graph element, generic across every registered stage type.
-Stage-specific parameters ride in ``params_yaml`` (an opaque string the
+"""Declarative task description — the ``StageSpec`` tree. One node per graph element, generic across every registered stage type. Stage-specific parameters ride in ``params_yaml`` (an opaque string the
 stage class itself parses) — that openness is what keeps the format stable
-while the stage catalog grows. Planning is local (in-process), so this
-tree never crosses the wire; introspection describes stages with
-StageDescription/Property messages instead.
-"""
+while the stage catalog grows."""
 
 from __future__ import annotations
 

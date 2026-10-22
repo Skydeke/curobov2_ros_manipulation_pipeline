@@ -1,13 +1,9 @@
-"""CartesianPath + the geometry and cost helpers it stands on.
-
-Covers the two things the reference ``pick_and_place_pipeline`` had and the
+"""CartesianPath + the geometry and cost helpers it stands on. Covers the two things the reference ``pick_and_place_pipeline`` had and the
 curobo port did not:
 
 1. a stage that emits whole-path Cartesian axis holds, so an approach /
    descent / retreat is a straight line instead of a free-space swing, and
-2. a real ranking cost (MTC ``cost::PathLength``) so a fan-out actually picks
-   the cheapest of the candidates it planned.
-"""
+2."""
 
 from __future__ import annotations
 

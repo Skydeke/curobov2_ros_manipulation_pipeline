@@ -1,15 +1,8 @@
 """GenerateGraspPose — sample pre-grasp pose candidates around the object
-(MTC ``GenerateGraspPose``; Sec. IV-A angle-step sampling).
-
-An open, axis-aligned pre-grasp pose is rotated around the object's up axis
+(MTC ``GenerateGraspPose``; Sec. IV-A angle-step sampling). An open, axis-aligned pre-grasp pose is rotated around the object's up axis
 in ``angle_delta`` steps. Each candidate is emitted as a zero-length
 solution whose ``meta["target_pose"]`` (plus the pre-grasp joint config)
-the enclosing ``ComputeIK`` wrapper turns into a joint-space state.
-
-Geometric sampling is the default; a future ``gpd_topic`` param could point
-at ``/grasp_pose_detection/generate_grasps`` without touching this class's
-contract — candidates just need to appear in ``meta["target_pose"]``.
-"""
+the enclosing ``ComputeIK`` wrapper turns into a joint-space state."""
 
 from __future__ import annotations
 

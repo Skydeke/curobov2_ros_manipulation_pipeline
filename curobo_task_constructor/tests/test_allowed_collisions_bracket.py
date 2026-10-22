@@ -1,43 +1,21 @@
-"""Every goalset-sending method must bracket its call with the collision allowance.
-
-``GoalsetSpec.allowed_collisions`` is the task constructor's ONLY channel for
+"""Every goalset-sending method must bracket its call with the collision allowance. ``GoalsetSpec.allowed_collisions`` is the task constructor's ONLY channel for
 contact allowance: the wire ``Goalset`` carries no collision concept, so
 ``CuroboServerInterface._set_links_collision`` -> the server's
 ``set_link_collision`` service is the only way the solver ever learns that e.g.
 the finger collision spheres may be turned off to let them touch the object
 being grasped. A method that sends a goalset without that bracket is therefore
 not merely inconsistent — it silently plans with one world and solves with
-another.
-
-The failure this exists to catch, observed on a real pick: ``plan`` and
-``plan_batch`` both bracketed, ``execute`` did not. The grasp close planned
-cleanly with the finger spheres off, then the server's execute path re-solved
-that same goalset (the trajectory cache is a single slot, so a mid-chain
-segment misses it) against spheres that the batch's ``finally`` had already
-restored — and the goal state came back rejected:
-
-    goal: 5 contacts
-      right_inner_finger_pad  -> plane_0   5.0 mm past surface
-      right_inner_finger      -> object_0  5.0 mm past surface
-      left_inner_finger_pad   -> plane_0   1.8 mm past surface
-      right_inner_knuckle     -> object_0  1.2 mm past surface
-      left_inner_finger       -> object_0  0.4 mm past surface
-
-which surfaced as "pick task failed at 'close_0'". No fallbacks container can
-absorb that: the container commits to a child at PLAN time, and by the time a
-segment is driven the plan is long since chosen.
-
-``CuroboServerInterface`` cannot be imported without a ROS 2 install
-(``geometry_msgs``), so this asserts the invariant over the source AST instead
-of instantiating the class. That is the point: the guard has to run in the
-ROS-free environment where every other test in this package runs.
-"""
+another."""
 
 import ast
 import pathlib
 
-ADAPTER = (pathlib.Path(__file__).resolve().parents[1]
-           / "curobo_task_constructor" / "robot" / "curobo.py")
+ADAPTER_DIR = (pathlib.Path(__file__).resolve().parents[1]
+               / "curobo_task_constructor" / "robot")
+#: Every module that contributes methods to CuroboServerInterface: the core
+#: adapter plus the mixins it is composed from.
+ADAPTERS = tuple(ADAPTER_DIR / n for n in
+                 ("curobo.py", "plan_client.py", "scene_client.py", "msg.py"))
 
 #: Methods that hand a goalset to the server and therefore must bracket.
 #: Keep in sync by ADDING here, never by relaxing the assertions — the
@@ -51,7 +29,7 @@ CONVERTERS = ("_to_goal", "_to_goalset", "_to_joint_msg", "_to_options",
 
 
 def _source():
-    return ADAPTER.read_text(encoding="utf-8")
+    return "\n".join(p.read_text(encoding="utf-8") for p in ADAPTERS)
 
 
 def _methods():
@@ -83,7 +61,8 @@ def _literal_flag(calls, value):
 
 
 def test_adapter_source_is_found():
-    assert ADAPTER.is_file(), f"adapter source not at {ADAPTER}"
+    assert all(p.is_file() for p in ADAPTERS), (
+        f"adapter source missing from {ADAPTERS}")
 
 
 def test_named_methods_exist():

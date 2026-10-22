@@ -1,27 +1,8 @@
-"""Execution replays each segment's own validated trajectory.
-
-A Task is planned as a chain of segments and then executed one segment at a
+"""Execution replays each segment's own validated trajectory. A Task is planned as a chain of segments and then executed one segment at a
 time. MTC ``Task::execute`` parity: each segment is driven from the trajectory
 the ``Solution`` ALREADY carries (see ``executor._replay_trajectory_dict``), so
 the server streams exactly those waypoints — there is no goal re-match against
-the server's trajectory cache. A multi-solution pose goal therefore CANNOT land
-on a different IK branch than the one that was planned, collision-checked and
-displayed, which is the failure the old client-side chain-continuity guard
-existed to catch.
-
-The old guard compared the driven trajectory against the plan and aborted the
-chain on any endpoint mismatch. That guard was the wrong fix: it fired on a
-legitimate re-solve (whose endpoints a stochastic trajopt is free to move), not
-on a real defect — and MTC's execute never second-guesses the controller this
-way. Start-state agreement (the arm actually being where a replay assumes) is
-the controller's ``allowed_start_tolerance`` check, exactly where MoveIt puts
-it, so the cuRobo executor no longer duplicates it.
-
-These are behaviour tests, not AST guards: ``executor`` imports no torch or
-curobo, so the real code runs here. What is pinned is (a) that each segment's
-OWN waypoints are handed to the drive, and (b) that the chain still STOPS at the
-first segment whose drive failed.
-"""
+the server's trajectory cache."""
 
 from __future__ import annotations
 

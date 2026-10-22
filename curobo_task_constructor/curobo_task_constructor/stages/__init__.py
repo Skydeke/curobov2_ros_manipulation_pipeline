@@ -14,6 +14,7 @@ from curobo_task_constructor.stages import (  # noqa: F401  (side-effect: regist
     fixed_state,
     generate_grasp_pose,
     generate_pose,
+    gripper_command,
     modify_scene,
     move_relative,
     move_to,

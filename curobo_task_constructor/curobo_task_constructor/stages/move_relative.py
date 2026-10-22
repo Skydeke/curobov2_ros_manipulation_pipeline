@@ -1,19 +1,10 @@
 """MoveRelative — propagate along an axis by a distance sampled in a range
-(MTC ``MoveRelative``; the approach/lift/lower/retreat stages of pick&place).
-
-Three direction modes (MTC ``setDirection`` parity, all carried in params):
+(MTC ``MoveRelative``; the approach/lift/lower/retreat stages of pick&place). Three direction modes (MTC ``setDirection`` parity, all carried in params):
 
 - translation (default): anchor the effector at ``robot.fk`` of the current
   joints, translate along ``axis`` by each sampled distance. Backward
   (approach-style): the END state is known — IK the shifted pose for the
-  START state, then plan start→end.
-- rotation: ``rotation: {axis: [x,y,z], angle: <rad>, frame: hand|world}``
-  rotates the tool orientation about the axis, optionally combined with a
-  translation when both ``axis``/``distance`` and ``rotation`` are present
-  (MTC ``TwistStamped`` may carry linear + angular velocity together).
-- joint offsets: ``joint_offsets: {name: delta}`` adds the deltas onto the
-  start joints and plans a joint-space goal (MTC ``setDirection(dict)``).
-"""
+  START state, then plan start→end."""
 
 from __future__ import annotations
 
@@ -268,16 +259,12 @@ class MoveRelative(PropagatingEitherWay):
             self._fail(state, None, "move_relative backward produced no solution")
 
     def _hold(self, start_pose: Pose3, target: Pose3) -> list:
-        """int8[6] axis holds for one sampled segment, or [] for none.
-
-        ``MoveRelative`` exists to interpolate a straight line, so by default it
+        """int8[6] axis holds for one sampled segment, or [] for none. ``MoveRelative`` exists to interpolate a straight line, so by default it
         derives the whole-path holds exactly like ``CartesianPath`` does: the
         offset changes only the axes the motion actually moves along, and every
         axis the start and the target agree on is pinned. A ``hold`` param
         overrides it (pass ``[0, 0, 0, 0, 0, 0]`` for a free-space relative
-        move). Only the classic planner reads the field, so this is a no-op on
-        any other planner.
-        """
+        move)."""
         explicit = self.params.get("hold")
         if explicit is not None:
             hold = [int(c) for c in (explicit or [])]

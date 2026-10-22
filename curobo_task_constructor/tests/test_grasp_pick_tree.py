@@ -1,23 +1,8 @@
-"""The REAL pick graph from ``kortex_curobo_grasping``, replayed on the mock.
-
-``grasp_orchestrator.py`` is rclpy-only, so the graph it builds was moved into
+"""The REAL pick graph from ``kortex_curobo_grasping``, replayed on the mock. ``grasp_orchestrator.py`` is rclpy-only, so the graph it builds was moved into
 ``kortex_curobo_grasping/ctc.py`` — pure data, no ROS. That makes the
 deliverable itself testable: this file imports the *production* builder (not a
 re-declaration that could silently drift), hands it a candidate window, and
-solves the resulting tree against ``MockCuroboServer``.
-
-What is asserted is the behaviour the rewrite was for:
-
-* the tree plans at all, and plans it in one round trip per leg however many
-  candidates are offered;
-* the descent and the retreat are straight lines, not joint-space swings;
-* the close does not need an IK result for the arm;
-* a solve that bows off the line is rejected and falls through to the next
-  approach strategy.
-
-The mock arm is 3-DOF with reach ``|L1 - L2| .. L1 + L2`` = 0.30 .. 0.50 m, so
-the starts below sit mid-shell with room to travel up and down.
-"""
+solves the resulting tree against ``MockCuroboServer``."""
 
 from __future__ import annotations
 

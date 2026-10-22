@@ -1,12 +1,6 @@
-"""The clear-all scene ops survive the execute wire.
-
-A scene-setup task clears the server world with ``remove_all`` and releases any
+"""The clear-all scene ops survive the execute wire. A scene-setup task clears the server world with ``remove_all`` and releases any
 stale attach with ``detach_all``. Both are boolean ops with no MTC counterpart:
-a ``PlanningScene`` diff is name-keyed and has no wildcard REMOVE. Dropping them
-is not harmless — the task's re-adds then land on the previous cycle's world,
-where ``add_object`` refuses the duplicate names, so every pick cycle plans
-against stale boxes and the setup never lands.
-"""
+a ``PlanningScene`` diff is name-keyed and has no wildcard REMOVE."""
 
 from curobo_task_constructor.executor import (
     _object_spec_from_dict, _scene_ops_from_dict, _scene_ops_to_dict,

@@ -1,51 +1,11 @@
 """CartesianPath — a straight-line whole-task solve (the port of the reference
-pipeline's ``MoveRelative`` + ``CartesianPath`` solver).
-
-Why this stage exists
+pipeline's ``MoveRelative`` + ``CartesianPath`` solver). Why this stage exists
 ---------------------
 On cuRobo a straight line is not a solve MODE, it is a COST: a goalset carries
 ``trajectory_constraints`` (``int8[6]`` = ``[theta_x, theta_y, theta_z, x, y,
 z]``) which the server turns into ``ToolPoseCriteria`` and scores on every
 non-terminal waypoint. Holding every axis on which the start and the goal agree
-therefore leaves the optimizer no choice but the segment between them. That is
-the whole mechanism, and it is what replaces MoveIt's
-``computeCartesianPath(step=0.01, jump_threshold=5.0)``.
-
-Three goal forms, matching the three ways a reference Cartesian stage is
-written:
-
-- ``goal.pose``      absolute tool pose (the descend onto a grasp)
-- ``goal.poses``     N candidate poses in ONE goalset — the server resolves the
-                     set inside a single ``plan_pose()`` call and reports the
-                     winner through ``selected_goal_index``. The hold is the
-                     intersection over all candidates, so it stays correct for
-                     whichever one wins.
-- ``goal.relative``  ``{x, y, z, frame: world|hand}`` offset from FK(start),
-                     keeping the start orientation. The literal
-                     ``MoveRelative`` port: a translation along a direction with
-                     the effector orientation frozen. This is what a retreat /
-                     lift should be, because it is anchored to the pose the arm
-                     ACTUALLY reached rather than to the pose that was asked
-                     for.
-
-FORWARD ONLY
-------------
-The hold vector is derived from the start pose, which is not known until the
-plan runs, so a backward (end-seeded) cartesian move would need a two-pass
-plan. Place this stage after a stage that writes a joint state.
-
-Straightness is the hold's job
------------------------------
-The hold is a soft cost and it is the whole mechanism: holding the axes on
-which the start and the goal agree keeps an axis-aligned leg on its segment.
-A diagonal leg leaves the position axes free, so its straightness is whatever
-the solve's optimum happens to be, and nothing checks it — the server's
-fractional-path gate was removed
-because it could never measure a real plan. There is no client-side
-straightness gate either, so a Cartesian leg's rejection can no longer come
-from straightness; use ``Fallbacks`` on other grounds if the pipeline needs
-to reach the next strategy.
-"""
+therefore leaves the optimizer no choice but the segment between them."""
 
 from __future__ import annotations
 

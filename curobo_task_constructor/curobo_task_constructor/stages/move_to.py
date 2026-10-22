@@ -33,18 +33,12 @@ class MoveTo(PropagatingEitherWay):
     # Goal resolution
     # ------------------------------------------------------------------
     def _goal_positions(self, start: InterfaceState) -> list:
-        """Joint-space goal aligned to the PLANNER's cspace order.
-
-        The start state can carry MORE joints than the planner's cspace: in
+        """Joint-space goal aligned to the PLANNER's cspace order. The start state can carry MORE joints than the planner's cspace: in
         simulation ``/joint_states`` is the whole robot (arm + fingers + tips +
         base/PTU), while cuRobo's cspace is only the active joints. Merging a
         sparse goal onto the raw reading key-for-key produced a goal as long as
         the reading (16 values for a 8-DOF cspace) and the server rejected it
-        with "q should have dof = 8, got 16". The robot interface already
-        knows the canonical cspace order (it is the same order every
-        ``start_pose`` is sent in), so project onto THAT and drop joints the
-        planner does not own.
-        """
+        with "q should have dof = 8, got 16"."""
         goal = self.params.get("goal") or {}
         names = self._goal_joint_order(start.joint_state)
         if "name" in goal:
@@ -101,22 +95,11 @@ class MoveTo(PropagatingEitherWay):
         return None
 
     def _goal_poses(self, start=None):
-        """Every candidate pose goal, in the order the caller listed them.
-
-        ``goal.poses`` is a LIST of pose dicts. All candidates go into ONE
+        """Every candidate pose goal, in the order the caller listed them. ``goal.poses`` is a LIST of pose dicts. All candidates go into ONE
         goalset, and the server resolves the set inside a single
         ``plan_pose()`` call (ClassicPlanner: a segment with N>1 poses becomes a
         cuRobo goalset solve) and reports the winner via
-        ``selected_goal_index``. This is the framework's cheapest fan-out: one
-        service round-trip, one GPU batch, N IK+trajopt seeds attempted in
-        parallel, best one stitched into the solution — the direct equivalent of
-        the reference pipeline's ``ComputeIK``+``Connect`` multi-seed solve, and
-        the reason ``max_goalset`` must be > 1 on the server.
-
-        ``goal.pose`` is sugar for a one-element list. ``goal.point`` (MTC
-        PointStamped: position goal, orientation kept) resolves against the
-        start state's tool orientation, so it needs ``start``.
-        """
+        ``selected_goal_index``."""
         from curobo_task_constructor.core.geom import Pose3
         goal = self.params.get("goal") or {}
         if "poses" in goal:

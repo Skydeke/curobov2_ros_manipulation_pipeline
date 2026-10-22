@@ -1,33 +1,7 @@
-"""TaskExecutor — MTC's ``Task::init()`` / ``plan()`` / ``execute()`` for cuRobo.
-
-Lifecycle (Sec. 3 of the plan):
+"""TaskExecutor — MTC's ``Task::init()`` / ``plan()`` / ``execute()`` for cuRobo. Lifecycle (Sec. 3 of the plan):
 
 1. ``build``    — turn the ``StageSpec`` tree into concrete stages via the open
-                  ``STAGE_REGISTRY`` (graph.builder.build_tree).
-2. ``init()``   — ``init()`` every stage against the task's base scene and
-                  ``resolve()`` the root with the GENERATE interface. Interface
-                  adjacency inside every container is validated here; a task
-                  that fails init is reported invalid (TaskDescription.valid
-                  == false) and never computed.
-3. ``plan()``   — drive the tree depth-first: generators seed first,
-                  propagators extend, connectors run last (they are the
-                  combinatorially expensive ones). Each motion leg reconciles
-                  the shared server's scene to the ``SceneDiff`` it carries, so
-                  a leg after a grasp plans with the object already attached
-                  (MTC applies ``ModifyPlanningScene`` at compute time); the
-                  pre-plan scene is restored when the burst ends. Because every
-                  stage CONSUMES its pulls on compute and pushes are
-                  keyed-deduped, the loop ``while any(s.can_compute())``
-                  terminates on its own; ``max_iterations`` is only a
-                  belt-and-braces guard.
-4. ``rank()``   — full root solutions ranked by accumulated cost.
-5. ``execute()``— apply the winning solution's scene deltas in chain order,
-                  then re-solve + drive each motion segment (SendTrajectory).
-
-Introspection (Sec. 7): ``describe()`` publishes the built TaskDescription and
-``statistics()`` roll up per-stage StageStatistics + per-attempt SolutionInfo
-records the action server publishes on the introspection topics.
-"""
+                  ``STAGE_REGISTRY`` (graph.builder.build_tree)."""
 
 from __future__ import annotations
 
@@ -40,7 +14,7 @@ from curobo_task_constructor.core.state import SceneDiff
 from curobo_task_constructor.graph.builder import build_tree
 from curobo_task_constructor.graph.spec import StageSpec
 
-__all__ = ["TaskExecutor", "EXECUTE_CONTINUITY_TOLERANCE"]
+__all__ = ["TaskExecutor", "drive_solution_dict", "EXECUTE_CONTINUITY_TOLERANCE"]
 
 #: The start-agreement number the whole pipeline shares: 0.01 rad. Kept here
 #: as the reference value because it is ALSO what the controller must enforce
@@ -50,282 +24,11 @@ __all__ = ["TaskExecutor", "EXECUTE_CONTINUITY_TOLERANCE"]
 #: the stored ``RobotTrajectory`` verbatim and lets the controller's start
 #: tolerance reject a replay whose first point is not where the arm is. This
 #: constant documents that shared number.
-EXECUTE_CONTINUITY_TOLERANCE = 0.01
 
+from curobo_task_constructor.executor_io import *
+from curobo_task_constructor.executor_serialize import _ExecutorSerializationMixin
 
-def _joint_positions(state) -> list:
-    """Joint values out of a waypoint, whatever shape it arrived in.
-
-    Waypoints reach here as JointState messages, as the raw responses they
-    were built from, and as plain lists in tests, so all three are accepted.
-    """
-    positions = getattr(state, "position", state)
-    return [float(x) for x in positions]
-
-
-def _max_joint_delta(a, b) -> float:
-    """Largest per-joint difference between two waypoints, in rad.
-
-    A missing trailing DOF (a 7-DOF arm group against a 8-joint arm) is
-    compared only over the joints both carry, matching how
-    ``_resolve_start_state`` pads a short start pose.
-    """
-    pa, pb = _joint_positions(a), _joint_positions(b)
-    n = min(len(pa), len(pb))
-    if n == 0:
-        return 0.0
-    return max(abs(x - y) for x, y in zip(pa[:n], pb[:n]))
-
-
-def _align_waypoint_positions(wp, names) -> Optional[list]:
-    """Waypoint values in ``names`` order, or None when it cannot be aligned.
-
-    A plan response and a ``/joint_states`` reading can carry the SAME joints
-    in a different order (or a different subset, e.g. a 16-joint reading next
-    to an 8-joint cspace). Appending positions positionally would then paint
-    the wrong joint — visible as a gripper that folds while the arm is still.
-    """
-    pos = _joint_positions(wp)
-    wp_names = [str(n) for n in (getattr(wp, "name", None) or [])]
-    if not wp_names or wp_names == names:
-        return pos
-    by_name = {n: i for i, n in enumerate(wp_names)}
-    if any(n not in by_name for n in names):
-        return None
-    out = []
-    for n in names:
-        i = by_name[n]
-        if i >= len(pos):
-            return None
-        out.append(pos[i])
-    return out
-
-
-def _replay_trajectory_dict(waypoints) -> Optional[dict]:
-    """Pack a solved segment's waypoints for verbatim replay.
-
-    MTC parity: ``Task::execute`` hands each sub-trajectory's stored
-    ``RobotTrajectory`` to the controller and never re-derives it. The cuRobo
-    adapter hands the same thing to the server as ``{"joint_names", "points",
-    "velocities"}`` so ``SendTrajectory`` can stage and stream exactly these
-    waypoints (``replay``) instead of re-matching a planning goal against the
-    server's trajectory cache. Returns ``None`` when there is no trajectory
-    (a mutation leaf, whose drive is skipped upstream)."""
-    wps = list(waypoints or [])
-    if not wps:
-        return None
-    names: list = []
-    points: list = []
-    velocities: list = []
-    for wp in wps:
-        if not names:
-            names = [str(n) for n in (getattr(wp, "name", None) or [])]
-        aligned = _align_waypoint_positions(wp, names) if names else None
-        if aligned is None:
-            raw = _joint_positions(wp)
-            # Legacy positional layout: safe only while the width agrees.
-            aligned = raw if len(raw) == len(names) else None
-        if aligned is None:
-            continue
-        points.append(aligned)
-        vel = getattr(wp, "velocity", None)
-        velocities.append([float(v) for v in vel] if vel else [])
-    return {"joint_names": names, "points": points, "velocities": velocities}
-
-
-def _pose_to_dict(pose) -> Optional[dict]:
-    """Any pose-like (dict, Pose3, ROS/stub Pose, PoseStamped) -> flat dict."""
-    if pose is None:
-        return None
-    if isinstance(pose, dict):
-        if {"x", "y", "z"} <= set(pose):
-            return {"x": float(pose.get("x", 0.0)),
-                    "y": float(pose.get("y", 0.0)),
-                    "z": float(pose.get("z", 0.0)),
-                    "qx": float(pose.get("qx", 0.0)),
-                    "qy": float(pose.get("qy", 0.0)),
-                    "qz": float(pose.get("qz", 0.0)),
-                    "qw": float(pose.get("qw", 1.0))}
-        return None
-    stamped = getattr(pose, "pose", None)
-    if stamped is not None and not hasattr(pose, "position"):
-        return _pose_to_dict(stamped)
-    pos = getattr(pose, "position", None)
-    ori = getattr(pose, "orientation", None)
-    if pos is None or ori is None:
-        return None
-    try:
-        if isinstance(pos, (list, tuple)):
-            x, y, z = (float(v) for v in list(pos)[:3])
-        else:
-            x, y, z = float(pos.x), float(pos.y), float(pos.z)
-        if isinstance(ori, (list, tuple)):
-            qx, qy, qz, qw = (float(v) for v in list(ori)[:4])
-        else:
-            qx, qy, qz, qw = (float(ori.x), float(ori.y),
-                              float(ori.z), float(ori.w))
-    except (TypeError, ValueError, AttributeError):
-        return None
-    return {"x": x, "y": y, "z": z, "qx": qx, "qy": qy, "qz": qz, "qw": qw}
-
-
-def _pose_stub_from_dict(d) -> Any:
-    """Flat pose dict -> duck-typed Pose stub (adapter parses it via Pose3)."""
-    from curobo_task_constructor.core.geom import _PoseStub
-    d = d or {}
-    return _PoseStub(
-        float(d.get("x", 0.0)), float(d.get("y", 0.0)),
-        float(d.get("z", 0.0)), float(d.get("qx", 0.0)),
-        float(d.get("qy", 0.0)), float(d.get("qz", 0.0)),
-        float(d.get("qw", 1.0)))
-
-
-def _object_spec_to_dict(spec) -> dict:
-    pose = _pose_to_dict(getattr(spec, "pose", None))
-    return {
-        "name": str(getattr(spec, "name", "")),
-        "shape": str(getattr(spec, "shape", None) or "cuboid"),
-        "pose": pose,
-        "dimensions": ([float(v) for v in (getattr(spec, "dimensions", None)
-                                           or [])] or None),
-        "mesh_path": getattr(spec, "mesh_path", None),
-        "vertices": getattr(spec, "vertices", None),
-        "triangles": getattr(spec, "triangles", None),
-    }
-
-
-def _object_spec_from_dict(d) -> Any:
-    from curobo_task_constructor.core.state import ObjectSpec
-    d = d or {}
-    pose = d.get("pose")
-    return ObjectSpec(
-        name=str(d.get("name", "")),
-        shape=str(d.get("shape", None) or "cuboid"),
-        pose=_pose_stub_from_dict(pose) if pose else None,
-        dimensions=d.get("dimensions"),
-        mesh_path=d.get("mesh_path"),
-        vertices=d.get("vertices"),
-        triangles=d.get("triangles"),
-    )
-
-
-def _scene_ops_to_dict(ops) -> dict:
-    """Materialization deltas -> MTC scene_diff-shaped dict.
-
-    ``remove_all``/``detach_all`` have no MTC counterpart (a PlanningScene diff
-    is name-keyed — there is no wildcard REMOVE), so they ride two extra
-    boolean keys rather than being dropped. Dropping them is NOT harmless: the
-    scene-setup task clears the world with ``remove_all`` (and releases any
-    stale attach with ``detach_all``), and a name-keyed diff cannot say
-    "everything", so the executing adapter would re-add onto the previous
-    cycle's world — where every ``add_object`` is refused as a duplicate and
-    the scene is left stale forever.
-    """
-    added, removed, attached, detached = [], [], None, None
-    remove_all = detach_all = False
-    for kind, payload in (ops or []):
-        if kind == "add":
-            added.append(_object_spec_to_dict(payload))
-        elif kind == "remove":
-            removed.append(str(payload))
-        elif kind == "attach":
-            attached = str(payload)
-        elif kind == "detach":
-            detached = None if payload is None else str(payload)
-        elif kind == "remove_all":
-            remove_all = True
-        elif kind == "detach_all":
-            detach_all = True
-    return {"added": added, "removed": removed,
-            "attached": attached, "detached": detached,
-            "remove_all": remove_all, "detach_all": detach_all}
-
-
-def _scene_ops_from_dict(d) -> list:
-    """MTC scene_diff-shaped dict -> (kind, payload) op list, in order.
-
-    Clear-all comes FIRST: ``detach_all`` then ``remove_all`` must precede the
-    adds (and the named removes), or the world they clear would be the one just
-    built in the same batch.
-    """
-    d = d or {}
-    ops = []
-    if d.get("detach_all"):
-        ops.append(("detach_all", None))
-    if d.get("remove_all"):
-        ops.append(("remove_all", None))
-    for name in (d.get("removed", None) or []):
-        ops.append(("remove", str(name)))
-    for spec in (d.get("added", None) or []):
-        ops.append(("add", _object_spec_from_dict(spec)))
-    if d.get("detached") is not None:
-        ops.append(("detach", str(d["detached"])))
-    if d.get("attached") is not None:
-        ops.append(("attach", str(d["attached"])))
-    return ops
-
-
-def _plan_request_to_dict(req) -> Optional[dict]:
-    """PlanRequest -> plain dicts (poses flat, joints float lists)."""
-    if req is None:
-        return None
-    goalsets = []
-    for gs in (getattr(req, "goalsets", None) or []):
-        poses = []
-        for p in (getattr(gs, "poses", None) or []):
-            pd = _pose_to_dict(p)
-            if pd is not None:
-                poses.append(pd)
-        goalsets.append({
-            "poses": poses,
-            "target_joints": [float(v) for v in (
-                getattr(gs, "target_joint_positions", None) or [])],
-            "allowed": [str(v) for v in (
-                getattr(gs, "allowed_collisions", None) or [])],
-            "holds": [int(v) for v in (
-                getattr(gs, "trajectory_constraints", None) or [])],
-        })
-    start = getattr(req, "start_pose", None)
-    return {
-        "start": ({"name": [str(n) for n in (getattr(start, "name", []) or [])],
-                   "position": [float(v) for v in (
-                       getattr(start, "position", []) or [])]}
-                  if start is not None else None),
-        "goalsets": goalsets,
-        "planner": getattr(req, "planner", None),
-    }
-
-
-def _plan_request_from_dict(d) -> Optional[Any]:
-    """Plain dicts -> PlanRequest (poses as stubs the adapter parses)."""
-    if not d:
-        return None
-    from curobo_task_constructor.core.robot import GoalsetSpec, PlanRequest
-    from curobo_task_constructor.core.state import JointStateStub
-    goalsets = []
-    for gs in (d.get("goalsets", None) or []):
-        goalsets.append(GoalsetSpec(
-            poses=[_pose_stub_from_dict(p) for p in (gs.get("poses", None) or [])],
-            target_joint_positions=[float(v) for v in (
-                gs.get("target_joints", None) or [])],
-            allowed_collisions=[str(v) for v in (gs.get("allowed", None) or [])],
-            trajectory_constraints=[int(v) for v in (gs.get("holds", None) or [])],
-        ))
-    start = d.get("start")
-    start_pose = None
-    if start:
-        start_pose = JointStateStub(dict(zip(
-            [str(n) for n in (start.get("name", None) or [])],
-            [float(v) for v in (start.get("position", None) or [])])))
-    return PlanRequest(goalsets=goalsets, start_pose=start_pose,
-                       planner=d.get("planner"),
-                       cartesian_step_size=float(
-                           d.get("cartesian_step_size", 0.0) or 0.0),
-                       cartesian_precision=float(
-                           d.get("cartesian_precision", 0.0) or 0.0))
-
-
-class TaskExecutor:
+class TaskExecutor(_ExecutorSerializationMixin):
     """Build + init + plan + rank + execute a declarative task."""
 
     def __init__(self, spec: StageSpec, robot: RobotInterface,
@@ -473,28 +176,7 @@ class TaskExecutor:
     # Plan
     # ------------------------------------------------------------------
     def plan(self, max_iterations: int = 0, progress_callback=None) -> bool:
-        """Run the compute loop until no stage can make progress.
-
-        Returns True when at least one full root solution was found.
-        ``max_iterations`` (0 = unlimited) guards against pathological graphs.
-        ``progress_callback`` (MTC ``publishTaskState``) fires after every
-        compute pass so introspection can stream per-stage rollups while
-        planning instead of only at the end.
-
-        The loop also stops the moment the FIRST complete root solution
-        exists. Without that, a serial container sitting above a fallbacks /
-        alternatives container keeps re-computing its trailing chain (e.g.
-        return -> forbid -> open -> detach) for every upstream reconnect —
-        pure waste that restarts already-solved stages and was observed to
-        trigger a server-side gpu_lock wedge right after the pick task
-        finished planning (the reconnect re-plan of the 'open' stage ~1.5 s
-        after the first solve left the CUDA graph capture stuck, bricking
-        gpu_lock until a node restart). The first full root solution is
-        exactly what ``best()`` would have ranked first anyway — fallbacks
-        already committed to its variant before the trailing chain was
-        built — so nothing is lost by exiting early, and planning finishes
-        sooner.
-        """
+        """Run the compute loop until no stage can make progress. Returns True when at least one full root solution was found. ``max_iterations`` (0 = unlimited) guards against pathological graphs."""
         if not self._valid:
             return False
         iterations = 0
@@ -573,26 +255,7 @@ class TaskExecutor:
         passes the segment's PLANNED waypoints and the server streams them
         verbatim (``replay``), so there is no cache lookup, no re-solve, and a
         multi-solution pose goal cannot pick a different IK branch mid-chain
-        than the one that was planned, collision-checked and displayed.
-        Returns the list of drive results.
-
-        ``progress_callback`` fires with each driven segment's stage name
-        (MTC's active-stage highlight during playback): the node publishes
-        it as action feedback so the panel can follow execution.
-        ``cancel_event`` (threading.Event, MTC preempt) stops the chain
-        between segments; the returned list is truncated like a failure.
-
-        The chain STOPS at the first segment whose drive failed. The remaining
-        segments each carry a ``start_pose`` baked from the PLANNED end state of
-        their predecessor, so continuing past a failure drives requests anchored
-        to poses the arm never reached. Start-state agreement (the arm actually
-        being where a replay assumes) is the controller's job, enforced by
-        ``allowed_start_tolerance`` — exactly where MoveIt puts it.
-
-        The returned list is truncated at the failure, so the caller's
-        zip-with-motion-leaves pairs each result with the leaf that produced
-        it and reports the right stage name.
-        """
+        than the one that was planned, collision-checked and displayed. Returns the list of drive results."""
         self._applied_ops = []
         results = []
         for leaf in self.flatten_leaves(sol):
@@ -600,6 +263,14 @@ class TaskExecutor:
                 break
             for kind, payload in leaf.scene_ops or []:
                 self._apply_op(kind, payload)
+            if getattr(leaf, "gripper_command", None):
+                if progress_callback is not None:
+                    progress_callback(getattr(leaf.stage, "name", ""))
+                result = self.robot.gripper_command(**leaf.gripper_command)
+                results.append(result)
+                if not result.success:
+                    break
+                continue
             if leaf.plan_request is None:
                 continue
             if progress_callback is not None:
@@ -651,9 +322,7 @@ class TaskExecutor:
         }
 
     def statistics(self) -> dict:
-        """Per-stage StageStatistics + per-attempt SolutionInfo rollups.
-
-        Shapes mirror ``curobo_task_constructor_interfaces``:
+        """Per-stage StageStatistics + per-attempt SolutionInfo rollups. Shapes mirror ``curobo_task_constructor_interfaces``:
         stages: [{stage_id, stage_name, stage_type, attempt_count,
                   success_count, last_cost, total_compute_time}]
         attempts: [{stage_id, stage_name, solution_id, cost, success,
@@ -661,21 +330,8 @@ class TaskExecutor:
 
         ``last_cost`` is the lowest cost among the stage's solutions (not the
         last emitted — a multi-candidate goalset emits one solution per
-        candidate, and the last one is not necessarily the cheapest).
-        ``total_compute_time`` is in seconds (wall-clock, accumulated across
-        every ``run_compute`` call on the stage).
-        ``attempt_count`` is ``success_count + failure_count`` — the number of
-        records the stage actually produced, which is exactly what the
-        published ``StageStatistics`` shows and what a client can
-        independently recount from ``solved`` + ``failed``. A count that
-        disagrees with those columns is worse than no count.
-
-        ``planner_calls`` is kept alongside it for the number that motivated
-        the old field (planner calls, including attempts that produced no
-        record — a discarded best-of-N seed, a generator pass). It is NOT
-        reconcilable with solved/failed by design, so it lives under its own
-        name rather than masquerading as the attempt count.
-        """
+        candidate, and the last one is not necessarily the cheapest). ``total_compute_time`` is in seconds (wall-clock, accumulated across
+        every ``run_compute`` call on the stage)."""
         stages = []
         attempts = []
         for stg in self.root.subtree_stages():
@@ -716,260 +372,3 @@ class TaskExecutor:
                     "planner_id": "",
                 })
         return {"task_id": self.task_id, "stages": stages, "attempts": attempts}
-
-    @staticmethod
-    def _planner_id(sol: Solution) -> str:
-        req = getattr(sol, "plan_request", None)
-        planner = getattr(req, "planner", None)
-        return str(planner) if planner is not None else ""
-
-    # ------------------------------------------------------------------
-    # Solution serialization (MTC Solution.toMsg / constructMotionPlan)
-    # ------------------------------------------------------------------
-    def solution_to_dict(self, sol: Solution) -> dict:
-        """A solution as ROS-free dicts with MTC ``Solution`` field names.
-
-        ``sub_solution`` mirrors the solution tree (one entry per node, with
-        child solution ids); ``sub_trajectories`` carries one entry per
-        MOTION leaf in chain order, each with the joint waypoints, the scene
-        ops the executor applies before driving it, and the ``replay_goal``
-        (the segment's planning goal) the execute server needs to replay the
-        validated plan from the curobo_server trajectory cache instead of
-        re-solving. ``start_scene`` is the task's base-scene objects.
-        """
-        sub_solutions = []
-
-        def walk(s: Solution) -> None:
-            sub_solutions.append({
-                "info": self._solution_info_dict(s),
-                "sub_solution_id": [
-                    self.register_solution(c) for c in (s.children or [])],
-            })
-            for ch in (s.children or []):
-                walk(ch)
-
-        walk(sol)
-        return {
-            "task_id": self.task_id,
-            "start_scene": [
-                _object_spec_to_dict(spec)
-                for spec in self.base_scene.objects_added.values()
-            ],
-            "sub_solution": sub_solutions,
-            "sub_trajectories": self._chain_trajectory_dicts(sol),
-        }
-
-    def _chain_trajectory_dicts(self, sol: Solution) -> list:
-        """One entry per motion leaf, in chain order, with scene ops folded
-        in chain position.
-
-        Mutation leaves (scene-only stages) carry no motion, so their ops
-        flush into the nearest motion segment: preceding mutations apply
-        BEFORE the segment drives (``before``), trailing mutations (e.g. a
-        release task's detach) apply AFTER it (``after``). A scene-only
-        chain yields one entry with no replay goal that only applies ops.
-        """
-        entries = []
-        pending = []
-        for leaf in self.flatten_leaves(sol):
-            ops = list(getattr(leaf, "scene_ops", None) or [])
-            if getattr(leaf, "plan_request", None) is None:
-                pending.extend(ops)
-                continue
-            entry = self._leaf_trajectory_dict(leaf)
-            entry["scene_diff"] = {
-                "before": _scene_ops_to_dict(pending + ops),
-                "after": _scene_ops_to_dict([]),
-            }
-            pending = []
-            entries.append(entry)
-        if pending:
-            if entries:
-                entries[-1]["scene_diff"]["after"] = _scene_ops_to_dict(
-                    pending)
-            else:
-                entries.append({
-                    # No motion leaf: ids stay 0 ("no solution"), never -1 —
-                    # uint32 fields reject negatives in C serialization.
-                    "info": {"id": 0, "cost": 0.0, "comment": "",
-                             "stage_id": 0, "planner_id": ""},
-                    "execution_info": {"controller_names": []},
-                    "trajectory": {"joint_names": [], "points": []},
-                    "scene_diff": {"before": _scene_ops_to_dict(pending),
-                                   "after": _scene_ops_to_dict([])},
-                    "replay_goal": None,
-                })
-        return entries
-
-    def _solution_info_dict(self, sol: Solution) -> dict:
-        """MTC SolutionInfo fields for one solution.
-
-        ``id`` is the GLOBAL solution id (``register_solution``), exactly the
-        number ``StageStatistics.solved``/``failed`` and ``GetSolution`` use —
-        never the per-stage ``solution_id``, which restarts at 0 in every
-        stage and would make a client join the wrong solution to a stage.
-        """
-        stage = getattr(sol, "stage", None)
-        return {
-            "id": self.register_solution(sol),
-            "cost": float(getattr(sol, "cost", float("inf"))),
-            "comment": str(getattr(sol, "comment", "") or ""),
-            "stage_id": int(getattr(stage, "stage_id", 0) or 0),
-            "planner_id": self._planner_id(sol),
-        }
-
-    def _leaf_trajectory_dict(self, leaf: Solution) -> dict:
-        traj = list(getattr(leaf, "trajectory", None) or [])
-        names = list(getattr(traj[0], "name", []) or []) if traj else []
-        points, velocities = [], []
-        for wp in traj:
-            aligned = _align_waypoint_positions(wp, names) if names else None
-            if aligned is None:
-                raw = [float(v) for v in (getattr(wp, "position", []) or [])]
-                aligned = raw if len(raw) == len(names) else None
-            if aligned is None:
-                continue
-            points.append([float(v) for v in aligned])
-            vel = getattr(wp, "velocity", None) or []
-            velocities.append([float(v) for v in vel])
-        return {
-            "info": self._solution_info_dict(leaf),
-            "execution_info": {"controller_names": []},
-            # MTC parity: the sub-trajectory carries the waypoints themselves so
-            # execute can replay them verbatim. Velocities ride along when the
-            # solver produced them (the wire JointState already carries them);
-            # the open-loop streamer tapers/clamps them, so an empty list is a
-            # benign "derive from positions".
-            "trajectory": {
-                "joint_names": [str(n) for n in names],
-                "points": points,
-                "velocities": velocities,
-            },
-            # Filled by _chain_trajectory_dicts (chain-position folding).
-            "scene_diff": {"before": _scene_ops_to_dict([]),
-                           "after": _scene_ops_to_dict([])},
-            "replay_goal": _plan_request_to_dict(
-                getattr(leaf, "plan_request", None)),
-        }
-
-    def execute_dict(self, d: dict, progress_callback=None,
-                     cancel_event=None) -> tuple:
-        """Drive a deserialized solution (see ``solution_to_dict``).
-
-        Rebuilds each motion segment's PlanRequest + scene ops and drives
-        them exactly like :meth:`execute`: MTC ``Task::execute`` parity, each
-        segment is replayed from the validated trajectory the solution carries
-        (never re-solved). Returns (results, failed_stage_name);
-        ``failed_stage_name`` is "" on success and names the leaf stage (MTC
-        reports per-sub-trajectory progress through the action feedback
-        instead).
-        """
-        self._applied_ops = []
-        # MTC maps sub-trajectory ids back to stage names through the task;
-        # same here: names come from this executor's own stage tree.
-        names = {stg.stage_id: stg.name
-                 for stg in self.root.subtree_stages()}
-
-        def _progress(index, total, info):
-            if progress_callback is not None:
-                stage_name = names.get(int((info or {}).get("stage_id", -1)
-                                           or -1), f"segment_{index}")
-                progress_callback(stage_name)
-
-        results, failed_index, cancelled = drive_solution_dict(
-            self.robot, d, self._applied_ops,
-            progress_callback=_progress, cancel_event=cancel_event)
-        if cancelled:
-            return results, "<cancelled>"
-        if failed_index is None:
-            return results, ""
-        segments = list((d or {}).get("sub_trajectories", None) or [])
-        info = (segments[failed_index].get("info", {})
-                if 0 <= failed_index < len(segments) else {})
-        return results, names.get(int(info.get("stage_id", -1) or -1), "")
-
-
-def drive_solution_dict(robot, d, applied_ops=None,
-                        progress_callback=None, cancel_event=None) -> tuple:
-    """Drive a deserialized solution without an executor tree.
-
-    The execute action server (another process, no stage tree) drives a
-    received Solution this way: scene ops apply through ``robot`` in chain
-    order and each motion segment replays its own VALIDATED waypoints via
-    ``robot.execute(req, trajectory=...)`` — MTC ``Task::execute`` parity, the
-    server streams the segment's stored trajectory verbatim (``replay``), so
-    there is no cache lookup, no re-solve, and no way for a multi-solution pose
-    goal to jump IK branch mid-chain. ``req`` is still sent for the planner
-    switch and its ``allowed_collisions``.
-
-    ``progress_callback`` fires as ``(index, total, info)`` per driven
-    motion segment (MTC's sub_id/sub_no feedback). ``applied_ops`` collects
-    ``(kind, payload)`` dedup keys across calls (pass the server's
-    per-goal list). Returns ``(results, failed_index, cancelled)``;
-    ``failed_index`` is None on success.
-    """
-    from curobo_task_constructor.core.robot import PlanResult
-
-    if applied_ops is None:
-        applied_ops = []
-    results = []
-    segments = list((d or {}).get("sub_trajectories", None) or [])
-    total = len(segments)
-
-    def _apply(kind, payload) -> None:
-        key = (kind, getattr(payload, "name", payload)
-               if kind == "add" else payload)
-        if key in applied_ops:
-            return
-        applied_ops.append(key)
-        if kind == "add":
-            robot.add_object(payload)
-        elif kind == "remove":
-            robot.remove_object(payload)
-        elif kind == "remove_all":
-            robot.remove_all_objects()
-        elif kind == "detach_all":
-            robot.detach_object(None)
-        elif kind == "attach":
-            robot.attach_object(payload)
-        elif kind == "detach":
-            robot.detach_object(payload)
-        else:
-            raise ValueError(f"unknown scene op kind {kind!r}")
-
-    for index, seg in enumerate(segments):
-        if cancel_event is not None and cancel_event.is_set():
-            return results, None, True
-        info = seg.get("info", {}) if isinstance(seg, dict) else {}
-        diff = seg.get("scene_diff", {}) if isinstance(seg, dict) else {}
-        for op in _scene_ops_from_dict(diff.get("before", {}) or {}):
-            _apply(op[0], op[1])
-        req = _plan_request_from_dict(seg.get("replay_goal", {}) or {})
-        if req is None:
-            for op in _scene_ops_from_dict(diff.get("after", {}) or {}):
-                _apply(op[0], op[1])
-            continue
-        if progress_callback is not None:
-            progress_callback(index, total, info)
-        traj = seg.get("trajectory", {}) or {}
-        points = list(traj.get("points", []) or [])
-        if len(points) <= 1:
-            # Trivial (no-motion) segment: the planner answers these without
-            # solving (see CuroboServerInterface._trivial_goal), so there is
-            # nothing to drive. Scene ops still apply (below); progress already
-            # fired (above), so the panel still follows the chain.
-            results.append(PlanResult(
-                True, "trivial (no motion needed)"))
-            for op in _scene_ops_from_dict(diff.get("after", {}) or {}):
-                _apply(op[0], op[1])
-            continue
-        result = robot.execute(req, trajectory=traj)
-        if not result.success:
-            results.append(result)
-            return results, index, False
-        for op in _scene_ops_from_dict(diff.get("after", {}) or {}):
-            _apply(op[0], op[1])
-        results.append(result)
-    if cancel_event is not None and cancel_event.is_set():
-        return results, None, True
-    return results, None, False

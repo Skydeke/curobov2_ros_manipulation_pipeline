@@ -56,14 +56,11 @@ def joint_order(robot, joint_state) -> list:
 
 
 def joint_positions_in_cspace(robot, joint_state) -> list:
-    """Positions in the planner's canonical cspace order.
-
-    ``/joint_states`` can carry MORE joints than the planner's cspace (the
+    """Positions in the planner's canonical cspace order. ``/joint_states`` can carry MORE joints than the planner's cspace (the
     whole robot: arm, fingers, tips, base/PTU). A joint goal derived from that
     reading key-for-key produces a goal as long as the reading (16 values for
     an 8-DOF cspace) and the server rejects it with "q should have dof = 8,
-    got 16". Project onto the cspace order and drop foreign joints.
-    """
+    got 16"."""
     positions = list(getattr(joint_state, "position", []) or [])
     names = list(getattr(joint_state, "name", []) or [])
     order = list(getattr(robot, "_joint_order", None) or [])
@@ -103,13 +100,9 @@ def full_request(robot, start_joints, goalsets, params, planner=None,
     by ``core.CartesianPath.extra_params``). A stage built with any other
     planner carries none of them, so the sentinels leave the server defaults
     in place — and the server ignores them unless the Cartesian planner is
-    active.
-
-    ``scene`` is the state's ``SceneDiff``: the leg is solved with the server
+    active. ``scene`` is the state's ``SceneDiff``: the leg is solved with the server
     reconciled to it (attach/detach previewed at ``start_joints``), so a leg
-    after a grasp plans against the object already in the hand. See
-    ``core.RobotInterface.plan_scene``.
-    """
+    after a grasp plans against the object already in the hand."""
     return PlanRequest(
         start_pose=start_joints,
         goalsets=goalsets,
@@ -130,28 +123,13 @@ CONSTRAINT_ORDER = "theta_x theta_y theta_z x y z"
 def axis_holds(
     start_pose, goal_poses, pos_tol: float = 0.005, rot_tol: float = 0.05
 ) -> list:
-    """``int8[6]`` holds that pin a path onto its straight segment.
-
-    cuRobo scores a *non-terminal* waypoint's held-axis error against the GOAL
+    """``int8[6]`` holds that pin a path onto its straight segment. cuRobo scores a *non-terminal* waypoint's held-axis error against the GOAL
     pose in the world frame (``curobo/_src/cost/wp_tool_pose.py``, the
     unprojected branch: the reference pose is the goal and
     ``project_distance_to_goal`` stays at its ``False`` default because
     ``_apply_pose_constraints`` never sets it). So an axis can be HELD only
     where the start and the goal already agree: holding an axis they differ on
-    would fight the very motion being planned.
-
-    Consequences, both deliberate:
-
-    - Orientation is all-or-nothing — a partial orientation hold is not
-      expressible in the 6-slot vector, so it is held only when start and goal
-      agree on the whole orientation (the usual case for a top-down grasp, where
-      the tool does not rotate during the descent).
-    - With several goal candidates, the hold is the INTERSECTION over all of
-      them: an axis is held only if every candidate agrees with the start. That
-      is the one vector that is correct for whichever candidate cuRobo ends up
-      selecting out of the goalset, so it is applied unchanged afterwards
-      (``_reset_pose_criteria`` restores the default criteria).
-    """
+    would fight the very motion being planned."""
     s = Pose3.from_any(start_pose)
     goals = [Pose3.from_any(g) for g in (goal_poses or [])]
     if not goals:
@@ -171,18 +149,12 @@ def axis_holds(
 
 
 def path_length_cost(trajectory, skip_tail: int = 0) -> float:
-    """MTC ``cost::PathLength``: sum of per-waypoint joint-space L2 distance.
-
-    Computed exactly from the waypoints that come back over the wire (each is a
+    """MTC ``cost::PathLength``: sum of per-waypoint joint-space L2 distance. Computed exactly from the waypoints that come back over the wire (each is a
     ``JointState`` in cspace order), so it is directly comparable to the
     reference pipeline's ``Connect`` cost term. Physically it also *rewards*
     straightness on a Cartesian move: a straight line in Cartesian space is a
     LONGER joint path than a shortcut around an obstacle, so minimising joint
-    path length is what pushes the solver onto the line.
-
-    ``skip_tail`` drops the trailing DOFs a pose goal leaves unconstrained (e.g.
-    ``finger_joint``), so a gripper close does not register as arm motion.
-    """
+    path length is what pushes the solver onto the line."""
     pts = []
     for wp in trajectory or []:
         pos = list(getattr(wp, "position", None) or [])
@@ -195,30 +167,14 @@ def path_length_cost(trajectory, skip_tail: int = 0) -> float:
 
 
 def cost_of(result, params: dict, start_joints=None) -> float:
-    """Ranking cost of one solve, per the stage's ``cost`` param.
-
-    Modes (``cost:`` in the stage params, default ``auto``):
+    """Ranking cost of one solve, per the stage's ``cost`` param. Modes (``cost:`` in the stage params, default ``auto``):
 
     ``auto``         Prefer ``PlanResult.cost`` when a RobotInterface actually
                      populated it (the server's own opinion), else
                      ``path_length``. This is the default because it is
                      correct in both cases: today no adapter populates it (the
                      rclpy one deliberately leaves it ``inf``), so in practice
-                     this is always path_length.
-    ``path_length``  MTC ``cost::PathLength`` on the returned waypoints. It is
-                     the reference pipeline's term, exactly computable from the
-                     wire, and the only one comparable across planners (cuRobo's
-                     ``seed_cost`` is a trajopt objective whose scale differs
-                     per problem, so it must not be mixed with a length).
-                     Physically it also *rewards* straightness on a Cartesian
-                     move: a straight line is a longer joint path than a
-                     shortcut, so minimising length is what pushes the solver
-                     onto the line.
-    ``waypoints``    Waypoint count — the previous proxy, kept for continuity.
-    ``solver_cost``  The cheapest ``stats.considered[*].cost`` the server
-                     reported. Needs ``log_considered: true`` to be populated.
-    ``inf``          Never rank, never pick (keeps first-solution-wins).
-    """
+                     this is always path_length."""
     mode = str((params or {}).get("cost", "auto"))
     if mode == "inf":
         return float("inf")
