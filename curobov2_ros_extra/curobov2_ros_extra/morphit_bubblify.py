@@ -139,25 +139,10 @@ def launch_morphit_bubblify(builder: Any, urdf_path: str,
                             port: int, show_collision: bool,
                             fit_defaults: Dict[str, Any],
                             save_fn: Any, output: str) -> bool:
-    """Run bubblify with MorphIt refits and a Save button in its editor.
-
-    Args:
+    """Run bubblify with MorphIt refits and a Save button in its editor. Args:
         builder: cuRobo :class:`RobotBuilder` (already loaded). Refit buttons
             call its ``refit_link_spheres``/``fit_collision_spheres`` on the
-            link selected in bubblify, and results sync into the viewer.
-        urdf_path: Resolved URDF for the viewer.
-        spherization_yml: Bubblify spheres yml preloading current spheres.
-        port: Viser port.
-        show_collision: Show collision meshes in the viewer.
-        fit_defaults: Initial ``fit_type``/``iterations``/``coverage_weight``/
-            ``protrusion_weight``/``sphere_density`` for the panel.
-        save_fn: Zero-arg callable writing the cuRobo file from the builder;
-            returns a status message. Called by the Save button and on exit.
-        output: Output cuRobo yml path (shown in the UI).
-
-    Returns:
-        True when the builder spheres differ after the session.
-    """
+            link selected in bubblify, and results sync into the viewer."""
     try:
         from curobov2_ros_extra.curobo_config_io import (
             pull_store_spheres_from_builder,

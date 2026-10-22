@@ -118,20 +118,11 @@ def _single_request(obj_type: str, obj_name: str, data: Dict[str, Any]) -> Dict[
 
 
 def obstacles_dict_to_add_requests(obstacles: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Convert a cuRobo-style obstacle dict to a list of AddObject payloads.
-
-    Args:
+    """Convert a cuRobo-style obstacle dict to a list of AddObject payloads. Args:
         obstacles: ``{bucket: {name: params, ...}}`` exactly as passed to
             ``SceneCfg.create`` by the upstream benchmark (also what
-            robometrics problems carry in ``problem['obstacles']``).
-
-    Returns:
-        List of AddObject request payload dicts (see module docstring).
-
-    Raises:
-        ValueError: on unknown obstacle buckets or MESH entries without
-            geometry.
-    """
+            robometrics problems carry in ``problem['obstacles']``). Returns:
+        List of AddObject request payload dicts (see module docstring)."""
     for bucket in obstacles:
         if bucket not in _SUPPORTED_BUCKETS:
             raise ValueError(
@@ -151,16 +142,13 @@ def obstacles_dict_to_add_requests(obstacles: Dict[str, Any]) -> List[Dict[str, 
     return requests
 
 def native_obb_obstacles(obstacles: Dict[str, Any]) -> Dict[str, Any]:
-    """The world the NATIVE leg builds for a problem, as wire obstacles.
-
-    Upstream ``motion_plan_benchmark`` builds each problem's world with
+    """The world the NATIVE leg builds for a problem, as wire obstacles. Upstream ``motion_plan_benchmark`` builds each problem's world with
     ``SceneCfg.create(deepcopy(problem["obstacles"])).get_obb_world()``: cuboids
     stay, sphere/capsule/cylinder/mesh all become OBB cuboids. The ROS leg must
     collide against that SAME world, so the conversion happens HERE, before the
     obstacles travel to the server - the server then never sees a mesh or a
     primitive for these problems and the two legs share one collision world by
-    construction. Idempotent: converting an already-converted world is a no-op.
-    """
+    construction."""
     import copy
 
     from curobo._src.geom.types import SceneCfg

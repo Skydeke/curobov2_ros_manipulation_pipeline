@@ -52,13 +52,10 @@ from ._viser_helpers import (
 
 
 class MpcViserNode(Node):
-    """Reactive-MPC viser node with a live-tracking goal gizmo.
-
-    The target is set by dragging the control frame. A ``SetPlanner`` call
+    """Reactive-MPC viser node with a live-tracking goal gizmo. The target is set by dragging the control frame. A ``SetPlanner`` call
     selects the MPC (reactive) controller, a ``SendTrajectory`` action starts
     the continuous servo loop, and ``PoseStamped`` messages on the mpc_goal topic
-    retarget it live. The server's joint commands (action feedback) are rendered.
-    """
+    retarget it live."""
 
     def __init__(self):
         super().__init__('mpc_viser_node')

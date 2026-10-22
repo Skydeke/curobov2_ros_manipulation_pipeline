@@ -1,22 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Load the robometrics benchmark problems.
-
-Reuses the exact datasets ``curobo/curobo/benchmark/motion_plan_benchmark.py``
+"""Load the robometrics benchmark problems. Reuses the exact datasets ``curobo/curobo/benchmark/motion_plan_benchmark.py``
 benchmarks against (``demo``, ``motion_benchmaker``, ``mpinets``), so the two
-legs here solve the same problems as the upstream native benchmark.
-
-``robometrics`` ships with the ``curobo[benchmark]`` pip extra (present in the
-docker image). The import is lazy and guarded so this module stays importable
-in pure-Python environments where robometrics is not installed.
-
-Each problem dict carries:
-    start                 -> 7-D pose-free joint configuration (cspace order)
-    goal_pose             -> {'position_xyz': [x, y, z],
-                              'quaternion_wxyz': [w, x, y, z]}
-    obstacles             -> SceneCfg-style {bucket: {name: params}, ...}
-    collision_buffer_ik   -> < 0 marks problems the upstream benchmark skips
-"""
+legs here solve the same problems as the upstream native benchmark. ``robometrics`` ships with the ``curobo[benchmark]`` pip extra (present in the
+docker image)."""
 
 # Standard Library
 from typing import Any, Dict, List, Optional, Tuple
@@ -67,16 +54,11 @@ def _get_loaders() -> Dict[str, Any]:
 
 
 def _combined_loader() -> Dict[str, List[Dict[str, Any]]]:
-    """Merge motion_benchmaker + mpinets into one ``{scene: [problems]}`` dict.
-
-    Upstream iterates ``file_paths = [motion_benchmaker_raw, mpinets_raw]``
+    """Merge motion_benchmaker + mpinets into one ``{scene: [problems]}`` dict. Upstream iterates ``file_paths = [motion_benchmaker_raw, mpinets_raw]``
     (the two halves of the page's 2600-problem tables) in one run, so the
     combined dataset is just the union, keyed by scene. Scene keys between the
     two robometrics datasets are disjoint — a collision would mean the merge
-    silently hid problems, so it fails fast instead. The merged dict (and the
-    mpinets provenance) is cached: the box's 2600-problem pass otherwise
-    re-loads both datasets from robometrics on every access.
-    """
+    silently hid problems, so it fails fast instead."""
     global _FULL_CACHE, _MPINETS_SCENE_KEYS_CACHE
     if _FULL_CACHE is not None:
         return _FULL_CACHE
@@ -122,20 +104,12 @@ def is_mpinets_scene(
     mpinets_scenes: Optional[frozenset],
     dataset: str,
 ) -> bool:
-    """Whether ``scene_key`` came from the mpinets dataset (upstream's ``mpinets`` flag).
-
-    Upstream's reference benchmark iterates one ``file_path`` at a time and sets
+    """Whether ``scene_key`` came from the mpinets dataset (upstream's ``mpinets`` flag). Upstream's reference benchmark iterates one ``file_path`` at a time and sets
     ``load_curobo(..., mpinets_data=…)`` per file, so this is a property of the
     *dataset*, not of the scene in isolation. For the combined "full" dataset
     ``mpinets_scenes`` (``mpinets_scene_keys()``) classifies each scene; for a
     single-dataset run it is ``None`` and the whole run is one file_path, so one
-    probe of an mpinets-only scene decides for every scene.
-
-    Both legs read the answer from here so they cannot drift: the native leg
-    feeds it into ``load_curobo`` per scene (``core_runner._run_scene``), the
-    ROS leg pins the running server's gripper to the matching lock value
-    (``RosBenchmarkRunner.set_server_lock_joints``).
-    """
+    probe of an mpinets-only scene decides for every scene."""
     if mpinets_scenes is not None:
         return scene_key in mpinets_scenes
     # Single dataset == one file_path upstream: probe an mpinets-only scene.
@@ -217,9 +191,7 @@ _CONVERTED_BUCKETS = ("sphere", "capsule", "cylinder")
 def collision_cache_sizes(
     problems: Dict[str, List[Dict[str, Any]]],
 ) -> Tuple[int, int]:
-    """Solver collision-cache sizes (cuboid slots, mesh slots) a dataset needs.
-
-    curobo's Warp collision kernels launch one thread per (robot sphere, padded
+    """Solver collision-cache sizes (cuboid slots, mesh slots) a dataset needs. curobo's Warp collision kernels launch one thread per (robot sphere, padded
     obstacle slot) per obstacle *type*, so an over-padded cache — the server's
     former deployment default ``{cuboid: 100, mesh: 100, voxel: ...}`` (the
     launch defaults are now 32/4 via ``collision_cache_cuboid`` /
@@ -229,22 +201,7 @@ def collision_cache_sizes(
     ``obstacle_collision_mode:=cuboid`` fix (see the extra README "timing
     attribution" section). The ROS benchmark leg sizes the server's cache to
     these values (and disables the empty no-camera voxel layer) before the
-    timed run so both legs collide through native-equivalent kernel grids.
-
-    The semantics mirror the native leg's ``check_problems``
-    (``curobo/benchmark/motion_plan_benchmark.py``): per problem it builds
-    ``SceneCfg.create(obstacles).get_obb_world()`` and reads the resulting OBB
-    cache count, so cuboids *plus* converted sphere/cylinder/capsule all
-    occupy the cuboid bucket. The server can run either
-    ``obstacle_collision_mode``, routing those prims to the cuboid bucket
-    (cuboid, default) or the mesh bucket (mesh), so the cuboid budget is
-    ``cuboid + converted`` and the mesh budget is ``mesh + converted`` — exact
-    for the default mode and safe in mesh mode.
-
-    Returns:
-        ``(cuboid_slots, mesh_slots)`` — the maximum per-scene count the
-        solver must hold per type across the dataset (cuboid_slots >= 1).
-    """
+    timed run so both legs collide through native-equivalent kernel grids."""
     cuboid_slots = 0
     mesh_slots = 0
     for scene_problems in problems.values():

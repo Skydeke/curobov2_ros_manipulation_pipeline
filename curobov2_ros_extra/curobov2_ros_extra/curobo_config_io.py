@@ -38,12 +38,39 @@ def apply_preserved_fields(config: Any, original: Dict[str, Any]) -> None:
             setattr(config, key, value)
 
 
+def enforce_lock_joints(config: Any, names) -> None:
+    """Move ``names`` out of the planning cspace and lock them to ``null``.
+
+    ``null`` is an unpinned lock: the joint is never planned, but its value is
+    read from the live joint state. Cspace parallel arrays are filtered by the
+    same indices so every list stays aligned with ``joint_names``.
+    """
+    names = [n for n in (names or []) if n]
+    if not names:
+        return
+    cspace = getattr(config, "cspace", None)
+    if cspace is not None:
+        joint_names = list(getattr(cspace, "joint_names", []) or [])
+        drop = {i for i, n in enumerate(joint_names) if n in names}
+        if drop:
+            for attr, value in list(vars(cspace).items()):
+                if isinstance(value, list) and len(value) == len(joint_names):
+                    setattr(cspace, attr,
+                            [v for i, v in enumerate(value) if i not in drop])
+    locks = dict(getattr(config, "lock_joints", None) or {})
+    for n in names:
+        locks[n] = None
+    config.lock_joints = locks
+
+
 def build_and_save(builder: Any, output: str,
-                   original: Optional[Dict[str, Any]]) -> Any:
-    """Build, restore original custom fields, and save to one file."""
+                   original: Optional[Dict[str, Any]] = None,
+                   lock_joints=()) -> Any:
+    """Build, restore original custom fields, lock requested joints, save."""
     config = builder.build()
     if original is not None:
         apply_preserved_fields(config, original)
+    enforce_lock_joints(config, lock_joints)
     builder.save(config, output)
     return config
 
