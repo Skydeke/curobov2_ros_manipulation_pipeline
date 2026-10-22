@@ -15,13 +15,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Getting-started FK example with an interactive viser GUI.
-
-Keeps the ROS2 service architecture (FK is computed on ``curobo_server`` via the
+"""Getting-started FK example with an interactive viser GUI. Keeps the ROS2 service architecture (FK is computed on ``curobo_server`` via the
 ``Fk`` service) while adding per-joint GUI sliders so the user can manually
 drive each joint angle. The resulting tool-frame poses are rendered as frames
-in the viser viewer. A "Sweep" toggle re-enables the automatic demo sweep.
-"""
+in the viser viewer."""
 
 import math
 

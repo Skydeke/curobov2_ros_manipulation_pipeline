@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""ROS leg: replay the IK benchmark goals through the running planner server.
-
-Talks to the ``unified_planner`` node started by ``gen_traj.launch.py``:
+"""ROS leg: replay the IK benchmark goals through the running planner server. Talks to the ``unified_planner`` node started by ``gen_traj.launch.py``:
 
 - the parity world (``WORLD_IK`` — the upstream ``collision_table.yml`` table)
   is pushed via ``/unified_planner/add_object`` after
@@ -19,11 +17,8 @@ Talks to the ``unified_planner`` node started by ``gen_traj.launch.py``:
 - per-goal success comes from ``joint_states_valid[i]`` (the server's
   best-seed convergence flag — the same ``result.success[i, 0]`` the native
   leg reads); the FK-verified pose errors are computed client-side from the
-  returned first-seed joint states with the SAME formula as the native leg.
-
-Only the ``cfree`` variant runs here: the server has no collision-free-off IK
-mode. Timing is informational (client wall around each batch call, ms).
-"""
+  returned first-seed joint states with the SAME formula as the native leg. Only the ``cfree`` variant runs here: the server has no collision-free-off IK
+mode."""
 
 # Standard Library
 import time
@@ -96,18 +91,10 @@ class RosIkRunner(Node):
         return future.result()
 
     def size_collision_cache(self, timeout: float = 120.0) -> None:
-        """Size the server's collision cache to the IK world (native parity).
-
-        Same rationale as ``ros_runner.size_collision_cache``: the IK solver's
+        """Size the server's collision cache to the IK world (native parity). Same rationale as ``ros_runner.size_collision_cache``: the IK solver's
         Warp collision kernels launch one thread per (sphere, padded cache
         slot), so an over-padded server cache (the 32/4 launch defaults)
-        inflates the kernel grid vs the native leg's ``{cuboid: 1}`` cache.
-        The one synchronous solver rebuild (~25-37 s) is paid inside the call.
-
-        Clears the world first: the server refuses a shrink below the
-        loaded scene, and empty fits every size. The IK world is pushed
-        back right after (see add_world).
-        """
+        inflates the kernel grid vs the native leg's ``{cuboid: 1}`` cache. The one synchronous solver rebuild (~25-37 s) is paid inside the call."""
         self.clear_world(timeout=timeout)
         request = SetCollisionCache.Request()
         request.obb = IK_WORLD_CUBOIDS

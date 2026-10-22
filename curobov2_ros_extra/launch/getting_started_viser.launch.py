@@ -15,16 +15,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Launch one or more cuRobo getting-started viser example nodes.
-
-Each node hosts its own ViserVisualizer web GUI.  Set the ``nodes`` argument
-to a comma-separated list of node names to launch (default: all eight).
-
-Example — launch only FK and IK on port 8090:
-
-    ros2 launch curobov2_ros_extra getting_started_viser.launch.py \
-        nodes:=fk_viser_node,ik_viser_node viser_port:=8090
-"""
+"""Launch one or more cuRobo getting-started viser example nodes. Each node hosts its own ViserVisualizer web GUI. Set the ``nodes`` argument
+to a comma-separated list of node names to launch (default: all eight)."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction

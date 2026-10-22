@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Native leg: kinematics & collision forces benchmark (the ``cost`` capability).
-
-The upstream ``curobo/benchmark/cost_gradient_benchmark.py`` moves a robot
+"""Native leg: kinematics & collision forces benchmark (the ``cost`` capability). The upstream ``curobo/benchmark/cost_gradient_benchmark.py`` moves a robot
 through random joint configurations and reports the forward-kinematics tool
 pose plus the cost gradient / collision status per sample. Its parity-relevant
 outs are *per-config correlation of the ROS server's FK and collision
@@ -14,14 +12,7 @@ validity* with the native machinery:
   (``WORLD_COST``: table + tall cuboid) with the server's
   ``collision_activation_distance=0.001``; the service calls this its
   ``poses_valid`` output and folds joint limits + self-collision + scene
-  collision into it.
-
-The native leg evaluates the SAME configs the ROS leg sends (shared,
-deterministically reseeded ``synthetic.load_cost_configs``), so ``valid``
-agreement is exact-by-construction and FK poses should agree to float
-reproducibility. Timing is informational (client wall around each
-FK+validate batch, ms).
-"""
+  collision into it."""
 
 # Standard Library
 import time

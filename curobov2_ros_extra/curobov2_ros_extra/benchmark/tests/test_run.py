@@ -418,18 +418,13 @@ class TestServerResetSeedPin:
 
 
 class TestRosSubcommandServerPins:
-    """`cmd_ros` reads parser attributes, so `p_ros` must declare them.
-
-    `p_ros` builds its options by hand instead of calling `_add_solver_opts`
+    """`cmd_ros` reads parser attributes, so `p_ros` must declare them. `p_ros` builds its options by hand instead of calling `_add_solver_opts`
     (it needs ROS-leg-specific `--use-dynamics`/`--mass` help text), which is
     exactly how these drifts happen: `cmd_ros` grew a `server_max_attempts`
     pin reading `args.max_attempts` that `p_ros` never declared, so every
     `curobo_benchmark ros` died with AttributeError. The cmd-level tests
     catch it too, but they are `importorskip('rclpy')`-gated and therefore
-    silent in a non-ROS env, so assert the surface directly.
-
-    (`--no-mpinets-locks` is covered ungated by TestMpinetsLockFlag.)
-    """
+    silent in a non-ROS env, so assert the surface directly."""
 
     def test_ros_declares_the_pins_cmd_ros_reads(self):
         args = build_parser().parse_args(['ros'])

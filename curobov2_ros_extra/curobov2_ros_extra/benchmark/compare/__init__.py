@@ -1,0 +1,57 @@
+"""Package facade for benchmark/compare: re-exports the original API."""
+
+from .metrics import PUBLISHED_REFERENCE_PAGE, _rel_delta, _row_value, _rows_for, orientation_error_deg, position_error_mm, trajectory_jerk, trajectory_metrics, winner_position_error_mm, winner_solve_time
+from .parity import _max, _mean, _solve_tracks_wall_pct, _success_rate, _time_overhead_pct, compare, compare_cost, compare_ik
+from .tables import _abs_delta, _amortized_ik_ms, _batch_ik_ms, _grid_table, _per_ik_ms, _percentile, _stat_str, _vec_mm, cost_style_rows, curobo_style_rows, ik_style_rows
+from .report import _REFERENCE_METRIC_KEYS, _fmt_stat, _metric_vals, _print_leg, print_cost_table, print_curobo_table, print_ik_table, print_published_comparison, print_reference_comparison, print_webpage_summary, reference_stats
+from .summary import _fmt, _pct, _print_pose_parity_report, print_report, print_report_cost, print_report_ik, save_report
+
+__all__ = [
+    'PUBLISHED_REFERENCE_PAGE',
+    '_REFERENCE_METRIC_KEYS',
+    '_abs_delta',
+    '_amortized_ik_ms',
+    '_batch_ik_ms',
+    '_fmt',
+    '_fmt_stat',
+    '_grid_table',
+    '_max',
+    '_mean',
+    '_metric_vals',
+    '_pct',
+    '_per_ik_ms',
+    '_percentile',
+    '_print_leg',
+    '_print_pose_parity_report',
+    '_rel_delta',
+    '_row_value',
+    '_rows_for',
+    '_solve_tracks_wall_pct',
+    '_stat_str',
+    '_success_rate',
+    '_time_overhead_pct',
+    '_vec_mm',
+    'compare',
+    'compare_cost',
+    'compare_ik',
+    'cost_style_rows',
+    'curobo_style_rows',
+    'ik_style_rows',
+    'orientation_error_deg',
+    'position_error_mm',
+    'print_cost_table',
+    'print_curobo_table',
+    'print_ik_table',
+    'print_published_comparison',
+    'print_reference_comparison',
+    'print_report',
+    'print_report_cost',
+    'print_report_ik',
+    'print_webpage_summary',
+    'reference_stats',
+    'save_report',
+    'trajectory_jerk',
+    'trajectory_metrics',
+    'winner_position_error_mm',
+    'winner_solve_time',
+]

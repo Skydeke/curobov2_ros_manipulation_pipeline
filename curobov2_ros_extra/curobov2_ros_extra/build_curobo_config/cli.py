@@ -32,109 +32,8 @@ import sys
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
-
-def resolve_package_meshes(urdf_path: str, asset_path: str) -> str:
-    """Rewrite mesh URIs in the URDF to absolute filesystem paths.
-
-    cuRobo's RobotBuilder resolves relative mesh paths against asset_path but
-    cannot resolve ROS 2 'package://' URIs, and URDFs exported from a different
-    machine often carry stale absolute paths. This rewrites every mesh
-    reference (package://, file://, or bare relative path) to a path that
-    actually exists, resolving packages via ament_index_python.
-    """
-    with open(urdf_path, "r") as f:
-        text = f.read()
-
-    meshes: Dict[str, str] = {}
-
-    def resolve_mesh(uri: str) -> str:
-        """Return a path that exists for the given mesh URI."""
-        pkg = rel = None
-
-        m = re.match(r"^package://([^/\s]+)/(\S+)", uri)
-        if m:
-            pkg, rel = m.group(1), m.group(2)
-            # Prefer the plain asset tree (e.g. /tmp/assets/<pkg>/...) so this
-            # also works without a sourced ROS workspace (bubblify preview).
-            if asset_path:
-                candidate = os.path.abspath(os.path.join(asset_path, pkg, rel))
-                if os.path.exists(candidate):
-                    return candidate
-        else:
-            p = re.sub(r"^file://", "", uri)
-            # Detect the package from the path so that relative paths, bare
-            # package-relative paths, and stale absolute paths (from another
-            # machine / workspace) all get remapped into this workspace's
-            # install tree. Handle both '<pkg>/...' and 'share/<pkg>/...'.
-            for known in ("kortex_description", "robotiq_description"):
-                idx = p.find("share/" + known + "/")
-                if idx != -1:
-                    pkg = known
-                    rel = p[idx + len("share/" + known) + 1:]
-                    break
-            if pkg is None:
-                for known in ("kortex_description", "robotiq_description"):
-                    idx = p.find(known + "/")
-                    if idx != -1:
-                        pkg = known
-                        rel = p[idx + len(known) + 1:]
-                        break
-            if pkg is None:
-                # Package can't be detected; if it's an existing absolute path
-                # keep it, otherwise leave as-is so curobo tries asset_path.
-                if os.path.isabs(p) and os.path.exists(p):
-                    return p
-                return uri
-
-        try:
-            from ament_index_python.packages import get_package_share_directory
-        except ImportError:
-            print(
-                "ERROR: ament_index_python not available; cannot resolve mesh paths.",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-
-        try:
-            share_dir = get_package_share_directory(pkg)
-        except Exception:
-            return uri
-        candidate = os.path.abspath(os.path.join(share_dir, rel))
-        if os.path.exists(candidate):
-            return candidate
-        return uri
-
-    def replace(match: Any, group: Any) -> str:
-        """Resolve a single regex match and remember the mapping."""
-        uri = match.group(group)
-        resolved = resolve_mesh(uri)
-        meshes[uri] = resolved
-        return resolved
-
-    # package:// URIs
-    text = re.sub(
-        r'package://[^\s"\'<>]+',
-        lambda m: replace(m, 0),
-        text,
-    )
-    # file:// URIs and bare absolute/relative paths in filename="..." attributes
-    text = re.sub(
-        r'(filename\s*=\s*["\'])([^"\']+)(["\'])',
-        lambda m: m.group(1) + replace(m, 2) + m.group(3),
-        text,
-    )
-
-    if meshes:
-        found = sum(1 for v in meshes.values() if os.path.isabs(v))
-        print(f"Resolved {found}/{len(meshes)} mesh paths to existing files.")
-
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".urdf", delete=False, prefix="curobo_resolved_"
-    )
-    tmp.write(text)
-    tmp.close()
-    return tmp.name
-
+from .meshes import resolve_package_meshes
+from .bubblify import launch_bubblify, load_bubblify_spheres
 
 def build_parser() -> argparse.ArgumentParser:
     """Create the CLI argument parser."""
@@ -231,6 +130,15 @@ def build_parser() -> argparse.ArgumentParser:
         "(repeatable, e.g. --budget j2n6s200_link_3=8).",
     )
     parser.add_argument(
+        "--lock-joint",
+        action="append",
+        default=[],
+        metavar="JOINT",
+        help="Keep JOINT out of the planning cspace and lock it unpinned "
+        "(value null, follows the live joint state). Repeatable; the saved "
+        "config still reflects this on a later edit run.",
+    )
+    parser.add_argument(
         "--recompute-matrix",
         action="store_true",
         help="Edit mode: recompute the self-collision matrix. "
@@ -271,8 +179,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--viser-port", type=int, default=8080, help="cuRobo Viser viewer port."
     )
     return parser
-
-
 def _resolve_fit_type(name: str) -> Any:
     """Map a CLI fit-type name to :class:`SphereFitType`.
 
@@ -283,8 +189,6 @@ def _resolve_fit_type(name: str) -> Any:
     except ImportError:
         return name
     return SphereFitType(name)
-
-
 def _parse_budget(spec: str) -> Tuple[str, int]:
     """Parse a LINK=N budget spec into (link, sphere count)."""
     link, sep, count = spec.partition("=")
@@ -293,8 +197,6 @@ def _parse_budget(spec: str) -> Tuple[str, int]:
               file=sys.stderr)
         sys.exit(2)
     return link, int(count)
-
-
 def _fit_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
     """Collect the shared sphere-fit kwargs from CLI args."""
     return {
@@ -305,8 +207,6 @@ def _fit_kwargs(args: argparse.Namespace) -> Dict[str, Any]:
         "protrusion_weight": args.protrusion_weight,
         "compute_metrics": True,
     }
-
-
 def recompute_matrix_safe(builder: Any, num_samples: int,
                           batch_size: int) -> bool:
     """Recompute the collision matrix, surviving CUDA OOM.
@@ -335,8 +235,6 @@ def recompute_matrix_safe(builder: Any, num_samples: int,
               "--matrix-batch-size/--num-collision-samples or --skip-matrix.",
               file=sys.stderr)
         return False
-
-
 def _make_save_fn(builder: Any, output: str,
                   original: Optional[Dict[str, Any]],
                   args: argparse.Namespace):
@@ -351,107 +249,11 @@ def _make_save_fn(builder: Any, output: str,
             note = " (matrix recomputed)"
         else:
             note = " (matrix recompute OOMed, kept previous matrix)"
-        build_and_save(builder, dest, original)
+        build_and_save(builder, dest, original,
+                       getattr(args, "lock_joint", []) or [])
         return f"Saved {dest}{note}"
 
     return save_now
-
-
-def collision_spheres_to_bubblify_data(
-    collision_spheres: Dict[str, List[Dict[str, Any]]],
-) -> Dict[str, Any]:
-    """Convert cuRobo collision spheres to a bubblify spherization dict."""
-    links = sorted(collision_spheres.keys())
-    total = sum(len(v) for v in collision_spheres.values())
-    return {
-        "collision_spheres": collision_spheres,
-        "metadata": {"total_spheres": total, "links": links},
-    }
-
-
-def write_bubblify_spherization(
-    collision_spheres: Dict[str, List[Dict[str, Any]]],
-) -> str:
-    """Write spheres to a temp bubblify spherization yml, return its path."""
-    import yaml
-
-    data = collision_spheres_to_bubblify_data(collision_spheres)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".yml", delete=False, prefix="bubblify_spheres_"
-    )
-    tmp.write(yaml.safe_dump(data, default_flow_style=False, sort_keys=False))
-    tmp.close()
-    return tmp.name
-
-
-def load_bubblify_spheres(path: str) -> Dict[str, List[Dict[str, Any]]]:
-    """Load a bubblify-exported spheres yml as cuRobo-style sphere dicts."""
-    import yaml
-
-    with open(path, "r") as f:
-        data = yaml.safe_load(f)
-    raw = data.get("collision_spheres", {})
-    spheres: Dict[str, List[Dict[str, Any]]] = {}
-    for link, entries in raw.items():
-        spheres[link] = [
-            {
-                "center": [float(c) for c in e["center"]],
-                "radius": float(e["radius"]),
-            }
-            for e in entries
-        ]
-    return spheres
-
-
-def launch_bubblify(
-    builder: Any,
-    urdf_path: str,
-    collision_spheres: Dict[str, List[Dict[str, Any]]],
-    port: int,
-    show_collision: bool,
-    fit_defaults: Dict[str, Any],
-    save_fn: Any,
-    output: str,
-) -> bool:
-    """Launch interactive bubblify with MorphIt refits and a Save button.
-
-    Preloads the current spheres; morphit refits and manual edits made in
-    the browser are pulled back into the builder, and saving writes only
-    the cuRobo yml.
-
-    Returns:
-        True when the builder spheres changed during the session.
-    """
-    try:
-        from curobov2_ros_extra.morphit_bubblify import launch_morphit_bubblify
-    except ImportError:  # script executed directly, not as an installed package
-        from morphit_bubblify import launch_morphit_bubblify
-    spherization_yml = write_bubblify_spherization(collision_spheres)
-    print(f"Preloading {sum(len(v) for v in collision_spheres.values())} "
-          f"spheres into bubblify: {spherization_yml}")
-    print("Refit links with MorphIt (budget or density) in the browser; "
-          "manual edits work too. Use the Save button or Ctrl+C; "
-          f"only {output} is written.")
-    return launch_morphit_bubblify(
-        builder, urdf_path, spherization_yml, port, show_collision,
-        fit_defaults, save_fn, output,
-    )
-
-
-#: Original kinematics keys the builder rebuilds; every other key
-#: (lock_joints, extra_links, load_meshes, ...) is carried over on save.
-try:
-    from curobov2_ros_extra.curobo_config_io import (
-        build_and_save,
-        load_original_kinematics,
-    )
-except ImportError:  # script executed directly, not as installed package
-    from curobo_config_io import (
-        build_and_save,
-        load_original_kinematics,
-    )
-
-
 def run_create_mode(args: argparse.Namespace, RobotBuilder: Any) -> Tuple[Any, str, str, None]:
     """Build a new config from a URDF, return (builder, urdf, output, None)."""
     if not args.asset_path:
@@ -477,8 +279,6 @@ def run_create_mode(args: argparse.Namespace, RobotBuilder: Any) -> Tuple[Any, s
                           args.matrix_batch_size)
 
     return builder, resolved_urdf, args.output or "curobo_config.yml", None
-
-
 def run_edit_mode(
     args: argparse.Namespace, RobotBuilder: Any
 ) -> Tuple[Any, str, str, Dict[str, Any]]:
@@ -538,8 +338,6 @@ def run_edit_mode(
         except SystemExit:
             pass
     return builder, urdf_hint, args.output or args.config, original
-
-
 def main(argv: Optional[List[str]] = None) -> None:
     """Entry point for the build_curobo_config CLI."""
     args = build_parser().parse_args(argv)
@@ -585,13 +383,22 @@ def main(argv: Optional[List[str]] = None) -> None:
         config = builder.build()
     else:
         print("Building config ...")
-        config = build_and_save(builder, output, original)
+        config = build_and_save(builder, output, original,
+                                getattr(args, "lock_joint", []) or [])
     print(f"Done! Wrote {output} (custom fields preserved).")
 
     if args.visualize:
         print("Starting Viser visualization...")
         builder.visualize(config, port=args.viser_port)
-
-
+try:
+    from curobov2_ros_extra.curobo_config_io import (
+        build_and_save,
+        load_original_kinematics,
+    )
+except ImportError:  # script executed directly, not as installed package
+    from curobo_config_io import (
+        build_and_save,
+        load_original_kinematics,
+    )
 if __name__ == "__main__":
     main()

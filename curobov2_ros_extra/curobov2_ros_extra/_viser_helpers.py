@@ -145,24 +145,9 @@ def _build_from_yaml(raw: dict, resolved_urdf: str,
 
 
 def _reconcile_gripper_joints(kin: dict, actuated_joint_names: list) -> None:
-    """Bring URDF actuated joints missing from the cspace into the tree as locked joints.
-
-    A cuRobo robot config ships with only its *active* joints in ``cspace``
+    """Bring URDF actuated joints missing from the cspace into the tree as locked joints. A cuRobo robot config ships with only its *active* joints in ``cspace``
     (e.g. a 7-DOF arm). But the URDF may expose extra actuated joints (e.g. a
-    gripper ``finger_joint`` plus its mimic joints). ``ViserVisualizer`` reads
-    *all* actuated joints from the URDF for its ``_viser_joint_names``, so a
-    kinematics model built only from the cspace (7 joints) mismatches the
-    viewer (8 joints) and ``set_joint_state()`` crashes on reindex.
-
-    This extends the kinematic chain past each missing actuated joint by
-    adding its child link to ``collision_link_names`` (with a sentinel empty
-    sphere entry so it contributes no collision primitives) and locks the joint
-    at a fixed position. The result: the visualizer kinematics now report the
-    same total joint count as the URDF, while the active cspace is unchanged.
-
-    Only non-mimic joints are locked directly; pure mimic joints follow their
-    actuated parent automatically.
-    """
+    gripper ``finger_joint`` plus its mimic joints)."""
     active_names = set(kin.get("cspace", {}).get("joint_names") or [])
     locked = kin.setdefault("lock_joints", {})
     coll_links = set(kin.get("collision_link_names") or [])
@@ -267,15 +252,10 @@ def _build_from_xrdf(xrdf: dict, resolved_urdf: str,
 # ---------------------------------------------------------------------------
 
 def start_service_poll(node, client, on_ready, period=0.5):
-    """Non-blocking service watchdog.
-
-    Polls ``client.service_is_ready()`` on a ROS timer (instead of the blocking
+    """Non-blocking service watchdog. Polls ``client.service_is_ready()`` on a ROS timer (instead of the blocking
     ``wait_for_service()``, which can deadlock a node that has not yet started
     spinning). As soon as the service appears, the timer is cancelled and
-    ``on_ready(client)`` is invoked exactly once.
-
-    Returns nothing; the timer is owned by ``node``.
-    """
+    ``on_ready(client)`` is invoked exactly once."""
     state = {"done": False, "timer": None}
 
     def _tick():
@@ -316,13 +296,9 @@ def active_joint_names_from_content(content_path) -> list:
 
 
 def _home_positions_from_content(content_path, active_names):
-    """Home (default) joint positions for the given active joint names.
-
-    Reads the robot dict built by ``_build_robot_data_dict`` and returns a
+    """Home (default) joint positions for the given active joint names. Reads the robot dict built by ``_build_robot_data_dict`` and returns a
     list of positions aligned with ``active_names``. Falls back to zeros when
-    the content is unavailable or a joint is missing. Used as the plan-start
-    fallback when no live ``/joint_states`` is available yet.
-    """
+    the content is unavailable or a joint is missing."""
     positions = [0.0] * len(active_names)
     if not isinstance(content_path, dict):
         return positions
@@ -353,18 +329,12 @@ def _start_positions(content_path, active_names, js):
 
 
 def _viz_set_positions(viz, positions, names):
-    """Apply joint positions to the viser robot safely.
-
-    curobo's ``set_joint_positions`` builds a ``JointState`` via
+    """Apply joint positions to the viser robot safely. curobo's ``set_joint_positions`` builds a ``JointState`` via
     ``from_position`` and later calls ``joint_state.clone()`` (a torch op), so
     positions must be a torch tensor — neither a python list nor a numpy array
     works. The visualizer's kinematics live on CUDA, so the tensor must be
     created on that device (a CPU tensor causes a ``torch.cat`` device mismatch
-    inside ``get_full_js``). This converts to a float32 torch tensor on the
-    solver's device and guards against empty/ragged names or positions so a
-    stray ``/joint_states`` message (or an unsolved request) never crashes the
-    node.
-    """
+    inside ``get_full_js``)."""
     import torch
 
     if not names or not positions or len(positions) != len(names):
@@ -385,17 +355,11 @@ def _viz_set_positions(viz, positions, names):
 # ---------------------------------------------------------------------------
 
 def viser_serve_forever(node, viz, logger=None):
-    """Spin the ROS Node on the main thread.
-
-    ``ViserVisualizer`` runs its own GUI/networking on background threads once
-    constructed, so the ROS node can spin synchronously here on the main thread.
-    This is the same proven pattern used by the original esdf_viser_node
+    """Spin the ROS Node on the main thread. ``ViserVisualizer`` runs its own GUI/networking on background threads once
+    constructed, so the ROS node can spin synchronously here on the main thread. This is the same proven pattern used by the original esdf_viser_node
     (``rclpy.spin(node)``) — spinning in a daemon thread does NOT reliably
     process rclpy timers/service callbacks, which breaks the service poll/solve
-    cycle.
-
-    Call this at the end of main() after node construction.
-    """
+    cycle."""
     import rclpy
 
     if logger:

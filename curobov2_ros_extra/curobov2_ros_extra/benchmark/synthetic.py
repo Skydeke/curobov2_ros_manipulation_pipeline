@@ -1,28 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Seeded synthetic benchmark inputs shared by the IK and kinematics/collision legs.
-
-The upstream curobo benchmark page lists, besides motion planning
+"""Seeded synthetic benchmark inputs shared by the IK and kinematics/collision legs. The upstream curobo benchmark page lists, besides motion planning
 (``benchmark/motion_plan_benchmark.py``, already wired up), two more families:
 inverse kinematics (``benchmark/ik_benchmark.py``) and kinematics & collision
 checking (``benchmark/cost_gradient_benchmark.py``). Both generate their own
 random inputs instead of consuming a dataset, so the parity legs here need an
 input source that is *leg-shared and deterministic*: ``load_ik_goals`` /
 ``load_cost_configs`` regenerate identical inputs on both legs from a fixed
-seed, guaranteeing both legs solve / FK the exact same goals and joint states.
-
-The robot used is the SAME robot the ROS server is launched with
-(``--robot-config``, defaulting to the benchmark envelope's
-``config/franka.curobo.reference.yml`` — ``panda_hand`` tool frame, joint
-limits expanded by ±0.2 rad like the upstream reference recipe). Building the
-kinematics/scene machinery here mirrors the server's own construction
-(``RobotModelManager`` / ``ConfigWrapperMotion``), so per-config outcomes are
-comparable leg-to-leg.
-
-This module stays importable in pure-Python environments: every cuRobo/ROS
-dependency is imported lazily inside the functions below (the legs are
-box-only — they need a GPU and a running planner server).
-"""
+seed, guaranteeing both legs solve / FK the exact same goals and joint states."""
 
 # Standard Library
 from typing import Any, Dict, List, Optional, Tuple
@@ -329,24 +314,14 @@ def load_ik_goals(
     device: str = "cuda",
     dtype: Any = None,
 ) -> List[List[Dict[str, Any]]]:
-    """Deterministic IK goal poses shared by the native and ROS legs.
-
-    Goals are the tool pose (FK) of random near-homed joint configs — the same
+    """Deterministic IK goal poses shared by the native and ROS legs. Goals are the tool pose (FK) of random near-homed joint configs — the same
     family the upstream ``ik_benchmark.py`` solves, but generated once here so
     BOTH legs solve identical goals (``torch.manual_seed(seed)`` +
     ``np.random.seed(seed)`` are applied at entry, so calling this from either
-    leg reproduces the same batches).
-
-    ``variant``:
+    leg reproduces the same batches). ``variant``:
     - ``"cfree"`` — collision-aware goals: configs rejected unless they are
       self- and scene-collision-free against ``WORLD_IK`` (parity variant —
-      this is the ROS server's only IK mode).
-    - ``"plain"`` — kinematics-only goals, no filtering (native-reference row
-      mirroring the upstream ``collision_free=False`` run; not compared).
-
-    Returns ``n_batches`` lists of ``batch`` goal dicts with
-    ``position_xyz`` / ``quaternion_wxyz`` (curobo wxyz order).
-    """
+      this is the ROS server's only IK mode)."""
     _require_curobo()
     import numpy as np
     import torch
@@ -427,28 +402,11 @@ def order_ros_parity_setup(
     size_collision_cache: bool = True,
     timeout: float = 120.0,
 ) -> None:
-    """Register the parity world on the server in cache-safe order.
-
-    Works against any object exposing ``clear_world`` /
+    """Register the parity world on the server in cache-safe order. Works against any object exposing ``clear_world`` /
     ``size_collision_cache`` / ``add_world`` (each with a ``timeout`` kwarg),
     ``get_logger().warn``, and a ``warmup(timeout=...)`` callable — the
-    service-clients API of ``ros_ik.RosIkRunner`` / ``ros_cost.RosCostRunner``.
-
-    The ordering is load-bearing: the registered scene must never hold more
-    cuboids than the server's active collision-cache capacity. cuRobo enforces
-    it at every world update — (a) a cache change rebuilds every solver from
-    the then-current scene and raises if that scene exceeds the NEW cap, and
-    (b) an add raises if the scene would exceed the CURRENT cap. Clearing
-    first empties the scene, so sizing *down* over planning-suite leftovers
-    (up to 8 cuboids) is safe; sizing *before* the adds then guarantees the
-    parity world can never overflow the active cache, which a previous leg may
-    have shrunk (the IK leg sizes to cuboid=1 — with the old clear->add->size
-    order the cost leg's 2-cuboid world crashed the box mid-add with "Cannot
-    add cuboid, cache is full"). The freshly sized solver finally captures the
-    registered world at construction (the ``warmup`` call), i.e. the same
-    construction order as the native leg. Passing ``size_collision_cache=False``
-    skips the sizing and leaves the (larger) server defaults in place for A/B.
-    """
+    service-clients API of ``ros_ik.RosIkRunner`` / ``ros_cost.RosCostRunner``. The ordering is load-bearing: the registered scene must never hold more
+    cuboids than the server's active collision-cache capacity."""
     node.clear_world(timeout=timeout)
 
     if size_collision_cache:
