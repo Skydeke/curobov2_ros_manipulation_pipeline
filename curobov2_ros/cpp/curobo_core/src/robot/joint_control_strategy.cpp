@@ -273,7 +273,11 @@ double JointCommandStrategy::action_progression()
     return action_result_->succeeded ? 1.0 : -1.0;
   }
   if (action_last_progress_) {
-    return *action_last_progress_;
+    // action_last_progress_ is derived from the *desired* time_from_start in
+    // the feedback, so it hits 1.0 when the trajectory is scheduled to end,
+    // not when the robot has arrived. Never report completion from it: only
+    // the result callback (action_result_) may claim the execution finished.
+    return std::min(*action_last_progress_, 0.99);
   }
   return 0.0;
 }
