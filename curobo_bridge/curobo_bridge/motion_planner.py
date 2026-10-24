@@ -83,10 +83,15 @@ def prepare_solve_mode(handle: int, mode: str) -> None:
     # keeps retrying on the next request instead of locking in a bad state.
     try:
         attempts = attempt_config(entry)
+        # Warm the trajopt graphs with a DIRECT solve (enable_graph_attempt ==
+        # max_attempts means no attempt can reach the PRM seed path), and warm the
+        # PRM graph separately below when the runtime can reach it. Warming with
+        # the runtime's own enable_graph_attempt would make this warmup plan run a
+        # full PRM search *on top of* that separate warmup.
         if mode == "cspace":
             _warmup_cspace(
                 planner, iterations=1,
-                max_attempts=attempts[0], enable_graph_attempt=attempts[1])
+                max_attempts=max(1, attempts[0]), enable_graph_attempt=max(1, attempts[0]))
         else:
             _warmup_pose(planner, iterations=1)
         # The PRM graph planner seeds the LATER attempts of both solve modes, so

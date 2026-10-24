@@ -24,6 +24,53 @@ def _log_world_push_failure(reason: str, interval_s: float = 5.0) -> None:
         return
     _LAST_WORLD_PUSH_ERROR_T = now
     print(f"[curobo_bridge] world_push FAILED: {reason}", flush=True)
+def _world_buffer_signature(mp):
+    """Identity of every buffer the captured CUDA graphs read the world through.
+
+    ``world_push`` -> ``SceneCollision.load_collision_model`` ->
+    ``SceneData.load_from_scene_cfg`` does ``clear()`` + re-add, and both write
+    IN PLACE into the cache tensors allocated at build time (``enable[...] = 0``,
+    ``params[...] = ...``, ``features[...] = ...``). The captured graphs therefore
+    still point at live storage holding the freshly pushed world - replaying them
+    reads the new values.
+
+    What does invalidate a graph is a buffer that MOVED (a reallocated tensor, a
+    different cache shape, an obstacle type that appeared or disappeared): the
+    recorded pointer would then be stale, which is the "illegal memory access" the
+    re-capture exists to prevent. This returns (shape, device pointer) for the
+    world tensors so the caller can tell the two cases apart. ``None`` means "cannot
+    verify" - the caller then keeps the conservative behaviour.
+
+    Args:
+        mp: The motion planner holding the shared ``scene_collision_checker``.
+
+    Returns:
+        A hashable signature tuple, or None when the buffers are not reachable.
+    """
+    data = getattr(getattr(mp, "scene_collision_checker", None), "data", None)
+    if data is None:
+        return None
+    try:
+        import torch
+    except Exception:
+        return None
+    fields = (
+        "dims", "pose", "inv_pose", "enable", "params", "features", "mesh_ids",
+        "count", "n_per_env", "voxel_size", "w_pose",
+    )
+    signature = []
+    for kind in ("cuboids", "meshes", "voxels", "spheres", "capsules", "cylinders"):
+        store = getattr(data, kind, None)
+        if store is None:
+            signature.append((kind, None))
+            continue
+        signature.append((kind, getattr(store, "max_n", None), type(store).__name__))
+        for field in fields:
+            value = getattr(store, field, None)
+            if torch.is_tensor(value):
+                signature.append(
+                    (kind, field, tuple(value.shape), value.data_ptr()))
+    return tuple(signature)
 def world_push(handle: int) -> bool:
     """Push the shared scene (incl. the perception voxel layer) into every
     initialized solver's collision model.
@@ -111,12 +158,17 @@ def world_push(handle: int) -> bool:
     _reapply_attached_disables(entry)
     if pushed:
         # The captured trajopt/rollout CUDA graphs bake in the collision-scene
-        # buffers that load_collision_model just rewrote. Replaying one against
-        # the new world faults ("CUDA error: an illegal memory access") - exactly
-        # the crash the perception refresh triggered on the plan right after it.
-        # Leave no mode recorded so the next plan re-captures its graphs under
-        # the exclusive GPU barrier (see prepare_solve_mode).
-        entry["_solve_mode"] = None
+        # buffers that load_collision_model just rewrote. Replaying one against a
+        # MOVED buffer faults ("CUDA error: an illegal memory access"). A value
+        # update that stayed in the same storage is safe AND is what we want: the
+        # graph reads the freshly pushed world, so the plan sees current
+        # perception without paying for a re-capture (measured ~1.7 s of GPU per
+        # plan in the real stack). Leave no mode recorded only when the buffers
+        # actually moved (see _world_buffer_signature).
+        signature = _world_buffer_signature(mp)
+        if signature is None or signature != entry.get("_world_buffer_signature"):
+            entry["_world_buffer_signature"] = signature
+            entry["_solve_mode"] = None
     return pushed
 
 from .runtime import _REGISTRY

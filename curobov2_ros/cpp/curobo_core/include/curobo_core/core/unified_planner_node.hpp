@@ -105,6 +105,8 @@ private:
   // so the periodic push only calls the bridge when something actually moved.
   std::map<std::string, double> unpinned_lock_positions_;
   std::map<std::string, double> pushed_unpinned_lock_positions_;
+  // Movements below this are ignored (see the parameter's declaration).
+  double unpinned_lock_deadband_ = 1.0e-4;
   // "ptu_pan, ptu_tilt" - for the diagnostics only.
   std::string unpinned_lock_joint_list_;
   rclcpp::TimerBase::SharedPtr unpinned_lock_timer_;

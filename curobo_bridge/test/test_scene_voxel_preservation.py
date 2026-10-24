@@ -185,7 +185,7 @@ def test_prepare_solve_mode_resets_and_recaptures_on_change():
 
         curobo_bridge.prepare_solve_mode(handle, "cspace")
         assert planner.trajopt_solver.resets == 1
-        assert ("cspace", 2, 1) in planner.calls
+        assert ("cspace", 2, 2) in planner.calls
         assert curobo_bridge._REGISTRY[handle]["_solve_mode"] == "cspace"
 
         # Same mode again: no reset, no extra capture.
@@ -250,11 +250,13 @@ def test_prepare_solve_mode_uses_the_configured_attempt_budget():
         curobo_bridge.shutdown(handle)
 
 
-def test_prepare_solve_mode_warms_the_graph_when_an_attempt_can_reach_it():
+def test_prepare_solve_mode_warms_a_direct_solve_and_the_graph_separately():
     """enable_graph_attempt < max_attempts keeps the PRM warmup.
 
     With max_attempts=2 / enable_graph_attempt=1 the second attempt seeds from
-    the graph planner, so its graph has to be captured under this barrier."""
+    the graph planner, so its graph has to be captured under this barrier. The
+    trajopt warmup itself stays a DIRECT solve: the PRM search is what the
+    separate graph-planner warmup below is for."""
     handle = curobo_bridge.init({})
     try:
         planner = _mode_planner_with_graph()
@@ -264,8 +266,73 @@ def test_prepare_solve_mode_warms_the_graph_when_an_attempt_can_reach_it():
 
         curobo_bridge.prepare_solve_mode(handle, "cspace")
 
-        assert ("cspace", 2, 1) in planner.calls
+        assert ("cspace", 2, 2) in planner.calls
         assert planner.graph_planner.warmups == 1
+    finally:
+        curobo_bridge.shutdown(handle)
+
+
+def test_world_push_keeps_the_graphs_when_the_buffers_did_not_move():
+    """A value-only world update must NOT force a CUDA-graph re-capture.
+
+    ``load_collision_model`` writes in place into the build-time cache tensors, so
+    the graphs baked against those buffers still read the freshly pushed world:
+    the plan sees current perception for free. Only a buffer that moved (a
+    reallocated tensor, a different cache shape) may force a re-capture.
+    """
+    handle = curobo_bridge.init({})
+    try:
+        import torch
+
+        entry = curobo_bridge._REGISTRY[handle]
+        entry["scene"] = _FakeScene()
+
+        class _Store:
+            def __init__(self):
+                self.max_n = 2
+                self.dims = torch.zeros((2, 4))
+                self.pose = torch.zeros((2, 8))
+                self.enable = torch.zeros(2, dtype=torch.uint8)
+
+        class _Data:
+            def __init__(self):
+                self.cuboids = _Store()
+                self.meshes = None
+                self.voxels = _Store()
+
+        class _Checker:
+            def __init__(self, data):
+                self.data = data
+
+        class _Planner:
+            def __init__(self):
+                self.data = _Data()
+                self.scene_collision_checker = _Checker(self.data)
+
+            def update_world(self, _scene):
+                # In-place value rewrite, exactly like load_collision_model.
+                self.data.cuboids.enable[0] = 1
+                self.data.voxels.dims[0, 0] = 3.5
+
+        planner = _Planner()
+        entry["motion_planner"] = planner
+        entry["_solve_mode"] = "cspace"
+
+        # First push records the buffer signature (the mode is already None after
+        # a build, so this is a no-op there); the next one must not drop it.
+        assert curobo_bridge.world_push(handle) is True
+        entry["_solve_mode"] = "cspace"
+        assert curobo_bridge.world_push(handle) is True
+        assert entry["_solve_mode"] == "cspace", "graphs were dropped for a value-only push"
+
+        # Same push again: still no re-capture.
+        assert curobo_bridge.world_push(handle) is True
+        assert entry["_solve_mode"] == "cspace"
+
+        # A moved buffer (what a reallocated cache looks like) must drop the mode.
+        planner.data.cuboids.dims = torch.zeros((4, 4))
+        assert curobo_bridge.world_push(handle) is True
+        assert entry["_solve_mode"] is None
     finally:
         curobo_bridge.shutdown(handle)
 

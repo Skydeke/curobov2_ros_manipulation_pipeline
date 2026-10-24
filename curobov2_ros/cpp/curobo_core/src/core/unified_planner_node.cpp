@@ -3,6 +3,7 @@
 #include "curobo_core/core/unified_planner_node.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <sstream>
 
 #include <chrono>
@@ -115,6 +116,10 @@ void UnifiedPlannerNode::declare_parameters() {
   // (lock_joints: {joint: null}, e.g. the PTU gimbal). Cheap: only calls the
   // bridge when a value actually changed.
   declare_parameter<double>("unpinned_lock_update_period", 0.1);
+  // A push costs a full model rewrite in the bridge, so ignore movements below
+  // this (rad/m) - encoder noise on a held joint is not a change of the
+  // mechanism. 0 restores exact comparison.
+  declare_parameter<double>("unpinned_lock_deadband", 1.0e-4);
   declare_parameter<bool>("push_esdf_to_solvers", true);
   declare_parameter<double>("mapper_stats_period", 60.0);
   declare_parameter<double>("curobo_mesh_cache_log_interval", 5.0);
@@ -568,6 +573,7 @@ void UnifiedPlannerNode::setup() {
   // the collision model on the perception lane. Nothing is wired up when the
   // robot has none.
   if (!unpinned_lock_joint_names_.empty()) {
+    unpinned_lock_deadband_ = get_parameter("unpinned_lock_deadband").as_double();
     robot_context_->set_joint_state_callback(
         [this](const sensor_msgs::msg::JointState &msg) {
           handle_joint_state_for_locks(msg);
@@ -793,7 +799,8 @@ void UnifiedPlannerNode::push_unpinned_lock_joints() {
     if (!changed) {
       for (const auto &[name, value] : unpinned_lock_positions_) {
         const auto it = pushed_unpinned_lock_positions_.find(name);
-        if (it == pushed_unpinned_lock_positions_.end() || it->second != value) {
+        if (it == pushed_unpinned_lock_positions_.end() ||
+          std::abs(it->second - value) > unpinned_lock_deadband_) {
           changed = true;
           break;
         }

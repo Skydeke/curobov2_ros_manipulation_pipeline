@@ -220,16 +220,37 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     import json
     import numpy as np
     import torch
-    from curobo.types import JointState
 
     entry = _REGISTRY[handle]
     kin = entry["kin"]
     device = torch.device("cuda", torch.cuda.current_device())
 
-    depth_t = torch.tensor(np.asarray(depth, dtype=np.float32), device=device)
-    h, w = int(depth_t.shape[0]), int(depth_t.shape[1])
+    depth_np = np.asarray(depth, dtype=np.float32)
+    h, w = int(depth_np.shape[0]), int(depth_np.shape[1])
     fx, fy, cx, cy = [float(v) for v in np.asarray(intrinsics).reshape(-1)[:4]]
+    threshold = float(entry.get("seg_distance_threshold", 0.05))
 
+    from curobo.types import JointState
+
+    # Robot spheres (FK) for this joint state, in the base frame - the exact
+    # tensor the collision model uses.
+    from curobo._src.perception.mapper.kernel.wp_robot_mask import mask_depth_by_spheres
+
+    q_t = torch.tensor([list(np.asarray(q, dtype=np.float32))],
+                       dtype=torch.float32, device=device)
+    js = JointState.from_position(q_t, joint_names=kin.joint_names)
+    spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
+
+    # One kernel launch replaces the host-side pixel loop: unproject, transform to
+    # base, compare against every sphere. `masks_json` shapes are a per-tool
+    # refinement and keep the analytic host path below (usually empty).
+    masks = json.loads(masks_json or "[]")
+    if not masks:
+        masked = mask_depth_by_spheres(
+            depth_np, spheres, cam_pose, (fx, fy, cx, cy), threshold)
+        return masked.astype(np.float32)
+
+    depth_t = torch.tensor(depth_np, device=device)
     v, u = torch.meshgrid(
         torch.arange(h, device=device), torch.arange(w, device=device), indexing="ij")
     valid = (depth_t > 0) & ~torch.isnan(depth_t) & ~torch.isinf(depth_t)
@@ -248,12 +269,6 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     homog = torch.cat([pts, torch.ones((pts.shape[0], 1), device=device)], dim=1)
     base = (homog @ t_cam.T)[:, :3]
 
-    # robot spheres (FK) -> keep points farther than threshold from every sphere.
-    q_t = torch.tensor([list(np.asarray(q, dtype=np.float32))],
-                       dtype=torch.float32, device=device)
-    js = JointState.from_position(q_t, joint_names=kin.joint_names)
-    spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
-    threshold = float(entry.get("seg_distance_threshold", 0.05))
     # Distance to the nearest robot sphere. The naive
     # `torch.norm(base[:, None] - spheres[None, :, :3], dim=2)` materialises an
     # [N, S, 3] float32 tensor, and on KATE that is not a rounding error: the
@@ -285,7 +300,7 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     del sph, sph_r
 
     margin = float(entry.get("seg_mask_margin", 0.0))
-    for mask in json.loads(masks_json or "[]"):
+    for mask in masks:
         inside = _inside_shape(base, mask, margin)
         if inside is not None:
             keep = keep & ~inside
