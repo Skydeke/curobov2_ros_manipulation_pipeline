@@ -145,7 +145,7 @@ void CameraSystemManager::configure()
     RCLCPP_INFO(
       node_->get_logger(),
       "Camera '%s' (index %d): raw=%s, purpose=%s, mapper_input=%s, "
-      "frame_rate_hz=%.1f, frame=%s",
+      "max_update_rate=%.1f Hz, frame=%s",
       cfg.name.c_str(), cfg.camera_index, cfg.depth_topic.c_str(), cfg.purpose.c_str(),
       cfg.mapper_topic.c_str(), cfg.frame_rate_hz, cfg.frame_id.c_str());
 
@@ -155,7 +155,13 @@ void CameraSystemManager::configure()
     auto strategy = std::make_shared<DepthMapCameraStrategy>(
       node_, cfg.name, cfg.mapper_topic, cfg.camera_info_topic, cfg.frame_id,
       cfg.intrinsics, cfg.extrinsics, bridge_, handle_, group, lane_,
-      mapper_image_width_, mapper_image_height_);
+      mapper_image_width_, mapper_image_height_,
+      // The Mapper's own rate limit. When a segmentation stream sits in front of
+      // this strategy its input is the masked topic, which the segmentation
+      // strategy has already gated at the same rate - a second gate here would
+      // beat against the first and halve the effective rate. Only a strategy
+      // reading the driver's topic directly gets the gate.
+      cfg.mapper_topic == cfg.depth_topic ? cfg.frame_rate_hz : 0.0);
     // PORT: the depth strategy bumps node.perception_epoch on integrate.
     strategy->set_on_integrated(on_integrated_);
     camera_context_->add_camera(cfg.name, strategy, cfg.frame_rate_hz);

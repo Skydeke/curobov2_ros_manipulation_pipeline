@@ -34,7 +34,8 @@ public:
     curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
     std::function<std::vector<double>(std::int64_t)> joint_pose_at,
     std::function<std::string()> masks_json,
-    rclcpp::CallbackGroup::SharedPtr callback_group = nullptr);
+    rclcpp::CallbackGroup::SharedPtr callback_group = nullptr,
+    double max_update_rate_hz = 0.0);
   ~RobotSegmentationCameraStrategy() override;
 
   // PORT: callback_depth / _mask_depth_image

@@ -9,6 +9,7 @@
 #define CUROBO_CORE__CAMERAS__CAMERA_STRATEGY_HPP_
 
 #include <array>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -35,8 +36,21 @@ public:
     rclcpp::Node * node, const std::string & camera_name, const std::string & topic,
     const std::string & camera_info, const std::string & frame_id,
     const std::optional<std::vector<double>> & intrinsics = std::nullopt,
-    const std::optional<std::vector<double>> & extrinsics = std::nullopt);
+    const std::optional<std::vector<double>> & extrinsics = std::nullopt,
+    double max_update_rate_hz = 0.0);
   virtual ~CameraStrategy() = default;
+
+  // PORT: MoveIt's occupancy-map monitor `max_update_rate`. Returns false for a
+  // frame that arrived sooner than 1/max_update_rate_hz after the last ACCEPTED
+  // one, so the caller drops it before doing any per-frame work (decode, TF
+  // lookup, FK, segmentation, Mapper integration). `max_update_rate_hz <= 0`
+  // accepts every frame (the historical behaviour).
+  //
+  // Without this the configured `camera_frame_rate_hz` only sized the Mapper's
+  // decay factor: the strategies processed every frame the driver published
+  // (measured 7 Hz from a 3 Hz-configured d435), and each frame costs a TF
+  // lookup plus a GPU segmentation pass and a TSDF/ESDF integration.
+  bool allow_frame();
 
   // PORT: camera_strategy.set_update_callback / _update_callback
   void set_update_callback(std::function<void(const sensor_msgs::msg::Image &)> callback)
@@ -103,6 +117,12 @@ protected:
   // camera_info callback).
   std::string camera_info_frame_;
   std::function<void(const sensor_msgs::msg::Image &)> update_callback_;
+  // Max update rate (Hz) and the wall-clock stamp of the last accepted frame.
+  // steady_clock, not the message stamp: the rate limit is about how much work
+  // this node does, and sim time can jump.
+  double max_update_rate_hz_ = 0.0;
+  std::optional<std::chrono::steady_clock::time_point> last_frame_at_;
+  std::mutex rate_mutex_;
 };
 
 }  // namespace curobo_core

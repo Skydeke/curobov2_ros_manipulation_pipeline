@@ -82,8 +82,11 @@ def prepare_solve_mode(handle: int, mode: str) -> None:
     # Record the flag only once the graphs below were attempted, so a failure
     # keeps retrying on the next request instead of locking in a bad state.
     try:
+        attempts = attempt_config(entry)
         if mode == "cspace":
-            _warmup_cspace(planner, iterations=1)
+            _warmup_cspace(
+                planner, iterations=1,
+                max_attempts=attempts[0], enable_graph_attempt=attempts[1])
         else:
             _warmup_pose(planner, iterations=1)
         # The PRM graph planner seeds the LATER attempts of both solve modes, so
@@ -91,8 +94,15 @@ def prepare_solve_mode(handle: int, mode: str) -> None:
         # re-captured under this exclusive barrier, not lazily inside the next
         # plan where the capture would race the camera/ESDF lane. The per-mode
         # warmups above only reach it when their first attempt happens to fail.
+        #
+        # Skip it entirely when the configured attempt budget can never reach the
+        # graph path (`enable_graph_attempt >= max_attempts`, e.g. the node's
+        # max_attempts=1 / enable_graph_attempt=1): warming a graph that no plan
+        # will ever replay costs this re-warmup's full GPU time on EVERY
+        # perception world push, for nothing.
         graph_planner = getattr(planner, "graph_planner", None)
-        if graph_planner is not None and callable(getattr(graph_planner, "warmup", None)):
+        if graph_attempt_used(attempts) and graph_planner is not None and callable(
+                getattr(graph_planner, "warmup", None)):
             try:
                 # Batch it exactly like the real seeding call does:
                 # `_get_graph_seed_trajectories` runs find_path over the trajopt
@@ -113,18 +123,54 @@ def prepare_solve_mode(handle: int, mode: str) -> None:
             f"({exc!r})", flush=True)
         return
     entry["_solve_mode"] = mode
-def _warmup_cspace(planner, iterations: int = 3, joint_delta: float = 0.2) -> None:
+def attempt_config(entry, cfg: Optional[dict] = None):
+    """The ``(max_attempts, enable_graph_attempt)`` a plan request will use.
+
+    PORT: config max_attempts / enable_graph_attempt. Recorded by
+    :func:`motion_planner_build` from the node's parameters so the warmup in
+    :func:`prepare_solve_mode` can mirror what the runtime actually replays.
+    Defaults reproduce the reference/older behaviour (2 attempts, graph seeding
+    from attempt 1)."""
+    if cfg is None:
+        cfg = entry.get("attempt_cfg") or {}
+    return (int(cfg.get("max_attempts", 2)), int(cfg.get("enable_graph_attempt", 1)))
+def graph_attempt_used(cfg) -> bool:
+    """Whether ``plan_cspace``/``plan_pose`` can ever reach the PRM seed path.
+
+    cuRobo consults the graph planner on every attempt where
+    ``current_attempt >= enable_graph_attempt`` (see
+    ``MotionPlanner._plan_cspace_attempts``), so a graph attempt is reachable iff
+    some attempt index is >= the threshold - i.e. iff
+    ``enable_graph_attempt < max_attempts``."""
+    max_attempts, enable_graph_attempt = cfg
+    return enable_graph_attempt < max_attempts
+def _warmup_cspace(
+    planner,
+    iterations: int = 3,
+    joint_delta: float = 0.2,
+    max_attempts: int = 2,
+    enable_graph_attempt: int = 1,
+) -> None:
     """Record the joint-space (``plan_cspace``) CUDA graphs at build time. Mirrors :meth:`MotionPlanner.warmup`'s pose loop, but exercises ``plan_cspace``
     (and, via ``enable_graph_attempt``, the graph-planner seed path) so every
     graph the joint-space planner replays is captured while the caller holds the
     exclusive GPU barrier. Without this the first joint-space request captures
-    them mid-plan next to the camera/ESDF lane, which can fault the CUDA context."""
+    them mid-plan next to the camera/ESDF lane, which can fault the CUDA context.
+
+    ``max_attempts``/``enable_graph_attempt`` MUST mirror the values the plan
+    requests use (see :func:`motion_planner_build`): a wider warmup walks code
+    paths - an extra attempt, and the PRM seed search - that the runtime never
+    replays, and each re-capture happens on the perception lane's time, where it
+    is the single most expensive thing this bridge does."""
     current = planner.default_joint_state.clone().unsqueeze(0)
     for _ in range(iterations):
         goal = current.clone()
         goal.position[..., 0] = goal.position[..., 0] + joint_delta
         try:
-            planner.plan_cspace(goal, current, max_attempts=2, enable_graph_attempt=1)
+            planner.plan_cspace(
+                goal, current,
+                max_attempts=max_attempts,
+                enable_graph_attempt=enable_graph_attempt)
         except TypeError:
             # Older/alternate signature without the graph-seed argument.
             planner.plan_cspace(goal, current, max_attempts=1)
@@ -159,6 +205,14 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
     # `if scene is None: return False`: the perception world was silently never
     # pushed and the planner collided against nothing.
     entry["scene"] = scene
+    # The plan-request attempt budget, recorded so prepare_solve_mode's re-capture
+    # warms exactly the code paths a plan will replay (and skips the PRM warmup
+    # when the graph path is unreachable). Passed by the node from its
+    # max_attempts / enable_graph_attempt parameters.
+    entry["attempt_cfg"] = {
+        "max_attempts": int(cfg.get("max_attempts", 2)),
+        "enable_graph_attempt": int(cfg.get("enable_graph_attempt", 1)),
+    }
     kwargs = {
         "robot": entry["robot_cfg"],
         "scene_model": scene,
@@ -225,7 +279,10 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
     # rebuild_planner) under the exclusive GPU barrier, so record the cspace
     # graphs HERE, while nothing else is on the GPU.
     try:
-        _warmup_cspace(planner)
+        _warmup_cspace(
+            planner,
+            max_attempts=entry["attempt_cfg"]["max_attempts"],
+            enable_graph_attempt=entry["attempt_cfg"]["enable_graph_attempt"])
     except Exception as exc:  # a warmup must never block the build
         print(
             f"[curobo_bridge] cspace CUDA-graph warmup failed ({exc!r}); the first "

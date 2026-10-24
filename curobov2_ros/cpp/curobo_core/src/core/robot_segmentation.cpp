@@ -50,7 +50,7 @@ RobotSegmentation::RobotSegmentation(
     auto strategy = std::make_shared<RobotSegmentationCameraStrategy>(
       node_, cfg.name, cfg.depth_topic, cfg.camera_info_topic, cfg.frame_id,
       cfg.intrinsics, cfg.extrinsics, bridge_, handle_, joint_pose_at,
-      [this]() {return masks_json();}, callback_group);
+      [this]() {return masks_json();}, callback_group, cfg.frame_rate_hz);
     streams_.push_back(strategy);
     RCLCPP_INFO(
       node_->get_logger(),

@@ -13,9 +13,10 @@ CameraStrategy::CameraStrategy(
   rclcpp::Node * node, const std::string & camera_name, const std::string & topic,
   const std::string & camera_info, const std::string & frame_id,
   const std::optional<std::vector<double>> & intrinsics,
-  const std::optional<std::vector<double>> & extrinsics)
+  const std::optional<std::vector<double>> & extrinsics,
+  double max_update_rate_hz)
 : node_(node), name_(camera_name), topic_(topic), camera_info_topic_(camera_info),
-  frame_id_(frame_id)
+  frame_id_(frame_id), max_update_rate_hz_(max_update_rate_hz)
 {
   // PORT: each strategy owns its own TF buffer/listener.
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
@@ -142,6 +143,27 @@ std::optional<Pose7d> CameraStrategy::parse_extrinsics(
     "Extrinsics must be list of 7 elements [x,y,z,qw,qx,qy,qz] or 4x4 matrix, got %zu",
     v.size());
   return std::nullopt;
+}
+
+// PORT: MoveIt's occupancy-map monitor `max_update_rate`. The gate is on
+// ACCEPTED frames, so a stream faster than the configured rate is decimated to
+// it rather than stopped: a frame is dropped only when it arrives less than
+// 1/max_update_rate_hz after the previous accepted one.
+bool CameraStrategy::allow_frame()
+{
+  if (max_update_rate_hz_ <= 0.0) {
+    return true;
+  }
+  const auto now = std::chrono::steady_clock::now();
+  std::lock_guard<std::mutex> lk(rate_mutex_);
+  if (last_frame_at_.has_value()) {
+    const double dt_s = std::chrono::duration<double>(now - *last_frame_at_).count();
+    if (dt_s < 1.0 / max_update_rate_hz_) {
+      return false;
+    }
+  }
+  last_frame_at_ = now;
+  return true;
 }
 
 }  // namespace curobo_core

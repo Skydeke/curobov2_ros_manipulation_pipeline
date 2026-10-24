@@ -39,7 +39,8 @@ public:
     curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
     rclcpp::CallbackGroup::SharedPtr callback_group = nullptr,
     curobo_runtime::GpuLane * lane = nullptr,
-    int mapper_image_width = 0, int mapper_image_height = 0);
+    int mapper_image_width = 0, int mapper_image_height = 0,
+    double max_update_rate_hz = 0.0);
   ~DepthMapCameraStrategy() override;
 
   // PORT: callback_depth_map

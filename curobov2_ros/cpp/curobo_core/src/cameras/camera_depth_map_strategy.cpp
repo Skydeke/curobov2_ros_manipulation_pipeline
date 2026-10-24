@@ -24,8 +24,9 @@ DepthMapCameraStrategy::DepthMapCameraStrategy(
   const std::optional<std::vector<double>> & extrinsics,
   curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
   rclcpp::CallbackGroup::SharedPtr callback_group, curobo_runtime::GpuLane * lane,
-  int mapper_image_width, int mapper_image_height)
-: CameraStrategy(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics),
+  int mapper_image_width, int mapper_image_height, double max_update_rate_hz)
+: CameraStrategy(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics,
+    max_update_rate_hz),
   bridge_(bridge), handle_(handle), lane_(lane),
   mapper_image_width_(mapper_image_width), mapper_image_height_(mapper_image_height)
 {
@@ -73,6 +74,13 @@ void DepthMapCameraStrategy::destroy()
 // PORT: camera_depth_map_strategy.callback_depth_map (decode + TF + handoff)
 void DepthMapCameraStrategy::callback_depth_map(const sensor_msgs::msg::Image & msg)
 {
+  // MoveIt's octomap inputs are rate-limited by `max_update_rate`; the Mapper's
+  // are limited by this camera's `camera_frame_rate_hz`. Drop the frame before
+  // decoding or touching TF - a frame this node never looks at must not cost a
+  // TF lookup, and (through the queue below) not an integration either.
+  if (!allow_frame()) {
+    return;
+  }
   bool unsupported = false;
   const DepthFrame frame = decode_depth(msg, unsupported);
   if (unsupported) {

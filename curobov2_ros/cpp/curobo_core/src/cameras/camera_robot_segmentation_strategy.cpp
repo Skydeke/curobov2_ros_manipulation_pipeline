@@ -39,8 +39,9 @@ RobotSegmentationCameraStrategy::RobotSegmentationCameraStrategy(
   curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
   std::function<std::vector<double>(std::int64_t)> joint_pose_at,
   std::function<std::string()> masks_json,
-  rclcpp::CallbackGroup::SharedPtr callback_group)
-: CameraStrategy(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics),
+  rclcpp::CallbackGroup::SharedPtr callback_group, double max_update_rate_hz)
+: CameraStrategy(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics,
+    max_update_rate_hz),
   bridge_(bridge), handle_(handle), joint_pose_at_(std::move(joint_pose_at)),
   masks_json_(std::move(masks_json))
 {
@@ -75,6 +76,13 @@ void RobotSegmentationCameraStrategy::destroy()
 // PORT: callback_depth / _mask_depth_image
 void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Image & msg)
 {
+  // MoveIt's octomap inputs are rate-limited by `max_update_rate`; the
+  // segmentation pass (a TF lookup plus an exclusive-barrier GPU masking job per
+  // frame) is limited by this camera's `camera_frame_rate_hz`. Gate before the
+  // decode so a frame this node will not look at costs nothing at all.
+  if (!allow_frame()) {
+    return;
+  }
   try {
     bool unsupported = false;
     const DepthFrame frame = decode_depth(msg, unsupported);
@@ -126,15 +134,18 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
       }
     }
     if (!have_pose) {
-      // PORT: _transform_points_to_base None -> mask EVERYTHING (a dropped
-      // frame is harmless; an unmasked robot is a permanent voxel error) but
-      // still publish, so the masked-depth stream does not stall.
+      // PORT: _transform_points_to_base None -> only a KNOWN pose can be masked.
+      // Drop the frame: publishing an all-zero "masked" depth would hand the
+      // mapper an empty frame to integrate (its TSDF/decay kernels run for no
+      // data, at the camera rate, for as long as the transform stays
+      // unavailable) and would silently replace depth the mapper may already
+      // have counted. A missing frame costs nothing; an unmasked or empty one
+      // costs either a permanent voxel error or wasted GPU time.
       RCLCPP_WARN_THROTTLE(
         node_->get_logger(), *node_->get_clock(), 2000,
-        "[%s] TF %s -> base unavailable; masking the whole frame",
+        "[%s] TF %s -> base unavailable; dropping this depth frame (no masked "
+        "depth published, no mapper integration)",
         name_.c_str(), frame_id_.c_str());
-      std::vector<float> zeros(frame.data.size(), 0.0f);
-      publish_masked(zeros, frame.height, frame.width, frame.encoding, msg.header.stamp);
       return;
     }
 

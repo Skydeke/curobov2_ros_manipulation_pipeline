@@ -66,8 +66,49 @@ TEST(CameraDepth, IntegratesADepthFrameThroughTheBridge)
   EXPECT_GE(bridge.depth_integrates(), 1);
 }
 
-TEST(CameraContext, RegistryAndFrameRateAggregate)
+TEST(CameraStrategyRate, MaxUpdateRateDecimatesFrames)
 {
+  // PORT: MoveIt's occupancy-map monitor `max_update_rate`. A driver publishing
+  // faster than the configured rate must be decimated to it, not processed in
+  // full: each accepted frame costs a TF lookup, a GPU segmentation pass and a
+  // Mapper integration.
+  auto node = make_node();
+  curobo_runtime::FakeBridge bridge;
+  std::vector<double> intrinsics{100.0, 0, 50.0, 0, 100.0, 50.0, 0, 0, 1};
+  std::vector<double> extrinsics{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0};
+  // 5 Hz gate; the test's own calls stand in for arriving frames.
+  DepthMapCameraStrategy camera(
+    node.get(), "depth_camera_0", "/cam/depth/image", "/cam/depth/camera_info", "",
+    intrinsics, extrinsics, &bridge, 1, nullptr, nullptr, 0, 0, 5.0);
+
+  // First frame always passes, a burst right after it does not.
+  EXPECT_TRUE(camera.allow_frame());
+  for (int i = 0; i < 20; ++i) {
+    EXPECT_FALSE(camera.allow_frame());
+  }
+  // After the gate's period (1/5 s) exactly one more frame is accepted.
+  std::this_thread::sleep_for(250ms);
+  EXPECT_TRUE(camera.allow_frame());
+  EXPECT_FALSE(camera.allow_frame());
+}
+
+TEST(CameraStrategyRate, ZeroRateKeepsEveryFrame)
+{
+  // 0 (the default, and what a camera with no configured rate gets) must keep
+  // the historical behaviour: no frame is dropped.
+  auto node = make_node();
+  curobo_runtime::FakeBridge bridge;
+  DepthMapCameraStrategy camera(
+    node.get(), "depth_camera_0", "/cam/depth/image", "/cam/depth/camera_info", "",
+    std::vector<double>{100, 0, 50, 0, 100, 50, 0, 0, 1},
+    std::vector<double>{0, 0, 0, 1, 0, 0, 0}, &bridge, 1);
+
+  for (int i = 0; i < 10; ++i) {
+    EXPECT_TRUE(camera.allow_frame());
+  }
+}
+
+TEST(CameraContext, RegistryAndFrameRateAggregate){
   auto node = make_node();
   curobo_runtime::FakeBridge bridge;
   CameraContext context(node.get());

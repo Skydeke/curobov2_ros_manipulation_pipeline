@@ -278,6 +278,13 @@ void UnifiedPlannerNode::setup() {
         << get_parameter("interpolation_dt").as_double()
         << ",\"max_batch_size\":" << get_parameter("max_batch_size").as_int()
         << ",\"max_goalset\":" << get_parameter("max_goalset").as_int()
+        // The plan-request attempt budget. The bridge records it so its
+        // post-world-push CUDA-graph re-capture warms exactly the paths a plan
+        // replays (and skips the PRM warmup when `enable_graph_attempt >=
+        // max_attempts`, i.e. when no attempt can reach the graph planner).
+        << ",\"max_attempts\":" << get_parameter("max_attempts").as_int()
+        << ",\"enable_graph_attempt\":"
+        << get_parameter("enable_graph_attempt").as_int()
         << ",\"obstacle_collision_mode\":\""
         << get_parameter("obstacle_collision_mode").as_string() << "\""
         << ",\"collision_cache\":{\"cuboid\":"

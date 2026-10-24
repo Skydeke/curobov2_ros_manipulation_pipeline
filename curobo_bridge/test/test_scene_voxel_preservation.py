@@ -125,6 +125,19 @@ def test_cspace_warmup_falls_back_when_graph_attempt_is_unsupported():
     assert planner.calls == [(1, None), (1, None)]
 
 
+def test_cspace_warmup_mirrors_the_requested_attempt_budget():
+    """A narrow runtime budget must not be warmed as a wide one.
+
+    The re-capture runs on every perception world push, so warming paths the plan
+    requests never replay (an extra attempt, the PRM seed search) is pure GPU
+    time spent in the middle of the perception lane."""
+    planner = _Planner()
+    curobo_bridge._warmup_cspace(
+        planner, iterations=1, max_attempts=1, enable_graph_attempt=1)
+
+    assert planner.calls == [(1, 1)]
+
+
 class _ToolPoses:
     def as_goal(self):
         return "goal"
@@ -195,6 +208,64 @@ def test_prepare_solve_mode_without_a_planner_is_a_noop():
     try:
         curobo_bridge.prepare_solve_mode(handle, "cspace")
         assert "_solve_mode" not in curobo_bridge._REGISTRY[handle]
+    finally:
+        curobo_bridge.shutdown(handle)
+
+
+class _GraphPlanner:
+    """PRM stand-in: records the explicit re-warmup prepare_solve_mode issues."""
+
+    def __init__(self):
+        self.warmups = 0
+
+    def warmup(self, num_warmup_iterations=1, max_batch_size=1):
+        self.warmups += 1
+
+
+def _mode_planner_with_graph():
+    planner = _ModePlanner()
+    planner.graph_planner = _GraphPlanner()
+    return planner
+
+
+def test_prepare_solve_mode_uses_the_configured_attempt_budget():
+    """The re-capture must mirror max_attempts/enable_graph_attempt.
+
+    max_attempts=1 / enable_graph_attempt=1 (the node's configuration) cannot
+    reach the PRM seed path, so its warmup is skipped and the cspace capture runs
+    a single direct attempt instead of the reference two-plus-graph one."""
+    handle = curobo_bridge.init({})
+    try:
+        planner = _mode_planner_with_graph()
+        entry = curobo_bridge._REGISTRY[handle]
+        entry["motion_planner"] = planner
+        entry["attempt_cfg"] = {"max_attempts": 1, "enable_graph_attempt": 1}
+
+        curobo_bridge.prepare_solve_mode(handle, "cspace")
+
+        assert ("cspace", 1, 1) in planner.calls
+        assert planner.graph_planner.warmups == 0
+        assert entry["_solve_mode"] == "cspace"
+    finally:
+        curobo_bridge.shutdown(handle)
+
+
+def test_prepare_solve_mode_warms_the_graph_when_an_attempt_can_reach_it():
+    """enable_graph_attempt < max_attempts keeps the PRM warmup.
+
+    With max_attempts=2 / enable_graph_attempt=1 the second attempt seeds from
+    the graph planner, so its graph has to be captured under this barrier."""
+    handle = curobo_bridge.init({})
+    try:
+        planner = _mode_planner_with_graph()
+        entry = curobo_bridge._REGISTRY[handle]
+        entry["motion_planner"] = planner
+        entry["attempt_cfg"] = {"max_attempts": 2, "enable_graph_attempt": 1}
+
+        curobo_bridge.prepare_solve_mode(handle, "cspace")
+
+        assert ("cspace", 2, 1) in planner.calls
+        assert planner.graph_planner.warmups == 1
     finally:
         curobo_bridge.shutdown(handle)
 
