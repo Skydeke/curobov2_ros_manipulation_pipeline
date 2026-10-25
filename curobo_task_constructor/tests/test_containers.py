@@ -164,6 +164,43 @@ def test_fallbacks_all_fail_no_solution():
     assert all(c.failures for c in ex.root.children[1].children)
 
 
+def test_plan_stops_when_winning_fallback_leaves_later_child_unfed():
+    """A solved Fallbacks must not keep the executor polling its later child.
+
+    Fallbacks fans the container input out to every child up front. When the
+    first child wins, later children still hold that unread start state, so
+    their ``can_compute()`` stays true even though their parent is done. The
+    plan loop must follow the ROOT, not scan the whole subtree: otherwise a
+    trailing stage that fails (the pick graph's final ``return`` leg) leaves
+    the task spinning forever with no root solution.
+    """
+    robot = _home_robot(fail_ik=True)  # pose goals fail, joint goals succeed
+    spec = StageSpec(stage_type="", name="root", container_type="serial",
+                     children=[
+                         StageSpec(stage_type="current_state", name="cur"),
+                         StageSpec(stage_type="", name="choose",
+                                   container_type="fallbacks",
+                                   children=[
+                                       _move_spec("good", "name: home"),
+                                       # fed the same start, never selected
+                                       _move_spec(
+                                           "never",
+                                           "pose:\n  x: 9.0\n  y: 9.0\n  z: 9.0\n"),
+                                   ]),
+                         # The task fails after the fallback succeeded.
+                         _move_spec(
+                             "tail", "pose:\n  x: 8.0\n  y: 8.0\n  z: 8.0\n"),
+                     ])
+    ex = TaskExecutor(spec, robot)
+    assert ex.init()
+    passes = []
+    # The cap keeps a regression from hanging the suite; the assertion below
+    # proves the loop stopped on its own long before reaching it.
+    assert not ex.plan(max_iterations=50,
+                       progress_callback=lambda: passes.append(1))
+    assert len(passes) <= 5
+
+
 # ----------------------------------------------------------------------
 # IndependentComponents
 # ----------------------------------------------------------------------

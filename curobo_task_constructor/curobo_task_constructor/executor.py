@@ -176,12 +176,18 @@ class TaskExecutor(_ExecutorSerializationMixin):
     # Plan
     # ------------------------------------------------------------------
     def plan(self, max_iterations: int = 0, progress_callback=None) -> bool:
-        """Run the compute loop until no stage can make progress. Returns True when at least one full root solution was found. ``max_iterations`` (0 = unlimited) guards against pathological graphs."""
+        """Run the compute loop until the root can make no more progress. Returns True when at least one full root solution was found. ``max_iterations`` (0 = unlimited) guards against pathological graphs."""
         if not self._valid:
             return False
         iterations = 0
         try:
-            while any(s.can_compute() for s in self.root.subtree_stages()):
+            # Only the ROOT may schedule work. A descendant can still report
+            # ``can_compute()`` after its parent has stopped (e.g. a Fallbacks
+            # child that was fed the same start as the winning child but never
+            # selected): ``root.run_compute()`` will never reach it again, so
+            # polling the whole subtree here spins forever whenever the
+            # selected branch succeeds but a later stage fails.
+            while self.root.can_compute():
                 self.root.run_compute()
                 iterations += 1
                 if progress_callback is not None:
