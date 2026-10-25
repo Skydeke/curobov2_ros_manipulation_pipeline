@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for the benchmark CLI parser + sidecar naming (pure Python)."""
 
+import importlib.util
+
 import pytest
 
 from curobov2_ros_extra.benchmark.run import (
@@ -9,6 +11,14 @@ from curobov2_ros_extra.benchmark.run import (
     _sidecar,
     build_parser,
 )
+
+
+def test_package_is_directly_executable():
+    """`python3 -m ...benchmark.run` (the compose/README invocation) needs a
+    `__main__` shim now that `run` is a package, not a module."""
+    assert importlib.util.find_spec(
+        'curobov2_ros_extra.benchmark.run.__main__'
+    ) is not None
 
 
 class TestSubcommands:

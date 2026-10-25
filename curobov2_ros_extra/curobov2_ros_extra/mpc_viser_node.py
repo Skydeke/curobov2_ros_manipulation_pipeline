@@ -36,6 +36,7 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.task import Future
 from geometry_msgs.msg import Pose
+from geometry_msgs.msg import PoseStamped as PoseStampedMsg
 from sensor_msgs.msg import JointState
 
 from curobov2_ros_interfaces.action import SendTrajectory
@@ -105,7 +106,6 @@ class MpcViserNode(Node):
         # Live MPC goal: publishing a stamped pose retargets the active
         # reactive loop. Viser-world coordinates coincide with the robot
         # base frame, so the header stays empty ("" == base convention).
-        from geometry_msgs.msg import PoseStamped as PoseStampedMsg
         self._goal_pub = self.create_publisher(PoseStampedMsg, f'{prefix}/mpc_goal', 10)
 
         self._js_sub = self.create_subscription(

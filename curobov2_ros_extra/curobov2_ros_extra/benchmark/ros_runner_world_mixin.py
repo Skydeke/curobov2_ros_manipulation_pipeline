@@ -341,7 +341,7 @@ class _RosRunnerWorldMixin:
         when unavailable.
         """
         stats = getattr(result, "stats", None)
-        return RosBenchmarkRunner._finite_or_none(
+        return _RosRunnerWorldMixin._finite_or_none(
             getattr(stats, "motion_time_s", None))
 
     @staticmethod
@@ -352,7 +352,7 @@ class _RosRunnerWorldMixin:
         filled server-side for every solve. None when unavailable.
         """
         stats = getattr(result, "stats", None)
-        return RosBenchmarkRunner._finite_or_none(
+        return _RosRunnerWorldMixin._finite_or_none(
             getattr(stats, "solver_time_s", None))
 
     @staticmethod
@@ -363,7 +363,7 @@ class _RosRunnerWorldMixin:
         None when unavailable.
         """
         stats = getattr(result, "stats", None)
-        return RosBenchmarkRunner._finite_or_none(
+        return _RosRunnerWorldMixin._finite_or_none(
             getattr(stats, "position_error_mm", None))
 
 __all__ = [
