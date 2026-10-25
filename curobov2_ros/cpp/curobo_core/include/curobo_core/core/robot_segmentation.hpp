@@ -6,10 +6,12 @@
 #ifndef CUROBO_CORE__CORE__ROBOT_SEGMENTATION_HPP_
 #define CUROBO_CORE__CORE__ROBOT_SEGMENTATION_HPP_
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -43,10 +45,17 @@ public:
     std::shared_ptr<curobov2_ros_interfaces::srv::RemoveObject::Response> response);
 
   // PORT: the masks dict serialized for the bridge (masks_json provider).
-  std::string masks_json() const;
+  // Mask poses are converted into the base frame through `resolve` (see
+  // MaskFrameResolver); masks whose frame cannot be resolved are skipped.
+  std::string masks_json(const MaskFrameResolver & resolve) const;
+  std::string masks_json() const {return masks_json(MaskFrameResolver{});}
   void destroy();
 
-  std::size_t mask_count() const {return masks_.size();}
+  std::size_t mask_count() const
+  {
+    std::lock_guard<std::mutex> lk(masks_mutex_);
+    return masks_.size();
+  }
 
 private:
   bool mesh_file_exists(const std::string & path) const;
@@ -57,7 +66,17 @@ private:
   std::string base_frame_;
   double distance_threshold_ = 0.05;
   double mask_margin_ = 0.0;
-  std::map<std::string, std::string> masks_;   // name -> mask JSON
+  struct Mask
+  {
+    std::string name, frame_id, mesh_file_path;
+    int type = 0;
+    std::array<double, 3> pos{0, 0, 0};
+    std::array<double, 4> quat_xyzw{0, 0, 0, 1};
+    std::array<double, 3> dims{0, 0, 0};
+  };
+  // Written by the set/remove services, read by every segmentation camera thread.
+  mutable std::mutex masks_mutex_;
+  std::map<std::string, Mask> masks_;
   std::vector<std::shared_ptr<RobotSegmentationCameraStrategy>> streams_;
 };
 

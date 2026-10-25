@@ -112,6 +112,13 @@ void UnifiedPlannerNode::declare_parameters() {
   // PORT: Mapper / ESDF tunables.
   declare_parameter<double>("decay_half_life_s", 0.7);
   declare_parameter<double>("esdf_refresh_min_interval", 2.0);
+  // Max depth frames/s handed to masking + TSDF integrate per camera (0 = every frame).
+  declare_parameter<double>("depth_integrate_max_hz", 10.0);
+  // Seconds added to the depth frame stamp when looking up the joint pose for robot
+  // segmentation. Positive = joints sampled later than the image header says
+  // (camera driver stamps early / exposure delay). Tune until the masked-out
+  // points (robot_pointcloud) hug the arm while it moves.
+  declare_parameter<double>("segmentation_joint_time_offset_s", 0.0);
   // How often the collision model is refreshed from the unpinned lock joints
   // (lock_joints: {joint: null}, e.g. the PTU gimbal). Cheap: only calls the
   // bridge when a value actually changed.
@@ -481,7 +488,9 @@ void UnifiedPlannerNode::setup() {
             // PORT: _joint_pose_at - the capture-time pose wins; the live pose
             // is the fallback while the timestamped feedback buffer fills.
             if (robot_context_ != nullptr) {
-              const auto pose_at = robot_context_->get_joint_pose_at(stamp_ns);
+              const auto seg_offset_ns = static_cast<std::int64_t>(
+                get_parameter("segmentation_joint_time_offset_s").as_double() * 1e9);
+              const auto pose_at = robot_context_->get_joint_pose_at(stamp_ns + seg_offset_ns);
               if (pose_at.has_value() && !pose_at->empty()) {
                 return *pose_at;
               }
@@ -602,11 +611,6 @@ void UnifiedPlannerNode::setup() {
     // lookup timeout to be honoured (see camera_strategy.cpp).
     tf_buffer_->setUsingDedicatedThread(true);
   }
-  // PORT: unified_planner_node._publish_tool_pose_callback (1 Hz, TF-driven).
-  tool_pose_pub_ = create_publisher<geometry_msgs::msg::PoseStamped>(
-      std::string(get_name()) + "/current_tool_pose", 10);
-  tool_pose_timer_ = create_wall_timer(std::chrono::seconds(1),
-                                       [this]() { publish_tool_pose(); });
   mpc_goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
       std::string(get_name()) + "/mpc_goal", 10,
       [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -726,30 +730,6 @@ void UnifiedPlannerNode::handle_mpc_goal(
   RCLCPP_DEBUG(get_logger(),
                "Reactive goal updated from topic: [%.3f, %.3f, %.3f]",
                pose.position.x, pose.position.y, pose.position.z);
-}
-
-// PORT: unified_planner_node._publish_tool_pose_callback
-void UnifiedPlannerNode::publish_tool_pose() {
-  if (tool_pose_pub_ == nullptr || tf_buffer_ == nullptr) {
-    return;
-  }
-  try {
-    const auto frames = bridge_->tool_frames(handle_);
-    if (frames.empty()) {
-      return;
-    }
-    // The tool frame is the same frame /ik_batch solves for.
-    const auto tf =
-        tf_buffer_->lookupTransform(base_link_, frames[0], tf2::TimePointZero);
-    geometry_msgs::msg::PoseStamped msg;
-    msg.header.stamp = get_clock()->now();
-    msg.header.frame_id = base_link_;
-    // Pose of the tool frame origin == the transform applied to identity.
-    msg.pose = apply_transform(geometry_msgs::msg::Pose(), tf);
-    tool_pose_pub_->publish(msg);
-  } catch (const std::exception &) {
-    // TF/solver not ready yet; retry next tick.
-  }
 }
 
 // The control strategy forwards its raw joint-state message, before it reduces

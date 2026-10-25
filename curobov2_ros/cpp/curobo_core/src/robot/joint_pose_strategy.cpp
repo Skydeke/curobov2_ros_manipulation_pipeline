@@ -116,6 +116,16 @@ void JointPoseStrategy::callback_joint_pose(const sensor_msgs::msg::JointState &
     }
   }
 
+  // A message that names none of the expected arm joints and is too short to
+  // hold them is another publisher's (gripper, head, ...). Reading it
+  // positionally overwrote joint_pose_ and fed a short/foreign vector into the
+  // feedback buffer, so the segmenter placed the robot spheres at a wrong pose.
+  if (remap.empty() && !expected_joint_names_.empty() &&
+    msg.position.size() < expected_joint_names_.size())
+  {
+    return;
+  }
+
   const std::size_t n = dof() != 0u ? dof() : msg.position.size();
   std::vector<double> feedback;
   {

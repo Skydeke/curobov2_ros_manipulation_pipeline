@@ -2,7 +2,9 @@
 // RobotSegmentation mask services (FakeBridge). No GPU.
 #include <gtest/gtest.h>
 
+#include <array>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -61,4 +63,42 @@ TEST(RobotSegmentation, SetAndRemoveMask)
   segmentation.handle_remove_mask(remove2, remove2_response);
   EXPECT_TRUE(remove2_response->success);
   EXPECT_EQ(remove2_response->message, "Mask 'cage' not present (nothing to remove)");
+}
+
+// A mask is given in its own frame_id; the bridge tests points in the base
+// frame, so the pose must be converted (and unknown frames skipped, not guessed).
+TEST(RobotSegmentation, MaskPoseIsConvertedToBaseFrame)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner");
+  curobo_runtime::FakeBridge bridge;
+  RobotSegmentation segmentation(node.get(), &bridge, 1, {}, nullptr);
+
+  auto request = std::make_shared<curobov2_ros_interfaces::srv::SetMask::Request>();
+  request->name = "obj";
+  request->type = 0;
+  request->frame_id = "map";
+  request->pose.position.x = 1.0;
+  request->pose.orientation.w = 1.0;
+  request->dimensions.x = request->dimensions.y = request->dimensions.z = 0.2;
+  auto response = std::make_shared<curobov2_ros_interfaces::srv::SetMask::Response>();
+  segmentation.handle_set_mask(request, response);
+  ASSERT_TRUE(response->success);
+
+  // base <- map is a pure +2 m translation in y: the mask must move with it.
+  const auto json = segmentation.masks_json(
+    [](const std::string & frame) -> std::optional<std::array<double, 7>> {
+      if (frame == "map") {
+        return std::array<double, 7>{0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0};
+      }
+      return std::nullopt;
+    });
+  EXPECT_NE(json.find("\"pos\":[1,2,0]"), std::string::npos) << json;
+
+  // Unresolvable frame -> mask skipped rather than placed at a guessed pose.
+  const auto skipped = segmentation.masks_json(
+    [](const std::string &) -> std::optional<std::array<double, 7>> {return std::nullopt;});
+  EXPECT_EQ(skipped.find("obj"), std::string::npos) << skipped;
 }

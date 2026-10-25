@@ -149,25 +149,32 @@ def voxel_grid(handle: int) -> dict:
     entry = _REGISTRY[handle]
     cfg = entry.get("mapper_cfg") or dict(MAPPER_DEFAULTS)
     mapper = _mapper(entry)
-    centers = None
-    try:
-        occupied = mapper.integrator.extract_occupied_voxels(surface_only=False)
-        if occupied is not None:
-            centers = occupied.centers.detach().cpu().numpy()
-    except Exception:
-        centers = None
-
     extent = np.asarray(cfg["extent_xyz"], dtype=np.float64)
     vsize = float(cfg["esdf_voxel_size"])
     center = np.asarray(cfg["grid_center"], dtype=np.float64)
     shape = tuple(int(np.ceil(e / vsize)) for e in extent)
     origin = center - extent / 2.0
-    grid = np.zeros(shape, dtype=np.uint8)
-    if centers is not None and centers.size:
-        idx = np.floor((centers - origin) / vsize).astype(np.int64)
-        valid = np.all((idx >= 0) & (idx < np.asarray(shape)), axis=1)
-        idx = idx[valid]
-        grid[idx[:, 0], idx[:, 1], idx[:, 2]] = 1
+    grid = None
+    try:
+        import torch
+
+        occupied = mapper.integrator.extract_occupied_voxels(surface_only=False)
+        if occupied is not None and occupied.centers.numel() > 0:
+            # Bin on the GPU and copy back only the dense uint8 grid (~140 kB)
+            # instead of N x 3 float centres plus a numpy floor/mask pass.
+            c = occupied.centers.detach()
+            o = torch.tensor(origin, dtype=c.dtype, device=c.device)
+            idx = torch.floor((c - o) / vsize).long()
+            lim = torch.tensor(shape, dtype=torch.long, device=c.device)
+            ok = ((idx >= 0) & (idx < lim)).all(dim=1)
+            idx = idx[ok]
+            g = torch.zeros(shape, dtype=torch.uint8, device=c.device)
+            g[idx[:, 0], idx[:, 1], idx[:, 2]] = 1
+            grid = g.cpu().numpy()
+    except Exception:
+        grid = None
+    if grid is None:
+        grid = np.zeros(shape, dtype=np.uint8)
     # Analytic primitives (AddObject obstacles) - GPU rasterization, exactly the
     # method the oracle uses (same collision checker as the planner).
     try:

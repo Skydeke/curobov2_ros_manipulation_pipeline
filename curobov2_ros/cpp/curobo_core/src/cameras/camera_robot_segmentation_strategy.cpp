@@ -3,7 +3,9 @@
 #include "curobo_runtime/runtime.hpp"
 #include "curobo_core/cameras/camera_robot_segmentation_strategy.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <map>
 
 #include <Eigen/Geometry>
 #include <sensor_msgs/msg/point_field.hpp>
@@ -38,7 +40,7 @@ RobotSegmentationCameraStrategy::RobotSegmentationCameraStrategy(
   const std::optional<std::vector<double>> & extrinsics,
   curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
   std::function<std::vector<double>(std::int64_t)> joint_pose_at,
-  std::function<std::string()> masks_json,
+  std::function<std::string(const MaskFrameResolver &)> masks_json,
   rclcpp::CallbackGroup::SharedPtr callback_group, double max_update_rate_hz)
 : CameraStrategy(node, camera_name, topic, camera_info_topic, frame_id, intrinsics, extrinsics,
     max_update_rate_hz),
@@ -99,7 +101,15 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
     }
     curobo_runtime::TensorF32 depth;
     depth.shape = {static_cast<std::int64_t>(frame.height), static_cast<std::int64_t>(frame.width)};
-    depth.data = frame.data;
+    // The raw frame is only needed again for the (subscriber-gated) debug cloud;
+    // otherwise hand the buffer over instead of copying ~3.7 MB per frame.
+    const bool want_cloud = robot_pointcloud_pub_ != nullptr &&
+      robot_pointcloud_pub_->get_subscription_count() > 0;
+    if (want_cloud) {
+      depth.data = frame.data;
+    } else {
+      depth.data = std::move(frame.data);
+    }
 
     // intrinsics_meta: [fx, fy, cx, cy] from the 3x3 K.
     curobo_runtime::TensorF32 k;
@@ -158,16 +168,48 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
     // the EXCLUSIVE gpu_lock here (blocking), not a shared lane hold: the CPU->GPU
     // transfer + FK masking must not overlap any other GPU job, and a concurrent
     // CUDA-graph capture would invalidate it. shared() admitted exactly that.
+    // Mask poses are given in their own frame_id (map, odom, a tool link...).
+    // Express them in the base frame AT THE CAPTURE STAMP, like the camera pose;
+    // the bridge tests points in the base frame, so an unconverted mask lands in
+    // the wrong place and deletes whatever real depth sits there.
+    // One TF lookup per distinct frame per image, and all of it BEFORE the
+    // exclusive GPU barrier: a lookup can wait up to its timeout for TF to catch
+    // up, and nothing else may touch the GPU while the barrier is held.
+    std::map<std::string, std::optional<std::array<double, 7>>> mask_frame_cache;
+    const MaskFrameResolver resolve_mask_frame =
+      [this, &msg, &mask_frame_cache](const std::string & frame)
+      -> std::optional<std::array<double, 7>> {
+        const std::vector<std::string> bases = integration_frame_candidates(node_);
+        if (frame.empty() || std::find(bases.begin(), bases.end(), frame) != bases.end()) {
+          return std::array<double, 7>{0, 0, 0, 1, 0, 0, 0};
+        }
+        const auto cached = mask_frame_cache.find(frame);
+        if (cached != mask_frame_cache.end()) {
+          return cached->second;
+        }
+        std::optional<std::array<double, 7>> result;
+        for (const std::string & base : bases) {
+          const auto tf = lookup_transform_at(*tf_buffer_, base, frame, msg.header.stamp);
+          if (!tf.has_value()) {
+            continue;
+          }
+          const auto & t = tf->transform.translation;
+          const auto & r = tf->transform.rotation;
+          const auto qn = normalize_quat_wxyz({r.w, r.x, r.y, r.z});
+          result = std::array<double, 7>{t.x, t.y, t.z, qn[0], qn[1], qn[2], qn[3]};
+          break;
+        }
+        mask_frame_cache[frame] = result;
+        return result;
+      };
+    const std::string masks_json = masks_json_ ? masks_json_(resolve_mask_frame) : "[]";
     auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-    const auto masked = bridge_->robot_segment(
-      handle_, depth, k, cam_pose, qf, masks_json_ ? masks_json_() : "[]");
+    const auto masked = bridge_->robot_segment(handle_, depth, k, cam_pose, qf, masks_json);
     publish_masked(masked.data, frame.height, frame.width, frame.encoding, msg.header.stamp);
 
     // PORT: the points masked OUT as robot, in the base frame, for debug.
     // Gated on an actual subscriber (the transform + serialization is not free).
-    if (robot_pointcloud_pub_ != nullptr &&
-      robot_pointcloud_pub_->get_subscription_count() > 0)
-    {
+    if (want_cloud) {
       publish_robot_pointcloud(
         frame.data, masked.data, frame.height, frame.width, *intrinsics, cam_pose,
         msg.header.stamp);

@@ -24,6 +24,8 @@ def _log_world_push_failure(reason: str, interval_s: float = 5.0) -> None:
         return
     _LAST_WORLD_PUSH_ERROR_T = now
     print(f"[curobo_bridge] world_push FAILED: {reason}", flush=True)
+
+
 def _world_buffer_signature(mp):
     """Identity of every buffer the captured CUDA graphs read the world through.
 

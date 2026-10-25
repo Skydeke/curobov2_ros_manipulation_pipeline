@@ -573,6 +573,7 @@ void ReactiveController::wait_for_execution(RobotContext * robot_context, double
     std::mutex mutex;
     std::condition_variable cv;
     bool done = false;
+    bool aborted = false;   // goal ended/cancelled: skip the pacing floor
   };
   auto state = std::make_shared<WaitState>();
   const double timeout_s = std::max(interval * 2.0 + 0.2, 0.5);
@@ -587,16 +588,31 @@ void ReactiveController::wait_for_execution(RobotContext * robot_context, double
     std::chrono::duration<double>(0.02),
     [state, this, robot_context]() {
       std::lock_guard<std::mutex> lk(state->mutex);
-      if (!is_goal_active_ || robot_context->get_progression() >= 1.0) {
+      if (!is_goal_active_) {
+        state->aborted = true;
+        state->done = true;
+        state->cv.notify_all();
+      } else if (robot_context->get_progression() >= 1.0) {
         state->done = true;
         state->cv.notify_all();
       }
     }, wait_cb_group_);
+  const auto t_wait0 = std::chrono::steady_clock::now();
 
   {
     std::unique_lock<std::mutex> lk(state->mutex);
     state->cv.wait_for(
       lk, std::chrono::duration<double>(timeout_s), [&] {return state->done;});
+    // Pacing floor: a controller that reports progression 1.0 immediately (very
+    // short window, or a stale "succeeded" result) must not turn the servo into
+    // a free-running MPPI loop that pins the GPU. Never step faster than
+    // `interval`; still wake at once if the goal ends.
+    if (!state->aborted) {
+      state->cv.wait_until(
+        lk, t_wait0 + std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+          std::chrono::duration<double>(interval)),
+        [&] {return state->aborted;});
+    }
   }
   timer->cancel();
 }

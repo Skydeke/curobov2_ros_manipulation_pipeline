@@ -405,7 +405,7 @@ public:
   virtual SphereSetOutcome collision_spheres_with_attached(
     RobotHandle handle, const std::vector<float> & q) = 0;
   // PORT: the kinematics model's tool frames (kin.tool_frames); the first is
-  // the frame /ik solves for and the node's current_tool_pose publishes.
+  // the frame /ik solves for.
   virtual std::vector<std::string> tool_frames(RobotHandle handle) = 0;
   // PORT: robot_model_manager.set_link_collision (kc.enable/disable_link_spheres).
   virtual LinkCollisionOutcome set_link_collision(

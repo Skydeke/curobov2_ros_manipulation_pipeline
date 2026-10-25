@@ -164,7 +164,15 @@ void CameraSystemManager::configure()
       cfg.mapper_topic == cfg.depth_topic ? cfg.frame_rate_hz : 0.0);
     // PORT: the depth strategy bumps node.perception_epoch on integrate.
     strategy->set_on_integrated(on_integrated_);
-    camera_context_->add_camera(cfg.name, strategy, cfg.frame_rate_hz);
+    // Decay is anchored per integrate(): use the capped rate, not the sensor rate.
+    double effective_hz = cfg.frame_rate_hz;
+    if (node_->has_parameter("depth_integrate_max_hz")) {
+      const double cap = node_->get_parameter("depth_integrate_max_hz").as_double();
+      if (cap > 0.0 && (effective_hz <= 0.0 || cap < effective_hz)) {
+        effective_hz = cap;
+      }
+    }
+    camera_context_->add_camera(cfg.name, strategy, effective_hz);
   }
 }
 

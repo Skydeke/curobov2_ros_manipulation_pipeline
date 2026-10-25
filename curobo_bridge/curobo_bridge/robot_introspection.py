@@ -194,18 +194,25 @@ def collision_spheres_with_attached(handle: int, q):
     spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
     kc = kin.kinematics_config
     attached_idx = kc.link_name_to_idx_map.get("attached_object")
-    mask = [False] * int(spheres.shape[0])
+    n_sph = int(spheres.shape[0])
     link_map = getattr(kc, "link_sphere_idx_map", None)
+    # Mask is built on the GPU and rides the same device->host copy as the
+    # spheres (was: a separate sync + .tolist() of every sphere's link id).
+    mask_col = None
     if attached_idx is not None and link_map is not None:
-        link_ids = link_map.reshape(-1).cpu().tolist()
-        if len(link_ids) == len(mask):
-            mask = [li == attached_idx for li in link_ids]
+        flat = link_map.reshape(-1)
+        if int(flat.shape[0]) == n_sph:
+            mask_col = (flat == attached_idx).to(spheres.dtype).unsqueeze(1)
+    if mask_col is None:
+        mask_col = torch.zeros((n_sph, 1), dtype=spheres.dtype, device=spheres.device)
+    packed = torch.cat([spheres.detach(), mask_col], dim=1).cpu().numpy()
+    mask = (packed[:, 4] > 0.5).tolist()
     # Link-relative copy of the attached spheres. The consumer (trajectory
     # preview) re-applies FK of this URDF link at every waypoint, so the
     # payload rides the ghost instead of staying at the live pose. We derive
     # the link frame from the solver's own FK rather than the YAML transform
     # so it is exact for whatever `fixed_transform` the config uses.
-    world = spheres.detach().cpu().numpy().astype(np.float32)
+    world = np.ascontiguousarray(packed[:, :4], dtype=np.float32)
     attached_frame = ""
     attached_local = np.zeros_like(world)
     parent = entry.get("attach_parent_link")

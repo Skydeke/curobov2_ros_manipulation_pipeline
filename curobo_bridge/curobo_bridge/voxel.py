@@ -95,13 +95,23 @@ def _rasterize_primitives_gpu(entry, voxel_grid, grid_min, voxel_size) -> int:
         cache["act"] = torch.zeros(1, device=device, dtype=torch.float32)
         cache["key"] = grid_key
         cache["caps"] = (n_cub, n_mesh)
+    # Static analytic scene => identical result every call. Key on the specs, not
+    # the (freshly rebuilt) Scene object, and skip the model reload + SDF launch.
+    scene_key = (repr(entry.get("scene_specs", [])), entry.get("attached_name"),
+                 _obstacle_mode(entry), grid_key)
+    if cache.get("occ") is not None and cache.get("occ_key") == scene_key:
+        occ = cache["occ"]
+        voxel_grid |= occ
+        return int(occ.sum())
     sc = cache["sc"]
     sc.load_collision_model(scene)
     buf = cache["buf"]
     buf.zero_()
     sc.get_sphere_distance_raw(cache["spheres"], buf, cache["weight"], cache["act"])
-    occ = (buf.distance[0, 0] > 0).cpu().numpy().reshape(size)
-    voxel_grid |= occ.astype(np.uint8)
+    occ = (buf.distance[0, 0] > 0).cpu().numpy().reshape(size).astype(np.uint8)
+    cache["occ"] = occ
+    cache["occ_key"] = scene_key
+    voxel_grid |= occ
     return int(occ.sum())
 def depth_integrate(handle: int, depth, intrinsics, camera_pose) -> None:
     """PORT: cameras/camera_depth_map_strategy._integrate_once."""
@@ -123,8 +133,11 @@ def depth_integrate(handle: int, depth, intrinsics, camera_pose) -> None:
         np.asarray(intrinsics, dtype=np.float32), dtype=torch.float32, device=device)
     if intrinsics_t.ndim == 2:
         intrinsics_t = intrinsics_t.unsqueeze(0)
-    rgb = torch.zeros((depth_t.shape[0], depth_t.shape[1], depth_t.shape[2], 3),
-                      dtype=torch.uint8, device=device)
+    rgb_key = (int(depth_t.shape[0]), int(depth_t.shape[1]), int(depth_t.shape[2]))
+    if entry.get("_zero_rgb_key") != rgb_key:
+        entry["_zero_rgb"] = torch.zeros(rgb_key + (3,), dtype=torch.uint8, device=device)
+        entry["_zero_rgb_key"] = rgb_key
+    rgb = entry["_zero_rgb"]   # geometry-only mapping: read-only all-zero colour
     camera_pose_t = Pose.from_list(list(camera_pose), device_cfg=dcfg)
     mapper.integrate(CameraObservation(
         depth_image=depth_t, rgb_image=rgb, intrinsics=intrinsics_t, pose=camera_pose_t))
@@ -250,10 +263,16 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
             depth_np, spheres, cam_pose, (fx, fy, cx, cy), threshold)
         return masked.astype(np.float32)
 
-    depth_t = torch.tensor(depth_np, device=device)
-    v, u = torch.meshgrid(
-        torch.arange(h, device=device), torch.arange(w, device=device), indexing="ij")
-    valid = (depth_t > 0) & ~torch.isnan(depth_t) & ~torch.isinf(depth_t)
+    depth_t = torch.from_numpy(depth_np).to(device)   # one H2D copy, no host copy
+    grids = entry.setdefault("_seg_pixel_grids", {})
+    if (h, w) not in grids:
+        grids.clear()
+        grids[(h, w)] = torch.meshgrid(
+            torch.arange(h, device=device), torch.arange(w, device=device), indexing="ij")
+    v, u = grids[(h, w)]
+    # isfinite covers NaN/inf; points past depth_max never reach the mapper anyway
+    # but must stay in the output image, so only mask here (no extra filtering).
+    valid = (depth_t > 0) & torch.isfinite(depth_t)
     uu = u[valid]
     vv = v[valid]
     z = depth_t[valid]
@@ -309,7 +328,7 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     keep_img[(vv.long() * w) + uu.long()] = keep
     keep_img = keep_img.view(h, w)
     masked = torch.where(keep_img, depth_t, torch.zeros_like(depth_t))
-    return masked.cpu().numpy().astype(np.float32)
+    return masked.cpu().numpy().astype(np.float32, copy=False)
 
 from .runtime import _REGISTRY
 from .scene import _to_scene

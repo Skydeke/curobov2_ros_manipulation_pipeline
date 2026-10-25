@@ -7,9 +7,11 @@
 #ifndef CUROBO_CORE__CAMERAS__CAMERA_ROBOT_SEGMENTATION_STRATEGY_HPP_
 #define CUROBO_CORE__CAMERAS__CAMERA_ROBOT_SEGMENTATION_STRATEGY_HPP_
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -23,6 +25,12 @@
 namespace curobo_core
 {
 
+// Resolves a mask's frame_id to its pose in the integration (base) frame at the
+// depth frame's capture time: [x, y, z, qw, qx, qy, qz]. Empty frame / the base
+// frame itself gives the identity; std::nullopt = frame unknown to TF.
+using MaskFrameResolver =
+  std::function<std::optional<std::array<double, 7>>(const std::string &)>;
+
 class RobotSegmentationCameraStrategy : public CameraStrategy
 {
 public:
@@ -33,7 +41,7 @@ public:
     const std::optional<std::vector<double>> & extrinsics,
     curobo_runtime::IBridge * bridge, curobo_runtime::RobotHandle handle,
     std::function<std::vector<double>(std::int64_t)> joint_pose_at,
-    std::function<std::string()> masks_json,
+    std::function<std::string(const MaskFrameResolver &)> masks_json,
     rclcpp::CallbackGroup::SharedPtr callback_group = nullptr,
     double max_update_rate_hz = 0.0);
   ~RobotSegmentationCameraStrategy() override;
@@ -56,7 +64,7 @@ private:
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
   std::function<std::vector<double>(std::int64_t)> joint_pose_at_;
-  std::function<std::string()> masks_json_;
+  std::function<std::string(const MaskFrameResolver &)> masks_json_;
   std::string output_topic_;
   std::string depth_frame_id_;
   rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr subscription_;

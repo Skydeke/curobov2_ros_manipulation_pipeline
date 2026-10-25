@@ -73,7 +73,7 @@ def collision_distance(handle: int, q):
 
     entry = _REGISTRY[handle]
     _spheres, dists, _activation, _checker = _sphere_snapshot(entry, q)
-    return [float(v) for v in dists]
+    return dists.tolist()
 def _rot_from_quat_wxyz(quat):
     """PORT: collision_distance._rot_from_quat_wxyz - 3x3 rotation (numpy)."""
     import numpy as np
@@ -107,20 +107,46 @@ def _sphere_snapshot(entry, q, kin=None):
     robot_spheres = ks.robot_spheres
 
     checker = _scene_collision(entry, dcfg)
-    buf = CollisionBuffer.from_shape(robot_spheres.shape, dcfg)
-    weight = dcfg.to_device([1.0])
     # PORT: _resolve_activation - the node's collision_activation_distance (same
     # margin the planner's optimizer uses).
     activation = float(entry.get("collision_activation_distance", 0.025))
-    dist = checker.get_sphere_distance(
-        ks, buf, weight, activation_distance=dcfg.to_device([activation]))
+    # Query scratch (buffer + weight + activation tensors) is allocated once per
+    # (sphere-array shape, checker, activation, thread) instead of on every call.
+    # The checker is part of the key because a scene mutation rebuilds it. The
+    # thread id is too: the viz lane and the planner lane both call this, and a
+    # shared buffer would be written concurrently. Each lane therefore keeps its
+    # own entry per checker instead of the two evicting each other every call.
+    import threading
+    qkey = (tuple(robot_spheres.shape), id(checker), activation, threading.get_ident())
+    scratch_by_thread = entry.setdefault("_sphere_query_scratch", {})
+    scratch = scratch_by_thread.get(qkey)
+    if scratch is None:
+        # Scene mutations rebuild the checker (and thus the id) each generation;
+        # cap the cache so those generations cannot accumulate. Evicting is safe:
+        # a call already holds its own references to the tensors it uses.
+        if len(scratch_by_thread) >= 8:
+            scratch_by_thread.clear()
+        scratch = (CollisionBuffer.from_shape(robot_spheres.shape, dcfg),
+                   dcfg.to_device([1.0]),
+                   dcfg.to_device([activation]))
+        scratch_by_thread[qkey] = scratch
+    buf, weight, act_t = scratch
+    dist = checker.get_sphere_distance(ks, buf, weight, activation_distance=act_t)
     # Negative-radius spheres are meaningless and would always read as colliding;
     # the mask must be SHAPE-PRESERVING (PORT: _sphere_collision_snapshot).
-    neg = robot_spheres[..., 3] < 0
-    if bool(neg.any()):
-        dist = dist * (~neg)
-    spheres = robot_spheres.reshape(-1, 4).detach().cpu().numpy()
-    dists = np.asarray([float(v) for v in torch.flatten(dist, start_dim=0).tolist()])
+    # Applied unconditionally: the old `bool(neg.any())` guard was a host sync.
+    dist = dist * (robot_spheres[..., 3] >= 0)
+    # One device->host copy of [spheres | distances] instead of two syncs and a
+    # python float() loop over every sphere.
+    flat_d = torch.flatten(dist, start_dim=0).to(robot_spheres.dtype).unsqueeze(1)
+    flat_s = robot_spheres.reshape(-1, 4).detach()
+    if flat_d.shape[0] == flat_s.shape[0]:
+        packed = torch.cat([flat_s, flat_d], dim=1).cpu().numpy()
+        spheres = packed[:, :4].copy()
+        dists = packed[:, 4].astype(np.float64)
+    else:   # defensive: shape contract differs, keep the old two-transfer path
+        spheres = flat_s.cpu().numpy()
+        dists = torch.flatten(dist, start_dim=0).cpu().numpy().astype(np.float64)
     return spheres, dists, activation, checker
 def _link_of_factory(kin):
     """PORT: the sphere-index -> link-name mapping shared by the diagnostics."""

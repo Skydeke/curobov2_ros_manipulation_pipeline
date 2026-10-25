@@ -257,6 +257,9 @@ void PlanningTab::createPlannerClients(const std::string &planner_node) {
       planner_ns + "mpc_goal", 10);
 
   // Live tool pose (base frame) for one-shot seeding of pristine displays.
+  // Optional source: the planner no longer publishes `current_tool_pose` (its
+  // 1 Hz TF lookup + timer were pure overhead), so unless something else fills
+  // it in the seed is skipped and a new target marker keeps its default pose.
   // Rebinding (planner switch) drops the cache and the seed latch: a new
   // planner may drive a different robot.
   {

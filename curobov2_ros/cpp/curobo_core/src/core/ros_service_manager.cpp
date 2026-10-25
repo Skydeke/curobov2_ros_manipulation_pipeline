@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <chrono>
 #include <string>
 #include <utility>
@@ -533,8 +534,8 @@ bool RosServiceManager::submit_viz_job(std::function<void()> job)
 
 void RosServiceManager::publish_sparse_voxel_grid()
 {
-  if (sparse_voxel_pub_ == nullptr) {
-    return;
+  if (sparse_voxel_pub_ == nullptr || sparse_voxel_pub_->get_subscription_count() == 0) {
+    return;   // nobody listening: skip the TSDF extract + primitive rasterize + D2H copy
   }
   if (!submit_viz_job([this]() {publish_sparse_voxel_grid_job();})) {
     RCLCPP_DEBUG_THROTTLE(
@@ -547,6 +548,15 @@ void RosServiceManager::publish_sparse_voxel_grid()
 void RosServiceManager::publish_sparse_voxel_grid_job()
 {
   try {
+    {
+      const auto now = std::chrono::steady_clock::now();
+      const std::int64_t epoch = obstacle_manager_->epoch();
+      if (epoch == viz_voxel_epoch_ && (now - viz_voxel_t_) < std::chrono::seconds(2)) {
+        return;   // nothing integrated / mutated since the last publish
+      }
+      viz_voxel_epoch_ = epoch;
+      viz_voxel_t_ = now;
+    }
     const auto grid = obstacle_manager_->get_voxel_grid();
     if (grid.shape.size() != 3) {
       return;
@@ -641,7 +651,7 @@ void RosServiceManager::publish_scene_obstacles()
 void RosServiceManager::publish_collision_spheres()
 {
   if (collision_spheres_pub_ == nullptr || !collision_spheres_enabled_ ||
-    pose_provider_ == nullptr)
+    pose_provider_ == nullptr || collision_spheres_pub_->get_subscription_count() == 0)
   {
     return;
   }
@@ -661,6 +671,23 @@ void RosServiceManager::publish_collision_spheres_job()
     const std::vector<float> q = pose_provider_();
     if (q.empty()) {
       return;
+    }
+    {
+      const auto now = std::chrono::steady_clock::now();
+      const std::int64_t epoch = obstacle_manager_->epoch();
+      const std::int64_t sv = obstacle_manager_->scene_version();
+      bool same = epoch == viz_sphere_epoch_ && sv == viz_sphere_scene_version_ &&
+        q.size() == viz_sphere_q_.size() && (now - viz_sphere_t_) < std::chrono::seconds(2);
+      for (std::size_t i = 0; same && i < q.size(); ++i) {
+        same = std::abs(q[i] - viz_sphere_q_[i]) < 1e-4f;
+      }
+      if (same) {
+        return;   // robot and world unchanged: spheres + distances would be identical
+      }
+      viz_sphere_epoch_ = epoch;
+      viz_sphere_scene_version_ = sv;
+      viz_sphere_q_ = q;
+      viz_sphere_t_ = now;
     }
     const auto sphere_set = bridge_->collision_spheres_with_attached(handle_, q);
     const auto & spheres = sphere_set.spheres;

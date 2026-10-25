@@ -86,8 +86,6 @@ private:
 
   // PORT: unified_planner_node.mpc_goal_callback
   void handle_mpc_goal(const geometry_msgs::msg::PoseStamped & msg);
-  // PORT: unified_planner_node._publish_tool_pose_callback (1 Hz)
-  void publish_tool_pose();
 
   curobo_runtime::IBridge * bridge_ = nullptr;
   curobo_runtime::RobotHandle handle_ = -1;
@@ -147,8 +145,6 @@ private:
   // robot segmentation (mask services registered via RosServiceManager).
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mpc_goal_sub_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr tool_pose_pub_;
-  rclcpp::TimerBase::SharedPtr tool_pose_timer_;
   // PORT: obstacle_manager._build_mapper - the mapper cfg JSON is built at
   // startup but COMPLETED (with decay_factor, which needs the camera/laser
   // frame rates) after their managers exist. The bridge builds the mapper

@@ -376,17 +376,21 @@ std::vector<std::int32_t> ObstacleManager::occupied_indices(
   if (grid.shape.size() != 3) {
     return out;
   }
-  const std::int64_t sx = grid.shape[0];
-  const std::int64_t sy = grid.shape[1];
-  const std::int64_t sz = grid.shape[2];
-  for (std::int64_t x = 0; x < sx; ++x) {
-    for (std::int64_t y = 0; y < sy; ++y) {
-      for (std::int64_t z = 0; z < sz; ++z) {
-        const std::size_t idx = static_cast<std::size_t>((x * sy + y) * sz + z);
-        if (idx < grid.data.size() && grid.data[idx] != 0) {
-          out.push_back(static_cast<std::int32_t>(idx));
-        }
-      }
+  // (x*sy + y)*sz + z over the full box is just the linear index, so a single
+  // contiguous scan replaces the triple loop (and its per-voxel bounds math).
+  const std::size_t total = std::min(
+    grid.data.size(),
+    static_cast<std::size_t>(grid.shape[0]) * static_cast<std::size_t>(grid.shape[1]) *
+    static_cast<std::size_t>(grid.shape[2]));
+  const std::uint8_t * d = grid.data.data();
+  std::size_t count = 0;
+  for (std::size_t i = 0; i < total; ++i) {
+    count += d[i] != 0;
+  }
+  out.reserve(count);
+  for (std::size_t i = 0; i < total; ++i) {
+    if (d[i] != 0) {
+      out.push_back(static_cast<std::int32_t>(i));
     }
   }
   return out;

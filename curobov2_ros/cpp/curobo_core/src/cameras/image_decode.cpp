@@ -97,36 +97,37 @@ std::vector<float> resize_depth_bilinear(
   if (src_h == dst_h && src_w == dst_w) {
     return src;
   }
+  // Per-axis taps/weights computed once per row/column instead of per pixel.
   const double scale_y = static_cast<double>(src_h) / static_cast<double>(dst_h);
   const double scale_x = static_cast<double>(src_w) / static_cast<double>(dst_w);
-  const auto clamp_index = [](double v, std::uint32_t n) -> std::uint32_t {
-      if (v <= 0.0) {
-        return 0;
+  struct Tap {std::uint32_t i0, i1; float w;};
+  const auto make_taps = [](std::uint32_t dn, std::uint32_t sn, double scale) {
+      std::vector<Tap> taps(dn);
+      const std::uint32_t max_i = sn - 1;
+      for (std::uint32_t o = 0; o < dn; ++o) {
+        const double s = (static_cast<double>(o) + 0.5) * scale - 0.5;
+        const auto clampi = [&](double v) -> std::uint32_t {
+            return v <= 0.0 ? 0u : (v >= static_cast<double>(max_i) ? max_i :
+                   static_cast<std::uint32_t>(v));
+          };
+        const std::uint32_t i0 = clampi(s);
+        taps[o] = {i0, clampi(s + 1.0),
+          static_cast<float>(std::max(0.0, std::min(1.0, s - static_cast<double>(i0))))};
       }
-      const std::uint32_t max_i = n - 1;
-      if (v >= static_cast<double>(max_i)) {
-        return max_i;
-      }
-      return static_cast<std::uint32_t>(v);
+      return taps;
     };
+  const std::vector<Tap> xt = make_taps(dst_w, src_w, scale_x);
+  const std::vector<Tap> yt = make_taps(dst_h, src_h, scale_y);
   for (std::uint32_t oy = 0; oy < dst_h; ++oy) {
-    const double sy = (static_cast<double>(oy) + 0.5) * scale_y - 0.5;
-    const std::uint32_t y0 = clamp_index(sy, src_h);
-    const std::uint32_t y1 = clamp_index(sy + 1.0, src_h);
-    const double wy = std::max(0.0, std::min(1.0, sy - static_cast<double>(y0)));
+    const float * r0 = src.data() + static_cast<std::size_t>(yt[oy].i0) * src_w;
+    const float * r1 = src.data() + static_cast<std::size_t>(yt[oy].i1) * src_w;
+    const float wy = yt[oy].w;
+    float * out = dst.data() + static_cast<std::size_t>(oy) * dst_w;
     for (std::uint32_t ox = 0; ox < dst_w; ++ox) {
-      const double sx = (static_cast<double>(ox) + 0.5) * scale_x - 0.5;
-      const std::uint32_t x0 = clamp_index(sx, src_w);
-      const std::uint32_t x1 = clamp_index(sx + 1.0, src_w);
-      const double wx = std::max(0.0, std::min(1.0, sx - static_cast<double>(x0)));
-      const float v00 = src[static_cast<std::size_t>(y0) * src_w + x0];
-      const float v01 = src[static_cast<std::size_t>(y0) * src_w + x1];
-      const float v10 = src[static_cast<std::size_t>(y1) * src_w + x0];
-      const float v11 = src[static_cast<std::size_t>(y1) * src_w + x1];
-      const double top = v00 * (1.0 - wx) + v01 * wx;
-      const double bottom = v10 * (1.0 - wx) + v11 * wx;
-      dst[static_cast<std::size_t>(oy) * dst_w + ox] =
-        static_cast<float>(top * (1.0 - wy) + bottom * wy);
+      const Tap & t = xt[ox];
+      const float top = r0[t.i0] + (r0[t.i1] - r0[t.i0]) * t.w;
+      const float bot = r1[t.i0] + (r1[t.i1] - r1[t.i0]) * t.w;
+      out[ox] = top + (bot - top) * wy;
     }
   }
   return dst;

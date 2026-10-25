@@ -134,3 +134,7 @@ __all__ = [
     'warmup_mapper',
     'world_push',
 ]
+
+from . import gpu_profile as _gpu_profile
+import sys as _sys
+_gpu_profile.install(_sys.modules[__name__])

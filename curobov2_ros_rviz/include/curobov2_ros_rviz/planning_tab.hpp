@@ -298,8 +298,10 @@ private:
   // session.
   QTimer *readiness_timer_;
 
-  // Live tool pose (server-published, base frame) used to one-shot seed a
-  // pristine TargetDisplay at the gripper instead of the hardcoded default.
+  // Live tool pose (base frame) used to one-shot seed a pristine TargetDisplay
+  // at the gripper instead of the hardcoded default. Optional: the planner does
+  // not publish `current_tool_pose` any more, so this stays empty unless another
+  // source provides it (the seed is then skipped).
   // Rebuilt by createPlannerClients(), so switching planners resets both the
   // cache and the per-display seed latch below.
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr
