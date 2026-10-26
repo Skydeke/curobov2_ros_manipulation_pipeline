@@ -466,6 +466,51 @@ void PlannerServices::publish_plan_image(const curobo_runtime::PlanOutcome & out
   }
 }
 
+// Copy the request's non-cspace joints (locked fingers) onto every planned
+// waypoint. cuRobo's solver returns the lock value it planned with, which is
+// the task's pre-command state, not the state the task will be in when this
+// segment runs. The task constructor sends the segment's start pose with the
+// commanded jaw value; use it for both the returned trajectory and the ghost
+// preview so the two previews agree with the task chain.
+void apply_start_locks(
+  std::vector<sensor_msgs::msg::JointState> & trajectory,
+  const sensor_msgs::msg::JointState & start,
+  const std::vector<std::string> & cspace)
+{
+  if (start.name.empty() || start.position.empty()) {
+    return;
+  }
+  std::vector<std::pair<std::string, double>> locks;
+  const std::size_t n = std::min(start.name.size(), start.position.size());
+  for (std::size_t i = 0; i < n; ++i) {
+    if (std::find(cspace.begin(), cspace.end(), start.name[i]) == cspace.end()) {
+      locks.emplace_back(start.name[i], start.position[i]);
+    }
+  }
+  if (locks.empty()) {
+    return;
+  }
+  for (auto & point : trajectory) {
+    if (point.name.empty()) {
+      point.name = cspace;
+    }
+    for (const auto & lock : locks) {
+      const auto it = std::find(point.name.begin(), point.name.end(), lock.first);
+      if (it == point.name.end()) {
+        point.name.push_back(lock.first);
+        point.position.push_back(lock.second);
+        continue;
+      }
+      const std::size_t index = static_cast<std::size_t>(it - point.name.begin());
+      if (index < point.position.size()) {
+        point.position[index] = lock.second;
+      } else {
+        point.position.push_back(lock.second);
+      }
+    }
+  }
+}
+
 // PORT: single_planner._stage_trajectory - project + buffer a trajectory into
 // the RobotContext's command buffer. plan() calls this so a compute-only plan
 // is rendered for preview (GhostStrategy) and can be streamed later; it does
@@ -861,6 +906,7 @@ void PlannerServices::fill_result(
   out.stats.waypoints_planned = outcome.waypoints_planned;
   // PORT: single_planner.plan() -> _stage_trajectory (preview buffer) and
   // _publish_plan_image (once per new plan).
+  apply_start_locks(out.trajectory, resolved_goal.start_pose, joint_names_);
   stage_preview(out.trajectory);
   publish_plan_image(outcome);
   out.stats.solver_time_s = outcome.solver_time_s;

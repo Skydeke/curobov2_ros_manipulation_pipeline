@@ -220,6 +220,13 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     if (names.empty()) {
       names = joint_names_;
     }
+    // Keep the full-joint replay for the RViz ghost: the task's stored plan
+    // carries the commanded jaw value (open/closed) at this point in the
+    // chain. project_active_joints() below strips those columns for the
+    // controller, so feed the ghost first from the unprojected copy.
+    const std::vector<std::string> ghost_names = names;
+    const std::vector<std::vector<double>> ghost_positions = positions;
+    const std::vector<std::vector<double>> ghost_velocities = velocities;
     // PORT: single_planner._stage_trajectory - project the replayed full-joint
     // plan onto the active (controller) joints before streaming it.
     project_active_joints(names, positions, velocities);
@@ -233,7 +240,10 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
 
     // PORT: single_planner "Trajectory sent to robot context for visualization".
     RCLCPP_INFO(node_->get_logger(), "Trajectory sent to robot context for visualization");
-    const int epoch = robot_context_->set_command(names, velocities, {}, positions);
+    robot_context_->set_ghost_command(
+      ghost_names, ghost_velocities, {}, ghost_positions);
+    const int epoch = robot_context_->set_command(
+      names, velocities, {}, positions, /*feed_ghost=*/false);
     if (!robot_context_->send_trajectrory(epoch)) {
       result->result.success = false;
       result->result.message = "Execution failed";

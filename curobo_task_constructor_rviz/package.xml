@@ -30,6 +30,7 @@
   <depend>rviz_common</depend>
   <depend>trajectory_msgs</depend>
   <depend>visualization_msgs</depend>
+  <depend>yaml_cpp_vendor</depend>
 
   <exec_depend>libqt5-core</exec_depend>
   <exec_depend>libqt5-gui</exec_depend>

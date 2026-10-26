@@ -61,6 +61,10 @@ def test_gripper_stage_executes_without_a_plan_request():
     assert leaves and leaves[-1].gripper_command["position"] == 1.3
     assert leaves[-1].gripper_command["gripper"] == "left"
     assert leaves[-1].plan_request is None
+    # The command updates the chain state too: a motion leg planned after it
+    # must start from the commanded jaw value, not the planner's lock value.
+    end = ex.best().end.joint_state
+    assert dict(zip(end.name, end.position))["finger_joint"] == 1.3
     ex.execute(ex.best())
     assert robot.gripper_commands
     assert robot.gripper_commands[-1]["joint"] == "finger_joint"

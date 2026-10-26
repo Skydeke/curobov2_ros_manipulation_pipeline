@@ -195,7 +195,6 @@ def make_joint_state(joint_state_cls, names: list, positions: list) -> Any:
     if joint_state_cls is None:
         return JointStateStub(dict(zip(names, positions)))
     js = joint_state_cls()
-    js.header = type(js).__class__  # placeholder, replaced by adapter if needed
     js.name = list(names)
     js.position = [float(p) for p in positions]
     return js

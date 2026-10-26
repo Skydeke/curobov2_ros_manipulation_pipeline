@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.stage import PropagatingEitherWay, Solution
-from curobo_task_constructor.core.state import InterfaceState
+from curobo_task_constructor.core.state import InterfaceState, make_joint_state
 
 
 @register_stage("gripper_command")
@@ -35,6 +35,27 @@ class GripperCommand(PropagatingEitherWay):
     def _emit_command(self, state: InterfaceState, write_start: bool) -> None:
         cmd = self.command()
         end = state.clone()
+        # Carry the commanded jaw value in the state itself: downstream motion
+        # legs then plan (and preview) from the task's actual gripper state,
+        # not from the planner's stale lock-joint value. The planner's cspace
+        # ignores the extra joint; it is only there for the state chain, the
+        # solution's start/end snapshots and the ghost preview.
+        joint = cmd.get("joint")
+        if joint:
+            js = getattr(end, "joint_state", None)
+            names = list(getattr(js, "name", []) or [])
+            positions = list(getattr(js, "position", []) or [])
+            if joint in names:
+                index = names.index(joint)
+                if index < len(positions):
+                    positions[index] = float(cmd["position"])
+                else:
+                    positions.append(float(cmd["position"]))
+            else:
+                names.append(joint)
+                positions.append(float(cmd["position"]))
+            end = state.clone(joint_state=make_joint_state(
+                getattr(self.robot, "joint_state_cls", None), names, positions))
         target = cmd["joint"] or cmd["gripper"]
         sol = Solution(
             start=end if write_start else state,

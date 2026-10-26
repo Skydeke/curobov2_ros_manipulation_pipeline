@@ -58,6 +58,15 @@ def test_solution_to_dict_has_mtc_fields():
         assert traj["replay_goal"]["goalsets"]
 
 
+def test_solution_to_dict_carries_the_full_start_state():
+    """The display needs the finger the cspace-only motion points omit."""
+    _, ex = _planned()
+    d = ex.solution_to_dict(ex.best())
+    assert d["start_state"]["name"]
+    assert len(d["start_state"]["name"]) == len(d["start_state"]["position"])
+    assert "finger_joint" in d["start_state"]["name"]
+
+
 def test_sub_solution_tree_mirrors_children():
     _, ex = _planned()
     d = ex.solution_to_dict(ex.best())

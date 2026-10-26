@@ -85,7 +85,8 @@ int RobotContext::set_command(
   const std::vector<std::string> & joint_names,
   const std::vector<std::vector<double>> & vel_command,
   const std::vector<std::vector<double>> & accel_command,
-  const std::vector<std::vector<double>> & position_command)
+  const std::vector<std::vector<double>> & position_command,
+  bool feed_ghost)
 {
   std::lock_guard<std::mutex> lk(strategy_lock_);
   // PORT: RobotContext.set_command(joint_names=None) resolves the names from the
@@ -94,8 +95,10 @@ int RobotContext::set_command(
   // is the C++ spelling of None.
   const std::vector<std::string> names = resolve_command_names(joint_names);
   // PORT: the ghost preview is fed first, then the real strategy (its epoch is
-  // what the caller gets).
-  if (ghost_strategy_ != nullptr) {
+  // what the caller gets). The replay path passes feed_ghost=false and sends
+  // the full-joint preview itself, so the controller projection cannot strip
+  // the jaw columns from the ghost.
+  if (feed_ghost && ghost_strategy_ != nullptr) {
     ghost_strategy_->set_command(names, vel_command, accel_command, position_command);
     ghost_strategy_->send_trajectrory();
   }
@@ -104,6 +107,21 @@ int RobotContext::set_command(
   }
   return robot_strategy_->set_command(
     names, vel_command, accel_command, position_command);
+}
+
+void RobotContext::set_ghost_command(
+  const std::vector<std::string> & joint_names,
+  const std::vector<std::vector<double>> & vel_command,
+  const std::vector<std::vector<double>> & accel_command,
+  const std::vector<std::vector<double>> & position_command)
+{
+  std::lock_guard<std::mutex> lk(strategy_lock_);
+  if (ghost_strategy_ == nullptr) {
+    return;
+  }
+  const std::vector<std::string> names = resolve_command_names(joint_names);
+  ghost_strategy_->set_command(names, vel_command, accel_command, position_command);
+  ghost_strategy_->send_trajectrory();
 }
 
 // PORT: RobotContext.set_and_send_command

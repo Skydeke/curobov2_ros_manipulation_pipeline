@@ -45,7 +45,10 @@ class _ExecutorSerializationMixin:
         ops the executor applies before driving it, and the ``replay_goal``
         (the segment's planning goal) the execute server needs to replay the
         validated plan from the curobo_server trajectory cache instead of
-        re-solving. ``start_scene`` is the task's base-scene objects.
+        re-solving. ``start_scene`` is the task's base-scene objects;
+        ``start_state`` is the full joint state the task starts from (arm and
+        finger), which the RViz display uses for joints a cspace-only motion
+        segment does not name.
         """
         sub_solutions = []
 
@@ -61,6 +64,8 @@ class _ExecutorSerializationMixin:
         walk(sol)
         return {
             "task_id": self.task_id,
+            "start_state": _joint_state_to_dict(
+                getattr(getattr(sol, "start", None), "joint_state", None)),
             "start_scene": [
                 _object_spec_to_dict(spec)
                 for spec in self.base_scene.objects_added.values()

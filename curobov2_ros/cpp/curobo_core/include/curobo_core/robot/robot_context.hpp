@@ -41,6 +41,16 @@ public:
     const std::vector<std::string> & joint_names,
     const std::vector<std::vector<double>> & vel_command,
     const std::vector<std::vector<double>> & accel_command,
+    const std::vector<std::vector<double>> & position_command,
+    bool feed_ghost = true);
+  // Preview-only update: drive the ghost strategy without touching the active
+  // control strategy. Used by the replay path, which projects the stored
+  // full-joint plan to the controller's arm joints but must keep the finger
+  // columns in the RViz ghost so close/attach/lift shows the commanded jaws.
+  void set_ghost_command(
+    const std::vector<std::string> & joint_names,
+    const std::vector<std::vector<double>> & vel_command,
+    const std::vector<std::vector<double>> & accel_command,
     const std::vector<std::vector<double>> & position_command);
   // PORT: RobotContext.set_and_send_command
   bool set_and_send_command(

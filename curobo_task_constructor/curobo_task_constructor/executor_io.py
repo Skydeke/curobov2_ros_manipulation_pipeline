@@ -37,6 +37,22 @@ def _joint_positions(state) -> list:
     return [float(x) for x in positions]
 
 
+def _joint_state_to_dict(state) -> dict:
+    """JointState-like -> ``{"name": [...], "position": [...]}``.
+
+    The solution's start state travels with the display payload so a consumer
+    can fill joints a planned trajectory does not name (the planner's cspace
+    is arm-only, while the task state also carries the finger). Without it a
+    gripper-only waypoint has no arm pose to stand on and a missing finger
+    silently reads as the URDF default.
+    """
+    names = [str(n) for n in (getattr(state, "name", None) or [])]
+    positions = [float(p) for p in (getattr(state, "position", None) or [])]
+    if len(positions) < len(names):
+        names = names[:len(positions)]
+    return {"name": names, "position": positions}
+
+
 def _max_joint_delta(a, b) -> float:
     """Largest per-joint difference between two waypoints, in rad.
 
@@ -389,6 +405,7 @@ def drive_solution_dict(robot, d, applied_ops=None,
 __all__ = [
     'EXECUTE_CONTINUITY_TOLERANCE',
     '_joint_positions',
+    '_joint_state_to_dict',
     '_max_joint_delta',
     '_align_waypoint_positions',
     '_replay_trajectory_dict',

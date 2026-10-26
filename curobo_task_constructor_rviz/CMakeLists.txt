@@ -15,6 +15,9 @@ find_package(rclcpp_action REQUIRED)
 find_package(rviz_common REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(visualization_msgs REQUIRED)
+# SubTrajectory.replay_goal_yaml carries gripper commands; the panel parses it
+# to animate the jaws (a GripperCommand has no trajectory points of its own).
+find_package(yaml-cpp REQUIRED)
 
 # Qt: this rviz stack is Qt5-based — link Qt5::Widgets explicitly, the same
 # way curobov2_ros_rviz (sibling in this workspace) and upstream
@@ -72,7 +75,7 @@ ament_target_dependencies(${PROJECT_NAME}
   trajectory_msgs
   visualization_msgs
 )
-target_link_libraries(${PROJECT_NAME} Qt5::Widgets)
+target_link_libraries(${PROJECT_NAME} Qt5::Widgets yaml-cpp::yaml-cpp)
 
 # A genuinely missing symbol must fail the BUILD, not ship a silently broken
 # .so: an undefined vtable (e.g. from a stale/partial build) currently

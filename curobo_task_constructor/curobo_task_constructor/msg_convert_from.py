@@ -207,8 +207,17 @@ def msg_to_sub_trajectory(msg) -> dict:
 
 def msg_to_solution_dict(msg) -> dict:
     """Solution message -> solution_to_dict-shaped dict (for execute_dict)."""
+    start_js = getattr(
+        getattr(getattr(msg, "start_scene", None), "robot_state", None),
+        "joint_state", None)
     return {
         "task_id": str(getattr(msg, "task_id", "") or ""),
+        "start_state": {
+            "name": [str(n) for n in (
+                getattr(start_js, "name", None) or [])],
+            "position": [float(p) for p in (
+                getattr(start_js, "position", None) or [])],
+        },
         "start_scene": [],
         "sub_solution": [
             {"info": msg_to_solution_info(getattr(sub, "info", None)),

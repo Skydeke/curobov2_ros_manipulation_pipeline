@@ -124,10 +124,17 @@ def _install_stubs():
             self.object = _CollisionObject()
             self.link_name = ""
 
+    class _JointState:
+        def __init__(self):
+            self.name = _List()
+            self.position = _List()
+
     class _PlanningScene:
         def __init__(self):
             self.world = _msg(collision_objects=_List())
-            self.robot_state = _msg(attached_collision_objects=_List())
+            self.robot_state = _msg(
+                attached_collision_objects=_List(),
+                joint_state=_JointState())
             self.is_diff = False
 
     mmsg.RobotTrajectory = _RobotTraj
@@ -200,9 +207,16 @@ def test_solution_round_trip_through_messages():
         sub = msg.sub_trajectory[0]
         assert len(sub.trajectory.joint_trajectory.points) > 0
         assert sub.replay_goal_yaml.strip()
+        # The display payload carries the full task start pose, finger
+        # included; the cspace-only motion points cannot supply it.
+        assert msg.start_scene.robot_state.joint_state.name == \
+            d["start_state"]["name"]
+        assert msg.start_scene.robot_state.joint_state.position == \
+            d["start_state"]["position"]
 
         back = msg_convert.msg_to_solution_dict(msg)
         assert back["task_id"] == "t"
+        assert back["start_state"] == d["start_state"]
         assert len(back["sub_trajectories"]) == 1
         seg = back["sub_trajectories"][0]
         assert seg["trajectory"]["points"] == \

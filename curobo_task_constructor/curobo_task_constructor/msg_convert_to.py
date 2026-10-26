@@ -255,6 +255,17 @@ def solution_to_msg(d: dict, msg_cls=None):
     msg.task_id = str(d.get("task_id", "") or "")
     from moveit_msgs.msg import PlanningScene
     scene = PlanningScene()
+    # MTC's start_scene is a full planning scene, and its RobotState is the
+    # task's start pose. Carry it even when no object is in the base scene:
+    # the trajectory display needs the finger value that an arm-only cspace
+    # trajectory leaves out (otherwise the jaws silently read as the URDF
+    # default at every waypoint).
+    start_state = d.get("start_state", None) or {}
+    start_names = [str(n) for n in (start_state.get("name", None) or [])]
+    start_positions = [float(p) for p in (start_state.get("position", None) or [])]
+    if start_names and len(start_names) == len(start_positions):
+        scene.robot_state.joint_state.name = start_names
+        scene.robot_state.joint_state.position = start_positions
     for spec in (d.get("start_scene", None) or []):
         from moveit_msgs.msg import CollisionObject
         scene.world.collision_objects.append(

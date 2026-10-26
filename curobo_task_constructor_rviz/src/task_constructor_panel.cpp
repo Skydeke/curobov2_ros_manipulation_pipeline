@@ -33,6 +33,8 @@
 #include <QVBoxLayout>
 #include <visualization_msgs/msg/marker.hpp>
 
+#include <yaml-cpp/yaml.h>
+
 #include <algorithm>
 #include <cmath>
 #include <chrono>
@@ -162,6 +164,68 @@ QIcon flowIcon(uint8_t flags)
   painter.setPen(QColor(color));
   painter.drawText(QRectF(0, 0, 16, 16), Qt::AlignCenter, glyph);
   return QIcon(pm);
+}
+
+/// One jaw command carried by a SubTrajectory's replay goal.
+struct GripperCommandStep
+{
+  std::string joint;
+  double position = 0.0;
+  bool valid = false;
+};
+
+/// Read ``gripper_command`` out of a SubTrajectory.replay_goal_yaml.
+///
+/// GripperCommand is deliberately not planned, so its SubTrajectory has no
+/// trajectory points; the commanded joint/value only exists in the replay
+/// goal. The trajectory display otherwise sees no jaw motion at all and
+/// leaves the fingers at the URDF default (or at the last plan's value).
+GripperCommandStep parseGripperCommand(const std::string& text)
+{
+  GripperCommandStep out;
+  if (text.empty())
+    return out;
+  try
+  {
+    const YAML::Node root = YAML::Load(text);
+    const YAML::Node cmd = root["gripper_command"];
+    if (!cmd || !cmd.IsMap())
+      return out;
+    const YAML::Node joint = cmd["joint"];
+    if (!joint || !joint.IsScalar())
+      return out;
+    out.joint = joint.as<std::string>();
+    if (out.joint.empty())
+      return out;
+    const YAML::Node position = cmd["position"];
+    if (position && position.IsScalar())
+      out.position = position.as<double>();
+    out.valid = true;
+  }
+  catch (const std::exception&)
+  {
+    return GripperCommandStep{};
+  }
+  return out;
+}
+
+/// Copy the joints a waypoint names into the canonical value vector.
+///
+/// Joints the waypoint does not name are left untouched: a cspace-only motion
+/// point must not reset the finger, and a gripper-only command point must not
+/// reset the arm.
+void applyJointState(
+    const sensor_msgs::msg::JointState& wp,
+    const std::vector<std::string>& names,
+    std::vector<double>& values)
+{
+  const size_t n = std::min(wp.name.size(), wp.position.size());
+  for (size_t j = 0; j < n; ++j)
+  {
+    const auto it = std::find(names.begin(), names.end(), wp.name[j]);
+    if (it != names.end())
+      values[static_cast<size_t>(it - names.begin())] = wp.position[j];
+  }
 }
 }  // namespace
 
@@ -1678,12 +1742,50 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(SolutionShared s
   std::vector<sensor_msgs::msg::JointState> out;
   if (!sol)
     return out;
+
+  // Gripper joints are driven by GripperCommand stages, never by the motion
+  // planner. cuRobo's full-DOF plan points still carry the jaw's plan-time
+  // lock value (normally 0.0 = open), so letting those points through would
+  // overwrite a commanded close and make the retreat/return animate open.
+  // Collect the commanded joints first and drop them from every motion point;
+  // the one-joint command waypoints below remain the sole source of jaw state.
+  std::vector<std::string> commanded_joints;
+  for (const auto& sub : sol->sub_trajectory) {
+    const GripperCommandStep cmd = parseGripperCommand(sub.replay_goal_yaml);
+    if (cmd.valid &&
+        std::find(commanded_joints.begin(), commanded_joints.end(), cmd.joint) ==
+            commanded_joints.end()) {
+      commanded_joints.push_back(cmd.joint);
+    }
+  }
+
+  // The start_scene carries the task's full start pose, finger included. The
+  // motion points are stripped of the commanded jaw joints below, so without
+  // this leading point every display frame falls back to the URDF default for
+  // the jaws until the first gripper command.
+  const auto& start = sol->start_scene.robot_state.joint_state;
+  if (!start.name.empty() && !start.position.empty()) {
+    sensor_msgs::msg::JointState wp;
+    wp.name = start.name;
+    wp.position = start.position;
+    out.push_back(std::move(wp));
+  }
+
   for (const auto& sub : sol->sub_trajectory) {
     const auto& jt = sub.trajectory.joint_trajectory;
     for (const auto& pt : jt.points) {
       sensor_msgs::msg::JointState wp;
-      wp.name = jt.joint_names;
-      wp.position = pt.positions;
+      const size_t n = std::min(jt.joint_names.size(), pt.positions.size());
+      for (size_t j = 0; j < n; ++j) {
+        if (std::find(commanded_joints.begin(), commanded_joints.end(),
+                      jt.joint_names[j]) != commanded_joints.end()) {
+          continue;
+        }
+        wp.name.push_back(jt.joint_names[j]);
+        wp.position.push_back(pt.positions[j]);
+      }
+      if (wp.position.empty())
+        continue;
       if (!out.empty() && !wp.position.empty() && !out.back().position.empty() &&
           out.back().position.size() == wp.position.size() && out.back().name == wp.name) {
         bool same = true;
@@ -1697,6 +1799,17 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(SolutionShared s
           continue;
       }
       out.push_back(wp);
+    }
+
+    // A gripper command is a zero-length segment (no trajectory points); its
+    // commanded value lives in the replay goal. Emit it as a one-joint
+    // waypoint so the jaws actually open/close at this point in the chain.
+    const GripperCommandStep cmd = parseGripperCommand(sub.replay_goal_yaml);
+    if (cmd.valid) {
+      sensor_msgs::msg::JointState wp;
+      wp.name = {cmd.joint};
+      wp.position = {cmd.position};
+      out.push_back(std::move(wp));
     }
   }
   return out;
@@ -1737,48 +1850,50 @@ void TaskView::publishSolutionTrajectory(
     return;
   trajectory_msgs::msg::JointTrajectory msg;
   if (!waypoints.empty()) {
-    msg.joint_names = waypoints.front().name;
-    double t = 0.0;
+    // Canonical joint order: every name any waypoint carries, first seen.
+    // A later waypoint can carry a different subset (an arm-only plan vs. the
+    // full start state, or a gripper-only command), so a fixed positional
+    // width would drive the wrong joint or silently drop the point.
     for (const auto& wp : waypoints) {
-      // A later waypoint can carry the same joints in a different order (a
-      // plan response vs. a /joint_states-seeded point, or a different
-      // subset). Appending positions positionally would then drive the wrong
-      // joint in the ghost — the "gripper folds while the arm is still" look.
-      std::vector<double> positions;
-      if (wp.name.empty() || wp.name == msg.joint_names) {
-        positions = wp.position;
-      } else {
-        positions.assign(msg.joint_names.size(), 0.0);
-        bool aligned = true;
-        for (size_t j = 0; j < msg.joint_names.size(); ++j) {
-          const auto it = std::find(
-              wp.name.begin(), wp.name.end(), msg.joint_names[j]);
-          const size_t idx =
-              (it == wp.name.end()) ? wp.name.size()
-                                    : static_cast<size_t>(it - wp.name.begin());
-          if (idx >= wp.position.size()) {
-            aligned = false;
-            break;
-          }
-          positions[j] = wp.position[idx];
-        }
-        if (!aligned) {
-          // No shared ordering: keep the point only when the width agrees
-          // (legacy positional layout), otherwise drop it.
-          if (wp.position.size() != msg.joint_names.size())
-            continue;
-          positions = wp.position;
+      for (const auto& name : wp.name) {
+        if (std::find(msg.joint_names.begin(), msg.joint_names.end(), name) ==
+            msg.joint_names.end()) {
+          msg.joint_names.push_back(name);
         }
       }
-      if (positions.size() < msg.joint_names.size())
-        continue;
-      positions.resize(msg.joint_names.size());
-      trajectory_msgs::msg::JointTrajectoryPoint pt;
-      pt.positions = std::move(positions);
-      pt.time_from_start.sec = static_cast<int32_t>(t);
-      pt.time_from_start.nanosec = static_cast<uint32_t>((t - static_cast<int32_t>(t)) * 1e9);
-      t += 0.05;
-      msg.points.push_back(pt);
+    }
+    if (!msg.joint_names.empty()) {
+      // Seed the carry-forward state from the widest waypoint (normally the
+      // start state the panel prepends). Every later point only overwrites
+      // the joints it names, so an arm-only motion leaves the finger where
+      // the last gripper command put it, and a gripper-only command leaves
+      // the arm where it is.
+      std::vector<double> carried(msg.joint_names.size(), 0.0);
+      size_t seed_width = 0;
+      for (const auto& wp : waypoints) {
+        if (wp.position.size() <= seed_width)
+          continue;
+        seed_width = wp.position.size();
+        carried.assign(msg.joint_names.size(), 0.0);
+        applyJointState(wp, msg.joint_names, carried);
+      }
+      double t = 0.0;
+      for (const auto& wp : waypoints) {
+        if (!wp.name.empty()) {
+          applyJointState(wp, msg.joint_names, carried);
+        } else if (wp.position.size() == msg.joint_names.size()) {
+          carried = wp.position;
+        } else {
+          continue;
+        }
+        trajectory_msgs::msg::JointTrajectoryPoint pt;
+        pt.positions = carried;
+        pt.time_from_start.sec = static_cast<int32_t>(t);
+        pt.time_from_start.nanosec =
+            static_cast<uint32_t>((t - static_cast<int32_t>(t)) * 1e9);
+        t += 0.05;
+        msg.points.push_back(pt);
+      }
     }
   }
   pub_solution_trajectory_->publish(msg);
