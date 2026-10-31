@@ -127,11 +127,6 @@ protected:
 
   std::string action_topic_;
   using FollowJT = control_msgs::action::FollowJointTrajectory;
-  rclcpp_action::Client<FollowJT>::SharedPtr action_client_;
-  rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr action_goal_handle_;
-  int action_seq_ = 0;
-  std::optional<double> action_last_progress_;
-  double action_total_duration_s_ = 0.0;
   struct ActionResult
   {
     bool succeeded = false;
@@ -139,7 +134,23 @@ protected:
     int error_code = 0;
     std::string error_string;
   };
-  std::optional<ActionResult> action_result_;
+  // One FollowJointTrajectory controller that owns a subset of the cspace.
+  // MoveIt-style dispatch: a single planned trajectory is split by joint across
+  // every route and executed on the controllers in parallel. With no
+  // controller config the strategy keeps the legacy behaviour: ONE route on
+  // ``action_topic`` owning every joint.
+  struct ControllerRoute
+  {
+    std::string action;
+    std::vector<std::string> joints;
+    rclcpp_action::Client<FollowJT>::SharedPtr client;
+    rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr goal_handle;
+    std::optional<double> last_progress;
+    std::optional<ActionResult> result;
+  };
+  std::vector<ControllerRoute> routes_;
+  int action_seq_ = 0;
+  double action_total_duration_s_ = 0.0;
 };
 
 }  // namespace curobo_core

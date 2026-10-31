@@ -11,6 +11,72 @@
 namespace curobo_core
 {
 
+namespace
+{
+
+// Split a whitespace/comma separated list, tolerating the Python list repr
+// ("['a', 'b']") the descriptor bridge produces for YAML sequences.
+std::vector<std::string> split_tokens(const std::string & text)
+{
+  std::vector<std::string> out;
+  std::string current;
+  for (const char c : text) {
+    const bool separator =
+      c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '\r' ||
+      c == '[' || c == ']' || c == '\'' || c == '"';
+    if (separator) {
+      if (!current.empty()) {
+        out.push_back(current);
+        current.clear();
+      }
+    } else {
+      current.push_back(c);
+    }
+  }
+  if (!current.empty()) {
+    out.push_back(current);
+  }
+  return out;
+}
+
+// MoveIt simple_controller_manager behaviour: hand a controller ONLY the
+// joints it owns, in the controller's own order.
+trajectory_msgs::msg::JointTrajectory project_trajectory(
+  const trajectory_msgs::msg::JointTrajectory & msg,
+  const std::vector<std::string> & joints)
+{
+  trajectory_msgs::msg::JointTrajectory out;
+  out.header = msg.header;
+  std::vector<std::size_t> cols;
+  for (const std::string & joint : joints) {
+    const auto it = std::find(msg.joint_names.begin(), msg.joint_names.end(), joint);
+    if (it == msg.joint_names.end()) {
+      continue;
+    }
+    out.joint_names.push_back(joint);
+    cols.push_back(static_cast<std::size_t>(it - msg.joint_names.begin()));
+  }
+  for (const auto & point : msg.points) {
+    trajectory_msgs::msg::JointTrajectoryPoint np;
+    np.time_from_start = point.time_from_start;
+    for (const std::size_t col : cols) {
+      np.positions.push_back(col < point.positions.size() ? point.positions[col] : 0.0);
+      if (!point.velocities.empty()) {
+        np.velocities.push_back(
+          col < point.velocities.size() ? point.velocities[col] : 0.0);
+      }
+      if (!point.accelerations.empty()) {
+        np.accelerations.push_back(
+          col < point.accelerations.size() ? point.accelerations[col] : 0.0);
+      }
+    }
+    out.points.push_back(std::move(np));
+  }
+  return out;
+}
+
+}  // namespace
+
 JointCommandStrategy::JointCommandStrategy(
   rclcpp::Node * node, double dt, std::vector<std::string> joint_names,
   std::map<std::string, std::string> params)
@@ -19,6 +85,40 @@ JointCommandStrategy::JointCommandStrategy(
   auto it = params_.find("action_topic");
   if (it != params_.end()) {
     action_topic_ = it->second;
+  }
+
+  // MoveIt-style multi-controller dispatch. A robot whose cspace is split over
+  // several controllers declares them here; the whole trajectory is then split
+  // by joint and executed on each controller in parallel:
+  //
+  //   strategy_params:
+  //     controller_names: "torso_controller arm_controller"
+  //     torso_controller.action: /torso_controller/follow_joint_trajectory
+  //     torso_controller.joints: "torso_lift_joint"
+  //     arm_controller.action: /arm_controller/follow_joint_trajectory
+  //     arm_controller.joints: "arm_1_joint arm_2_joint ... arm_7_joint"
+  auto names_it = params_.find("controller_names");
+  if (names_it != params_.end()) {
+    for (const std::string & name : split_tokens(names_it->second)) {
+      const auto action_it = params_.find(name + ".action");
+      const auto joints_it = params_.find(name + ".joints");
+      if (action_it == params_.end() || joints_it == params_.end()) {
+        throw std::runtime_error(
+          "strategy_params.controller_names lists '" + name + "' but '" + name +
+          ".action' / '" + name + ".joints' are not both set");
+      }
+      ControllerRoute route;
+      route.action = action_it->second;
+      route.joints = split_tokens(joints_it->second);
+      routes_.push_back(std::move(route));
+    }
+  }
+  // Legacy single-controller path: one route owning every cspace joint.
+  if (routes_.empty() && !action_topic_.empty()) {
+    ControllerRoute route;
+    route.action = action_topic_;
+    route.joints = joint_names_;
+    routes_.push_back(std::move(route));
   }
 }
 
@@ -145,103 +245,128 @@ std::int64_t JointCommandStrategy::buffer_epoch() const
 std::string JointCommandStrategy::action_failure_summary()
 {
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-  if (action_result_ && !action_result_->succeeded) {
-    std::string msg = "status=" + std::to_string(action_result_->status) +
-      " error_code=" + std::to_string(action_result_->error_code) + " " +
-      action_result_->error_string;
-    while (!msg.empty() && msg.back() == ' ') {
-      msg.pop_back();
+  for (const auto & route : routes_) {
+    if (route.result && !route.result->succeeded) {
+      std::string msg = route.action + ": status=" +
+        std::to_string(route.result->status) + " error_code=" +
+        std::to_string(route.result->error_code) + " " + route.result->error_string;
+      while (!msg.empty() && msg.back() == ' ') {
+        msg.pop_back();
+      }
+      return msg;
     }
-    return msg;
   }
   return "";
 }
 
-// PORT: JointCommandStrategy._send_as_action - the ONE execution path.
+// PORT: JointCommandStrategy._send_as_action - the ONE execution path. With
+// several routes the trajectory is split by joint and every controller is
+// driven in parallel; the goal succeeds only if all of them succeed.
 void JointCommandStrategy::send_as_action(
   const trajectory_msgs::msg::JointTrajectory & msg,
   const std::vector<std::vector<double>> & positions)
 {
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-  action_result_.reset();
-  action_last_progress_.reset();
+  for (auto & route : routes_) {
+    route.result.reset();
+    route.last_progress.reset();
+    route.goal_handle.reset();
+  }
   action_seq_ += 1;
   const int seq = action_seq_;
 
   const int n = static_cast<int>(msg.points.size());
   action_total_duration_s_ = dilated_dt() * std::max(n - 1, 0);
 
-  if (action_topic_.empty()) {
-    action_result_ = ActionResult{
-      false, 0, 0,
-      "strategy_params.action_topic not configured — the FollowJointTrajectory "
-      "action is the only execution path"};
+  if (routes_.empty()) {
     throw std::runtime_error(
-      std::string("strategy_params.action_topic must name the "
-      "FollowJointTrajectory action (e.g. /joint_trajectory_controller/"
-      "follow_joint_trajectory) — the action is the only execution path"));
+      std::string("strategy_params must name either action_topic or "
+      "controller_names + <controller>.action/<controller>.joints — the "
+      "FollowJointTrajectory action is the only execution path"));
   }
 
-  if (!action_client_) {
-    action_client_ = rclcpp_action::create_client<FollowJT>(node_, action_topic_);
-  }
-  if (!action_client_->wait_for_action_server(std::chrono::seconds(5))) {
-    action_result_ = ActionResult{
-      false, 0, 0,
-      "FollowJointTrajectory action server " + action_topic_ + " not available"};
-    throw std::runtime_error(
-      "FollowJointTrajectory action server " + action_topic_ +
-      " is not available; refusing to fall back to topic publish");
+  for (auto & route : routes_) {
+    if (!route.client) {
+      route.client = rclcpp_action::create_client<FollowJT>(node_, route.action);
+    }
+    if (!route.client->wait_for_action_server(std::chrono::seconds(5))) {
+      route.result = ActionResult{
+        false, 0, 0,
+        "FollowJointTrajectory action server " + route.action + " not available"};
+      throw std::runtime_error(
+        "FollowJointTrajectory action server " + route.action +
+        " is not available; refusing to fall back to topic publish");
+    }
   }
 
-  FollowJT::Goal goal;
-  goal.trajectory = msg;
-  rclcpp_action::Client<FollowJT>::SendGoalOptions options;
-  options.feedback_callback =
-    [this, seq](rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr,
-      const std::shared_ptr<const FollowJT::Feedback> feedback) {
-      std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-      if (seq != action_seq_) {
-        return;
-      }
-      const auto & t = feedback->desired.time_from_start;
-      const double ts = static_cast<double>(t.sec) + static_cast<double>(t.nanosec) * 1e-9;
-      if (action_total_duration_s_ > 0.0) {
-        action_last_progress_ = std::min(1.0, std::max(0.0, ts / action_total_duration_s_));
-      }
-    };
-  options.result_callback =
-    [this, seq](const rclcpp_action::ClientGoalHandle<FollowJT>::WrappedResult & wrapped) {
-      std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-      if (seq != action_seq_) {
-        return;
-      }
-      const bool succeeded =
-        wrapped.code == rclcpp_action::ResultCode::SUCCEEDED;
-      ActionResult result;
-      result.succeeded = succeeded;
-      result.status = static_cast<int>(wrapped.code);
-      result.error_code = wrapped.result ? wrapped.result->error_code : 0;
-      result.error_string = wrapped.result ? wrapped.result->error_string : "";
-      // PORT: _action_result_done
-      action_result_ = result;
-      action_last_progress_ = succeeded ? std::make_optional(1.0) : std::nullopt;
-    };
-  // PORT: _action_goal_response - keep the accepted handle so it can be canceled.
-  options.goal_response_callback =
-    [this, seq](rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr goal_handle) {
-      std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-      if (seq != action_seq_) {
-        return;
-      }
-      if (!goal_handle) {
-        action_result_ = ActionResult{
-          false, 0, 0, "action goal rejected / not accepted"};
-        return;
-      }
-      action_goal_handle_ = goal_handle;
-    };
-  action_client_->async_send_goal(goal, options);
+  for (auto & route : routes_) {
+    FollowJT::Goal goal;
+    goal.trajectory = project_trajectory(msg, route.joints);
+    ControllerRoute * route_ptr = &route;
+    rclcpp_action::Client<FollowJT>::SendGoalOptions options;
+    options.feedback_callback =
+      [this, seq, route_ptr](
+        rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr,
+        const std::shared_ptr<const FollowJT::Feedback> feedback) {
+        std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+        if (seq != action_seq_) {
+          return;
+        }
+        const auto & t = feedback->desired.time_from_start;
+        const double ts = static_cast<double>(t.sec) +
+          static_cast<double>(t.nanosec) * 1e-9;
+        if (action_total_duration_s_ > 0.0) {
+          route_ptr->last_progress =
+            std::min(1.0, std::max(0.0, ts / action_total_duration_s_));
+        }
+      };
+    options.result_callback =
+      [this, seq, route_ptr](
+        const rclcpp_action::ClientGoalHandle<FollowJT>::WrappedResult & wrapped) {
+        std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+        if (seq != action_seq_) {
+          return;
+        }
+        const bool succeeded =
+          wrapped.code == rclcpp_action::ResultCode::SUCCEEDED;
+        ActionResult result;
+        result.succeeded = succeeded;
+        result.status = static_cast<int>(wrapped.code);
+        result.error_code = wrapped.result ? wrapped.result->error_code : 0;
+        result.error_string = wrapped.result ? wrapped.result->error_string : "";
+        route_ptr->result = result;
+        route_ptr->last_progress = succeeded ? std::make_optional(1.0) : std::nullopt;
+        // MoveIt cancels the remaining controllers when one aborts: a dead
+        // peer must not let the others keep tracking the plan on their own.
+        if (!succeeded) {
+          for (auto & other : routes_) {
+            if (&other == route_ptr || !other.goal_handle || !other.client) {
+              continue;
+            }
+            try {
+              other.client->async_cancel_goal(other.goal_handle);
+            } catch (const std::exception &) {
+              // best-effort
+            }
+          }
+        }
+      };
+    options.goal_response_callback =
+      [this, seq, route_ptr](
+        rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr goal_handle) {
+        std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+        if (seq != action_seq_) {
+          return;
+        }
+        if (!goal_handle) {
+          route_ptr->result = ActionResult{
+            false, 0, 0, "action goal rejected / not accepted"};
+          return;
+        }
+        route_ptr->goal_handle = goal_handle;
+      };
+    route.client->async_send_goal(goal, options);
+  }
 
   mark_execution_start(n, positions);
 }
@@ -258,17 +383,23 @@ void JointCommandStrategy::clear_execution_timer()
 // PORT: JointCommandStrategy._cancel_action (from stop_robot)
 void JointCommandStrategy::cancel_action()
 {
-  rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr goal_handle;
+  std::vector<rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr> handles;
+  std::vector<rclcpp_action::Client<FollowJT>::SharedPtr> clients;
   {
     std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-    goal_handle = action_goal_handle_;
-    action_goal_handle_.reset();
-    action_result_ = ActionResult{false, 0, 0, "canceled"};
+    for (auto & route : routes_) {
+      if (route.goal_handle && route.client) {
+        handles.push_back(route.goal_handle);
+        clients.push_back(route.client);
+      }
+      route.goal_handle.reset();
+      route.result = ActionResult{false, 0, 0, "canceled"};
+    }
     action_seq_ += 1;
   }
-  if (goal_handle && action_client_) {
+  for (std::size_t i = 0; i < handles.size(); ++i) {
     try {
-      action_client_->async_cancel_goal(goal_handle);
+      clients[i]->async_cancel_goal(handles[i]);
     } catch (const std::exception &) {
       // best-effort: cancel must not throw out of a stop path
     }
@@ -276,20 +407,34 @@ void JointCommandStrategy::cancel_action()
 }
 
 // PORT: JointCommandStrategy._get_progression - the action is the ONLY source.
+// With several routes the run is complete only when ALL have succeeded; while
+// running, report the slowest controller.
 double JointCommandStrategy::action_progression()
 {
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-  if (action_result_) {
-    return action_result_->succeeded ? 1.0 : -1.0;
+  if (routes_.empty()) {
+    return 0.0;
   }
-  if (action_last_progress_) {
-    // action_last_progress_ is derived from the *desired* time_from_start in
-    // the feedback, so it hits 1.0 when the trajectory is scheduled to end,
-    // not when the robot has arrived. Never report completion from it: only
-    // the result callback (action_result_) may claim the execution finished.
-    return std::min(*action_last_progress_, 0.99);
+  bool all_done = true;
+  bool any_running = false;
+  double min_progress = 1.0;
+  for (const auto & route : routes_) {
+    if (route.result) {
+      if (!route.result->succeeded) {
+        return -1.0;
+      }
+    } else {
+      all_done = false;
+      any_running = true;
+      const double p = route.last_progress ?
+        std::min(*route.last_progress, 0.99) : 0.0;
+      min_progress = std::min(min_progress, p);
+    }
   }
-  return 0.0;
+  if (all_done) {
+    return 1.0;
+  }
+  return any_running ? min_progress : 0.0;
 }
 
 }  // namespace curobo_core
