@@ -12,11 +12,14 @@ from typing import Any, Optional
 
 from geometry_msgs.msg import Point, Pose as RosPose, Quaternion, Vector3
 from control_msgs.action import (
+    FollowJointTrajectory as FollowJointTrajectoryAction,
     GripperCommand as GripperCommandAction,
     ParallelGripperCommand as ParallelGripperCommandAction,
 )
+from builtin_interfaces.msg import Duration
 from rclpy.action import ActionClient
 from sensor_msgs.msg import JointState
+from trajectory_msgs.msg import JointTrajectoryPoint
 from std_srvs.srv import Trigger
 
 from curobov2_ros_interfaces.action import SendTrajectory
@@ -395,19 +398,43 @@ class _PlanClientMixin:
         timeout = float(cfg.get("timeout", 5.0) or 5.0)
         name = controller or cfg.get("name") or "gripper"
         ns = action_ns or cfg.get("action_ns") or "gripper_cmd"
-        action = f"/{name}/{ns}" if name else ns
+        # JointTrajectory grippers are FollowJointTrajectory controllers, not
+        # GripperCommand ones (TIAGo's pal-gripper). One point, all joints to
+        # `position`.
+        is_traj = gtype in ("JointTrajectory", "FollowJointTrajectory")
+        action = (
+            f"/{name}/follow_joint_trajectory" if is_traj and name
+            else (f"/{name}/{ns}" if name else ns)
+        )
         effort = float(effort) or float(max_effort) or float(
             cfg.get("max_effort") or 0.0)
         client = self._gripper_clients.get(action)
         if client is None:
-            action_type = (ParallelGripperCommandAction
-                           if gtype == "ParallelGripperCommand"
-                           else GripperCommandAction)
+            if is_traj:
+                action_type = FollowJointTrajectoryAction
+            elif gtype == "ParallelGripperCommand":
+                action_type = ParallelGripperCommandAction
+            else:
+                action_type = GripperCommandAction
             client = ActionClient(self._node, action_type, action)
             self._gripper_clients[action] = client
         if not client.wait_for_server(timeout_sec=timeout):
             return PlanResult(False, f"gripper action {action} unavailable")
-        if gtype == "ParallelGripperCommand":
+        if is_traj:
+            joints = list(cfg.get("joints") or ([joint] if joint else []))
+            if not joints:
+                return PlanResult(False, f"gripper {gripper!r} lists no joints")
+            goal = FollowJointTrajectoryAction.Goal()
+            goal.trajectory.joint_names = [str(j) for j in joints]
+            point = JointTrajectoryPoint()
+            point.positions = [float(position)] * len(joints)
+            point.velocities = [0.0] * len(joints)
+            duration = float(cfg.get("time_from_start", 2.0) or 2.0)
+            point.time_from_start = Duration(
+                sec=int(duration), nanosec=int((duration % 1) * 1e9))
+            goal.trajectory.points = [point]
+            label = f"{'/'.join(joints)}={float(position)}"
+        elif gtype == "ParallelGripperCommand":
             joints = list(cfg.get("joints") or ([joint] if joint else []))
             if not joints:
                 return PlanResult(False, f"gripper {gripper!r} lists no joints")
