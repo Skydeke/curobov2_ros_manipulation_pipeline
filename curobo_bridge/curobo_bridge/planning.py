@@ -103,6 +103,30 @@ def reset_seed(handle: int) -> None:
     planner = entry.get("motion_planner")
     if planner is not None:
         planner.reset_seed()
+def _clamp_to_limits(entry, positions):
+    """Snap a joint vector into the cspace position limits.
+
+    Gazebo (and some hardware drivers) report an at-rest joint a hair OUTSIDE
+    its [lower, upper] bound - e.g. -3e-9 when the limit is exactly 0.0, which
+    is common for robots whose zero pose sits on a joint stop (OpenArm's
+    joint4 and lift). cuRobo's cspace constraint then rejects the *start*
+    state outright ("Start or End state in collision") and no planner will
+    move, even though the state is physically fine. Clamp, don't tolerate: the
+    limit check is an exact `lo - q <= 0` test.
+    """
+    import numpy as np
+    try:
+        limits = entry["kin"].get_joint_limits().position.detach().cpu().numpy()
+    except Exception:
+        return positions
+    limits = limits.astype(np.float32)
+    if limits.shape != (2, positions.shape[-1]):
+        return positions
+    lo, hi = limits[0], limits[1]
+    eps = np.minimum(1e-6, 0.25 * np.maximum(hi - lo, 1e-9))
+    return np.clip(positions, lo + eps, hi - eps).astype(positions.dtype)
+
+
 def plan_cspace(handle: int, req) -> dict:
     """Joint-space plan (PORT: joint_space_planner._plan_trajectory)."""
     import numpy as np
@@ -114,9 +138,10 @@ def plan_cspace(handle: int, req) -> dict:
     device = torch.device("cuda", torch.cuda.current_device())
 
     start = torch.tensor(
-        [list(np.asarray(req["start"], dtype=np.float32))], dtype=torch.float32, device=device)
+        [list(_clamp_to_limits(entry, np.asarray(req["start"], dtype=np.float32)))],
+        dtype=torch.float32, device=device)
     goal = torch.tensor(
-        [list(np.asarray(req["joint_target"], dtype=np.float32))],
+        [list(_clamp_to_limits(entry, np.asarray(req["joint_target"], dtype=np.float32)))],
         dtype=torch.float32, device=device)
     names = planner.kinematics.joint_names
     start_state = JointState.from_position(start, joint_names=names)
@@ -137,7 +162,8 @@ def plan_pose(handle: int, req) -> dict:
     device = torch.device("cuda", torch.cuda.current_device())
 
     start = torch.tensor(
-        [list(np.asarray(req["start"], dtype=np.float32))], dtype=torch.float32, device=device)
+        [list(_clamp_to_limits(entry, np.asarray(req["start"], dtype=np.float32)))],
+        dtype=torch.float32, device=device)
     start_state = JointState.from_position(start, joint_names=planner.kinematics.joint_names)
 
     goalset_arg = req.get("goalset")
@@ -151,7 +177,34 @@ def plan_pose(handle: int, req) -> dict:
         position=torch.tensor(goalset[:, 0:3], dtype=torch.float32, device=device),
         quaternion=torch.tensor(goalset[:, 3:7], dtype=torch.float32, device=device))
     tool_frame = planner.tool_frames[0]
-    goal = GoalToolPose.from_poses({tool_frame: pose}, num_goalset=len(goalset))
+    from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
+
+    # A bimanual robot (e.g. OpenArm) configures one tool frame per arm, but the
+    # caller only ever targets the active arm. cuRobo's IK requires a goal entry
+    # for EVERY configured tool link (`GoalToolPose.reorder_links` raises
+    # "Ordered link names [...] not a subset of [...]" otherwise), so the
+    # passive frames are pinned to their current FK pose and their pose weight
+    # is zeroed to leave them unconstrained. Single-arm robots (TIAGo, KATE)
+    # keep the exact old goal, one frame and all.
+    passive_frames = list(planner.tool_frames[1:])
+    passive_criteria = {}
+    if passive_frames:
+        fk = planner.kinematics.compute_kinematics(start_state)
+        pose_dict = {tool_frame: pose}
+        for frame in passive_frames:
+            here = fk.tool_poses.get_link_pose(frame)
+            pose_dict[frame] = Pose(
+                position=here.position.repeat(len(goalset), 1).contiguous(),
+                quaternion=here.quaternion.repeat(len(goalset), 1).contiguous())
+            passive_criteria[frame] = ToolPoseCriteria(
+                terminal_pose_axes_weight_factor=[0.0] * 6,
+                non_terminal_pose_axes_weight_factor=[0.0] * 6)
+        goal = GoalToolPose.from_poses(
+            pose_dict, ordered_tool_frames=list(planner.tool_frames),
+            num_goalset=len(goalset))
+        planner.update_tool_pose_criteria(passive_criteria)
+    else:
+        goal = GoalToolPose.from_poses({tool_frame: pose}, num_goalset=len(goalset))
 
     # PORT: single_planner._apply_pose_constraints - hold the requested Cartesian
     # axes along the whole path (Goalset.trajectory_constraints order
@@ -160,8 +213,6 @@ def plan_pose(handle: int, req) -> dict:
     # trace the straight line; without it the solve curves and the achieved
     # fraction check rejects it. The MotionPlanner is SHARED, so the default
     # (unconstrained) criteria are restored right after the solve.
-    from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
-
     constraints = [int(c) for c in (req.get("trajectory_constraints") or [])]
     applied = len(constraints) == 6 and any(c == 1 for c in constraints)
     if applied:
@@ -177,6 +228,9 @@ def plan_pose(handle: int, req) -> dict:
     finally:
         if applied:
             planner.update_tool_pose_criteria({tool_frame: ToolPoseCriteria()})
+        if passive_frames:
+            planner.update_tool_pose_criteria(
+                {frame: ToolPoseCriteria() for frame in passive_frames})
     return _plan_outcome(planner, result)
 
 from .runtime import _REGISTRY
