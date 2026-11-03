@@ -33,7 +33,12 @@ public:
   // ---- M2 ----
   void robot_model_build(RobotHandle handle, const std::string & cfg_json) override;
   TensorF32 fk(RobotHandle handle, const TensorF32 & q) override;
-  IkOutcome ik(RobotHandle handle, const TensorF32 & poses) override;
+  LinkPosesOutcome link_poses(
+    RobotHandle handle, const TensorF32 & q,
+    const std::vector<std::string> & link_names) override;
+  IkOutcome ik(
+    RobotHandle handle, const TensorF32 & poses,
+    const std::string & tool_frame = "") override;
   void ik_config(
     RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,
     bool use_lm_seed, bool use_cuda_graph) override;

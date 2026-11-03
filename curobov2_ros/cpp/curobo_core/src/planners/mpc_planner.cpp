@@ -62,10 +62,12 @@ void MPCController::ensure_solver()
   const auto extent = node->has_parameter("mapper_extent_xyz") ?
     node->get_parameter("mapper_extent_xyz").as_double_array() :
     std::vector<double>{2.0, 2.0, 2.0};
+  const double voxel_size = param_double("voxel_size", 0.05);
+  const double margin = voxel_size > 0.0 ? 2.0 * voxel_size : 0.0;
   for (std::size_t i = 0; i < extent.size(); ++i) {
-    cache << (i ? "," : "") << extent[i];
+    cache << (i ? "," : "") << (extent[i] + margin);
   }
-  cache << "],\"voxel_size\":" << param_double("voxel_size", 0.05) << "}}";
+  cache << "],\"voxel_size\":" << voxel_size << "}}";
 
   std::ostringstream cfg;
   cfg << "{\"step_dt\":" << step_dt_

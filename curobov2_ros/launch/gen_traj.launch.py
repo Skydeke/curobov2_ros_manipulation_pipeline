@@ -13,6 +13,34 @@ import sys
 import yaml
 
 
+def _resolve_path(path, base_dir):
+    """Resolve package://, absolute, or relative-to-base_dir paths."""
+    if not path:
+        return path
+    if path.startswith('package://'):
+        rest = path[len('package://'):]
+        package, _, tail = rest.partition('/')
+        return os.path.join(get_package_share_directory(package), tail)
+    if os.path.isabs(path):
+        return path
+    candidate = os.path.normpath(os.path.join(base_dir, path))
+    return candidate if os.path.exists(candidate) else path
+
+
+def load_descriptor(name_or_path):
+    """Load robots/<name>.yaml without the removed Python server package."""
+    path = name_or_path if os.path.isfile(name_or_path) else os.path.join(
+        get_package_share_directory('curobov2_ros'), 'robots', f'{name_or_path}.yaml')
+    with open(path, 'r') as file:
+        desc = yaml.safe_load(file) or {}
+    return {
+        'base_link': desc.get('base_link'),
+        'strategy_params': desc.get('strategy_params') or {},
+        'curobo_config_path': _resolve_path(
+            desc.get('curobo_config', ''), os.path.dirname(path)),
+    }
+
+
 def get_urdf_path_from_config(config_file_path, default_urdf_path):
     """
     Read urdf_path from the cuRobo robot config YAML.
@@ -23,7 +51,7 @@ def get_urdf_path_from_config(config_file_path, default_urdf_path):
             config = yaml.safe_load(file)
             urdf_path = config.get('robot_cfg', {}).get('kinematics', {}).get('urdf_path')
             if urdf_path:
-                return urdf_path
+                return _resolve_path(urdf_path, os.path.dirname(config_file_path))
     except (FileNotFoundError, yaml.YAMLError, KeyError, AttributeError) as e:
         print(f"Warning: Could not load urdf_path from config file: {e}")
         print(f"Using default urdf_path: {default_urdf_path}")
@@ -73,9 +101,9 @@ def get_default_pose_from_config(config_file_path):
 # (transient_local / latched) so joint_state_publisher — and anyone else sourcing
 # the descriptor's feedback topic — gets the default pose whenever it subscribes,
 # instead of the all-zero / joint-limit-violating pose that JSP publishes for a
-# topic with no messages yet. Publishes ONCE, then only stays alive to keep the
-# latched sample reachable; real emulator/driver states on the same topic
-# supersede it naturally, so it never fights live feedback.
+# topic with no messages yet. Republished for ~10 s so late subscribers get it,
+# then only stays alive to keep the latched sample reachable; real
+# emulator/driver states on the same topic supersede it afterwards.
 _HOME_POSE_PUBLISHER_SRC = r'''
 import sys
 import time
@@ -104,10 +132,13 @@ msg.name = list(names)
 msg.position = [float(v) for v in home]
 msg.velocity = []
 msg.effort = []
-for _ in range(3):
+# Keep publishing for ~10 s: joint_state_publisher uses a volatile
+# subscription and may start after the first sample, which would leave the
+# robot at zeros.
+for _ in range(100):
     msg.header.stamp = node.get_clock().now().to_msg()
     pub.publish(msg)
-    time.sleep(0.2)
+    time.sleep(0.1)
 print(f'[home_pose_publisher] published default pose on {topic}', flush=True)
 rclpy.spin(node)
 '''
@@ -128,18 +159,20 @@ def launch_setup(context, *args, **kwargs):
     descriptor_joint_states_topic = None
     if robot_name:
         try:
-            from curobov2_ros.robot.robot_description import load_robot_description
-            _desc = load_robot_description(robot_name)
-            descriptor_base_link = _desc.base_link
+            _desc = load_descriptor(robot_name)
+            descriptor_base_link = _desc['base_link']
             # Topic the robot publishes its real JointStates on, and the single
             # source of truth for it: the emulator uses /emulator/joint_states,
             # a real robot its own driver topic.
-            descriptor_joint_states_topic = _desc.strategy_params.get('joint_states_topic')
+            descriptor_joint_states_topic = _desc['strategy_params'].get('joint_states_topic')
             if not robot_config_file:
-                robot_config_file = _desc.curobo_config_path
+                robot_config_file = _desc['curobo_config_path']
             print(f"[gen_traj.launch] robot='{robot_name}' -> config {robot_config_file}")
         except Exception as e:
             print(f"[gen_traj.launch] Warning: could not load descriptor '{robot_name}': {e}")
+
+    if robot_config_file:
+        robot_config_file = _resolve_path(robot_config_file, os.getcwd())
 
     # Fallback urdf_path — if the robot config carries no urdf_path and none was
     # passed, point at this well-known generated location and let the node's own
@@ -222,7 +255,7 @@ def launch_setup(context, *args, **kwargs):
                 # This used to be hardcoded to the emulator, so RViz showed a
                 # robot frozen at zero as soon as a real one was launched.
                 'source_list': [
-                    descriptor_joint_states_topic or '/emulator/joint_states'],
+                    descriptor_joint_states_topic or '/joint_states'],
             }]
         ),
 
@@ -375,7 +408,7 @@ def launch_setup(context, *args, **kwargs):
     # instead of an all-zero / joint-limit-violating pose before the first
     # emulator or driver JointState arrives.
     home_names, home_pose = get_default_pose_from_config(robot_config_file)
-    home_topic = descriptor_joint_states_topic
+    home_topic = descriptor_joint_states_topic or '/joint_states'
     if home_names and home_pose and home_topic:
         nodes.append(
             ExecuteProcess(

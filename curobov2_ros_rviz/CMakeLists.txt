@@ -81,9 +81,9 @@ set(${PROJECT_NAME}_SRCS
   # stacked above the object list in a QSplitter, which is not a shape MoveIt's
   # Scene Objects tab has. Its form and its add_object call now live in MoveIt's
   # own "Add/Remove scene object(s)" group, inside scene_objects_tab.ui.
-  src/target_display.cpp
+  src/curobo_planning_display.cpp
   src/sparse_voxel_grid_display.cpp
-  src/curobo_trajectory_display.cpp
+  src/trajectory_panel.cpp
   src/reachability_map_display.cpp
   src/curobo_fk.cpp
   src/curobo_link_updater.cpp
@@ -97,7 +97,6 @@ set(${PROJECT_NAME}_SRCS
   src/context_tab.cpp
   src/planning_tab.cpp
   src/joints_tab.cpp
-  src/manipulation_tab.cpp
   src/scene_objects_tab.cpp
   # MoveIt's draggable joint-value bar, ported. Needs moc (it declares Q_OBJECT),
   # hence its presence in HDRS as well as SRCS.
@@ -106,10 +105,10 @@ set(${PROJECT_NAME}_SRCS
 
 # Define header file
 set(${PROJECT_NAME}_HDRS
-  include/${PROJECT_NAME}/target_display.hpp
+  include/${PROJECT_NAME}/curobo_planning_display.hpp
   include/${PROJECT_NAME}/sparse_voxel_grid_display.hpp
   include/${PROJECT_NAME}/node_spinner.hpp
-  include/${PROJECT_NAME}/curobo_trajectory_display.hpp
+  include/${PROJECT_NAME}/trajectory_panel.hpp
   include/${PROJECT_NAME}/reachability_map_display.hpp
   include/${PROJECT_NAME}/curobo_fk.hpp
   include/${PROJECT_NAME}/curobo_link_updater.hpp
@@ -120,7 +119,6 @@ set(${PROJECT_NAME}_HDRS
   include/${PROJECT_NAME}/context_tab.hpp
   include/${PROJECT_NAME}/planning_tab.hpp
   include/${PROJECT_NAME}/joints_tab.hpp
-  include/${PROJECT_NAME}/manipulation_tab.hpp
   include/${PROJECT_NAME}/scene_objects_tab.hpp
   include/${PROJECT_NAME}/progress_bar_delegate.hpp
 )
@@ -130,14 +128,12 @@ set(${PROJECT_NAME}_HDRS
 # (motion_planning_rviz_plugin_frame.ui) rather than a hand-built layout, so the
 # shape is the upstream one by construction and the deviations live in the
 # comment at the top of each file:
-#   manipulation_tab.ui     MoveIt's Manipulation tab grid
 #   scene_objects_tab.ui   MoveIt's Scene Objects tab two columns
 #   planning_tab.ui        MoveIt's Planning tab groups
 # Context and Joints build their widgets in code (the Joints table is a QTreeWidget
 # whose value column is painted by ProgressBarDelegate, which a .ui cannot express).
 set(${PROJECT_NAME}_UIS
   resource/planning_tab.ui
-  resource/manipulation_tab.ui
   resource/scene_objects_tab.ui
 )
 

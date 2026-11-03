@@ -3,7 +3,7 @@
 from .runtime import _GLOBAL_FLAGS, _LANES, _NEXT_HANDLE, _REGISTRY, bind_lane, init, lane_names, registered_handles, set_global_flags, shutdown
 from .robot_model import _detect_asset_root, _resolve_uri, _robot_kinematics_block, _translate_xrdf, robot_model_build
 from .robot_introspection import _resolve_descriptor, collision_spheres_with_attached, robot_description, robot_model_rebuild_locks, robot_model_update_lock_joints, robot_spheres, tool_frames
-from .kinematics import fk, joint_limits
+from .kinematics import fk, joint_limits, link_poses
 from .ik import _build_ik_solver, _ik_solver, ik, ik_config
 from .collision import _link_of_factory, _rot_from_quat_wxyz, _sphere_snapshot, collision_attribution, collision_distance, validate
 from .scene import ATTACH_LINK, _attachment_manager, _clear_attached_voxels, _cuboid_world_aabb, _reapply_attached_disables, _scene_collision, _solver_scene_checkers, _to_scene, attach_object, detach_object, scene_get, scene_set
@@ -44,6 +44,7 @@ __all__ = [
     '_knot_motion_time',
     '_link_of_factory',
     '_log_world_push_failure',
+    'link_poses',
     '_mapper',
     '_mpc',
     '_mpc_apply_goal',

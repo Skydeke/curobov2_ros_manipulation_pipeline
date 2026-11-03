@@ -3,9 +3,6 @@
 #include <geometry_msgs/msg/pose_stamped.hpp>
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 // Only startMpc() still talks to SetPlanner: it re-asserts MPC on the server
-// before opening the live-tracking loop. The trajectory-type DROPDOWN moved to
-// the Context tab, which owns the user's choice; this is not a user-facing
-// control, it is a precondition of the reactive path.
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
 // Reached transitively via send_trajectory.hpp -> TrajectoryResult, but named
 // explicitly because result_callback reads its fields directly.
@@ -14,10 +11,7 @@
 // transitively via trajectory_generation.hpp, but read field-by-field here).
 #include "curobov2_ros_interfaces/msg/trajectory_result.hpp"
 #include <QApplication>
-// This file creates QTimers (mpc_goal_timer_ and the readiness poll) and takes
-// &QTimer::timeout, so it needs the complete type. It was reaching it through
-// <QtWidgets> in the header, which is a transitive include that only works by
-// accident; the other four tabs all include this directly.
+#include <QComboBox>
 #include <QSignalBlocker>
 #include <QThread>
 #include <QTimer>
@@ -26,12 +20,6 @@
 namespace {
 
 // A planned TrajectoryResult -> the execute action's replay form.
-//
-// Execution is MTC-literal: the server drives exactly the plan it is handed and
-// never re-plans nor looks one up, so the panel re-packs the result it just
-// generated (and is displaying) into the action's replay trajectory. The wire
-// form of a result is sensor_msgs/JointState[] + a scalar dt; the replay field
-// wants JointTrajectoryPoints with time_from_start.
 trajectory_msgs::msg::JointTrajectory toReplayTrajectory(
     const curobov2_ros_interfaces::msg::TrajectoryResult &result) {
   trajectory_msgs::msg::JointTrajectory traj;
@@ -62,7 +50,8 @@ PlanningTab::PlanningTab(QWidget *parent)
       planner_poll_in_flight_{false}, planner_poll_seq_{0}, goal_active_{false},
       action_ptr_{nullptr}, trajectory_generation_client_{nullptr},
       goal_handle_{nullptr}, time_dilation_factor_{1.0},
-      target_display_{nullptr}, user_editing_pose_{false},
+      target_display_{nullptr}, tool_frames_in_flight_{false},
+      target_tool_combo_{nullptr}, user_editing_pose_{false},
       last_displayed_x_{std::numeric_limits<double>::quiet_NaN()},
       last_displayed_y_{std::numeric_limits<double>::quiet_NaN()},
       last_displayed_z_{std::numeric_limits<double>::quiet_NaN()},
@@ -76,12 +65,14 @@ PlanningTab::PlanningTab(QWidget *parent)
   // Extend the widget with all attributes and children from UI file
   ui_->setupUi(this);
 
+  target_tool_combo_ = new QComboBox(this);
+  target_tool_combo_->setToolTip(
+      tr("Tool frame edited by the pose fields and marker drags."));
+  ui_->queryFormLayout->insertRow(0, tr("Target tool:"), target_tool_combo_);
+  connect(target_tool_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+          this, &PlanningTab::onTargetToolChanged);
+
   // `last_displayed_q_` cannot be seeded in the init list above: the generated
-  // geometry_msgs Quaternion is a rosidl struct whose default `w` is 1.0, and
-  // the whole "has this ever been displayed" mechanism keys on `w` being NaN
-  // (updateMarkerPoseDisplay()). Left at its default the first poll would treat
-  // the identity rotation as already displayed and never write the boxes. The
-  // x/y/z values are irrelevant -- NaN on `w` alone forces all four.
   last_displayed_q_.x = 0.0;
   last_displayed_q_.y = 0.0;
   last_displayed_q_.z = 0.0;
@@ -93,17 +84,11 @@ PlanningTab::PlanningTab(QWidget *parent)
   node_ = std::make_shared<rclcpp::Node>("_", options);
 
   // Own TF buffer for the one-time tool-pose seed lookup (frame names travel
-  // with the tool message + the RViz fixed frame: zero frame configuration).
-  // RViz spins node_ on the background spinner below, which is also what
-  // pumps this listener.
   seed_tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
   seed_tf_listener_ =
     std::make_shared<tf2_ros::TransformListener>(*seed_tf_buffer_, node_, false);
 
   // Bootstrap value only. The planner node is owned by the Context tab, which
-  // pushes the real one in through setPlannerNode() as soon as CuroboPanel
-  // finishes initialising; this is only what the clients are built against in
-  // the meantime, so it is not persisted in this tab's config any more.
   planner_node_ = "unified_planner";
 
   // Show the bootstrap node until the Context tab says otherwise. Nothing is
@@ -121,9 +106,6 @@ PlanningTab::PlanningTab(QWidget *parent)
           this, SLOT(updateTimeDilationFactor(double)));
 
   // Every planner-facing widget starts disabled and stays that way until
-  // pollPlannerReady() confirms the planner is actually responding -- not just
-  // discoverable (see setPlannerReady()/pollPlannerReady() for why that
-  // distinction matters during the planner's ~90s GPU warmup).
   setPlannerReady(false);
 
   readiness_timer_ = new QTimer(this);
@@ -131,9 +113,6 @@ PlanningTab::PlanningTab(QWidget *parent)
           &PlanningTab::pollPlannerReady);
   readiness_timer_->start(250);
 
-  // Connect pose spinboxes to apply changes in real-time
-  // Use valueChanged to update immediately when user changes value (arrows,
-  // wheel, typing)
   connect(ui_->spinBoxPosX,
           QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
           [this](double) { applyPoseFromSpinboxes(); });
@@ -188,18 +167,15 @@ PlanningTab::PlanningTab(QWidget *parent)
           &PlanningTab::updateMarkerPoseDisplay);
   poseUpdateTimer->start(100); // Update pose display every 100ms
 
-  // Timer to find the TargetDisplay(s) (added to RViz as displays, not owned
+  // Timer to find the CuroboPlanningDisplay(s) (added to RViz as displays, not owned
   // by this panel). Keeps running so displays added/removed/reordered later
   // are picked up (the primary display feeds the goal).
   QTimer *findDisplayTimer = new QTimer(this);
   connect(findDisplayTimer, &QTimer::timeout, this,
-          &PlanningTab::refreshTargetDisplays);
+          &PlanningTab::refreshPlanningDisplays);
   findDisplayTimer->start(500); // Check every 500ms
 
   // Connect planner node / planner type controls
-  // (none here any more -- both live on the Context tab. See the class docs
-  // in planning_tab.hpp for why, and setPlannerNode()/setTrajectoryType() for
-  // how the values reach this tab.)
 
   // Connect stop robot button
   connect(ui_->stopRobot, &QPushButton::clicked, this,
@@ -207,24 +183,12 @@ PlanningTab::PlanningTab(QWidget *parent)
   connect(ui_->clearGoal, &QPushButton::clicked, this,
           &PlanningTab::on_clearGoal_clicked);
 
-  // NOTE: this tab owns the planner-facing ROS plumbing (services, action,
-  // and the 10 Hz mpc_goal publisher). The TargetDisplay is a generic draggable
-  // 6-DOF marker with no planner knowledge; MPC live-tracking is started from
-  // the "Compute + Execute" button while "MPC (Real-time)" is selected on the
-  // Context tab.
-
-  // Spin node_ on a background thread for the rest of this panel's lifetime, so
-  // every async_send_request/AsyncParametersClient callback below actually gets
-  // delivered. Constructed last: by now every client/publisher/subscription
-  // this node will ever need already exists.
+  // Spin node_ on a background thread for the panel's lifetime.
   spinner_ = std::make_unique<NodeSpinner>(node_);
 }
 
 PlanningTab::~PlanningTab() {
   // spinner_ is declared last in the header, so it is destroyed FIRST here --
-  // cancel()+join() completes (see NodeSpinner) before any
-  // client/publisher/node it might still be invoking callbacks against is torn
-  // down.
 }
 
 void PlanningTab::createPlannerClients(const std::string &planner_node) {
@@ -251,17 +215,19 @@ void PlanningTab::createPlannerClients(const std::string &planner_node) {
       node_->create_client<curobov2_ros_interfaces::srv::SetPlanner>(
           planner_ns + "set_planner");
 
+  this->joint_info_client_ =
+      node_->create_client<curobov2_ros_interfaces::srv::GetJointInfo>(
+          planner_ns + "get_joint_info");
+  tool_frames_.clear();
+  pushed_tool_frames_.clear();
+  tool_frames_in_flight_ = false;
+
   // Publisher streaming the live MPC goal towards the current target pose
   // (stamped: the pose rides in the RViz fixed frame, see goalFrame()).
   this->mpc_goal_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
       planner_ns + "mpc_goal", 10);
 
   // Live tool pose (base frame) for one-shot seeding of pristine displays.
-  // Optional source: the planner no longer publishes `current_tool_pose` (its
-  // 1 Hz TF lookup + timer were pure overhead), so unless something else fills
-  // it in the seed is skipped and a new target marker keeps its default pose.
-  // Rebinding (planner switch) drops the cache and the seed latch: a new
-  // planner may drive a different robot.
   {
     std::lock_guard<std::mutex> lock(tool_pose_mutex_);
     tool_pose_.reset();
@@ -298,6 +264,9 @@ void PlanningTab::setPlannerReady(bool ready) {
   }
 
   ui_->doubleSpinBoxTimeDilationFactor->setEnabled(ready);
+  if (ready && tool_frames_.empty()) {
+    refreshToolFrames();
+  }
   updateActionButtons();
 
   // A planner that has gone away (restart, GPU fault) invalidates whatever the
@@ -328,13 +297,6 @@ void PlanningTab::updateActionButtons() {
 
 void PlanningTab::pollPlannerReady() {
   // Watchdog for wedged probes: rclcpp's async get_parameters has no timeout --
-  // if the planner never answers (still busy finishing an execution, GPU-bound
-  // on an MPC sweep, or warming up again after a respawn) the completion
-  // callback is simply never fired and planner_poll_in_flight_ would stay true
-  // forever, freezing planner_ready_ (and with it every Generate/Execute
-  // button, even after the execution is clearly done). Force-expire an
-  // outstanding probe after 2 s and send a fresh one; completions from a
-  // superseded probe are discarded via the sequence counter.
   if (planner_poll_in_flight_) {
     const auto outstanding_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -372,6 +334,9 @@ void PlanningTab::pollPlannerReady() {
           }
           planner_poll_in_flight_ = false;
           setPlannerReady(ready);
+          if (ready && tool_frames_.empty()) {
+            refreshToolFrames();
+          }
         });
       });
 }
@@ -428,9 +393,6 @@ void PlanningTab::updateTimeDilationFactor(double value) {
 
 void PlanningTab::on_sendTrajectory_clicked() {
   // Execution is MTC-literal: the server neither re-plans nor reuses a cached
-  // plan, so there is nothing to send unless this panel holds a generated
-  // trajectory. It does after a successful Generate -- and after
-  // Generate-and-Send, which chains into here once generation completes.
   if (last_trajectory_.points.empty()) {
     RCLCPP_ERROR(node_->get_logger(),
                  "Send: no generated trajectory to replay; press Generate "
@@ -479,14 +441,6 @@ void PlanningTab::setStatus(const QString &text, const QString &detail) {
 }
 
 // goal_response_callback/result_callback are rclcpp_action client callbacks --
-// they now fire on the background spin thread (spinner_), so every UI/member
-// touch inside them is marshaled back via runOnGuiThread. Only pure logging
-// (thread-safe) stays outside.
-//
-// Everything the GUI lambda needs is copied out of `result` BEFORE the hop.
-// `result` is a const reference owned by rclcpp_action and is destroyed when
-// this function returns, so capturing it (or &result) into a lambda that the
-// GUI thread runs later would be a dangling read. Values only -- no views.
 void PlanningTab::result_callback(
     const rclcpp_action::ClientGoalHandle<
         curobov2_ros_interfaces::action::SendTrajectory>::WrappedResult
@@ -509,20 +463,11 @@ void PlanningTab::result_callback(
 
   if (result.result) {
     // The path is result.result->result.*, NOT result.result->*.
-    // SendTrajectory.action's result section declares "TrajectoryResult
-    // result", so the C++ type SendTrajectory_Result holds the payload as a
-    // VALUE member named `result`; the outer `result` is WrappedResult's
-    // SharedPtr to that wrapper. joints_tab.cpp and manipulation_tab.cpp
-    // (both compiled) use this same double hop -- a service response would
-    // be a single hop, which is what makes it easy to get wrong.
     const auto &payload = result.result->result;
 
     message = QString::fromStdString(payload.message).trimmed();
 
     // PlanningStats' scalars are always populated -- no request flag, every
-    // planner (PlanningStats.msg; unified_planner_node.py sets them
-    // unconditionally). This is the search-shape readout, and it is why the
-    // panel shows something after a plan instead of only a log line.
     const auto &s = payload.stats;
     stats =
         tr("%1 candidate(s) generated, %2 solved, %3 pruned; %4 waypoint(s)")
@@ -562,9 +507,6 @@ void PlanningTab::result_callback(
     setStatus(message.isEmpty() ? outcome : message, stats);
 
     // The execution just finished; force-out a readiness probe that may be
-    // stranded from before (sent while the planner was busy) and re-probe
-    // immediately, so the Generate/Execute buttons recover as soon as the
-    // action completes rather than waiting out the poll watchdog.
     if (planner_poll_in_flight_) {
       planner_poll_in_flight_ = false;
     }
@@ -603,11 +545,6 @@ void PlanningTab::on_generateTrajectory_clicked() {
   generateTrajectoryAsync(nullptr);
 }
 
-// Shared by on_generateTrajectory_clicked (fire-and-forget) and the
-// classic-mode branch of on_generateAndSend_clicked (chains into
-// on_sendTrajectory_clicked). Pure async_send_request + callback -- no
-// spin_until_future_complete, so this can never block the GUI thread waiting on
-// the planner.
 void PlanningTab::generateTrajectoryAsync(std::function<void(bool)> on_done) {
   // Always called from the GUI thread (button slots), so early-return failure
   // paths can invoke on_done() directly; only the async completion below
@@ -683,8 +620,14 @@ void PlanningTab::on_generateAndSend_clicked() {
     // is dragged).
     if (!target_display_) {
       RCLCPP_WARN(node_->get_logger(),
-                  "Target display not available; add TargetDisplay to RViz to "
+                  "Target display not available; add CuroboPlanningDisplay to RViz to "
                   "start MPC tracking");
+      return;
+    }
+    if (target_display_->getToolFrames().size() > 1) {
+      RCLCPP_WARN(node_->get_logger(),
+                  "MPC tracks a single tool frame; select one in the target "
+                  "display's Tool Frames property");
       return;
     }
     RCLCPP_INFO(node_->get_logger(), "Starting MPC tracking");
@@ -693,9 +636,6 @@ void PlanningTab::on_generateAndSend_clicked() {
   }
 
   // Classic Mode: generate, then chain into send once generation actually
-  // succeeds (previously a QTimer::singleShot(500, ...) guess resting on
-  // on_generateTrajectory_clicked's old blocking behavior -- now a real
-  // completion callback, since that call is fully async).
   RCLCPP_INFO(node_->get_logger(), "Classic mode: generate and execute once");
   generateTrajectoryAsync([this](bool success) {
     if (success) {
@@ -774,11 +714,6 @@ void PlanningTab::sendMpcGoal() {
   auto goal = curobov2_ros_interfaces::action::SendTrajectory::Goal();
 
   // start_pose intentionally left EMPTY so the server resolves the start state
-  // from robot_context.get_joint_pose() (the live, model-sized joint vector).
-  // The legacy code sent raw /joint_states here, which carries extra joints
-  // (e.g. a gripper) -- cuRobo's MPC rejects the oversized state
-  // ("current_state must have 7 columns, got 8"). The server's own resolution
-  // is both the right size and the real current pose.
 
   curobov2_ros_interfaces::msg::Goalset gset;
   gset.poses.push_back(target_display_->getPose());
@@ -795,11 +730,6 @@ void PlanningTab::sendMpcGoal() {
       std::bind(&PlanningTab::result_callback, this, std::placeholders::_1);
 
   // Arm the MPC-start latch before sending: goal_response_callback consumes
-  // it on acceptance (`accepted && mpc_starting_`) to begin the live target
-  // stream. Clearing it here is the bug that silently killed MPC feature --
-  // the acceptance branch never fired, mpc_active_ stayed false, and every
-  // subsequent gizmo drag was ignored (MPC executed once toward the fixed
-  // start pose).
   mpc_starting_ = true;
   action_ptr_->async_send_goal(goal, send_goal_options);
   setStatus(tr("executing..."));
@@ -870,11 +800,6 @@ void PlanningTab::on_stopRobot_clicked() {
 
 void PlanningTab::initializeEmbedded(rviz_common::DisplayContext *context) {
   // Just record it: this tab has no onInitialize() of its own and nothing
-  // else to bootstrap. Deliberately NOT calling Panel::onInitialize(), which
-  // reads the context pointer rviz hands a standalone panel before
-  // onInitialize() and which a panel constructed by another panel never gets;
-  // the one thing this tab actually needs from the display context is read
-  // through displayContext() in refreshTargetDisplays().
   embedded_display_context_ = context;
 }
 
@@ -903,9 +828,6 @@ void PlanningTab::setPlannerNode(const QString &planner_node) {
   createPlannerClients(new_node);
 
   // Mirror the choice in the Options group, the way MoveIt repeats
-  // the planning group at the top of its Planning tab. Read-only here: the
-  // single editable control is the Context tab's dropdown, so there is
-  // exactly one place the value can change.
   ui_->plannerNodeEcho->setText(QString::fromStdString(planner_node_));
 
   // The new planner node needs re-probing for readiness (it may still be
@@ -928,22 +850,101 @@ void PlanningTab::setTrajectoryType(int combo_index) {
                                     : "Classic (MotionGen)");
 }
 
-void PlanningTab::refreshTargetDisplays() {
+void PlanningTab::refreshToolFrames() {
+  if (tool_frames_in_flight_ || !joint_info_client_ ||
+      !joint_info_client_->service_is_ready()) {
+    return;
+  }
+  tool_frames_in_flight_ = true;
+  auto request =
+      std::make_shared<curobov2_ros_interfaces::srv::GetJointInfo::Request>();
+  joint_info_client_->async_send_request(
+      request,
+      [this](rclcpp::Client<curobov2_ros_interfaces::srv::GetJointInfo>::
+                 SharedFuture future) {
+        std::vector<std::string> frames;
+        bool ok = false;
+        try {
+          auto response = future.get();
+          ok = response->success;
+          frames = response->tool_frames;
+        } catch (const std::exception &e) {
+          RCLCPP_WARN(node_->get_logger(), "get_joint_info failed: %s", e.what());
+        }
+        runOnGuiThread([this, ok, frames]() {
+          tool_frames_in_flight_ = false;
+          if (!ok) {
+            return;
+          }
+          tool_frames_ = frames;
+          applyToolFramesToDisplay();
+          refreshTargetToolCombo();
+        });
+      });
+}
+
+void PlanningTab::applyToolFramesToDisplay() {
+  if (!target_display_ || tool_frames_.empty() ||
+      target_display_->toolFramesUserSet()) {
+    return;
+  }
+  // Only push when the server list actually changed. Otherwise the periodic
+  // poll would overwrite whatever the user is typing into Tool Frames.
+  if (tool_frames_ != pushed_tool_frames_) {
+    target_display_->setToolFrames(tool_frames_);
+    pushed_tool_frames_ = tool_frames_;
+  }
+}
+
+void PlanningTab::refreshTargetToolCombo() {
+  if (!target_tool_combo_) {
+    return;
+  }
+  const QSignalBlocker blocker(target_tool_combo_);
+  const auto tools =
+      target_display_ ? target_display_->getToolFrames() : std::vector<std::string>();
+  const QString active = target_display_
+                             ? QString::fromStdString(target_display_->getActiveTool())
+                             : QString();
+
+  bool same = target_tool_combo_->count() == static_cast<int>(tools.size());
+  for (int i = 0; same && i < target_tool_combo_->count(); ++i) {
+    same = target_tool_combo_->itemData(i).toString() ==
+      QString::fromStdString(tools[static_cast<size_t>(i)]);
+  }
+  if (!same) {
+    target_tool_combo_->clear();
+    for (const auto & tool : tools) {
+      const QString label = tool.empty() ? tr("target") : QString::fromStdString(tool);
+      target_tool_combo_->addItem(label, QString::fromStdString(tool));
+    }
+  }
+  const int index = target_tool_combo_->findData(active);
+  if (index >= 0) {
+    target_tool_combo_->setCurrentIndex(index);
+  }
+  target_tool_combo_->setEnabled(target_tool_combo_->count() > 1);
+}
+
+void PlanningTab::onTargetToolChanged(int index) {
+  if (!target_display_ || index < 0) {
+    return;
+  }
+  target_display_->setActiveTool(
+      target_tool_combo_->itemData(index).toString().toStdString());
+  updateMarkerPoseDisplay();
+}
+
+void PlanningTab::refreshPlanningDisplays() {
   auto context = displayContext();
   if (!context) {
     return;
   }
 
-  // Collect every TargetDisplay, descending into display Groups: the
-  // shipped rviz configs (<robot>_curobo.rviz) place TargetDisplay inside a
-  // "Curobo Planning" group, so a scan of only root-level displays misses it
-  // whenever RViz reloads the config. Runs continuously so displays added,
-  // removed or reordered later are picked up (the primary display feeds
-  // the goal, others are available for display-reordering diagnostics).
-  std::vector<TargetDisplay *> found;
+  std::vector<CuroboPlanningDisplay *> found;
   auto root_display = context->getRootDisplayGroup();
   if (root_display) {
-    collectTargetDisplaysInGroup(root_display, found);
+    collectPlanningDisplaysInGroup(root_display, found);
   }
 
   if (found != target_displays_) {
@@ -951,54 +952,49 @@ void PlanningTab::refreshTargetDisplays() {
     if (found.empty()) {
       target_display_ = nullptr;
       RCLCPP_WARN(node_->get_logger(),
-                  "No TargetDisplay found - add one via Displays -> Add");
+                  "No CuroboPlanningDisplay found - add one via Displays -> Add");
     } else if (target_display_ != found.front()) {
       // The PRIMARY target stays the FIRST display in the tree. Classic
       // and MPC act only on this one.
       target_display_ = found.front();
-      RCLCPP_INFO(node_->get_logger(), "Primary TargetDisplay set (total: %zu)",
+      RCLCPP_INFO(node_->get_logger(), "Primary CuroboPlanningDisplay set (total: %zu)",
                   found.size());
     } else {
       // Unchanged -- fall through to the button refresh below without
       // re-logging, so a steady config is quiet.
     }
     // The Clear button is gated on having a primary target, and this poll is
-    // the only thing that notices one appearing or being removed (it runs on
-    // a 500 ms timer, not on any signal). Re-evaluated on every pass because
-    // updateActionButtons() is idempotent and cheap.
     updateActionButtons();
   }
+
+  applyToolFramesToDisplay();
+  refreshTargetToolCombo();
 }
 
-void PlanningTab::collectTargetDisplaysInGroup(
-    rviz_common::DisplayGroup *group, std::vector<TargetDisplay *> &out) {
+void PlanningTab::collectPlanningDisplaysInGroup(
+    rviz_common::DisplayGroup *group, std::vector<CuroboPlanningDisplay *> &out) {
   for (int i = 0; i < group->numDisplays(); ++i) {
     rviz_common::Display *child = group->getDisplayAt(i);
     if (child == nullptr) {
       continue;
     }
-    TargetDisplay *target = dynamic_cast<TargetDisplay *>(child);
+    CuroboPlanningDisplay *target = dynamic_cast<CuroboPlanningDisplay *>(child);
     if (target != nullptr) {
       out.push_back(target);
-      continue; // a TargetDisplay cannot also be a subgroup
+      continue; // a CuroboPlanningDisplay cannot also be a subgroup
     }
     // A DisplayGroup derives from Display, so subgroups appear as children
     // of a group and must be descended into as well.
     rviz_common::DisplayGroup *subgroup =
         dynamic_cast<rviz_common::DisplayGroup *>(child);
     if (subgroup != nullptr) {
-      collectTargetDisplaysInGroup(subgroup, out);
+      collectPlanningDisplaysInGroup(subgroup, out);
     }
   }
 }
 
 std::string PlanningTab::goalFrame() const {
   // Every pose this tab sends (goalsets, mpc_goal) is expressed in the RViz
-  // fixed frame: the primary source is the target gizmo's frame (bound to
-  // the fixed frame when the marker is created and rebound on change).
-  // Before the marker exists, fall back to the display context's fixed
-  // frame directly. Empty only when RViz itself has no fixed frame yet;
-  // the server then treats the pose as base-frame ("" convention).
   if (target_display_) {
     const std::string gizmo_frame = target_display_->getGizmoFrame();
     if (!gizmo_frame.empty()) {
@@ -1017,49 +1013,47 @@ PlanningTab::buildGoalsets() {
   std::vector<curobov2_ros_interfaces::msg::Goalset> goalsets;
 
   if (target_display_) {
+    const auto targets = target_display_->getToolPoses();
     curobov2_ros_interfaces::msg::Goalset gset;
-    gset.poses.push_back(target_display_->getPose());
-    // Fixed-frame coordinates (the display is frame-dumb); the server
-    // resolves them into the base link via TF.
     gset.frame_id = goalFrame();
+    const bool unnamed = targets.size() == 1 && targets.front().first.empty();
+    if (unnamed || targets.empty()) {
+      gset.poses.push_back(targets.empty() ? target_display_->getPose()
+                                           : targets.front().second);
+    } else {
+      for (const auto & target : targets) {
+        if (target.first.empty()) {
+          continue;
+        }
+        gset.tool_frames.push_back(target.first);
+        gset.tool_poses.push_back(target.second);
+      }
+      if (gset.tool_frames.empty()) {
+        gset.poses.push_back(target_display_->getPose());
+      }
+    }
+    // Compatibility fallback: also carry the active pose as a single-tool
+    // goalset. New servers prefer tool_frames/tool_poses; older servers (which
+    // do not know those fields) still get a plan for the active tool.
+    if (gset.poses.empty()) {
+      gset.poses.push_back(target_display_->getPose());
+    }
+    RCLCPP_INFO(
+        node_->get_logger(), "Goal request: %zu pose(s), %zu tool pose(s), frame '%s'",
+        gset.poses.size(), gset.tool_poses.size(), gset.frame_id.c_str());
     goalsets.push_back(gset);
   }
   if (goalsets.empty()) {
     RCLCPP_WARN(
         node_->get_logger(),
         "Target display not available - goal sent WITHOUT a target pose "
-        "(planning will fail; add TargetDisplay to RViz)");
+        "(planning will fail; add CuroboPlanningDisplay to RViz)");
   }
   return goalsets;
 }
 
-// Why the goal orientation is a QUATERNION and not RPY
-// ------------------------------------------------------------
-// This used to be three roll/pitch/yaw spin boxes with `eulerToQuaternion` and
-// `quaternionToEuler` either side of them, and the pair disagreed with its own
-// label: the .ui said "(rad)" while both helpers multiplied by 180.0/M_PI, so
-// the boxes were in degrees and said otherwise. Neither can happen with a
-// quaternion, which is also the form every other part of the stack speaks:
-//
-//   * `geometry_msgs/msg/Pose.orientation` is a quaternion.
-//   * `TargetDisplay::getPose()` returns a Pose, so buildGoalsets() hands the
-//     planner one directly.
-//   * curobo's IK takes a Pose, so the round trip is identity either way --
-//     while the RPY path inserted a rotation that gimbal lock made lossy at
-//     pitch = +-90 deg, silently changing the goal the operator asked for.
-//
-// The cost of a quaternion is that q and -q are the same rotation, which is what
-// canonicalize() below exists to settle.
-
+// Quaternion orientation (q and -q are the same rotation; settle the sign).
 void PlanningTab::canonicalize(geometry_msgs::msg::Quaternion & q) {
-  // Pick the sign from the largest-magnitude component rather than from w.
-  // The w >= 0 convention breaks down at exactly the orientations that matter
-  // here -- a 180 deg turn about Z has w == 0, so the sign of w is pure noise
-  // and the operator's fields would flip on every poll.
-  // An explicit array, not `(&q.x)[i]`: indexing across a struct's members by
-  // pointer arithmetic only works while rosidl happens to emit four adjacent
-  // doubles in x,y,z,w order, and it reads the wrong field silently if that ever
-  // changes.
   const double c[4] = {q.x, q.y, q.z, q.w};
   int sign_ref = 0;
   for (int i = 1; i < 4; ++i) {
@@ -1078,10 +1072,6 @@ void PlanningTab::canonicalize(geometry_msgs::msg::Quaternion & q) {
 
 bool PlanningTab::normalize(geometry_msgs::msg::Quaternion & q) {
   // A quaternion is only a rotation if it is unit length. Four independent spin
-  // boxes can be typed to anything at all, so unlike the RPY path -- which could
-  // not represent a non-rotation -- this has to be checked here rather than
-  // assumed. Returns false for a zero quaternion, where there is no direction to
-  // preserve and no honest value to fall back to.
   const double norm = std::sqrt(q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w);
   if (norm < 1e-9) {
     return false;
@@ -1102,14 +1092,6 @@ void PlanningTab::readQuaternionFromSpinboxes(geometry_msgs::msg::Quaternion & q
 
 void PlanningTab::writeQuaternionToSpinboxes(const geometry_msgs::msg::Quaternion & q) {
   // Every one of these boxes has valueChanged connected to
-  // applyPoseFromSpinboxes(), so an unblocked setValue re-enters it once per
-  // component and pushes a half-updated quaternion at the marker.
-  //
-  // Scoped (QSignalBlocker) rather than blockSignals() pairs on purpose:
-  // blockSignals() sets a flag rather than counting, so a nested
-  // block-then-unblock here would RE-ENABLE these boxes while the caller still
-  // believed they were muted. RAII also means an early return cannot leave a
-  // widget permanently muted.
   const QSignalBlocker bq(ui_->spinBoxQx);
   const QSignalBlocker by(ui_->spinBoxQy);
   const QSignalBlocker bz(ui_->spinBoxQz);
@@ -1133,10 +1115,6 @@ void PlanningTab::applyPoseFromSpinboxes() {
   pose.position.z = ui_->spinBoxPosZ->value();
 
   // The orientation is read, normalised and canonicalised, then WRITTEN BACK to
-  // the boxes, so what is on screen is exactly what went to the marker. Skipping
-  // the write-back is the subtle version of the bug: the operator types 0.5 into
-  // x, the marker turns by some angle neither of them can read off the boxes,
-  // and the boxes still read 0.5.
   geometry_msgs::msg::Quaternion q;
   readQuaternionFromSpinboxes(q);
   const bool usable = normalize(q);
@@ -1181,12 +1159,7 @@ bool PlanningTab::eventFilter(QObject *obj, QEvent *event) {
 }
 
 void PlanningTab::maybeSeedTargetFromTool() {
-  // One-shot seed: a freshly added TargetDisplay parks at its hardcoded
-  // default in the fixed frame, disconnected from the arm. Move it to the
-  // live tool pose exactly once, and only while it still shows the untouched
-  // default (any drag, typed value or saved config defeats the seed).
-  // Frame names travel with the data (tool message header + fixed frame):
-  // nothing here is configured with frame names.
+  // One-shot seed: a freshly added CuroboPlanningDisplay parks at its hardcoded
   if (!target_display_ || target_display_ == seeded_display_ ||
       user_editing_pose_) {
     return;
@@ -1239,9 +1212,6 @@ void PlanningTab::updateMarkerPoseDisplay() {
 
   auto pose = target_display_->getPose();
 
-  // Canonicalised BEFORE the comparison, so that dragging the gizmo round a 180
-  // deg turn -- where the marker may report either of two equal representations
-  // -- is not mistaken for the operator changing the goal on every single poll.
   geometry_msgs::msg::Quaternion q = pose.orientation;
   canonicalize(q);
 
@@ -1258,9 +1228,6 @@ void PlanningTab::updateMarkerPoseDisplay() {
   bool z_changed = std::isnan(last_displayed_z_) ||
                    std::fabs(pose.position.z - last_displayed_z_) > epsilon_pos;
   // A quaternion has no meaningful per-component "change" on its own -- the
-  // shortest-arc distance between two rotations is what changed. Comparing
-  // components is sufficient here only because both sides are canonicalised
-  // first, which puts them in the same hemisphere.
   const bool q_changed = std::isnan(last_displayed_q_.w) ||
                          std::fabs(q.x - last_displayed_q_.x) > epsilon_rot ||
                          std::fabs(q.y - last_displayed_q_.y) > epsilon_rot ||
@@ -1302,35 +1269,21 @@ void PlanningTab::updateMarkerPoseDisplay() {
   ui_->spinBoxPosZ->blockSignals(false);
 }
 
-// ---------------------------------------------------------------------
-// Clear, the one button MoveIt's Planning tab has that this one did not.
-//
-// "No request" in curobo is not an empty goal: the server always plans from
-// the robot's LIVE state, so the honest way to drop a request is to put the
-// goal back where the robot already is. That is what this does, and it
-// pushes the result to the marker so the two never disagree.
-//
-// user_editing_pose_ is forced clear first: updateMarkerPoseDisplay() bails
-// out while it is set (it exists so a half-typed spinbox value is not
-// overwritten mid-keystroke), and leaving it set would make the re-seed
-// silently do nothing right after a Clear.
+// Clear re-seeds the goal from the robot's live state.
 void PlanningTab::on_clearGoal_clicked() {
   if (target_display_ == nullptr) {
     RCLCPP_WARN(
         node_->get_logger(),
-        "Clear needs a TargetDisplay in RViz; there is no pose to read back");
+        "Clear needs a CuroboPlanningDisplay in RViz; there is no pose to read back");
     return;
   }
 
   user_editing_pose_ = false;
 
-  // Drop the "already shown" memo so the next poll writes every field, rather
-  // than only the ones whose value happens to differ from the marker's.
   last_displayed_x_ = std::numeric_limits<double>::quiet_NaN();
   last_displayed_y_ = std::numeric_limits<double>::quiet_NaN();
   last_displayed_z_ = std::numeric_limits<double>::quiet_NaN();
-  // `.w` alone is the "never displayed" sentinel; updateMarkerPoseDisplay()
-  // tests it with isnan and then compares all four components.
+  // NaN w = "never displayed".
   last_displayed_q_.x = 0.0;
   last_displayed_q_.y = 0.0;
   last_displayed_q_.z = 0.0;

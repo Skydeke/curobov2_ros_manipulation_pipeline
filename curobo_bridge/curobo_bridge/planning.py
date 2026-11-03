@@ -151,51 +151,8 @@ def plan_cspace(handle: int, req) -> dict:
         max_attempts=int(req.get("max_attempts", 1)),
         enable_graph_attempt=int(req.get("enable_graph_attempt", 1)))
     return _plan_outcome(planner, result)
-def _active_tool_frame(planner):
-    """Pick the configured active tool frame.
-
-    A bimanual cuRobo config declares one tool frame per arm, but a request
-    carries ONE pose goal. ``GoalToolPose`` still needs an entry for every
-    configured frame, so the other frames are filled with a dummy pose.
-
-    The active frame is the FIRST configured tool frame. A caller that wants
-    the other arm launches with that arm's frame first (the OpenArm launch
-    rewrites ``tool_frames`` for ``arm:=right``). Do NOT infer it from the goal
-    pose: a grasp near the robot midline can then flip between arms from cycle
-    to cycle, while the gripper/perception side is still configured for one arm.
-
-    ``joint_affects_endeffector`` mobility is used only to detect a reduced
-    planner (one arm locked out): then the mobile frame is active.
-
-    Returns ``(frames, active_index, counts)``; ``counts`` is empty when the
-    model does not expose the matrix.
-    """
-    frames = list(planner.tool_frames)
-    if not frames:
-        return frames, 0, []
-    try:
-        kin = planner.kinematics
-        cfg = kin.config.kinematics_config
-        matrix = cfg.joint_affects_endeffector
-        dof = len(kin.joint_names)
-        if matrix is not None and matrix.numel() == dof * len(frames):
-            counts = [int(c) for c in matrix.view(dof, len(frames)).sum(dim=0).tolist()]
-            if len(set(counts)) > 1:
-                return frames, max(range(len(frames)), key=lambda i: (counts[i], -i)), counts
-            return frames, 0, counts
-    except Exception:
-        pass
-    return frames, 0, []
-
-
 def _passive_joint_mask(planner, active_index, passive_indices):
-    """Joints that belong to a passive frame and not to the active one.
-
-    ``joint_affects_endeffector`` is [n_dof * n_tool_frames]. A bimanual arm's
-    seven joints affect only that arm's frame; the shared lift affects both and
-    is therefore NOT held. Returns a float mask on the solver device, or None
-    when the model does not expose the matrix.
-    """
+    """Joints that belong to a passive frame and not to the active one."""
     import torch
 
     try:
@@ -218,19 +175,11 @@ def _passive_joint_mask(planner, active_index, passive_indices):
 
 
 def _apply_passive_hold(planner, mask, weight=1.0e4):
-    """Enable the target-cspace distance cost on ``mask`` only.
-
-    The passive arm stays in the cspace (both arms must remain independently
-    planable), so the hold is a cost, not a joint lock. ``goal_js`` is the
-    start state supplied to ``plan_pose``; per-DOF weights zero every joint
-    except the passive arm's, so the lift and the active arm are untouched.
-    The cost is registered in the trajopt task config with weight 0 (see
-    ``motion_planner_build``) and is enabled only for this request.
-    """
+    """Enable the target-cspace cost on the passive arm's joints only."""
     saved = []
     seen = set()
     for rollout in planner.trajopt_solver.get_all_rollout_instances():
-        for cost in rollout.get_cost_component_by_name("target_cspace_dist"):
+        for cost in rollout.get_cost_component_by_name('target_cspace_dist'):
             if id(cost) in seen:
                 continue
             seen.add(id(cost))
@@ -241,17 +190,13 @@ def _apply_passive_hold(planner, mask, weight=1.0e4):
                 cost._weight.clone(),
                 cfg.terminal_dof_weight.clone(),
                 cfg.non_terminal_dof_weight.clone(),
-                getattr(cfg, "only_terminal_cost", None),
+                getattr(cfg, 'only_terminal_cost', None),
             ))
             cfg.weight.fill_(float(weight))
-            # The cost is primed (enabled) during planner warmup and stays
-            # enabled; update its live weight in place so the captured CUDA
-            # graph sees the request. Toggling enable/disable here would leave
-            # the captured kernel reading the wrong value (or be absent).
             cost._weight.fill_(float(weight))
             cfg.terminal_dof_weight.copy_(mask)
             cfg.non_terminal_dof_weight.copy_(mask)
-            if hasattr(cfg, "only_terminal_cost"):
+            if hasattr(cfg, 'only_terminal_cost'):
                 cfg.only_terminal_cost = False
     return saved
 
@@ -263,7 +208,7 @@ def _restore_passive_hold(saved):
         cost._weight.copy_(live_weight)
         cfg.terminal_dof_weight.copy_(terminal)
         cfg.non_terminal_dof_weight.copy_(non_terminal)
-        if only_terminal is not None and hasattr(cfg, "only_terminal_cost"):
+        if only_terminal is not None and hasattr(cfg, 'only_terminal_cost'):
             cfg.only_terminal_cost = bool(only_terminal)
 
 
@@ -282,75 +227,90 @@ def plan_pose(handle: int, req) -> dict:
         dtype=torch.float32, device=device)
     start_state = JointState.from_position(start, joint_names=planner.kinematics.joint_names)
 
+    tool_frames_arg = list(req.get("tool_frames") or [])
+    tool_poses_arg = req.get("tool_poses")
     goalset_arg = req.get("goalset")
-    if goalset_arg is None or len(goalset_arg) == 0:
-        raise ValueError(
-            "plan_pose requires a 'goalset' of [x,y,z,qw,qx,qy,qz] poses; got no "
-            "poses (a joint-space goal must go through plan_cspace / the "
-            "joint-space planner).")
-    goalset = np.asarray(goalset_arg, dtype=np.float32)
-    pose = Pose(
-        position=torch.tensor(goalset[:, 0:3], dtype=torch.float32, device=device),
-        quaternion=torch.tensor(goalset[:, 3:7], dtype=torch.float32, device=device))
-    frames, active_index, _mobility = _active_tool_frame(planner)
-    tool_frame = frames[active_index] if frames else planner.tool_frames[0]
+    if tool_frames_arg:
+        if tool_poses_arg is None or len(tool_poses_arg) == 0:
+            raise ValueError("plan_pose got tool_frames without tool_poses")
+        if len(set(tool_frames_arg)) != len(tool_frames_arg):
+            raise ValueError(f"tool_frames contains duplicates: {tool_frames_arg}")
+        unknown = [f for f in tool_frames_arg if f not in planner.tool_frames]
+        if unknown:
+            raise ValueError(
+                f"unknown tool frame(s) {unknown}; configured: "
+                f"{list(planner.tool_frames)}")
+        goalset = np.asarray(tool_poses_arg, dtype=np.float32).reshape(-1, 7)
+        if goalset.shape[0] != len(tool_frames_arg):
+            raise ValueError(
+                f"tool_frames/tool_poses length mismatch: {len(tool_frames_arg)} "
+                f"frame(s), {goalset.shape[0]} pose(s)")
+        num_goalset = 1
+    else:
+        if goalset_arg is None or len(goalset_arg) == 0:
+            raise ValueError(
+                "plan_pose requires a 'goalset' of [x,y,z,qw,qx,qy,qz] poses; got no "
+                "poses (a joint-space goal must go through plan_cspace / the "
+                "joint-space planner).")
+        goalset = np.asarray(goalset_arg, dtype=np.float32).reshape(-1, 7)
+        num_goalset = len(goalset)
+
+    def make_pose(rows):
+        return Pose(
+            position=torch.tensor(rows[:, 0:3], dtype=torch.float32, device=device),
+            quaternion=torch.tensor(rows[:, 3:7], dtype=torch.float32, device=device))
+
     from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
-    # cuRobo's IK requires a goal entry for EVERY configured tool link
-    # (`GoalToolPose.reorder_links` raises "Ordered link names [...] not a
-    # subset of [...]" otherwise), but only the active frame is targeted. The
-    # other frames get a dummy (current FK) goal.
-    #
-    # The passive arm stays in the cspace (both arms must remain planable),
-    # so it is held at its start joints by a target-cspace cost + a seed clamp
-    # (see below); its tool pose therefore must have NO pose cost: the arm is
-    # fixed relative to the base, and the shared lift is free to carry it.
-    # Without a joint hold mask (unusual tree), fall back to the old pose pin.
-    #
-    # Single-arm robots (TIAGo, KATE) keep the exact old goal, one frame and
-    # all.
-    passive_frames = [f for i, f in enumerate(frames) if i != active_index]
-    passive_indices = [i for i in range(len(frames)) if i != active_index]
-    passive_criteria = {}
+    if tool_frames_arg:
+        pose_dict = {
+            frame: make_pose(goalset[i:i + 1]) for i, frame in enumerate(tool_frames_arg)
+        }
+    else:
+        pose_dict = {planner.tool_frames[0]: make_pose(goalset)}
+    constraint_frame = next(iter(pose_dict))
+
+    # cuRobo requires a goal for every configured tool link. Frames the caller
+    # did not target are held at their start joints (cspace cost + seed clamp);
+    # they stay planable but do not move. Their tool pose has no cost, so the
+    # shared lift can carry the fixed arm.
+    passive_frames = [f for f in planner.tool_frames if f not in pose_dict]
+    passive_indices = [planner.tool_frames.index(f) for f in passive_frames]
+    active_index = planner.tool_frames.index(constraint_frame)
     hold_mask = None
-    hold_saved = []
     if passive_frames:
         hold_mask = _passive_joint_mask(planner, active_index, passive_indices)
+    passive_criteria = {}
+    if passive_frames:
         fk = planner.kinematics.compute_kinematics(start_state)
-        pose_dict = {tool_frame: pose}
         for frame in passive_frames:
             here = fk.tool_poses.get_link_pose(frame)
             pose_dict[frame] = Pose(
-                position=here.position.repeat(len(goalset), 1).contiguous(),
-                quaternion=here.quaternion.repeat(len(goalset), 1).contiguous())
-            # If the passive joints can be held, its tool pose must be free:
-            # the arm is fixed relative to the base, so the shared lift carries
-            # it, and a world-frame pose cost would forbid that lift motion.
-            # Without a hold mask (unusual tree), keep the old pose pin.
+                position=here.position.repeat(num_goalset, 1).contiguous(),
+                quaternion=here.quaternion.repeat(num_goalset, 1).contiguous())
             passive_criteria[frame] = (
                 ToolPoseCriteria.disabled() if hold_mask is not None
                 else ToolPoseCriteria(
                     terminal_pose_axes_weight_factor=[1.0] * 6,
                     non_terminal_pose_axes_weight_factor=[1.0] * 6))
-        goal = GoalToolPose.from_poses(
-            pose_dict, ordered_tool_frames=frames, num_goalset=len(goalset))
-        planner.update_tool_pose_criteria(passive_criteria)
-    else:
-        goal = GoalToolPose.from_poses({tool_frame: pose}, num_goalset=len(goalset))
 
-    # PORT: single_planner._apply_pose_constraints - hold the requested Cartesian
-    # axes along the whole path (Goalset.trajectory_constraints order
-    # [theta_x, theta_y, theta_z, x, y, z] -> ToolPoseCriteria order
-    # [x, y, z, roll, pitch, yaw]). This is what makes a CartesianPath solve
-    # trace the straight line; without it the solve curves and the achieved
-    # fraction check rejects it. The MotionPlanner is SHARED, so the default
-    # (unconstrained) criteria are restored right after the solve.
+    if tool_frames_arg or passive_frames:
+        goal = GoalToolPose.from_poses(
+            pose_dict, ordered_tool_frames=list(planner.tool_frames),
+            num_goalset=num_goalset)
+    else:
+        goal = GoalToolPose.from_poses(pose_dict, num_goalset=num_goalset)
+    if passive_criteria:
+        planner.update_tool_pose_criteria(passive_criteria)
+
+    # Goalset.trajectory_constraints: [theta_x, theta_y, theta_z, x, y, z]
+    # -> ToolPoseCriteria [x, y, z, roll, pitch, yaw].
     constraints = [int(c) for c in (req.get("trajectory_constraints") or [])]
     applied = len(constraints) == 6 and any(c == 1 for c in constraints)
     if applied:
         tx, ty, tz, cx, cy, cz = (1.0 if c == 1 else 0.0 for c in constraints)
         planner.update_tool_pose_criteria({
-            tool_frame: ToolPoseCriteria(
+            constraint_frame: ToolPoseCriteria(
                 non_terminal_pose_axes_weight_factor=[cx, cy, cz, tx, ty, tz])})
     if hold_mask is not None:
         hold_saved = _apply_passive_hold(planner, hold_mask)
@@ -364,10 +324,11 @@ def plan_pose(handle: int, req) -> dict:
     finally:
         _restore_passive_hold(hold_saved)
         if applied:
-            planner.update_tool_pose_criteria({tool_frame: ToolPoseCriteria()})
-        if passive_frames:
             planner.update_tool_pose_criteria(
-                {frame: ToolPoseCriteria() for frame in passive_frames})
+                {constraint_frame: ToolPoseCriteria()})
+        if passive_criteria:
+            planner.update_tool_pose_criteria(
+                {frame: ToolPoseCriteria() for frame in passive_criteria})
     return _plan_outcome(planner, result)
 
 from .runtime import _REGISTRY

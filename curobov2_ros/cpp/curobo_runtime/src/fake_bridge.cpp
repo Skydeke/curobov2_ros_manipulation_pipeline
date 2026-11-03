@@ -143,7 +143,30 @@ TensorF32 FakeBridge::fk(RobotHandle, const TensorF32 & q)
   return out;
 }
 
-IkOutcome FakeBridge::ik(RobotHandle, const TensorF32 & poses)
+LinkPosesOutcome FakeBridge::link_poses(
+  RobotHandle, const TensorF32 & q, const std::vector<std::string> & link_names)
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  const std::int64_t n = q.shape.empty() ? 0 : q.shape[0];
+  const auto l = static_cast<std::int64_t>(link_names.size());
+  LinkPosesOutcome out;
+  out.link_names = link_names;
+  out.poses.shape = {n, l, 7};
+  out.poses.data.assign(
+    static_cast<std::size_t>(n) * static_cast<std::size_t>(l) * 7, 0.0f);
+  for (std::int64_t i = 0; i < n; ++i) {
+    for (std::int64_t j = 0; j < l; ++j) {
+      float * dst = out.poses.data.data() +
+        (static_cast<std::size_t>(i) * static_cast<std::size_t>(l) +
+        static_cast<std::size_t>(j)) * 7;
+      dst[3] = 1.0f;
+    }
+  }
+  return out;
+}
+
+IkOutcome FakeBridge::ik(
+  RobotHandle, const TensorF32 & poses, const std::string &)
 {
   std::lock_guard<std::mutex> lk(mutex_);
   const std::int64_t n = poses.shape.empty() ? 0 : poses.shape[0];
@@ -465,11 +488,14 @@ TensorF32 FakeBridge::robot_segment(
 PlanOutcome FakeBridge::plan_pose(RobotHandle, const PlanRequest & request)
 {
   PlanOutcome out;
-  if (request.goalset.shape.empty() || request.goalset.shape[0] == 0) {
+  const bool multi_tool = !request.tool_poses.shape.empty() &&
+    request.tool_poses.shape[0] > 0;
+  if (!multi_tool && (request.goalset.shape.empty() || request.goalset.shape[0] == 0)) {
     out.status = "no solution";
     return out;
   }
-  const float * row = request.goalset.data.data();
+  const float * row = multi_tool ? request.tool_poses.data.data() :
+    request.goalset.data.data();
   const double norm = std::sqrt(
     static_cast<double>(row[0]) * row[0] + static_cast<double>(row[1]) * row[1] +
     static_cast<double>(row[2]) * row[2]);

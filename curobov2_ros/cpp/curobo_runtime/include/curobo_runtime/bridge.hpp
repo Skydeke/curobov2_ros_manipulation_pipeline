@@ -52,6 +52,13 @@ struct IkOutcome
   std::vector<std::string> joint_names;
 };
 
+// Poses of named links for a batch of joint states (visualisation FK).
+struct LinkPosesOutcome
+{
+  TensorF32 poses;                            // [N, L, 7] x,y,z,qw,qx,qy,qz
+  std::vector<std::string> link_names;        // L names actually returned
+};
+
 // Joint introspection (PORT: ros_service_manager._callback_get_joint_info).
 struct JointLimitsOutcome
 {
@@ -87,6 +94,11 @@ struct PlanRequest
 {
   std::vector<float> start;                   // [dof]
   TensorF32 goalset;                          // [G, 7] poses (plan_pose)
+  // Simultaneous per-tool Cartesian targets (bimanual). Parallel arrays;
+  // `tool_poses` is [T, 7] (x, y, z, qw, qx, qy, qz). Empty for the
+  // single-tool `goalset` path.
+  std::vector<std::string> tool_frames;
+  TensorF32 tool_poses;
   // PORT: the request's goalset count. `goalset` above is only the FIRST
   // segment's poses (build_request mirrors the Python's goalsets[0] use), so the
   // count is needed to tell "one goalset with N poses" (CartesianPath) from "N
@@ -348,8 +360,15 @@ public:
   // PORT: fk_services._compute_poses. q: [N, dof] -> tool poses [N, 1, 7]
   // ([x,y,z,qw,qx,qy,qz] per row).
   virtual TensorF32 fk(RobotHandle handle, const TensorF32 & q) = 0;
+  // Poses of `link_names` for q: [N, dof] -> [N, L, 7]. Unknown names are
+  // dropped and reported in `link_names`.
+  virtual LinkPosesOutcome link_poses(
+    RobotHandle handle, const TensorF32 & q,
+    const std::vector<std::string> & link_names) = 0;
   // PORT: ik_services._solve. poses: [N, 7] -> per-N solution + validity.
-  virtual IkOutcome ik(RobotHandle handle, const TensorF32 & poses) = 0;
+  virtual IkOutcome ik(
+    RobotHandle handle, const TensorF32 & poses,
+    const std::string & tool_frame = "") = 0;
   // PORT: config_wrapper_ik.ConfigWrapperIK.build (solver lifecycle).
   // `self_collision_check` drives BOTH self-collision and scene collision (the
   // old Python's single `ik_collision_check` flag; false = pure-kinematics IK

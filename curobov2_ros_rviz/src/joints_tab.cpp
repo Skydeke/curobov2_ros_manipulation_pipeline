@@ -181,13 +181,13 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
   preset_row->addWidget(named_pose_combo_, 1);
   // "Preview": mirror the target column onto <planner_node>/trajectory (a
   // one-waypoint JointTrajectory) whenever it changes, so the
-  // CuroboTrajectoryDisplay shows the configuration live as the bars are
+  // CuroboPlanningDisplay shows the configuration live as the bars are
   // dragged. Checked by default; unchecking makes the tab edit-only again.
   preview_check_ = new QCheckBox(tr("Preview"), this);
   preview_check_->setToolTip(
     tr("Mirror the target configuration onto the planner's trajectory topic "
        "(<planner_node>/trajectory) as a single-waypoint JointTrajectory, so the "
-       "CuroboTrajectoryDisplay shows it while you move the bars. This only "
+       "CuroboPlanningDisplay shows it while you move the bars. This only "
        "changes what is DRAWN - it never plans or moves the robot."));
   preview_check_->setChecked(true);
   preset_row->addWidget(preview_check_);
@@ -412,7 +412,7 @@ void JointsTab::setPlannerNode(const QString & planner_node)
   action_client_ = rclcpp_action::create_client<curobov2_ros_interfaces::action::SendTrajectory>(
     node_, ns + "execute_trajectory");
 
-  // Preview/ghost topic: CuroboTrajectoryDisplay subscribes to
+  // Preview/ghost topic: CuroboPlanningDisplay subscribes to
   // <planner_node>/trajectory. The server publishes the planned ghost there; the
   // tab ALSO mirrors the edited target (a one-waypoint JointTrajectory) so
   // moving the joint bars displays the configuration without planning.
@@ -870,7 +870,7 @@ QVector<double> targetVector(QTreeWidget * tree)
 }  // namespace
 
 // Mirror the target column onto <planner_node>/trajectory as a single-waypoint
-// JointTrajectory so the CuroboTrajectoryDisplay shows the configuration the
+// JointTrajectory so the CuroboPlanningDisplay shows the configuration the
 // user is editing - no plan, no motion. Gated on the "Preview" checkbox; only
 // publishes when the target actually changed (the caller polls).
 void JointsTab::publishPreview()

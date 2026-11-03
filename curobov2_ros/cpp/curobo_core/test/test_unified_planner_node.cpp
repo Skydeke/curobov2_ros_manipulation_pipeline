@@ -7,11 +7,13 @@
 #include <memory>
 
 #include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 
 #include "curobo_core/core/unified_planner_node.hpp"
 #include "curobo_runtime/fake_bridge.hpp"
 #include "curobo_runtime/runtime.hpp"
 #include "curobov2_ros_interfaces/srv/fk.hpp"
+#include "curobov2_ros_interfaces/srv/fk_batch.hpp"
 #include "curobov2_ros_interfaces/srv/get_joint_info.hpp"
 #include "curobov2_ros_interfaces/srv/get_scene_objects.hpp"
 #include "curobov2_ros_interfaces/srv/warmup_fk.hpp"
@@ -43,6 +45,25 @@ TEST(UnifiedPlannerNode, RegistersAndAnswersTheM2Services)
     EXPECT_TRUE(response->success);
     EXPECT_EQ(response->message, "7 joints in cspace");
     EXPECT_EQ(response->joint_names.size(), 7u);
+    ASSERT_EQ(response->tool_frames.size(), 1u);
+    EXPECT_EQ(response->tool_frames[0], "tool0");
+  }
+  {
+    auto client = node->create_client<curobov2_ros_interfaces::srv::FkBatch>(
+      "unified_planner/fk_batch");
+    ASSERT_TRUE(client->wait_for_service(5s));
+    auto request = std::make_shared<curobov2_ros_interfaces::srv::FkBatch::Request>();
+    sensor_msgs::msg::JointState state;
+    state.name = node->joint_names();
+    state.position.assign(node->joint_names().size(), 0.0);
+    request->joint_states.push_back(state);
+    request->link_names = {"tool0", "base_link"};
+    auto future = client->async_send_request(request);
+    rclcpp::spin_until_future_complete(node, future, 10s);
+    auto response = future.get();
+    EXPECT_TRUE(response->success);
+    ASSERT_EQ(response->link_names.size(), 2u);
+    EXPECT_EQ(response->link_poses.size(), 2u);
   }
   {
     auto client = node->create_client<curobov2_ros_interfaces::srv::WarmupFK>(

@@ -32,6 +32,10 @@
   <depend>visualization_msgs</depend>
   <depend>yaml_cpp_vendor</depend>
 
+  <!-- The task-constructor RViz config uses the shared trajectory display
+       from curobov2_ros_rviz. -->
+  <exec_depend>curobov2_ros_rviz</exec_depend>
+
   <exec_depend>libqt5-core</exec_depend>
   <exec_depend>libqt5-gui</exec_depend>
   <exec_depend>libqt5-opengl</exec_depend>

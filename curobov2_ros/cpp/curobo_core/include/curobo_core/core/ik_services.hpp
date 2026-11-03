@@ -8,6 +8,7 @@
 #ifndef CUROBO_CORE__CORE__IK_SERVICES_HPP_
 #define CUROBO_CORE__CORE__IK_SERVICES_HPP_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -46,7 +47,8 @@ public:
   // ReachabilityServices).
   bool solve_poses(
     const std::vector<Pose7> & poses, std::vector<std::vector<float>> & positions,
-    std::vector<std::uint8_t> & flags, std::vector<std::string> & joint_names);
+    std::vector<std::uint8_t> & flags, std::vector<std::string> & joint_names,
+    const std::string & tool_frame = "");
 
   // PORT: ik_services.IKServices.update_world / rebuild (delegate to the bridge
   // at M3; the scene push is a bridge concern).
@@ -75,7 +77,8 @@ public:
 
 private:
   bool solve(
-    const std::vector<Pose7> & poses, curobo_runtime::IkOutcome & outcome);
+    const std::vector<Pose7> & poses, curobo_runtime::IkOutcome & outcome,
+    const std::string & tool_frame = "");
 
   void handle_warmup_ik(
     const std::shared_ptr<curobov2_ros_interfaces::srv::WarmupIK::Request> request,
@@ -106,6 +109,9 @@ private:
   bool ik_collision_check_ = true;
   bool ik_use_lm_seed_ = true;
   bool ik_use_cuda_graph_ = true;
+  // The first solve after a (re)build records the IK CUDA graph; it must run
+  // under the exclusive GPU barrier or concurrent lanes invalidate the capture.
+  std::atomic<bool> ik_graph_ready_{false};
   std::mutex solve_lock_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::WarmupIK>::SharedPtr warmup_srv_;

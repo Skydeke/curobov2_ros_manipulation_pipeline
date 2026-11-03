@@ -57,17 +57,37 @@ Visualization Manager:
       Plane Cell Count: 10
       Reference Frame: <Fixed Frame>
       Value: true
-    - Class: curobov2_ros_rviz/TargetDisplay
+    - Alpha: 0.8
+      Class: curobov2_ros_rviz/CuroboPlanningDisplay
+      Collision Spheres Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /unified_planner/collision_spheres
       Enabled: true
+      Goal State Alpha: 0.5
       Gizmo Visible: true
-      Name: Target Pose Marker
-      Target Orientation W: 1.0
-      Target Orientation X: 0.0
-      Target Orientation Y: 0.0
-      Target Orientation Z: 0.0
+      Loop Animation: false
+      Name: CuroboPlanning
+      Planner Node: unified_planner
+      Scene Robot Alpha: 1
+      Seed From TF: true
+      Show Goal State: true
+      Show Attached: true
+      Show Scene Robot: true
+      Show Trail: false
+      Speed: 1
+      Target Orientation W: 1
+      Target Orientation X: 0
+      Target Orientation Y: 0
+      Target Orientation Z: 0
       Target Position X: 0.4
-      Target Position Y: 0.0
+      Target Position Y: 0
       Target Position Z: 0.4
+      Tool Frames: ""
+      Trail Step Size: 10
+      Trajectory Topic: /unified_planner/trajectory
       Value: true
   Enabled: true
   Global Options:

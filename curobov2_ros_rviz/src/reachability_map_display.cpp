@@ -1024,7 +1024,7 @@ void ReachabilityMapDisplay::makeGizmoMarker(const geometry_msgs::msg::Pose & po
   int_marker.header.frame_id = gizmo_frame_;
   // Frame-locked marker (header.stamp == 0) so RViz follows TF every frame;
   // a timestamped marker would freeze the reference transform at creation.
-  // See TargetDisplay::makeGizmoMarker for the full rationale.
+  // See CuroboPlanningDisplay::insertGizmoMarker for the full rationale.
   int_marker.pose = pose;
   int_marker.scale = 1.0;
   int_marker.name = gizmo_name_;

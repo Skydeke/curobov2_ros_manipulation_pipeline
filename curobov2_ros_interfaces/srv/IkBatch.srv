@@ -5,6 +5,9 @@ geometry_msgs/Pose[] poses
 # configured base link via TF before solving (SetMask.srv convention).
 string frame_id ""
 
+# Tool frame the poses target. Empty means the first configured tool frame.
+string tool_frame ""
+
 ---
 
 sensor_msgs/JointState[] joint_states

@@ -12,6 +12,43 @@ Panels:
 Visualization Manager:
   Class: ""
   Displays:
+    - Alpha: 0.8
+      Class: curobov2_ros_rviz/CuroboPlanningDisplay
+      Collision Spheres Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /curobo_server/collision_spheres
+      Enabled: true
+      Goal State Alpha: 0.5
+      Gizmo Visible: false
+      Loop Animation: false
+      Name: CuroboPlanning
+      Planner Node: curobo_server
+      Scene Robot Alpha: 1
+      Seed From TF: true
+      Show Goal State: false
+      Show Attached: true
+      Show Scene Robot: true
+      Show Trail: false
+      Speed: 1
+      Target Orientation W: 1
+      Target Orientation X: 0
+      Target Orientation Y: 0
+      Target Orientation Z: 0
+      Target Position X: 0.4
+      Target Position Y: 0
+      Target Position Z: 0.4
+      Tool Frames: ""
+      Trail Step Size: 10
+      Trajectory Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /curobo_task_constructor/solution_trajectory
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Selected solution markers

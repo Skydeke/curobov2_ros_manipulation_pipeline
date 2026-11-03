@@ -86,23 +86,39 @@ std::pair<bool, std::string> check_goal_request(
 {
   const std::string name = planner->get_planner_name();
   const auto & goalsets = goal.goalsets;
-  std::string sizes, joints;
+  std::string sizes, joints, tools;
   for (std::size_t i = 0; i < goalsets.size(); ++i) {
     sizes += (i ? ", " : "") + std::to_string(goalsets[i].poses.size());
     joints += (i ? ", " : "") + std::to_string(goalsets[i].target_joint_positions.size());
+    tools += (i ? ", " : "") + std::to_string(goalsets[i].tool_poses.size());
   }
   if (goalsets.empty()) {
     return {false, name + ": request must provide `goalsets` (one Goalset entry per segment)"};
   }
   for (const auto & g : goalsets) {
-    if (g.poses.empty() && g.target_joint_positions.empty()) {
-      return {false, name + ": every goalset entry must hold >= 1 pose or a "
-        "non-empty target_joint_positions (got pose sizes [" + sizes +
-        "], joint sizes [" + joints + "])"};
+    if (g.poses.empty() && g.target_joint_positions.empty() &&
+      g.tool_poses.empty())
+    {
+      return {false, name + ": every goalset entry must hold >= 1 pose, a "
+        "non-empty target_joint_positions, or multi-tool poses (got pose sizes [" +
+        sizes + "], joint sizes [" + joints + "], tool pose sizes [" + tools + "])"};
+    }
+    if (!g.tool_poses.empty() && g.tool_poses.size() != g.tool_frames.size()) {
+      return {false, name + ": tool_frames and tool_poses must be parallel "
+        "(got " + std::to_string(g.tool_frames.size()) + " frame(s), " +
+        std::to_string(g.tool_poses.size()) + " pose(s))"};
+    }
+    if (!g.tool_poses.empty() && !g.target_joint_positions.empty()) {
+      return {false, name + ": a goalset cannot mix multi-tool poses with "
+        "target_joint_positions"};
     }
   }
   if (!planner->is_open_loop()) {
-    if (goalsets.size() != 1 || goalsets.front().poses.size() != 1) {
+    const bool single_pose = goalsets.size() == 1 &&
+      goalsets.front().poses.size() == 1 && goalsets.front().tool_poses.empty();
+    const bool multi_tool = goalsets.size() == 1 &&
+      !goalsets.front().tool_poses.empty();
+    if (!single_pose && !multi_tool) {
       return {false, name + ": requires exactly one goalset entry with a single "
         "pose, got " + std::to_string(goalsets.size()) + " set(s) of sizes [" +
         sizes + "]"};
@@ -403,6 +419,20 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
     // Snap continuous-joint targets to the in-range equivalent nearest the
     // start so a negative / un-wrapped joint goal plans like its wrapped twin.
     wrap_full_turn_targets(plan_request);
+  } else if (!goal.goalsets.empty() && !goal.goalsets.front().tool_frames.empty()) {
+    const auto & g = goal.goalsets.front();
+    plan_request.tool_frames.assign(g.tool_frames.begin(), g.tool_frames.end());
+    plan_request.tool_poses.shape = {
+      static_cast<std::int64_t>(g.tool_poses.size()), 7};
+    for (const auto & pose : g.tool_poses) {
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.position.x));
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.position.y));
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.position.z));
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.w));
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.x));
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.y));
+      plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.z));
+    }
   } else if (!goal.goalsets.empty()) {
     plan_request.goalset_count = static_cast<std::int64_t>(goal.goalsets.size());
     // PORT: single_planner._apply_pose_constraints - the FIRST non-empty

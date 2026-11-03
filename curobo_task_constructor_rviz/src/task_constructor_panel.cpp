@@ -448,7 +448,7 @@ TaskView::TaskView(TaskConstructorPanel* parent, rviz_common::properties::Proper
           [this](bool checked) { show_time_column->setValue(checked); });
 
   connect(tasks_view_->selectionModel(), SIGNAL(currentChanged(QModelIndex, QModelIndex)), this,
-          SLOT(onCurrentStageChanged(QModelIndex, QModelIndex)));
+          SLOT(onCurrentStageChanged()));
 
   onCurrentStageChanged();
 
@@ -1844,7 +1844,7 @@ std::vector<visualization_msgs::msg::Marker> TaskView::selectedMarkers() const
 void TaskView::publishSolutionTrajectory(
     const std::vector<sensor_msgs::msg::JointState>& waypoints)
 {
-  // The current solution as JointTrajectory for the CuroboTrajectoryDisplay
+  // The current solution as JointTrajectory for the CuroboPlanningDisplay
   // (full-robot animation + trail) — the same topic Task.publish uses.
   if (!pub_solution_trajectory_)
     return;

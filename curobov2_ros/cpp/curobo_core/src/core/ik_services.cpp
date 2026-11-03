@@ -123,11 +123,33 @@ std::string IKServices::warmup(int batch_size, int num_seeds)
     // the solver (Re)CAPTURES its CUDA graph, so it takes the exclusive
     // gpu_lock. Unguarded it could capture while the plan/camera lane was
     // capturing, invalidating one of them.
+    ik_graph_ready_ = false;
     on_kin_lane(lane_, [&]() {
         auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
         bridge_->ik_config(
           handle_, batch_size, num_seeds, self_collision_check, use_lm_seed,
           use_cuda_graph);
+        if (use_cuda_graph) {
+          // Record the IK solve graph NOW, while every other GPU lane is held
+          // off. Otherwise the first user solve (e.g. dragging the goal marker)
+          // captures lazily and a concurrent camera/mapper kernel invalidates
+          // the capture, poisoning the kin lane.
+          curobo_runtime::TensorF32 dummy;
+          dummy.shape = {1, 7};
+          dummy.data = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f};
+          try {
+            (void)bridge_->ik(handle_, dummy, "");
+            ik_graph_ready_ = true;
+            RCLCPP_INFO(
+              node_->get_logger(), "IK CUDA graph warmed (batch_size=%d)",
+              batch_size);
+          } catch (const std::exception & exc) {
+            RCLCPP_WARN(
+              node_->get_logger(), "IK graph warmup solve failed: %s", exc.what());
+          }
+        } else {
+          ik_graph_ready_ = true;
+        }
       });
   }
   // PORT: config_wrapper_ik build - the torch_sync CPU/GPU ordering bridge.
@@ -177,14 +199,19 @@ bool IKServices::resolve_use_lm_seed() const
 // param, then True.
 bool IKServices::resolve_use_cuda_graph() const
 {
-  // PORT: config_wrapper.resolve_use_cuda_graph (shared helper).
+  if (node_ != nullptr && node_->has_parameter("ik_use_cuda_graph")) {
+    return node_->get_parameter("ik_use_cuda_graph").as_bool();
+  }
   return curobo_core::resolve_use_cuda_graph(node_);
 }
 
 // PORT: config_wrapper_ik.ConfigWrapperIK.needs_rebuild
 bool IKServices::needs_rebuild(int batch_size, int num_seeds) const
 {
-  return batch_size != ik_batch_size_ || num_seeds != ik_num_seeds_ ||
+  // A smaller request fits the existing buffers; only growth (or a tunable
+  // change) needs a rebuild. This keeps frequent single-pose UI IK queries from
+  // shrinking a solver that a reachability batch sized.
+  return batch_size > ik_batch_size_ || num_seeds != ik_num_seeds_ ||
          resolve_collision_check() != ik_collision_check_ ||
          resolve_use_lm_seed() != ik_use_lm_seed_ ||
          resolve_use_cuda_graph() != ik_use_cuda_graph_;
@@ -207,7 +234,8 @@ void IKServices::handle_warmup_ik(
 
 // PORT: ik_services.IKServices._solve / _solve_locked
 bool IKServices::solve(
-  const std::vector<Pose7> & poses, curobo_runtime::IkOutcome & outcome)
+  const std::vector<Pose7> & poses, curobo_runtime::IkOutcome & outcome,
+  const std::string & tool_frame)
 {
   if (poses.empty()) {
     return false;
@@ -228,9 +256,19 @@ bool IKServices::solve(
     // holds barrier.shared() itself (GpuLane::run_job). Do NOT pre-acquire the
     // barrier here: blocking on the lane while holding a read hold deadlocks
     // against a capture (writer) that is waiting for readers to drain.
-    outcome = on_kin_lane(lane_, [&]() {
-        return bridge_->ik(handle_, poses_to_tensor(poses));
-      });
+    const auto pose_tensor = poses_to_tensor(poses);
+    if (!ik_graph_ready_.exchange(true)) {
+      // First solve after a build records the IK CUDA graph; keep every other
+      // lane off the GPU while it does.
+      outcome = on_kin_lane(lane_, [&]() {
+          auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+          return bridge_->ik(handle_, pose_tensor, tool_frame);
+        });
+    } else {
+      outcome = on_kin_lane(lane_, [&]() {
+          return bridge_->ik(handle_, pose_tensor, tool_frame);
+        });
+    }
     // PORT: ik_services._solve_call - the torch_sync CPU/GPU ordering bridge.
     if (node_ != nullptr && node_->has_parameter("torch_sync") &&
       node_->get_parameter("torch_sync").as_bool())
@@ -239,6 +277,7 @@ bool IKServices::solve(
     }
     return true;
   } catch (const std::exception & e) {
+    ik_graph_ready_ = false;
     // PORT: a lane/solve fatal CUDA error must stop the node, not be
     // reported as an ordinary failure from a dead context.
     handle_gpu_fault(node_, "solving IK", e.what());
@@ -269,7 +308,7 @@ void IKServices::handle_ik(
 
   curobo_runtime::IkOutcome outcome;
   try {
-    if (!solve(poses, outcome)) {
+    if (!solve(poses, outcome, request->tool_frame)) {
       response->success = false;
       response->error_msg.data = "IK solve failed";
       return;
@@ -321,7 +360,7 @@ void IKServices::handle_ik_batch(
 
   curobo_runtime::IkOutcome outcome;
   try {
-    if (!solve(poses, outcome)) {
+    if (!solve(poses, outcome, request->tool_frame)) {
       response->success = false;
       response->error_msg.data = "IK batch solve failed";
       return;
@@ -355,10 +394,11 @@ void IKServices::handle_ik_batch(
 // PORT: ik_services.IKServices.solve_poses
 bool IKServices::solve_poses(
   const std::vector<Pose7> & poses, std::vector<std::vector<float>> & positions,
-  std::vector<std::uint8_t> & flags, std::vector<std::string> & joint_names)
+  std::vector<std::uint8_t> & flags, std::vector<std::string> & joint_names,
+  const std::string & tool_frame)
 {
   curobo_runtime::IkOutcome outcome;
-  if (!solve(poses, outcome)) {
+  if (!solve(poses, outcome, tool_frame)) {
     return false;
   }
   const std::size_t dof = outcome.positions.shape.size() > 2 ?

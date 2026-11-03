@@ -45,3 +45,7 @@ float64[] upper_limits
 # reports — repeated here so one call is enough to render the whole panel.
 string[] locked_joint_names
 float64[] locked_positions
+
+# Cartesian tool frames the planner accepts goals for (cuRobo `tool_frames`).
+# One per arm on a bimanual robot.
+string[] tool_frames

@@ -52,6 +52,13 @@ public:
     const std::vector<std::vector<double>> & qs,
     std::vector<curobo_runtime::TensorF32> & poses) const;
 
+  // Poses of named links for every qs row, used by visualisers.
+  bool compute_link_poses(
+    const std::vector<std::vector<double>> & qs,
+    const std::vector<std::string> & link_names,
+    curobo_runtime::TensorF32 & poses,
+    std::vector<std::string> & used_names) const;
+
   // PORT: fk_services.FKServices._validate
   std::vector<std::uint8_t> validate(const std::vector<std::vector<double>> & qs) const;
 
