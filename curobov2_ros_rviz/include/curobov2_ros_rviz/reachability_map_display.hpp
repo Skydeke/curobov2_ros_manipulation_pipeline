@@ -67,7 +67,7 @@ namespace curobov2_ros_rviz
  *  - one coloured sphere per grid cell (green = IK converged, red = not),
  *  - optionally, full-robot ghosts of the solved configurations, either at
  *    every solved cell or at a single user-selected cell (reusing the same
- *    URDF FK / LinkUpdater machinery as CuroboTrajectoryDisplay).
+ *    URDF FK / LinkUpdater machinery as CuroboPlanningDisplay).
  *
  * The URDF is always read from the latched `/robot_description` topic. No
  * MoveIt dependency.

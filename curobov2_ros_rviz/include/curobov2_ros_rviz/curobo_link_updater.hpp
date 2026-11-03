@@ -17,7 +17,7 @@ namespace curobov2_ros_rviz
 /**
  * Feeds precomputed Eigen link transforms to rviz_default_plugins::robot::Robot.
  *
- * Used by CuroboTrajectoryDisplay to render the robot at each trajectory
+ * Used by CuroboPlanningDisplay to render the robot at each trajectory
  * waypoint without any kinematic computation — FK is done once when the
  * message arrives, this class just bridges Eigen → Ogre for Robot::update().
  */

@@ -166,62 +166,81 @@ def plan_pose(handle: int, req) -> dict:
         dtype=torch.float32, device=device)
     start_state = JointState.from_position(start, joint_names=planner.kinematics.joint_names)
 
+    tool_frames_arg = list(req.get("tool_frames") or [])
+    tool_poses_arg = req.get("tool_poses")
     goalset_arg = req.get("goalset")
-    if goalset_arg is None or len(goalset_arg) == 0:
-        raise ValueError(
-            "plan_pose requires a 'goalset' of [x,y,z,qw,qx,qy,qz] poses; got no "
-            "poses (a joint-space goal must go through plan_cspace / the "
-            "joint-space planner).")
-    goalset = np.asarray(goalset_arg, dtype=np.float32)
-    pose = Pose(
-        position=torch.tensor(goalset[:, 0:3], dtype=torch.float32, device=device),
-        quaternion=torch.tensor(goalset[:, 3:7], dtype=torch.float32, device=device))
-    tool_frame = planner.tool_frames[0]
+    if tool_frames_arg:
+        if tool_poses_arg is None or len(tool_poses_arg) == 0:
+            raise ValueError("plan_pose got tool_frames without tool_poses")
+        if len(set(tool_frames_arg)) != len(tool_frames_arg):
+            raise ValueError(f"tool_frames contains duplicates: {tool_frames_arg}")
+        unknown = [f for f in tool_frames_arg if f not in planner.tool_frames]
+        if unknown:
+            raise ValueError(
+                f"unknown tool frame(s) {unknown}; configured: "
+                f"{list(planner.tool_frames)}")
+        goalset = np.asarray(tool_poses_arg, dtype=np.float32).reshape(-1, 7)
+        if goalset.shape[0] != len(tool_frames_arg):
+            raise ValueError(
+                f"tool_frames/tool_poses length mismatch: {len(tool_frames_arg)} "
+                f"frame(s), {goalset.shape[0]} pose(s)")
+        num_goalset = 1
+    else:
+        if goalset_arg is None or len(goalset_arg) == 0:
+            raise ValueError(
+                "plan_pose requires a 'goalset' of [x,y,z,qw,qx,qy,qz] poses; got no "
+                "poses (a joint-space goal must go through plan_cspace / the "
+                "joint-space planner).")
+        goalset = np.asarray(goalset_arg, dtype=np.float32).reshape(-1, 7)
+        num_goalset = len(goalset)
+
+    def make_pose(rows):
+        return Pose(
+            position=torch.tensor(rows[:, 0:3], dtype=torch.float32, device=device),
+            quaternion=torch.tensor(rows[:, 3:7], dtype=torch.float32, device=device))
+
     from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
-    # A bimanual robot (e.g. OpenArm) configures one tool frame per arm, but the
-    # caller only ever targets the active arm. cuRobo's IK requires a goal entry
-    # for EVERY configured tool link (`GoalToolPose.reorder_links` raises
-    # "Ordered link names [...] not a subset of [...]" otherwise), so the
-    # passive frames are pinned to their current FK pose. They are then HELD
-    # there with full terminal AND non-terminal weight: zeroing the weight (the
-    # old behaviour) left the passive arm unconstrained, so the cspace cost
-    # pulled it toward its nominal rest pose and the arm the caller never
-    # targeted drifted during the solve. Single-arm robots (TIAGo, KATE) keep
-    # the exact old goal, one frame and all.
-    passive_frames = list(planner.tool_frames[1:])
+    if tool_frames_arg:
+        pose_dict = {
+            frame: make_pose(goalset[i:i + 1]) for i, frame in enumerate(tool_frames_arg)
+        }
+    else:
+        pose_dict = {planner.tool_frames[0]: make_pose(goalset)}
+    constraint_frame = next(iter(pose_dict))
+
+    # cuRobo requires a goal for every configured tool link. Frames the caller
+    # did not target are pinned at their current FK pose and held there.
+    passive_frames = [f for f in planner.tool_frames if f not in pose_dict]
     passive_criteria = {}
     if passive_frames:
         fk = planner.kinematics.compute_kinematics(start_state)
-        pose_dict = {tool_frame: pose}
         for frame in passive_frames:
             here = fk.tool_poses.get_link_pose(frame)
             pose_dict[frame] = Pose(
-                position=here.position.repeat(len(goalset), 1).contiguous(),
-                quaternion=here.quaternion.repeat(len(goalset), 1).contiguous())
+                position=here.position.repeat(num_goalset, 1).contiguous(),
+                quaternion=here.quaternion.repeat(num_goalset, 1).contiguous())
             passive_criteria[frame] = ToolPoseCriteria(
                 terminal_pose_axes_weight_factor=[1.0] * 6,
                 non_terminal_pose_axes_weight_factor=[1.0] * 6)
+
+    if tool_frames_arg or passive_frames:
         goal = GoalToolPose.from_poses(
             pose_dict, ordered_tool_frames=list(planner.tool_frames),
-            num_goalset=len(goalset))
-        planner.update_tool_pose_criteria(passive_criteria)
+            num_goalset=num_goalset)
     else:
-        goal = GoalToolPose.from_poses({tool_frame: pose}, num_goalset=len(goalset))
+        goal = GoalToolPose.from_poses(pose_dict, num_goalset=num_goalset)
+    if passive_criteria:
+        planner.update_tool_pose_criteria(passive_criteria)
 
-    # PORT: single_planner._apply_pose_constraints - hold the requested Cartesian
-    # axes along the whole path (Goalset.trajectory_constraints order
-    # [theta_x, theta_y, theta_z, x, y, z] -> ToolPoseCriteria order
-    # [x, y, z, roll, pitch, yaw]). This is what makes a CartesianPath solve
-    # trace the straight line; without it the solve curves and the achieved
-    # fraction check rejects it. The MotionPlanner is SHARED, so the default
-    # (unconstrained) criteria are restored right after the solve.
+    # Goalset.trajectory_constraints: [theta_x, theta_y, theta_z, x, y, z]
+    # -> ToolPoseCriteria [x, y, z, roll, pitch, yaw].
     constraints = [int(c) for c in (req.get("trajectory_constraints") or [])]
     applied = len(constraints) == 6 and any(c == 1 for c in constraints)
     if applied:
         tx, ty, tz, cx, cy, cz = (1.0 if c == 1 else 0.0 for c in constraints)
         planner.update_tool_pose_criteria({
-            tool_frame: ToolPoseCriteria(
+            constraint_frame: ToolPoseCriteria(
                 non_terminal_pose_axes_weight_factor=[cx, cy, cz, tx, ty, tz])})
     try:
         result = planner.plan_pose(
@@ -230,10 +249,11 @@ def plan_pose(handle: int, req) -> dict:
             enable_graph_attempt=int(req.get("enable_graph_attempt", 1)))
     finally:
         if applied:
-            planner.update_tool_pose_criteria({tool_frame: ToolPoseCriteria()})
-        if passive_frames:
             planner.update_tool_pose_criteria(
-                {frame: ToolPoseCriteria() for frame in passive_frames})
+                {constraint_frame: ToolPoseCriteria()})
+        if passive_criteria:
+            planner.update_tool_pose_criteria(
+                {frame: ToolPoseCriteria() for frame in passive_criteria})
     return _plan_outcome(planner, result)
 
 from .runtime import _REGISTRY

@@ -95,29 +95,46 @@ def world_push(handle: int) -> bool:
     pushed = False
     # PORT: collision_world_scene() - the SOLVERS get the converted scene.
     solver_scene = _solver_bound_scene(scene, _obstacle_mode(entry))
+    scene_for_solvers = solver_scene
     mp = entry.get("motion_planner")
     if mp is not None:
         try:
             mp.update_world(solver_scene)
             pushed = True
         except Exception as exc:
-            # NEVER swallow this. A failed update leaves the solver on its
-            # PREVIOUS world - possibly with no camera voxels at all - while the
-            # perception map keeps publishing the obstacles. Silently continuing
-            # is how a plan ends up going straight through the wall. Report it and
-            # let the caller refuse to plan (throttled: the caller retries every
-            # plan while the failure persists).
-            _log_world_push_failure(
-                f"motion planner update_world raised {exc!r}; the solver keeps "
-                f"its previous world and camera voxels may be missing")
+            # A voxel layer that is one cell too large must not poison the GPU
+            # context (a failed update during graph capture invalidates it, so
+            # the next IK/FK capture dies with capture_end). Retry with analytic
+            # primitives only: the camera layer is dropped, but the solver and
+            # its CUDA graphs stay usable.
+            fallback = None
+            if getattr(solver_scene, "voxel", None):
+                import copy
+
+                fallback = copy.copy(solver_scene)
+                fallback.voxel = None
+            if fallback is not None:
+                try:
+                    mp.update_world(fallback)
+                    scene_for_solvers = fallback
+                    pushed = True
+                    _log_world_push_failure(
+                        f"motion planner update_world raised {exc!r}; retried "
+                        "without the voxel layer (camera obstacles are missing)")
+                except Exception as retry_exc:
+                    _log_world_push_failure(
+                        f"motion planner update_world raised {retry_exc!r}; the "
+                        "solver keeps its previous world")
+            else:
+                _log_world_push_failure(
+                    f"motion planner update_world raised {exc!r}; the solver "
+                    "keeps its previous world")
         if pushed:
             # Best-effort verification that the voxel layer actually landed in the
             # solver's collision model (attributes vary by cuRobo build; only act
-            # when we can positively see an empty voxel store). Accessors can
-            # RAISE (properties on the planner do), so never let a probe turn a
-            # successful push into a crash.
+            # when we can positively see an empty voxel store).
             try:
-                has_voxel_in = bool(getattr(solver_scene, "voxel", None))
+                has_voxel_in = bool(getattr(scene_for_solvers, "voxel", None))
                 data = getattr(getattr(mp, "scene_collision_checker", None), "data", None)
                 if has_voxel_in and data is not None and \
                         getattr(data, "voxels", None) is None:
@@ -131,7 +148,7 @@ def world_push(handle: int) -> bool:
     ik = entry.get("ik")
     if ik is not None:
         try:
-            ik.update_world(solver_scene)
+            ik.update_world(scene_for_solvers)
         except Exception:
             pass
     # PORT: fk_services._push_world - the FK collision validator is a THIRD

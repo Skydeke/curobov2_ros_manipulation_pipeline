@@ -134,7 +134,7 @@ private Q_SLOTS:
   void zeroTargets();
   void onNamedPoseChosen(int index);
   /// Publish the current target column as a one-waypoint JointTrajectory on
-  /// <planner_node>/trajectory (the ghost topic the CuroboTrajectoryDisplay
+  /// <planner_node>/trajectory (the ghost topic the CuroboPlanningDisplay
   /// shows), so moving a joint bar / selecting a named pose displays the
   /// configuration without planning. No-op unless "Preview" is checked and the
   /// target actually changed.
@@ -248,7 +248,7 @@ private:
 
   /// "Preview" gate + its topic. Checked => the target column is mirrored onto
   /// <planner_node>/trajectory (a one-waypoint JointTrajectory) whenever it
-  /// changes, so the CuroboTrajectoryDisplay shows the configuration live while
+  /// changes, so the CuroboPlanningDisplay shows the configuration live while
   /// the bars are dragged. Unchecked => the tab only edits the request.
   QCheckBox * preview_check_ = nullptr;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr preview_pub_;

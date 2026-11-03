@@ -11,7 +11,7 @@
  * fetches full solutions via per-task GetSolution, and drives the selected
  * solution through ExecuteTaskSolution with no replanning, like MTC's
  * Execute solution button. The selected solution is additionally published
- * as trajectory_msgs/JointTrajectory for the CuroboTrajectoryDisplay.
+ * as trajectory_msgs/JointTrajectory for the CuroboPlanningDisplay.
  *
  * Class map to moveit_task_constructor (same names, same roles, same slot
  * names): SubPanel / TaskConstructorPanel (the TaskPanel; keeps its

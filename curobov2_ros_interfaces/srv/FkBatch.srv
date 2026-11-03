@@ -1,5 +1,9 @@
 sensor_msgs/JointState[] joint_states
 
+# Optional: when non-empty, also return every named link's pose for each joint
+# state. Used by the trajectory display so it does not run its own kinematics.
+string[] link_names
+
 ---
 
 geometry_msgs/Pose[] poses
@@ -10,3 +14,8 @@ geometry_msgs/Pose[] poses
 std_msgs/Bool[] poses_valid
 std_msgs/String error_msg
 bool success
+
+# Link poses actually returned (unknown names are filtered out), flattened as
+# link_poses[i * len(link_names) + j] for joint state i and link j.
+string[] link_names
+geometry_msgs/Pose[] link_poses

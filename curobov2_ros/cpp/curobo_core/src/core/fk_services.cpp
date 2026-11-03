@@ -193,6 +193,31 @@ bool FKServices::compute_poses(
   return true;
 }
 
+bool FKServices::compute_link_poses(
+  const std::vector<std::vector<double>> & qs,
+  const std::vector<std::string> & link_names,
+  curobo_runtime::TensorF32 & poses,
+  std::vector<std::string> & used_names) const
+{
+  if (qs.empty() || link_names.empty()) {
+    return false;
+  }
+  const std::size_t dof = joint_names_.size();
+  curobo_runtime::TensorF32 q;
+  q.shape = {static_cast<std::int64_t>(qs.size()), static_cast<std::int64_t>(dof)};
+  q.data.reserve(qs.size() * dof);
+  for (const auto & row : qs) {
+    for (std::size_t j = 0; j < dof; ++j) {
+      q.data.push_back(static_cast<float>(j < row.size() ? row[j] : 0.0));
+    }
+  }
+  auto outcome = on_kin_lane(
+    lane_, [&]() {return bridge_->link_poses(handle_, q, link_names);});
+  poses = std::move(outcome.poses);
+  used_names = std::move(outcome.link_names);
+  return !used_names.empty();
+}
+
 // PORT: fk_services.FKServices._validate
 std::vector<std::uint8_t> FKServices::validate(
   const std::vector<std::vector<double>> & qs) const
@@ -344,6 +369,37 @@ void FKServices::handle_fk_batch(
     std_msgs::msg::Bool b;
     b.data = valid[i] != 0;
     response->poses_valid.push_back(b);
+  }
+
+  if (!request->link_names.empty()) {
+    curobo_runtime::TensorF32 link_poses;
+    std::vector<std::string> used_names;
+    try {
+      compute_link_poses(qs, request->link_names, link_poses, used_names);
+    } catch (const std::exception & exc) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "FK batch link poses failed: %s", exc.what());
+      response->success = false;
+      response->error_msg.data = std::string("FK link poses failed: ") + exc.what();
+      return;
+    }
+    const std::size_t links = used_names.size();
+    if (links > 0 &&
+      link_poses.data.size() >= n * links * 7)
+    {
+      response->link_names = used_names;
+      for (std::size_t i = 0; i < n; ++i) {
+        for (std::size_t j = 0; j < links; ++j) {
+          const float * src = link_poses.data.data() + (i * links + j) * 7;
+          Pose7 pose;
+          for (int k = 0; k < 7; ++k) {
+            pose[k] = src[k];
+          }
+          response->link_poses.push_back(to_ros_pose(pose));
+        }
+      }
+    }
   }
   response->success = true;
 }

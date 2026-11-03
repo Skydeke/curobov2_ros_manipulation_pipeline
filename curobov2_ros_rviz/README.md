@@ -24,17 +24,16 @@ the panel's Planning tab.
 
 | Component | Kind | Role |
 |---|---|---|
-| `curobov2_ros_rviz/CuroboPanel` | Panel | The whole planner UI in one dock: Context, Planning, Joints, Manipulation, Scene Objects |
+| `curobov2_ros_rviz/CuroboPanel` | Panel | The whole planner UI in one dock: Context, Planning, Joints, Scene Objects |
 | `add_objects_panel/AddObjectsPanel` | Panel | Add/remove scene obstacles (also a tab of the Curobo panel) |
-| `curobov2_ros_rviz/TargetDisplay` | Display | Generic 6-DOF target pose (planner/MPC logic lives in the Curobo panel) |
+| `curobov2_ros_rviz/CuroboPlanningDisplay` | Display | MoveIt MotionPlanning-style display: live robot, trajectory playback, target markers |
 | `curobov2_ros_rviz/SparseVoxelGridDisplay` | Display | Renders the mapper's occupied voxels |
-| `curobov2_ros_rviz/CuroboTrajectoryDisplay` | Display | Animates a full robot body along a `JointTrajectory` |
 | `curobov2_ros_rviz/ReachabilityMapDisplay` | Display | Solves + visualises a reachability map on a plane |
 
 ## CuroboPanel
 
 ### Current state
-One dock with five tabs, laid out like MoveIt's Motion Planning panel. This is
+One dock with four tabs, laid out like MoveIt's Motion Planning panel. This is
 the only curobo planner panel — the planner-args panel it reuses as its Planning
 tab (`PlanningTab`, formerly the standalone `RvizArgsPanel`) is deliberately not
 registered separately, so it cannot be added as a dock of its own.
@@ -42,7 +41,7 @@ registered separately, so it cannot be added as a dock of its own.
 Every group title below is MoveIt's **own** wording, transcribed from
 `motion_planning_rviz_plugin_frame.ui`. MoveIt's tabs are Context, Planning,
 Joints (inserted programmatically at index 2), Scene Objects, Stored Scenes,
-Stored States, Status, Manipulation; the five kept here are the ones curobo can
+Stored States, Status, Manipulation; the four kept here are the ones curobo can
 fill honestly, in MoveIt's order. A group whose control would be permanently
 dead is left out rather than stubbed, and each omission is named in the source
 next to the code it would have gone in.
@@ -68,19 +67,6 @@ next to the code it would have gone in.
   (`Plan` / `Plan + send` / `Stop`). MoveIt's "Nullspace exploration:" sliders are
   absent: curobo's `generate_trajectory` takes a goal configuration, not a
   nullspace goal.
-- **Manipulation** — the gripper, built from the same MoveIt widget as the Joints
-  tab: a "Group joints:" table holding only the *gripper* joints (name contains
-  finger/gripper/claw), each with a draggable bar, plus a "Commands" group with
-  `Gripper:` (Open / Close / Reset to current) and `Execute:` (Plan / Plan + send
-  / Stop). Open and Close command the upper and lower **limits** — nothing in the
-  cspace says which way a gripper travels, so the buttons say what they do
-  numerically and the bar stays draggable for an exact opening.
-  MoveIt's own Manipulation tab is *object detection* (`Detected Objects`,
-  `Support Surfaces`, `ROI`, firing `moveit_ros_perception`), which this server
-  cannot support at all; the joint widget is the closest honest thing it owns.
-  The tab no longer persists anything: the gripper joint set is re-derived from
-  the cspace every 2 s, so an old config's `Manipulation: finger_joint` entry is
-  ignored.
 - **Scene Objects** — MoveIt's "Current Scene Objects" group over a live,
   flat list from the server's `get_scene_objects` service, with a strip that acts
   on the selection (Refresh / Remove / Clear / Attach / Detach), then the
@@ -176,27 +162,48 @@ always what the server is doing.
 **MPC mode:** with "MPC (Real-time)" selected, "Compute + Execute" on the
 Planning tab switches the planner to MPC, sends an `execute_trajectory` goal, and
 streams the target pose to `/<planner>/mpc_goal` at 10 Hz while the gizmo is
-dragged.
+dragged. MPC tracks one tool frame; with several configured, restrict
+`Tool Frames` to the one to track.
 
-**Multiple target displays:** the Planning tab scans every `TargetDisplay` in the
-display tree — including ones nested inside display Groups — so the primary
-(first) display is found after an RViz config reload. Classic and MPC act on
-that primary display only; the old Multipoint mode that turned every extra
-display into a waypoint is removed.
+**Multiple targets:** the Planning tab finds the first `CuroboPlanningDisplay` in
+the display tree (including inside Groups). That display holds one target per
+tool frame reported by `get_joint_info`, so a bimanual robot gets one draggable
+marker per arm and `buildGoalsets()` sends them together as
+`Goalset.tool_frames` / `tool_poses`. Restrict the set with the display's
+`Tool Frames` property to plan a single arm.
 
 ### Future development
 - [ ] Save and load the system's state
 
-## TargetDisplay
+## CuroboPlanningDisplay
 
-Generic 6-DOF target marker, planner-agnostic. All planner/MPC logic lives in
-the Curobo panel's Planning tab; this display only owns the gizmo and the
-draggable pose.
+One display for everything MoveIt's MotionPlanning display shows:
 
-Self-contained: the gizmo is rendered in-place by the display (no separate
-"Interactive Markers" display needed). The Planning tab's pose spin boxes
-stay in sync with the target in both directions (the tab finds the display
-automatically and talks to it via `getPose`/`setPose`).
+- **Scene Robot** — the live robot, driven by TF (`Show Scene Robot`,
+  `Scene Robot Alpha`).
+- **Planned Path** — a `trajectory_msgs/JointTrajectory` animated as a ghost
+  robot, with `Show Trail`, `Loop Animation`, `Speed`, `Alpha`, and a docked
+  scrubber. Waypoint link poses come from `<planner>/fk_batch`; the display
+  runs no forward kinematics.
+- **Planning Request** — one draggable 6-DOF marker per tool frame, built with
+  MoveIt's 6-DOF control layout (three rotate rings, three move axes). Tool
+  frames arrive from `get_joint_info`; new markers are seeded at their TF pose.
+  `Active Tool` and the Planning tab's pose fields edit one marker; dragging a
+  marker makes it active.
+- **Goal State** — a green ghost robot at the IK solution for the active
+  target (`Show Goal State`, `Goal State Alpha`). The target is transformed to
+  the robot base with TF, solved through `/<planner>/ik_batch`, then FK'd
+  through `fk_batch`. It updates while the marker is dragged and stays visible
+  between plans.
+- **Sphere overlays** — the server's `<planner>/collision_spheres`
+  MarkerArray. `attached_spheres` (the grasped object, blue) is controlled by
+  `Show Attached`; `collision_spheres` (the robot's own spheres, green/red) by
+  `Show Robot Collision Spheres`. In the task constructor the same server
+  namespaces apply, so an attached object stays in the ghost gripper while
+  playback follows the solution.
+
+The old separate `TargetDisplay` and `CuroboTrajectoryDisplay` plugins are
+gone; use `curobov2_ros_rviz/CuroboPlanningDisplay`.
 
 ## AddObjectsPanel
 
@@ -238,35 +245,6 @@ extra RViz geometry.
 
 Renders the cuRobo mapper's occupied voxels from the `SparseVoxelGrid` topic
 (the same data the U-Net consumer and reachability/obstacle logic see).
-
-## CuroboTrajectoryDisplay
-
-Animates a **full robot body** (every link, every joint) through a
-`trajectory_msgs/JointTrajectory` — e.g. the ghost preview topic `<node>/trajectory`
-or the MPC's `<node>/mpc_predicted_path`.
-
-Properties: Trajectory Topic, Alpha, Show Trail (+ Trail Step Size),
-Loop Animation, Speed.
-
-### FK is computed in the display, for display only
-
-The server is a *planner*, not a visualiser: it publishes only the joint-space
-trajectory (joint names + positions + velocities + timestamps). All forward
-kinematics used to render the robot is computed **inside this plugin**, from the
-URDF, purely for visualisation:
-
-- `CuroboFK` parses the URDF once (`urdf::Model`, Eigen only) and walks the
-  kinematic tree per waypoint to produce link transforms.
-- `CuroboLinkUpdater` bridges those Eigen transforms into RViz's `Robot`
-  renderer (same `LinkUpdater` abstraction MoveIt's displays use).
-- The URDF is read from the latched `/robot_description` topic (fallback: the
-  RViz node's `robot_description` parameter, then `/tmp/kortex.urdf`).
-
-This FK is **not** cuRobo's FK: no cuRobo kinematics, CUDA kernel, GPU buffers
-or planner config are touched for visualisation. cuRobo's FK remains the source
-of truth for *planning*; the display only needs rendering-accurate geometry.
-The plugin also never consults TF — link transforms come from the message + URDF
-alone, so it works with no TF tree. No MoveIt dependency.
 
 ## ReachabilityMapDisplay
 

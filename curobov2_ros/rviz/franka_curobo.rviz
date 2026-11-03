@@ -6,9 +6,9 @@ Panels:
       Expanded:
         - /TF1/Frames1
         - /Curobo CollisionDomain1/Mapper Workspace1/Namespaces1
-        - /Curobo Planning1
+        - /Curobo Planning1/CuroboPlanning1
       Splitter Ratio: 0.5
-    Tree Height: 219
+    Tree Height: 375
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -21,11 +21,10 @@ Panels:
     SyncSource: ""
   - Class: curobov2_ros_rviz/CuroboPanel
     Context:
-      collision_spheres: false
       planner_node_name: unified_planner
       trajectory_type: 0
     Joints:
-      target_positions: 0.000000,0.000000,0.000000,-0.069800,0.000000,0.000000,0.000000
+      target_positions: ""
     Name: Curobo
     Planning:
       Class: ""
@@ -33,8 +32,31 @@ Panels:
       time_dilation_factor: 1
     Scene Objects: ~
   - Class: curobo_task_constructor/Task Constructor
-    ExecuteOnServer: true
+    Global Settings:
+      Task View Settings:
+        Old task handling: Keep
+        Show Computation Times: true
+        Task Expansion: All Expanded
     Name: Task Constructor
+    Tasks View:
+      property_splitter:
+        - 85
+        - 85
+      solution_sorting:
+        column: 0
+        order: 1
+      solutions_splitter:
+        - 369
+        - 184
+      solutions_view_columns:
+        - 100
+        - 100
+        - 100
+      tasks_view_columns:
+        - 280
+        - 26
+        - 26
+        - 35
 Visualization Manager:
   Class: ""
   Displays:
@@ -56,6 +78,150 @@ Visualization Manager:
       Plane Cell Count: 40
       Reference Frame: <Fixed Frame>
       Value: true
+    - Class: rviz_default_plugins/TF
+      Enabled: false
+      Filter (blacklist): ""
+      Filter (whitelist): ""
+      Frame Timeout: 15
+      Frames:
+        All Enabled: true
+      Marker Scale: 1
+      Name: TF
+      Show Arrows: true
+      Show Axes: true
+      Show Names: true
+      Tree:
+        {}
+      Update Interval: 0
+      Value: false
+    - Class: rviz_common/Group
+      Displays:
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: false
+          Name: Self-Collision Model
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/collision_spheres
+          Value: false
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: true
+          Name: Scene
+          Namespaces:
+            {}
+          Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/scene_obstacles
+          Value: true
+        - Alpha: 1
+          Class: curobov2_ros_rviz/SparseVoxelGridDisplay
+          Color: 255; 50; 0
+          Enabled: true
+          Name: Mapper Voxels
+          Point Style: Boxes
+          Topic:
+            Depth: 5
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/voxel_grid_sparse
+          Value: true
+        - Class: rviz_default_plugins/MarkerArray
+          Enabled: false
+          Name: Mapper Workspace
+          Namespaces:
+            {}
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/mapper_workspace
+          Value: false
+      Enabled: true
+      Name: Curobo CollisionDomain
+    - Class: rviz_common/Group
+      Displays:
+        - Active Tool: grasping_frame
+          Alpha: 0.800000011920929
+          Class: curobov2_ros_rviz/CuroboPlanningDisplay
+          Collision Spheres Topic: /unified_planner/collision_spheres
+          Enabled: true
+          Gizmo Visible: true
+          Goal State Alpha: 0.5
+          Loop Animation: false
+          Name: CuroboPlanning
+          Planner Node: unified_planner
+          Scene Robot Alpha: 1
+          Seed From TF: true
+          Show Attached: true
+          Show Goal State: true
+          Show Robot Collision Spheres: false
+          Show Scene Robot: false
+          Show Trail: false
+          Speed: 1
+          Target Orientation W: 1
+          Target Orientation X: 0
+          Target Orientation Y: 0
+          Target Orientation Z: 0
+          Target Position X: 0.5
+          Target Position Y: 0.15000000596046448
+          Target Position Z: 0.6800000071525574
+          Tool Frames: grasping_frame
+          Trail Step Size: 10
+          Trajectory Topic: /unified_planner/trajectory
+          Value: true
+        - Auto Refresh: true
+          Cell Alpha: 1
+          Cell Style: Arrows
+          Class: curobov2_ros_rviz/ReachabilityMapDisplay
+          Enabled: false
+          Failed Color: 200; 0; 0
+          Gizmo Visible: true
+          Grid Cells X: 10
+          Grid Cells Y: 10
+          Name: ReachabilityMapDisplay
+          Plane Alpha: 0.4000000059604645
+          Plane Color: 190; 190; 190
+          Plane Orientation W: 1
+          Plane Orientation X: 0
+          Plane Orientation Y: 0
+          Plane Orientation Z: 0
+          Plane Position X: 0.6782777905464172
+          Plane Position Y: 0
+          Plane Position Z: 0.2097598761320114
+          Plane Size X: 1
+          Plane Size Y: 1
+          Refresh: false
+          Selected Cell: 9
+          Service Name: /unified_planner/generate_rm
+          Show Solutions: All Solved Cells
+          Solution Alpha: 0.6000000238418579
+          Solved Color: 0; 200; 0
+          Value: false
+        - Class: rviz_default_plugins/Image
+          Enabled: true
+          Max Value: 1
+          Median window: 5
+          Min Value: 0
+          Name: PlanningPlot
+          Normalize Range: true
+          Topic:
+            Depth: 1
+            Durability Policy: Transient Local
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/motion_plan_debug
+          Value: true
+      Enabled: true
+      Name: Curobo Planning
     - Alpha: 1
       Class: rviz_default_plugins/RobotModel
       Collision Enabled: false
@@ -157,144 +323,6 @@ Visualization Manager:
       Update Interval: 0
       Value: true
       Visual Enabled: true
-    - Class: rviz_default_plugins/TF
-      Enabled: false
-      Filter (blacklist): ""
-      Filter (whitelist): ""
-      Frame Timeout: 15
-      Frames:
-        All Enabled: true
-      Marker Scale: 1
-      Name: TF
-      Show Arrows: true
-      Show Axes: true
-      Show Names: true
-      Tree:
-        {}
-      Update Interval: 0
-      Value: false
-    - Class: rviz_common/Group
-      Displays:
-        - Class: rviz_default_plugins/MarkerArray
-          Enabled: true
-          Name: Self-Collision Model
-          Namespaces:
-            collision_spheres: true
-          Topic:
-            Depth: 5
-            Durability Policy: Volatile
-            History Policy: Keep Last
-            Reliability Policy: Reliable
-            Value: /unified_planner/collision_spheres
-          Value: true
-        - Class: rviz_default_plugins/MarkerArray
-          Enabled: true
-          Name: Scene
-          Namespaces:
-            {}
-          Topic:
-            Depth: 5
-            Durability Policy: Volatile
-            History Policy: Keep Last
-            Reliability Policy: Reliable
-            Value: /unified_planner/scene_obstacles
-          Value: true
-        - Alpha: 1
-          Class: curobov2_ros_rviz/SparseVoxelGridDisplay
-          Color: 255; 50; 0
-          Enabled: true
-          Name: Mapper Voxels
-          Point Style: Boxes
-          Topic:
-            Depth: 5
-            Durability Policy: Transient Local
-            History Policy: Keep Last
-            Reliability Policy: Reliable
-            Value: /unified_planner/voxel_grid_sparse
-          Value: true
-        - Class: rviz_default_plugins/MarkerArray
-          Enabled: false
-          Name: Mapper Workspace
-          Namespaces:
-            {}
-          Topic:
-            Depth: 1
-            Durability Policy: Transient Local
-            Filter size: 10
-            History Policy: Keep Last
-            Reliability Policy: Reliable
-            Value: /unified_planner/mapper_workspace
-          Value: false
-      Enabled: true
-      Name: Curobo CollisionDomain
-    - Class: rviz_common/Group
-      Displays:
-        - Class: curobov2_ros_rviz/TargetDisplay
-          Enabled: true
-          Gizmo Visible: true
-          Name: TargetDisplay
-          Target Orientation W: 1
-          Target Orientation X: 0
-          Target Orientation Y: 0
-          Target Orientation Z: 0
-          Target Position X: 0.4000000059604645
-          Target Position Y: 0
-          Target Position Z: 0.4000000059604645
-          Value: true
-        - Alpha: 0.800000011920929
-          Class: curobov2_ros_rviz/CuroboTrajectoryDisplay
-          Enabled: true
-          Loop Animation: false
-          Name: CuroboTrajectoryDisplay
-          Show Trail: false
-          Speed: 1
-          Trail Step Size: 10
-          Trajectory Topic: /unified_planner/trajectory
-          Value: true
-        - Auto Refresh: true
-          Cell Alpha: 1
-          Cell Style: Arrows
-          Class: curobov2_ros_rviz/ReachabilityMapDisplay
-          Enabled: false
-          Failed Color: 200; 0; 0
-          Gizmo Visible: true
-          Grid Cells X: 10
-          Grid Cells Y: 10
-          Name: ReachabilityMapDisplay
-          Plane Alpha: 0.4000000059604645
-          Plane Color: 190; 190; 190
-          Plane Orientation W: 1
-          Plane Orientation X: 0
-          Plane Orientation Y: 0
-          Plane Orientation Z: 0
-          Plane Position X: 0.6782777905464172
-          Plane Position Y: 0
-          Plane Position Z: 0.2097598761320114
-          Plane Size X: 1
-          Plane Size Y: 1
-          Refresh: false
-          Selected Cell: 9
-          Service Name: /unified_planner/generate_rm
-          Show Solutions: All Solved Cells
-          Solution Alpha: 0.6000000238418579
-          Solved Color: 0; 200; 0
-          Value: false
-        - Class: rviz_default_plugins/Image
-          Enabled: true
-          Max Value: 1
-          Median window: 5
-          Min Value: 0
-          Name: PlanningPlot
-          Normalize Range: true
-          Topic:
-            Depth: 1
-            Durability Policy: Transient Local
-            History Policy: Keep Last
-            Reliability Policy: Reliable
-            Value: /unified_planner/motion_plan_debug
-          Value: true
-      Enabled: true
-      Name: Curobo Planning
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -323,21 +351,23 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.42731383442878723
-        Y: 0.04639555513858795
-        Z: 0.18113894760608673
+        X: 0.41256964206695557
+        Y: -0.0031342001166194677
+        Z: 0.29722341895103455
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5953981876373291
+      Pitch: 0.47539839148521423
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 1.5553972721099854
+      Yaw: 1.5453972816467285
     Saved: ~
 Window Geometry:
   Curobo:
+    collapsed: false
+  CuroboPlanning - Trajectory:
     collapsed: false
   Displays:
     collapsed: false
@@ -346,7 +376,7 @@ Window Geometry:
   Hide Right Dock: false
   PlanningPlot:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000025300000389fc0200000003fb000000100044006900730070006c006100790073010000003b00000116000000c700fffffffb000000180050006c0061006e006e0069006e00670050006c006f007401000001570000021e0000001600fffffffb0000000800540069006d0065010000037b000000490000003700ffffff000000010000022d00000389fc0200000002fb00000020005400610073006b00200043006f006e007300740072007500630074006f0072010000003b000000df000000a000fffffffc00000120000002a4000001eb0100001afa000000000100000002fb0000000c004300750072006f0062006f0100000000ffffffff0000022d00fffffffb0000000a0056006900650077007301000008390000019b0000010000ffffff000005480000038900000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000025300000389fc0200000004fb000000100044006900730070006c006100790073010000003b000001b2000000c700fffffffb000000180050006c0061006e006e0069006e00670050006c006f007401000001f3000001500000001600fffffffb0000000800540069006d00650100000349000000450000003700fffffffb00000036004300750072006f0062006f0050006c0061006e006e0069006e00670020002d0020005400720061006a006500630074006f007200790100000394000000300000003000ffffff000000010000022d00000389fc0200000002fb00000020005400610073006b00200043006f006e007300740072007500630074006f0072010000003b000000f7000000f700fffffffc000001380000028c000001eb0100001afa000000000100000002fb0000000c004300750072006f0062006f0100000000ffffffff0000022d00fffffffb0000000a0056006900650077007301000008390000019b0000010000ffffff000005480000038900000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Task Constructor:
     collapsed: false
   Time:

@@ -48,4 +48,52 @@ def fk(handle: int, q):
     out[:, 0, 3:7] = quaternions
     return out
 
+
+def _visualisation_kinematics(entry):
+    """All-link Kinematics used only for visualisation.
+
+    The planning model tracks just the configured tool frames, so it cannot
+    answer "where is every link". This second instance is built lazily from the
+    same resolved config with every link as a tool frame.
+    """
+    kin = entry.get("viz_kin")
+    if kin is None:
+        from curobo.kinematics import Kinematics, KinematicsCfg
+
+        kin_cfg = entry["kin_cfg"]
+        link_names = list(kin_cfg.kinematics_config.link_name_to_idx_map.keys())
+        viz_cfg = KinematicsCfg.from_robot_yaml_file(
+            entry["resolved_config"], tool_frames=link_names)
+        kin = Kinematics(viz_cfg)
+        entry["viz_kin"] = kin
+        entry["viz_link_names"] = list(kin.tool_frames)
+    return kin
+
+
+def link_poses(handle: int, q, link_names):
+    """Poses of `link_names` for [N, dof] joint positions.
+
+    Returns a dict with `poses` [N, L, 7] (x, y, z, qw, qx, qy, qz) and the
+    link names actually returned (unknown names are dropped).
+    """
+    import numpy as np
+    import torch
+    from curobo.types import JointState
+
+    entry = _REGISTRY[handle]
+    kin = _visualisation_kinematics(entry)
+    known = set(kin.tool_frames)
+    used = [name for name in link_names if name in known]
+
+    q_t = torch.tensor(np.asarray(q, dtype=np.float32), dtype=torch.float32,
+                       device=torch.device("cuda", torch.cuda.current_device()))
+    state = kin.compute_kinematics(JointState.from_position(q_t, joint_names=kin.joint_names))
+    index = {name: i for i, name in enumerate(kin.tool_frames)}
+    out = np.zeros((q_t.shape[0], len(used), 7), dtype=np.float32)
+    for li, name in enumerate(used):
+        i = index[name]
+        out[:, li, 0:3] = state.tool_poses.position[:, 0, i, :].detach().cpu().numpy()
+        out[:, li, 3:7] = state.tool_poses.quaternion[:, 0, i, :].detach().cpu().numpy()
+    return {"poses": out, "link_names": used}
+
 from .runtime import _REGISTRY

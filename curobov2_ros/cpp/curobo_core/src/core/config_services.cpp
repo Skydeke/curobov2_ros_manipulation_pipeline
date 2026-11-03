@@ -85,11 +85,16 @@ void ConfigServices::rebuild_planner()
   const auto cache_extent = node_->has_parameter("mapper_extent_xyz") ?
     node_->get_parameter("mapper_extent_xyz").as_double_array() :
     std::vector<double>{2.0, 2.0, 2.0};
+  const double voxel_size = node_->get_parameter("voxel_size").as_double();
+  // The mapper rounds its grid up, so an extent that divides exactly into
+  // voxels can still produce one more cell per axis than this cache. Allocate
+  // two cells of margin so world_push always fits.
+  const double margin = voxel_size > 0.0 ? 2.0 * voxel_size : 0.0;
   for (std::size_t i = 0; i < cache_extent.size(); ++i) {
-    cfg << (i ? "," : "") << cache_extent[i];
+    cfg << (i ? "," : "") << (cache_extent[i] + margin);
   }
   // Three closers: voxel object, collision_cache object, top-level object.
-  cfg << "],\"voxel_size\":" << node_->get_parameter("voxel_size").as_double() << "}}}";
+  cfg << "],\"voxel_size\":" << voxel_size << "}}}";
   // PORT: MotionPlanner build (warmup) captures a CUDA graph; it must hold the
   // exclusive GPU barrier or a concurrent lane's work invalidates the capture
   // ("operation failed due to a previous error during capture"). The startup

@@ -79,7 +79,7 @@ def ik_config(handle: int, batch_size: int, num_seeds: int,
     # rebuild (batch-size or param change) does not leave the solver sceneless.
     if self_collision_check:
         world_push(handle)
-def ik(handle: int, poses):
+def ik(handle: int, poses, tool_frame: str = ""):
     """Solve [N,7] tool poses (PORT: ik_services._solve / _solve_locked)."""
     import numpy as np
     import torch
@@ -94,7 +94,11 @@ def ik(handle: int, poses):
         position=torch.tensor(poses[:, 0:3], dtype=torch.float32, device=device),
         quaternion=torch.tensor(poses[:, 3:7], dtype=torch.float32, device=device),
     )
-    tool_frame = solver.kinematics.tool_frames[0]
+    tool_frame = tool_frame or solver.kinematics.tool_frames[0]
+    if tool_frame not in solver.kinematics.tool_frames:
+        raise ValueError(
+            f"unknown tool frame {tool_frame!r}; configured: "
+            f"{list(solver.kinematics.tool_frames)}")
     goal = GoalToolPose.from_poses({tool_frame: pose})
     result = solver.solve_pose(goal_tool_poses=goal)
 

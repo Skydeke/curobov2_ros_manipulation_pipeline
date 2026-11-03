@@ -337,12 +337,32 @@ TensorF32 PyBridge::fk(RobotHandle handle, const TensorF32 & q)
   }
 }
 
-// PORT: ik_services._solve
-IkOutcome PyBridge::ik(RobotHandle handle, const TensorF32 & poses)
+LinkPosesOutcome PyBridge::link_poses(
+  RobotHandle handle, const TensorF32 & q,
+  const std::vector<std::string> & link_names)
 {
   py::gil_scoped_acquire gil;
   try {
-    py::object result = bridge_module().attr("ik")(handle, tensor_to_array(poses));
+    py::object result =
+      bridge_module().attr("link_poses")(handle, tensor_to_array(q), link_names);
+    LinkPosesOutcome outcome;
+    outcome.poses = array_to_tensor(result.attr("__getitem__")("poses"));
+    outcome.link_names =
+      result.attr("__getitem__")("link_names").cast<std::vector<std::string>>();
+    return outcome;
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("programming", e.what());
+  }
+}
+
+// PORT: ik_services._solve
+IkOutcome PyBridge::ik(
+  RobotHandle handle, const TensorF32 & poses, const std::string & tool_frame)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    py::object result = bridge_module().attr("ik")(
+      handle, tensor_to_array(poses), tool_frame);
     IkOutcome outcome;
     outcome.success = result.attr("__getitem__")("success").cast<bool>();
     outcome.positions = array_to_tensor(result.attr("__getitem__")("positions"));
@@ -674,6 +694,12 @@ py::dict plan_request_to_dict(const PlanRequest & request)
   }
   if (!request.goalset.shape.empty()) {
     out["goalset"] = tensor_to_array(request.goalset);
+  }
+  if (!request.tool_frames.empty()) {
+    out["tool_frames"] = request.tool_frames;
+  }
+  if (!request.tool_poses.shape.empty()) {
+    out["tool_poses"] = tensor_to_array(request.tool_poses);
   }
   return out;
 }

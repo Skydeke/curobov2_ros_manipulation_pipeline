@@ -40,6 +40,10 @@ void UnifiedPlannerNode::declare_parameters() {
   declare_parameter<int>("num_ik_seeds", 32);
   declare_parameter<int>("num_trajopt_seeds", 12);
   declare_parameter<bool>("use_cuda_graph", true);
+  // The standalone IK solver's lazy graph capture is fragile: if any other
+  // lane records/captures at the same time, the capture is invalidated and the
+  // kin lane is poisoned. Keep it off by default; set true to opt in.
+  declare_parameter<bool>("ik_use_cuda_graph", false);
   declare_parameter<double>("collision_activation_distance", 0.025);
   declare_parameter<double>("interpolation_dt", 0.025);
   declare_parameter<int>("max_batch_size", 1);
@@ -308,12 +312,18 @@ void UnifiedPlannerNode::setup() {
         << ",\"voxel\":{\"layers\":1,\"dims\":[";
     const auto cache_extent =
         get_parameter("mapper_extent_xyz").as_double_array();
+    const double voxel_size = get_parameter("voxel_size").as_double();
+    // The mapper rounds its grid up, so an extent that divides exactly into
+    // voxels can still produce one more cell per axis than this cache.
+    const double margin = voxel_size > 0.0 ? 2.0 * voxel_size : 0.0;
     for (std::size_t i = 0; i < cache_extent.size(); ++i) {
-      cfg << (i ? "," : "") << cache_extent[i];
+      cfg << (i ? "," : "") << (cache_extent[i] + margin);
     }
     // Three closers: voxel object, collision_cache object, top-level object.
-    cfg << "],\"voxel_size\":" << get_parameter("voxel_size").as_double()
-        << "}}}";
+    cfg << "],\"voxel_size\":" << voxel_size << "}}}";
+    RCLCPP_INFO(
+      get_logger(), "Collision cache voxel extent: %.3f m, voxel_size: %.3f m",
+      (cache_extent.empty() ? 2.0 : cache_extent[0]) + margin, voxel_size);
     // PORT: unified_planner_node "Warming up {type} planner..." / "  ->
     // Initializing MotionPlanner..." / "{type} planner ready".
     RCLCPP_INFO(get_logger(), "Warming up %s planner...",

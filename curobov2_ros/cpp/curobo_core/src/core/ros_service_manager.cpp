@@ -288,6 +288,7 @@ void RosServiceManager::handle_get_joint_info(
     }
     response->locked_joint_names = limits.locked_joint_names;
     response->locked_positions = limits.locked_positions;
+    response->tool_frames = bridge_->tool_frames(handle_);
     response->success = true;
     response->message = std::to_string(dof) + " joints in cspace";
     if (!limits.locked_joint_names.empty()) {

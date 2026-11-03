@@ -20,7 +20,11 @@ PlannerResult ClassicPlanner::plan(const curobo_runtime::PlanRequest & request)
   // at least one pose; a joint-space segment (no poses, only
   // target_joint_positions) belongs to the joint-space planner. Say which cause
   // it is rather than letting the solver raise a bare KeyError.
-  if (request.goalset.shape.empty() || request.goalset.shape[0] == 0) {
+  const bool multi_tool =
+    !request.tool_frames.empty() && !request.tool_poses.shape.empty();
+  if (!multi_tool &&
+    (request.goalset.shape.empty() || request.goalset.shape[0] == 0))
+  {
     RCLCPP_WARN(
       rclcpp::get_logger("classic_planner"),
       "Classic Motion Generation: goalsets must contain exactly 1 segment with >= 1 "
@@ -38,8 +42,8 @@ PlannerResult ClassicPlanner::plan(const curobo_runtime::PlanRequest & request)
 
   // PORT: classic_planner "planning to candidate set (N poses) resolved within
   // a single solve" / "Planning with max_attempts=N".
-  const std::int64_t num_goalset =
-    request.goalset.shape.empty() ? 0 : request.goalset.shape[0];
+  const std::int64_t num_goalset = multi_tool ? 1 :
+    (request.goalset.shape.empty() ? 0 : request.goalset.shape[0]);
   if (num_goalset > 1) {
     RCLCPP_INFO(
       rclcpp::get_logger("classic_planner"),

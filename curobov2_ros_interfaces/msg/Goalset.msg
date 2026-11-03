@@ -4,6 +4,12 @@
 #   len(poses)==N  -> candidate set, the planner picks the best (goalset)
 geometry_msgs/Pose[] poses
 
+# Simultaneous per-tool targets (bimanual): one pose per named tool frame,
+# planned in the same solve. Parallel to `tool_poses`. When this is non-empty
+# the segment is a multi-tool goal and `poses` is ignored.
+string[] tool_frames
+geometry_msgs/Pose[] tool_poses
+
 # Target joint configuration for joint-space planning. When set (non-empty),
 # this segment is planned in joint space (plan_cspace) with these joint
 # values in cuRobo's active-DOF order.

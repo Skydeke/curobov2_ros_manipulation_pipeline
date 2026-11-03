@@ -2,15 +2,14 @@
 
 #include <curobov2_ros_rviz/context_tab.hpp>
 #include <curobov2_ros_rviz/joints_tab.hpp>
-#include <curobov2_ros_rviz/manipulation_tab.hpp>
 #include <curobov2_ros_rviz/planning_tab.hpp>
 #include <curobov2_ros_rviz/scene_objects_tab.hpp>
 
 #include <rviz_common/display_context.hpp>
 // Complete RosNodeAbstraction, needed for ->get_raw_node() (a weak_ptr from
 // getRosNodeAbstraction() alone would only need the declaration). Path is
-// rviz_common/ros_integration/..., matching target_display.cpp,
-// curobo_trajectory_display.cpp and reachability_map_display.cpp.
+// rviz_common/ros_integration/..., matching curobo_planning_display.cpp and
+// reachability_map_display.cpp.
 #include <rviz_common/ros_integration/ros_node_abstraction_iface.hpp>
 
 #include <QTabWidget>
@@ -30,10 +29,7 @@ CuroboPanel::CuroboPanel(QWidget * parent) : rviz_common::Panel(parent)
   tabs_ = new QTabWidget(this);
   layout->addWidget(tabs_);
 
-  // Tab order and names are the five asked for: Context, Planning, Joints,
-  // Manipulation, Scene Objects. No tab is in a scroll area and none is split:
-  // every tab's layout comes from a .ui that reflows, so all five fill the dock
-  // directly, and each is shaped like the MoveIt tab it stands for.
+  // Tab order: Context, Planning, Joints, Scene Objects.
 
   // --- Context: which server, which trajectory type, how it is driven ---------
   context_tab_ = new ContextTab();
@@ -46,13 +42,6 @@ CuroboPanel::CuroboPanel(QWidget * parent) : rviz_common::Panel(parent)
   // --- Joints: live joint monitor + joint-space planning ----------------------
   joints_tab_ = new JointsTab();
   tabs_->addTab(joints_tab_, tr("Joints"));
-
-  // --- Manipulation: MoveIt's own object-perception grid, controls absent -----
-  // Its controls are absent because curobo has no perception services to wire
-  // them to. See manipulation_tab.hpp: this tab is a frame, not a gripper, and
-  // the gripper it briefly duplicated is reachable from the Joints tab.
-  manipulation_tab_ = new ManipulationTab();
-  tabs_->addTab(manipulation_tab_, tr("Manipulation"));
 
   // --- Scene Objects: MoveIt's two columns, list + add/remove form -------------
   // The tab itself, not a splitter over an add form and a list: MoveIt's Scene
@@ -107,10 +96,6 @@ void CuroboPanel::onInitialize()
   // rviz's ROS node. RosNodeAbstraction already spins it on its own thread, so
   // the plain-QWidget tabs use it as-is and must NOT spin it again: rclcpp
   // throws "Node has already been added to an executor" if they did.
-  //
-  // The Manipulation tab is not in this list because it has no ROS state left:
-  // it is MoveIt's perception grid with no controls, so there is nothing for it
-  // to call. It is still a tab; it just does not listen to anything.
   if (display_context != nullptr) {
     if (auto ros_node_abstraction = display_context->getRosNodeAbstraction().lock()) {
       auto rviz_node = ros_node_abstraction->get_raw_node();
@@ -154,7 +139,7 @@ void CuroboPanel::load(const rviz_common::Config & config)
   rviz_common::Panel::load(config);
 
   // Context FIRST: it owns planner_node_name, and pushing it into its combo is
-  // what emits plannerNodeChosen — which is how the other four tabs learn the
+  // what emits plannerNodeChosen — which is how the other three tabs learn the
   // stored value. Loading them first would leave them on their defaults until
   // something else changed the node.
   //
@@ -166,15 +151,6 @@ void CuroboPanel::load(const rviz_common::Config & config)
   scene_objects_tab_->load(config.mapGetChild("Scene Objects"));
   joints_tab_->load(config.mapGetChild("Joints"));
 
-  // The Manipulation tab is deliberately not loaded, and neither is anything from
-  // the old AddObjectsPanel. Both used to be, but neither has any state left to
-  // persist: the planner node belongs to the Context tab, the set of gripper
-  // joints is no longer re-derived from anywhere, and the shape, size, name and
-  // colour in the Scene Objects add form are properties of the PLANNER's scene
-  // rather than of this panel. A "Manipulation" child in an old config is
-  // therefore simply ignored -- there is nothing in it this panel would honour,
-  // and keeping the read would mean keeping a knob that looks configurable and is
-  // not.
   syncPlannerNode();
 }
 
@@ -188,7 +164,6 @@ void CuroboPanel::save(rviz_common::Config config) const
   planning_tab_->save(config.mapMakeChild("Planning"));
   scene_objects_tab_->save(config.mapMakeChild("Scene Objects"));
   joints_tab_->save(config.mapMakeChild("Joints"));
-  // No "Manipulation" child is written, for the reason given in load() above.
 }
 
 }  // namespace curobov2_ros_rviz

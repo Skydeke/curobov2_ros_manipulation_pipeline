@@ -55,91 +55,6 @@ Visualization Manager:
       Plane Cell Count: 40
       Reference Frame: <Fixed Frame>
       Value: true
-    - Alpha: 1
-      Class: rviz_default_plugins/RobotModel
-      Collision Enabled: false
-      Description File: ""
-      Description Source: Topic
-      Description Topic:
-        Depth: 5
-        Durability Policy: Volatile
-        History Policy: Keep Last
-        Reliability Policy: Reliable
-        Value: /robot_description
-      Enabled: true
-      Links:
-        All Links Enabled: true
-        Expand Joint Details: false
-        Expand Link Details: false
-        Expand Tree: false
-        Link Tree Style: Links in Alphabetic Order
-        base:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        base_link_inertia:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        camera_mount:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        flange:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        forearm_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        grasping_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        shoulder_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        tool0:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        upper_arm_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_1_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_2_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_3_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-      Mass Properties:
-        Inertia: false
-        Mass: false
-      Name: RobotModel
-      TF Prefix: ""
-      Update Interval: 0
-      Value: true
-      Visual Enabled: true
     - Class: rviz_default_plugins/TF
       Enabled: false
       Filter (blacklist): ""
@@ -212,10 +127,27 @@ Visualization Manager:
       Name: Curobo CollisionDomain
     - Class: rviz_common/Group
       Displays:
-        - Class: curobov2_ros_rviz/TargetDisplay
+        - Alpha: 0.800000011920929
+          Class: curobov2_ros_rviz/CuroboPlanningDisplay
+          Collision Spheres Topic:
+            Depth: 5
+            Durability Policy: Volatile
+            History Policy: Keep Last
+            Reliability Policy: Reliable
+            Value: /unified_planner/collision_spheres
           Enabled: true
+          Goal State Alpha: 0.5
           Gizmo Visible: true
-          Name: TargetDisplay
+          Loop Animation: false
+          Name: CuroboPlanning
+          Planner Node: unified_planner
+          Scene Robot Alpha: 1
+          Seed From TF: true
+          Show Goal State: true
+          Show Attached: true
+          Show Scene Robot: true
+          Show Trail: false
+          Speed: 1
           Target Orientation W: 1
           Target Orientation X: 0
           Target Orientation Y: 0
@@ -223,14 +155,7 @@ Visualization Manager:
           Target Position X: 0.9010480642318726
           Target Position Y: 0
           Target Position Z: 0.7498555183410645
-          Value: true
-        - Alpha: 0.800000011920929
-          Class: curobov2_ros_rviz/CuroboTrajectoryDisplay
-          Enabled: true
-          Loop Animation: false
-          Name: CuroboTrajectoryDisplay
-          Show Trail: false
-          Speed: 1
+          Tool Frames: ""
           Trail Step Size: 10
           Trajectory Topic: /unified_planner/trajectory
           Value: true
