@@ -226,9 +226,15 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
     entry["unpinned_lock_joints"] = [
         str(k) for k, v in _lock_joints.items() if v is None
     ]
-    # The URDF link the payload is fixed to, used to publish the attached
-    # spheres LINK-RELATIVE so a trajectory preview can ride the gripper.
+    # The URDF links the payload can be fixed to (one per arm on a bimanual
+    # robot), used to publish the attached spheres LINK-RELATIVE so a
+    # trajectory preview can ride the gripper.
     _extra_links = _root_kin.get("extra_links") or {}
+    entry["attach_links"] = {
+        str(link_name): str(cfg.get("parent_link_name"))
+        for link_name, cfg in _extra_links.items()
+        if isinstance(cfg, dict) and cfg.get("parent_link_name")
+    }
     _attach = _extra_links.get(ATTACH_LINK) or {}
     entry["attach_parent_link"] = (
         _attach.get("parent_link_name") if isinstance(_attach, dict) else None)

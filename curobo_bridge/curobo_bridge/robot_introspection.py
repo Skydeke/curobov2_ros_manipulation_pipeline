@@ -193,7 +193,8 @@ def collision_spheres_with_attached(handle: int, q):
         joint_names=kin.joint_names)
     spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
     kc = kin.kinematics_config
-    attached_idx = kc.link_name_to_idx_map.get("attached_object")
+    used_link = entry.get("attach_link_used") or "attached_object"
+    attached_idx = kc.link_name_to_idx_map.get(used_link)
     n_sph = int(spheres.shape[0])
     link_map = getattr(kc, "link_sphere_idx_map", None)
     # Mask is built on the GPU and rides the same device->host copy as the
@@ -215,7 +216,7 @@ def collision_spheres_with_attached(handle: int, q):
     world = np.ascontiguousarray(packed[:, :4], dtype=np.float32)
     attached_frame = ""
     attached_local = np.zeros_like(world)
-    parent = entry.get("attach_parent_link")
+    parent = entry.get("attach_parent_link_used") or entry.get("attach_parent_link")
     if parent and any(mask):
         try:
             q_t = torch.tensor(

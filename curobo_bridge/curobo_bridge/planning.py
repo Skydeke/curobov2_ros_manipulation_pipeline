@@ -183,9 +183,12 @@ def plan_pose(handle: int, req) -> dict:
     # caller only ever targets the active arm. cuRobo's IK requires a goal entry
     # for EVERY configured tool link (`GoalToolPose.reorder_links` raises
     # "Ordered link names [...] not a subset of [...]" otherwise), so the
-    # passive frames are pinned to their current FK pose and their pose weight
-    # is zeroed to leave them unconstrained. Single-arm robots (TIAGo, KATE)
-    # keep the exact old goal, one frame and all.
+    # passive frames are pinned to their current FK pose. They are then HELD
+    # there with full terminal AND non-terminal weight: zeroing the weight (the
+    # old behaviour) left the passive arm unconstrained, so the cspace cost
+    # pulled it toward its nominal rest pose and the arm the caller never
+    # targeted drifted during the solve. Single-arm robots (TIAGo, KATE) keep
+    # the exact old goal, one frame and all.
     passive_frames = list(planner.tool_frames[1:])
     passive_criteria = {}
     if passive_frames:
@@ -197,8 +200,8 @@ def plan_pose(handle: int, req) -> dict:
                 position=here.position.repeat(len(goalset), 1).contiguous(),
                 quaternion=here.quaternion.repeat(len(goalset), 1).contiguous())
             passive_criteria[frame] = ToolPoseCriteria(
-                terminal_pose_axes_weight_factor=[0.0] * 6,
-                non_terminal_pose_axes_weight_factor=[0.0] * 6)
+                terminal_pose_axes_weight_factor=[1.0] * 6,
+                non_terminal_pose_axes_weight_factor=[1.0] * 6)
         goal = GoalToolPose.from_poses(
             pose_dict, ordered_tool_frames=list(planner.tool_frames),
             num_goalset=len(goalset))

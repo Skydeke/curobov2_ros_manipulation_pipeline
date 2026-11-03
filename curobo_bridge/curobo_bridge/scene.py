@@ -118,6 +118,59 @@ def scene_get(handle: int) -> str:
         "names": entry.get("scene_names", []),
     }, sort_keys=True)
 ATTACH_LINK = "attached_object"
+def _select_attach_link(entry, kin, fk_result, spec):
+    """Pick the payload attach link for this grasp.
+
+    A bimanual robot declares one attach link per arm (``attached_object_left``
+    / ``attached_object_right``). The caller only says which OBJECT it grabbed,
+    not which arm grabbed it, so use the object's world position: the attach
+    link whose parent flange is closest to the object is the arm holding it.
+    Single-attach-link robots (Franka, KATE, UR10e) always use their one link.
+    """
+    import numpy as np
+
+    kc = kin.kinematics_config
+    candidates = {
+        name: parent
+        for name, parent in (entry.get("attach_links") or {}).items()
+        if name.startswith("attached_object")
+        and parent and name in kc.link_name_to_idx_map
+    }
+    if not candidates:
+        # Legacy single-link YAML (no per-arm extra_links): keep the old path.
+        parent = entry.get("attach_parent_link")
+        if parent and ATTACH_LINK in kc.link_name_to_idx_map:
+            candidates = {ATTACH_LINK: parent}
+    if not candidates:
+        declared = ", ".join(sorted(entry.get("attach_links") or {})) or ATTACH_LINK
+        raise ValueError(
+            f"Robot YAML does not declare a payload attach link ({declared}) — "
+            "attach is unavailable for this robot (the robot YAML must declare "
+            "one).")
+    if len(candidates) == 1:
+        name, parent = next(iter(candidates.items()))
+        return name, parent
+    origin = np.asarray(spec.get("pose", [0.0, 0.0, 0.0])[0:3], dtype=np.float32)
+    best_name = None
+    best_parent = None
+    best_dist = float("inf")
+    for name, parent in candidates.items():
+        try:
+            pose = fk_result.tool_poses.get_link_pose(parent)
+        except Exception:
+            continue
+        position = pose.position[0].detach().cpu().numpy()
+        dist = float(np.linalg.norm(position - origin))
+        if dist < best_dist:
+            best_dist = dist
+            best_name = name
+            best_parent = parent
+    if best_name is None:
+        # FK cannot resolve any parent (non-tool-frame attach link): keep the
+        # declared order rather than failing the grasp.
+        best_name = next(iter(candidates))
+        best_parent = candidates[best_name]
+    return best_name, best_parent
 def _attachment_manager(entry):
     """PORT: attachment_services._attachment_manager.
 
@@ -286,13 +339,16 @@ def attach_object(handle: int, name: str, q) -> None:
     # both use that kin rather than the standalone robot-model one, or the
     # payload spheres land somewhere no solver collides with.
     kin = getattr(am, "_kinematics", None) or entry["kin"]
-    kc = kin.kinematics_config
-    if ATTACH_LINK not in kc.link_name_to_idx_map:
-        raise ValueError(
-            f"Robot YAML does not declare the '{ATTACH_LINK}' link — attach is "
-            "unavailable for this robot (the robot YAML must declare it).")
     kparams = am.kinematics_params
-    link_idx = kparams.get_sphere_index_from_link_name(ATTACH_LINK)
+
+    q_t = torch.tensor([list(np.asarray(q, dtype=np.float32))],
+                       dtype=torch.float32, device=device)
+    joint_state = JointState.from_position(q_t, joint_names=kin.joint_names)
+    fk_result = kin.compute_kinematics(joint_state)
+    if fk_result.tool_poses is None:
+        raise RuntimeError("FK result has no tool_poses; cannot resolve EE for attachment")
+    attach_link, parent_link = _select_attach_link(entry, kin, fk_result, spec)
+    link_idx = kparams.get_sphere_index_from_link_name(attach_link)
     n_slots = int(link_idx.shape[0])
 
     # PORT: attachment_services.attach - cap the fit at the link's slot budget,
@@ -306,9 +362,9 @@ def attach_object(handle: int, name: str, q) -> None:
     if n_needed > n_slots:
         print(
             f"[curobo_bridge] Attached object '{name}' needs about {n_needed} "
-            f"collision spheres but link '{ATTACH_LINK}' allocates only {n_slots}: "
+            f"collision spheres but link '{attach_link}' allocates only {n_slots}: "
             "its collision model is a coarse approximation that may not cover "
-            f"corners or protrusions. Raise 'extra_collision_spheres.{ATTACH_LINK}' "
+            f"corners or protrusions. Raise 'extra_collision_spheres.{attach_link}' "
             "in the robot YAML before planning with this payload on real hardware.",
             flush=True)
     n_fit = min(n_needed, n_slots) if n_needed > 0 else n_slots
@@ -329,19 +385,16 @@ def attach_object(handle: int, name: str, q) -> None:
             f"world z [{float(centers[:, 2].min()) - float(radii.min()):.4f}, "
             f"{float(centers[:, 2].max()) + float(radii.max()):.4f}] m", flush=True)
 
-    q_t = torch.tensor([list(np.asarray(q, dtype=np.float32))],
-                       dtype=torch.float32, device=device)
-    joint_state = JointState.from_position(q_t, joint_names=kin.joint_names)
-    fk_result = kin.compute_kinematics(joint_state)
-    if fk_result.tool_poses is None:
-        raise RuntimeError("FK result has no tool_poses; cannot resolve EE for attachment")
-    ee_link = kin.tool_frames[0]
+    # The payload is fitted in its OWN arm's flange frame so the fitted spheres
+    # land where that arm's gripper actually holds the object (not always the
+    # first tool frame, which on a bimanual robot is the left arm's).
+    ee_link = parent_link
     obj_to_link = fk_result.tool_poses.get_link_pose(ee_link).inverse()
 
     n_fit = int(centers.shape[0])
     if n_fit > n_slots:
         raise RuntimeError(
-            f"Fitted {n_fit} spheres but link '{ATTACH_LINK}' only has {n_slots} sphere slots")
+            f"Fitted {n_fit} spheres but link '{attach_link}' only has {n_slots} sphere slots")
     padding = None
     if n_fit < n_slots:
         padding = torch.zeros(n_slots - n_fit, 4,
@@ -358,7 +411,7 @@ def attach_object(handle: int, name: str, q) -> None:
         if padding is not None:
             env_spheres = torch.cat([env_spheres, padding], dim=0)
         kparams.link_spheres[i, link_idx, :] = env_spheres
-    am._attached_link_name = ATTACH_LINK
+    am._attached_link_name = attach_link
     # PORT: _fit_and_attach's cuRobo-native disable - records the name and turns
     # the world obstacle off on the attachment manager's scene checker (the
     # solver's own checker once the manager comes from the planner). The
@@ -376,6 +429,10 @@ def attach_object(handle: int, name: str, q) -> None:
         except Exception:
             pass
     entry["attached_name"] = name
+    # Which of the per-arm attach links this payload actually went to; detach
+    # and the link-relative sphere report read it back.
+    entry["attach_link_used"] = attach_link
+    entry["attach_parent_link_used"] = parent_link
     # PORT: attachment_services.attach - keep the grasped obstacle REGISTERED in
     # the solver scenes but disabled by name (re-armed after every world push via
     # _reapply_attached_disables), then drop it from the voxel-map rasterization
@@ -402,9 +459,12 @@ def detach_object(handle: int) -> str:
     # kinematics once the planner exists. cuRobo's AttachmentManager.detach also
     # re-enables its recorded disabled names on its scene checker.
     am = _attachment_manager(entry)
+    used_link = entry.get("attach_link_used") or ATTACH_LINK
     if am is not None:
-        am.detach(ATTACH_LINK)
+        am.detach(used_link)
     entry["attached_name"] = ""
+    entry["attach_link_used"] = ""
+    entry["attach_parent_link_used"] = ""
     # PORT: attachment_services.detach - restore the released obstacle to
     # collision checking. Dropping it from the disabled set, then pushing the
     # world, re-adds it with enable=1 (the push clears + re-adds every
