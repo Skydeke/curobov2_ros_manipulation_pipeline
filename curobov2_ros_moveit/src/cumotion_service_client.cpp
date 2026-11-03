@@ -20,10 +20,13 @@
 #include "curobov2_ros_moveit/cumotion_planner_ids.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -32,15 +35,18 @@
 
 #include <Eigen/Geometry>
 
+#include "geometric_shapes/mesh_operations.h"
 #include "geometric_shapes/shapes.h"
 #include "geometry_msgs/msg/pose.hpp"
 #include "moveit_msgs/msg/collision_object.hpp"
 #include "moveit_msgs/msg/constraints.hpp"
+#include "moveit_msgs/msg/object_color.hpp"
 #include "moveit/planning_scene_interface/planning_scene_interface.h"
 #include "rclcpp/rclcpp.hpp"
 #include "shape_msgs/msg/mesh.hpp"
 #include "shape_msgs/msg/mesh_triangle.hpp"
 #include "shape_msgs/msg/solid_primitive.hpp"
+#include "std_msgs/msg/color_rgba.hpp"
 
 namespace curobov2
 {
@@ -206,6 +212,202 @@ bool fillRequestFromShape(
   }
 }
 
+// One object exactly as `get_scene_objects` reports it. rosidl has no nested
+// record type, so the service returns parallel arrays; this index-aligned view
+// exists only inside this file.
+struct ServerObject
+{
+  std::string name;
+  std::int8_t type = 0;
+  geometry_msgs::msg::Pose pose;
+  geometry_msgs::msg::Vector3 dimensions;
+  std_msgs::msg::ColorRGBA color;
+  std::string mesh_file_path;
+  bool attached = false;
+};
+
+geometry_msgs::msg::Pose poseFromEigen(const Eigen::Isometry3d & pose)
+{
+  geometry_msgs::msg::Pose out;
+  out.position.x = pose.translation().x();
+  out.position.y = pose.translation().y();
+  out.position.z = pose.translation().z();
+  const Eigen::Quaterniond q(pose.linear());
+  out.orientation.x = q.x();
+  out.orientation.y = q.y();
+  out.orientation.z = q.z();
+  out.orientation.w = q.w();
+  return out;
+}
+
+void meshToMsg(const shapes::Mesh & mesh, shape_msgs::msg::Mesh & out)
+{
+  out.vertices.clear();
+  out.vertices.reserve(mesh.vertex_count);
+  const double * vptr = mesh.vertices;
+  for (std::size_t i = 0; i < mesh.vertex_count; ++i, vptr += 3) {
+    geometry_msgs::msg::Point p;
+    p.x = vptr[0];
+    p.y = vptr[1];
+    p.z = vptr[2];
+    out.vertices.push_back(p);
+  }
+  out.triangles.clear();
+  out.triangles.reserve(mesh.triangle_count);
+  const unsigned int * tptr = mesh.triangles;
+  for (std::size_t i = 0; i < mesh.triangle_count; ++i, tptr += 3) {
+    shape_msgs::msg::MeshTriangle tri;
+    tri.vertex_indices[0] = tptr[0];
+    tri.vertex_indices[1] = tptr[1];
+    tri.vertex_indices[2] = tptr[2];
+    out.triangles.push_back(tri);
+  }
+}
+
+bool fillCollisionObjectFromServer(
+  const ServerObject & object,
+  const curobov2_ros_interfaces::srv::AddObject::Request * cached_geometry,
+  const std::string & planning_frame,
+  moveit_msgs::msg::CollisionObject & co,
+  std_msgs::msg::ColorRGBA & color,
+  std::string & reason)
+{
+  co = moveit_msgs::msg::CollisionObject();
+  co.id = object.name;
+  co.header.frame_id = planning_frame;
+  co.operation = moveit_msgs::msg::CollisionObject::ADD;
+  co.pose = object.pose;
+  color = object.color;
+
+  // CollisionObject primitive/mesh poses are relative to co.pose. The service
+  // reports one world pose per object, so the shape pose is the identity; the
+  // old implementation copied co.pose into primitive_poses, which transformed
+  // every mirrored object twice.
+  const geometry_msgs::msg::Pose identity;
+
+  switch (object.type) {
+    case curobov2_ros_interfaces::srv::AddObject::Request::CUBOID: {
+      shape_msgs::msg::SolidPrimitive prim;
+      prim.type = shape_msgs::msg::SolidPrimitive::BOX;
+      prim.dimensions = {object.dimensions.x, object.dimensions.y, object.dimensions.z};
+      co.primitives.push_back(prim);
+      co.primitive_poses.push_back(identity);
+      return true;
+    }
+    case curobov2_ros_interfaces::srv::AddObject::Request::SPHERE: {
+      shape_msgs::msg::SolidPrimitive prim;
+      prim.type = shape_msgs::msg::SolidPrimitive::SPHERE;
+      prim.dimensions = {object.dimensions.x};
+      co.primitives.push_back(prim);
+      co.primitive_poses.push_back(identity);
+      return true;
+    }
+    case curobov2_ros_interfaces::srv::AddObject::Request::CYLINDER: {
+      shape_msgs::msg::SolidPrimitive prim;
+      prim.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+      prim.dimensions = {object.dimensions.x, object.dimensions.y};
+      co.primitives.push_back(prim);
+      co.primitive_poses.push_back(identity);
+      return true;
+    }
+    case curobov2_ros_interfaces::srv::AddObject::Request::CAPSULE: {
+      // moveit_msgs has no capsule primitive. A capsule is exactly the union of
+      // a cylinder over the segment between the two sphere centres and two
+      // spheres at its ends, so mirror it as those three primitives (kept in
+      // the object frame, which is why their poses are offsets, not co.pose).
+      const double radius = object.dimensions.x;
+      const double segment = object.dimensions.y;
+      shape_msgs::msg::SolidPrimitive cylinder;
+      cylinder.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
+      cylinder.dimensions = {radius, segment};
+      co.primitives.push_back(cylinder);
+      co.primitive_poses.push_back(identity);
+      for (double sign : {-1.0, 1.0}) {
+        shape_msgs::msg::SolidPrimitive sphere;
+        sphere.type = shape_msgs::msg::SolidPrimitive::SPHERE;
+        sphere.dimensions = {radius};
+        co.primitives.push_back(sphere);
+        Eigen::Isometry3d offset = Eigen::Isometry3d::Identity();
+        offset.translation().z() = sign * 0.5 * segment;
+        co.primitive_poses.push_back(poseFromEigen(offset));
+      }
+      return true;
+    }
+    case curobov2_ros_interfaces::srv::AddObject::Request::MESH: {
+      shape_msgs::msg::Mesh mesh;
+      if (object.mesh_file_path.empty() && cached_geometry != nullptr &&
+        !cached_geometry->vertices.empty() && !cached_geometry->triangles.empty())
+      {
+        // Inline geometry this client itself forwarded. get_scene_objects does
+        // not echo vertex buffers (they can be huge), so this cache is the only
+        // faithful source for such an object.
+        mesh.vertices.reserve(cached_geometry->vertices.size());
+        for (const auto & point : cached_geometry->vertices) {
+          mesh.vertices.push_back(point);
+        }
+        mesh.triangles.reserve(cached_geometry->triangles.size() / 3U);
+        for (std::size_t i = 0; i + 2U < cached_geometry->triangles.size(); i += 3U) {
+          shape_msgs::msg::MeshTriangle tri;
+          tri.vertex_indices[0] = cached_geometry->triangles[i];
+          tri.vertex_indices[1] = cached_geometry->triangles[i + 1U];
+          tri.vertex_indices[2] = cached_geometry->triangles[i + 2U];
+          mesh.triangles.push_back(tri);
+        }
+      } else if (!object.mesh_file_path.empty()) {
+        Eigen::Vector3d scale(object.dimensions.x, object.dimensions.y, object.dimensions.z);
+        if (scale.x() <= 0.0 || scale.y() <= 0.0 || scale.z() <= 0.0) {
+          scale = Eigen::Vector3d::Ones();
+        }
+        shapes::Mesh * loaded = shapes::createMeshFromResource(object.mesh_file_path, scale);
+        if (loaded == nullptr) {
+          reason = "could not load mesh file '" + object.mesh_file_path + "'";
+          return false;
+        }
+        meshToMsg(*loaded, mesh);
+        delete loaded;
+      } else {
+        reason = "inline mesh vertices are not echoed by get_scene_objects";
+        return false;
+      }
+      co.meshes.push_back(mesh);
+      co.mesh_poses.push_back(identity);
+      return true;
+    }
+    default:
+      reason = "unsupported object type " + std::to_string(static_cast<int>(object.type));
+      return false;
+  }
+}
+
+std::string serverObjectSignature(
+  const ServerObject & object,
+  const curobov2_ros_interfaces::srv::AddObject::Request * cached_geometry)
+{
+  std::ostringstream os;
+  os << static_cast<int>(object.type) << '|'
+     << object.pose.position.x << ',' << object.pose.position.y << ','
+     << object.pose.position.z << ',' << object.pose.orientation.x << ','
+     << object.pose.orientation.y << ',' << object.pose.orientation.z << ','
+     << object.pose.orientation.w << '|'
+     << object.dimensions.x << ',' << object.dimensions.y << ','
+     << object.dimensions.z << '|' << object.mesh_file_path;
+  if (object.mesh_file_path.empty() && cached_geometry != nullptr) {
+    // Hash inline buffers instead of stringifying them: a mesh can be hundreds
+    // of thousands of vertices and this signature is recomputed every plan.
+    os << '|' << cached_geometry->vertices.size() << ','
+       << cached_geometry->triangles.size() << ','
+       << std::hex
+       << hashBytes(
+            reinterpret_cast<const unsigned char *>(cached_geometry->vertices.data()),
+            cached_geometry->vertices.size() * sizeof(geometry_msgs::msg::Point))
+       << ':' << hashBytes(
+            reinterpret_cast<const unsigned char *>(cached_geometry->triangles.data()),
+            cached_geometry->triangles.size() * sizeof(std::int32_t))
+       << std::dec;
+  }
+  return os.str();
+}
+
 }  // namespace
 
 CumotionServiceClient::CumotionServiceClient(const rclcpp::Node::SharedPtr & node)
@@ -229,20 +431,45 @@ CumotionServiceClient::CumotionServiceClient(const rclcpp::Node::SharedPtr & nod
   }
   service_timeout_secs_ = node_->get_parameter("cumotion_service_timeout").as_double();
 
-  set_planner_client_ = node_->create_client<curobov2_ros_interfaces::srv::SetPlanner>(
-    ns_ + "/set_planner");
+  // Dedicated client node/executor (see the header): move_group may be
+  // single-threaded, and all these calls are synchronous. A unique name avoids
+  // duplicate-node warnings when one context per planning group is created.
+  static std::atomic<unsigned> instance_counter{0};
+  client_node_ = rclcpp::Node::make_shared(
+    "curobov2_moveit_client_" + std::to_string(++instance_counter));
+  client_executor_ = std::make_shared<rclcpp::executors::SingleThreadedExecutor>();
+  client_executor_->add_node(client_node_);
+  client_spinner_ = std::thread([this]() {client_executor_->spin();});
+
+  set_planner_client_ =
+    client_node_->create_client<curobov2_ros_interfaces::srv::SetPlanner>(
+      ns_ + "/set_planner");
   traj_gen_client_ =
-    node_->create_client<curobov2_ros_interfaces::srv::TrajectoryGeneration>(
+    client_node_->create_client<curobov2_ros_interfaces::srv::TrajectoryGeneration>(
       ns_ + "/generate_trajectory");
-  add_object_client_ = node_->create_client<curobov2_ros_interfaces::srv::AddObject>(
+  add_object_client_ = client_node_->create_client<curobov2_ros_interfaces::srv::AddObject>(
     ns_ + "/add_object");
-  remove_object_client_ = node_->create_client<curobov2_ros_interfaces::srv::RemoveObject>(
-    ns_ + "/remove_object");
+  remove_object_client_ =
+    client_node_->create_client<curobov2_ros_interfaces::srv::RemoveObject>(
+      ns_ + "/remove_object");
   attach_object_client_ =
-    node_->create_client<curobov2_ros_interfaces::srv::AttachObject>(
+    client_node_->create_client<curobov2_ros_interfaces::srv::AttachObject>(
       ns_ + "/attach_object");
-  detach_object_client_ = node_->create_client<std_srvs::srv::Trigger>(ns_ + "/detach_object");
-  get_obstacles_client_ = node_->create_client<std_srvs::srv::Trigger>(ns_ + "/get_obstacles");
+  detach_object_client_ =
+    client_node_->create_client<std_srvs::srv::Trigger>(ns_ + "/detach_object");
+  get_scene_objects_client_ =
+    client_node_->create_client<curobov2_ros_interfaces::srv::GetSceneObjects>(
+      ns_ + "/get_scene_objects");
+}
+
+CumotionServiceClient::~CumotionServiceClient()
+{
+  if (client_executor_) {
+    client_executor_->cancel();
+  }
+  if (client_spinner_.joinable()) {
+    client_spinner_.join();
+  }
 }
 
 template<typename Srv>
@@ -280,21 +507,11 @@ void CumotionServiceClient::removeCuroboObject(const std::string & name)
   cached_geometry_.erase(name);
 }
 
-std::vector<std::string> CumotionServiceClient::parseServerObjectNames(
-  const std::string & message)
+void CumotionServiceClient::removeMoveItMirror(
+  moveit::planning_interface::PlanningSceneInterface & psi,
+  const std::string & name)
 {
-  std::vector<std::string> names;
-  std::istringstream iss(message);
-  std::string line;
-  while (std::getline(iss, line)) {
-    if (!line.empty() && line.back() == '\r') {
-      line.pop_back();
-    }
-    if (!line.empty()) {
-      names.push_back(line);
-    }
-  }
-  return names;
+  psi.removeCollisionObjects({name});
 }
 
 bool CumotionServiceClient::setPlanner(uint8_t planner_type, std::string & message)
@@ -487,7 +704,8 @@ bool CumotionServiceClient::syncPlanningScene(
   // so detach can re-enable it and so attachment geometry keeps existing), and
   // /attach_object itself fails when the named obstacle is not in the scene. So
   // attached ids are kept in the wanted set (Sec 6c).
-  std::vector<std::string> wanted_names = planning_scene->getWorld()->getObjectIds();
+  std::vector<std::string> world_names = planning_scene->getWorld()->getObjectIds();
+  std::vector<std::string> wanted_names = world_names;
   // MoveIt 2 (Jazzy) dropped PlanningScene::getAttachedBody*; attached bodies
   // live on the current RobotState (a const reference from getCurrentState()).
   // RobotState has no count/index API either: getAttachedBody() looks up by
@@ -502,6 +720,30 @@ bool CumotionServiceClient::syncPlanningScene(
     attached_names.push_back(id);
     if (std::find(wanted_names.begin(), wanted_names.end(), id) == wanted_names.end()) {
       wanted_names.push_back(id);
+    }
+  }
+
+  // A reverse-mirrored object is owned by cuRobo: the previous reverse pass put
+  // it in MoveIt only so RViz and other MoveIt clients can see it. If it is
+  // gone from the MoveIt world now, the user deleted it there — delete it on the
+  // server too instead of resurrecting it from the server in this plan's
+  // reverse pass. (Attached bodies live in the RobotState, not the world.)
+  for (auto it = mirrored_in_moveit_names_.begin(); it != mirrored_in_moveit_names_.end();) {
+    const std::string & name = *it;
+    const bool in_world =
+      std::find(world_names.begin(), world_names.end(), name) != world_names.end();
+    const bool is_attached =
+      std::find(attached_names.begin(), attached_names.end(), name) != attached_names.end();
+    if (!in_world && !is_attached && mirrored_seen_in_moveit_.count(name) != 0U) {
+      removeCuroboObject(name);
+      mirrored_in_moveit_signatures_.erase(name);
+      mirrored_seen_in_moveit_.erase(name);
+      it = mirrored_in_moveit_names_.erase(it);
+    } else {
+      if (in_world) {
+        mirrored_seen_in_moveit_.insert(name);
+      }
+      ++it;
     }
   }
 
@@ -532,6 +774,18 @@ bool CumotionServiceClient::syncPlanningScene(
       if (prev != synced_groups_.end()) {
         new_groups[base] = prev->second;
       }
+      continue;
+    }
+
+    // A reverse mirror: the server already owns this object (it may have been
+    // added by perception / the task constructor / another client), and the
+    // reverse pass below is what keeps MoveIt in step with it. Do not forward it
+    // again — that would either collide with the server's copy or churn the
+    // geometry every plan.
+    if (std::find(
+        mirrored_in_moveit_names_.begin(), mirrored_in_moveit_names_.end(), base) !=
+      mirrored_in_moveit_names_.end())
+    {
       continue;
     }
 
@@ -579,9 +833,18 @@ bool CumotionServiceClient::syncPlanningScene(
       }
 
       curobov2_ros_interfaces::srv::AddObject::Response::SharedPtr res;
-      if (!callService<curobov2_ros_interfaces::srv::AddObject>(
-          add_object_client_, req, res) ||
-        !res->success) {
+      bool added = callService<curobov2_ros_interfaces::srv::AddObject>(
+        add_object_client_, req, res) && res->success;
+      // A name the server already holds but this client did not put there (a
+      // direct add_object / perception object whose id collides with a MoveIt
+      // object) is a duplicate to the server. MoveIt is the forward authority,
+      // so replace the server-side object with the MoveIt geometry once.
+      if (!added && res && res->message.find("already exists") != std::string::npos) {
+        removeCuroboObject(member);
+        added = callService<curobov2_ros_interfaces::srv::AddObject>(
+          add_object_client_, req, res) && res->success;
+      }
+      if (!added) {
         RCLCPP_WARN_STREAM(node_->get_logger(), "add_object failed for '" << member << "'");
         continue;
       }
@@ -635,6 +898,12 @@ bool CumotionServiceClient::syncPlanningScene(
   }
   synced_attached_names_ = std::move(new_attached);
 
+  // Remember what MoveIt already contained so the reverse pass (which runs
+  // immediately after this one) can tell a server-only object from one the
+  // forward pass just made.
+  last_moveit_world_names_ = std::move(world_names);
+  last_moveit_attached_names_ = attached_names;
+
   return true;
 }
 
@@ -644,120 +913,177 @@ bool CumotionServiceClient::syncObstaclesFromServer(
 {
   std::lock_guard<std::mutex> lk(sync_mutex_);
 
-  auto req = std::make_shared<std_srvs::srv::Trigger::Request>();
-  std_srvs::srv::Trigger::Response::SharedPtr res;
-  if (!callService<std_srvs::srv::Trigger>(get_obstacles_client_, req, res)) {
-    RCLCPP_ERROR(node_->get_logger(), "get_obstacles service call failed");
+  // Ask for the SOLVER's full scene, not a names-only listing: the objects that
+  // matter most in the reverse direction (perception, direct add_object calls,
+  // other clients) were never forwarded by this process, so there is no local
+  // geometry to replay for them.
+  auto req =
+    std::make_shared<curobov2_ros_interfaces::srv::GetSceneObjects::Request>();
+  curobov2_ros_interfaces::srv::GetSceneObjects::Response::SharedPtr res;
+  if (!callService<curobov2_ros_interfaces::srv::GetSceneObjects>(
+      get_scene_objects_client_, req, res))
+  {
+    RCLCPP_ERROR(node_->get_logger(), "get_scene_objects service call failed");
     return false;
   }
-  const std::vector<std::string> server_names = parseServerObjectNames(res->message);
+  if (!res->success) {
+    RCLCPP_ERROR_STREAM(
+      node_->get_logger(), "get_scene_objects refused: " << res->message);
+    return false;
+  }
 
-  // Remove MoveIt mirrors that no longer exist in cuRobo.
+  // Unpack the parallel arrays defensively: a short array must not silently
+  // attribute one object's pose or size to another.
+  std::vector<ServerObject> objects;
+  objects.reserve(res->names.size());
+  for (std::size_t i = 0; i < res->names.size(); ++i) {
+    if (res->names[i].empty()) {
+      continue;
+    }
+    if (i >= res->types.size() || i >= res->poses.size() ||
+      i >= res->dimensions.size() || i >= res->colors.size() ||
+      i >= res->mesh_file_paths.size() || i >= res->attached.size())
+    {
+      RCLCPP_WARN_STREAM(
+        node_->get_logger(),
+        "get_scene_objects returned a short array for '" << res->names[i]
+        << "'; omitting it instead of mirroring misaligned values");
+      continue;
+    }
+    ServerObject object;
+    object.name = res->names[i];
+    object.type = res->types[i];
+    object.pose = res->poses[i];
+    object.dimensions = res->dimensions[i];
+    object.color = res->colors[i];
+    object.mesh_file_path = res->mesh_file_paths[i];
+    object.attached = res->attached[i];
+    objects.push_back(std::move(object));
+  }
+
+  // Names the forward pass already represents in MoveIt (user world objects
+  // and things this client forwarded) must not be mirrored back as if the
+  // server had created them.
+  std::set<std::string> forward_members;
+  for (const auto & group : synced_groups_) {
+    forward_members.insert(group.second.begin(), group.second.end());
+  }
+  const std::set<std::string> moveit_world(
+    last_moveit_world_names_.begin(), last_moveit_world_names_.end());
+  const std::set<std::string> moveit_attached(
+    last_moveit_attached_names_.begin(), last_moveit_attached_names_.end());
+
+  // Existing mirrors: keep the ones the server still reports as world objects.
+  // A mirror that disappeared from the server (or became attached) must be
+  // removed from MoveIt; a stale world copy of an attached object would make
+  // MoveIt collide against the payload twice.
+  std::vector<std::string> new_mirrored;
+  new_mirrored.reserve(objects.size());
+  std::set<std::string> mirrored_names(
+    mirrored_in_moveit_names_.begin(), mirrored_in_moveit_names_.end());
   for (const std::string & name : mirrored_in_moveit_names_) {
-    if (std::find(server_names.begin(), server_names.end(), name) == server_names.end()) {
-      psi.removeCollisionObjects({name});
+    const auto it = std::find_if(
+      objects.begin(), objects.end(),
+      [&name](const ServerObject & object) {return object.name == name;});
+    const bool still_world = it != objects.end() && !it->attached;
+    if (!still_world) {
+      removeMoveItMirror(psi, name);
+      mirrored_in_moveit_signatures_.erase(name);
+      mirrored_seen_in_moveit_.erase(name);
+      continue;
+    }
+    new_mirrored.push_back(name);
+  }
+
+  for (const ServerObject & object : objects) {
+    if (object.attached) {
+      // Attach state is owned by the forward pass (MoveIt AttachedBody ->
+      // attach_object). get_scene_objects does not report WHICH link an object
+      // is attached to, so a server-side attach cannot be reconstructed as a
+      // MoveIt AttachedCollisionObject without guessing; leave it out of the
+      // world rather than showing a bogus free-floating obstacle.
+      continue;
+    }
+
+    const bool was_mirror = mirrored_names.count(object.name) != 0U;
+    if (!was_mirror) {
+      // A forward-synced object is already in MoveIt (possibly under a different
+      // member name for a multi-shape CollisionObject). Leave it alone.
+      if (forward_members.count(object.name) != 0U ||
+        moveit_world.count(object.name) != 0U ||
+        moveit_attached.count(object.name) != 0U)
+      {
+        continue;
+      }
+    }
+
+    const auto cached = cached_geometry_.find(object.name);
+    const curobov2_ros_interfaces::srv::AddObject::Request * cached_geometry =
+      cached == cached_geometry_.end() ? nullptr : &cached->second;
+    const std::string sig = serverObjectSignature(object, cached_geometry);
+
+    if (was_mirror) {
+      const auto sig_it = mirrored_in_moveit_signatures_.find(object.name);
+      const bool seen = mirrored_seen_in_moveit_.count(object.name) != 0U;
+      if (seen && sig_it != mirrored_in_moveit_signatures_.end() && sig_it->second == sig) {
+        continue;  // unchanged since the last reverse pass
+      }
+    }
+
+    moveit_msgs::msg::CollisionObject co;
+    std_msgs::msg::ColorRGBA color;
+    std::string reason;
+    if (!fillCollisionObjectFromServer(
+        object, cached_geometry, planning_frame, co, color, reason))
+    {
+      RCLCPP_WARN_ONCE(
+        node_->get_logger(),
+        "Skipping cuRobo->MoveIt mirror for '%s': %s",
+        object.name.c_str(), reason.c_str());
+      if (was_mirror) {
+        removeMoveItMirror(psi, object.name);
+        mirrored_in_moveit_signatures_.erase(object.name);
+        mirrored_seen_in_moveit_.erase(object.name);
+        new_mirrored.erase(
+          std::remove(new_mirrored.begin(), new_mirrored.end(), object.name),
+          new_mirrored.end());
+      }
+      continue;
+    }
+
+    // Publish the mirror asynchronously. A synchronous apply_planning_scene
+    // call here would wait for move_group's planning-scene lock, which the
+    // planning callback that called us is holding — a deadlock. ADD replaces an
+    // existing object with the same id, so this is also the update path.
+    moveit_msgs::msg::ObjectColor object_color;
+    object_color.id = object.name;
+    object_color.color = color;
+    psi.addCollisionObjects({co}, {object_color});
+    mirrored_in_moveit_signatures_[object.name] = sig;
+    if (!was_mirror) {
+      new_mirrored.push_back(object.name);
     }
   }
 
-  std::vector<std::string> new_mirrored;
-  new_mirrored.reserve(server_names.size());
-  for (const std::string & name : server_names) {
-    auto it = cached_geometry_.find(name);
-    if (it == cached_geometry_.end()) {
-      // The object was created directly on the server (perception / raw
-      // add_object) and never passed through a forward sync, so we have no
-      // geometry to replay. get_obstacles is names-only, hence the limitation.
-      RCLCPP_WARN_ONCE(
-        node_->get_logger(),
-        "Server object '%s' has no cached geometry (not mirror of a MoveIt "
-        "collision object); skipping cuRobo->MoveIt mirror", name.c_str());
-      continue;
+  // Drop signatures for names that are no longer mirrored.
+  const std::set<std::string> current(new_mirrored.begin(), new_mirrored.end());
+  for (auto it = mirrored_in_moveit_signatures_.begin();
+    it != mirrored_in_moveit_signatures_.end();)
+  {
+    if (current.count(it->first) == 0U) {
+      it = mirrored_in_moveit_signatures_.erase(it);
+    } else {
+      ++it;
     }
-    const auto & add_req = it->second;
-
-    moveit_msgs::msg::CollisionObject co;
-    co.id = name;
-    co.header.frame_id = planning_frame;
-    co.operation = moveit_msgs::msg::CollisionObject::ADD;
-    co.pose = add_req.pose;
-
-    bool built = false;
-    switch (add_req.type) {
-      case curobov2_ros_interfaces::srv::AddObject::Request::CUBOID: {
-        shape_msgs::msg::SolidPrimitive prim;
-        prim.type = shape_msgs::msg::SolidPrimitive::BOX;
-        prim.dimensions[0] = add_req.dimensions.x;
-        prim.dimensions[1] = add_req.dimensions.y;
-        prim.dimensions[2] = add_req.dimensions.z;
-        co.primitives.push_back(prim);
-        co.primitive_poses.push_back(co.pose);
-        built = true;
-        break;
-      }
-      case curobov2_ros_interfaces::srv::AddObject::Request::SPHERE: {
-        shape_msgs::msg::SolidPrimitive prim;
-        prim.type = shape_msgs::msg::SolidPrimitive::SPHERE;
-        prim.dimensions[0] = add_req.dimensions.x;
-        co.primitives.push_back(prim);
-        co.primitive_poses.push_back(co.pose);
-        built = true;
-        break;
-      }
-      case curobov2_ros_interfaces::srv::AddObject::Request::CYLINDER: {
-        shape_msgs::msg::SolidPrimitive prim;
-        prim.type = shape_msgs::msg::SolidPrimitive::CYLINDER;
-        prim.dimensions[0] = add_req.dimensions.x;
-        prim.dimensions[1] = add_req.dimensions.y;
-        co.primitives.push_back(prim);
-        co.primitive_poses.push_back(co.pose);
-        built = true;
-        break;
-      }
-      case curobov2_ros_interfaces::srv::AddObject::Request::CAPSULE:
-        // moveit_msgs SolidPrimitive has no CAPSULE; cannot mirror faithfully.
-        RCLCPP_WARN_STREAM(
-          node_->get_logger(), "Skipping CAPSULE '" << name
-          << "' in cuRobo->MoveIt mirror");
-        continue;
-      case curobov2_ros_interfaces::srv::AddObject::Request::MESH: {
-        if (add_req.vertices.empty() || add_req.triangles.empty()) {
-          RCLCPP_WARN_STREAM(
-            node_->get_logger(), "Skipping file-path-only MESH '" << name
-            << "' in cuRobo->MoveIt mirror (no inline geometry cached)");
-          continue;
-        }
-        shape_msgs::msg::Mesh mesh;
-        mesh.vertices.reserve(add_req.vertices.size());
-        for (const auto & v : add_req.vertices) {
-          mesh.vertices.push_back(v);
-        }
-        mesh.triangles.reserve(add_req.triangles.size() / 3U);
-        for (std::size_t i = 0; i + 2U < add_req.triangles.size(); i += 3U) {
-          shape_msgs::msg::MeshTriangle tri;
-          tri.vertex_indices[0] = add_req.triangles[i];
-          tri.vertex_indices[1] = add_req.triangles[i + 1U];
-          tri.vertex_indices[2] = add_req.triangles[i + 2U];
-          mesh.triangles.push_back(tri);
-        }
-        co.meshes.push_back(mesh);
-        co.mesh_poses.push_back(co.pose);
-        built = true;
-        break;
-      }
-      default:
-        RCLCPP_WARN_STREAM(
-          node_->get_logger(), "Unsupported AddObject type for '" << name
-          << "'; skipping mirror");
-        continue;
+  }
+  for (auto it = mirrored_seen_in_moveit_.begin();
+    it != mirrored_seen_in_moveit_.end();)
+  {
+    if (current.count(*it) == 0U) {
+      it = mirrored_seen_in_moveit_.erase(it);
+    } else {
+      ++it;
     }
-    if (!built) {
-      continue;
-    }
-
-    // Idempotent: re-applying a CollisionObject with ADD replaces the previous
-    // one, so unchanged or updated geometry is handled by the same call.
-    psi.applyCollisionObject(co);
-    new_mirrored.push_back(name);
   }
 
   mirrored_in_moveit_names_ = std::move(new_mirrored);

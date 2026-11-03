@@ -22,8 +22,12 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include "rclcpp/executors/single_threaded_executor.hpp"
 
 #if __has_include(<moveit/planning_interface/planning_interface.hpp>)
 #include "moveit/planning_interface/planning_interface.hpp"
@@ -39,6 +43,7 @@
 
 #include "curobov2_ros_interfaces/srv/add_object.hpp"
 #include "curobov2_ros_interfaces/srv/attach_object.hpp"
+#include "curobov2_ros_interfaces/srv/get_scene_objects.hpp"
 #include "curobov2_ros_interfaces/srv/remove_object.hpp"
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
 #include "curobov2_ros_interfaces/srv/trajectory_generation.hpp"
@@ -78,6 +83,10 @@ class CumotionServiceClient
 {
 public:
   explicit CumotionServiceClient(const rclcpp::Node::SharedPtr & node);
+  ~CumotionServiceClient();
+
+  CumotionServiceClient(const CumotionServiceClient &) = delete;
+  CumotionServiceClient & operator=(const CumotionServiceClient &) = delete;
 
   /// Select the active planner by type (see SetPlanner.srv constants).
   bool setPlanner(uint8_t planner_type, std::string & message);
@@ -93,12 +102,13 @@ public:
   /// cuRobo (add/update/remove), multi-shape and mesh aware.
   bool syncPlanningScene(const planning_scene::PlanningSceneConstPtr & planning_scene);
 
-  /// Reverse direction of syncPlanningScene: pull the objects cuRobo currently
-  /// knows about (anything added via /add_object, not just MoveIt mirrors) and
-  /// mirror them into a MoveIt planning scene as CollisionObjects. Names that
-  /// were never part of a forward sync have no cached geometry and are skipped
-  /// with a one-time warning (Sec 6d of the task-constructor plan). @p
-  /// planning_frame becomes the CollisionObjects' header.frame_id.
+  /// Reverse direction of syncPlanningScene: ask cuRobo for the FULL scene via
+  /// `get_scene_objects` (type/pose/size/colour, not just names) and mirror every
+  /// object that did not come from MoveIt into the MoveIt world as a
+  /// CollisionObject. This includes objects added by perception, the task
+  /// constructor, the grasp orchestrator or a bare `ros2 service call`, which a
+  /// client-side geometry cache could never describe. @p planning_frame becomes
+  /// the CollisionObjects' header.frame_id.
   bool syncObstaclesFromServer(
     moveit::planning_interface::PlanningSceneInterface & psi,
     const std::string & planning_frame);
@@ -113,10 +123,26 @@ private:
   /// Remove one curobo-side object (member name) and drop its cached state.
   void removeCuroboObject(const std::string & name);
 
-  /// Parse the newline-separated obstacle-name list returned by get_obstacles.
-  static std::vector<std::string> parseServerObjectNames(const std::string & message);
+  /// Remove a reverse-synced object from the MoveIt world. Deliberately
+  /// asynchronous: reverse sync runs inside move_group's own planning callback,
+  /// and apply_planning_scene (or a synchronous remove) would deadlock against
+  /// the planning scene lock that callback holds. A later plan sees the update.
+  static void removeMoveItMirror(
+    moveit::planning_interface::PlanningSceneInterface & psi,
+    const std::string & name);
 
+  /// Logger / parameter owner. This is move_group's node; do NOT spin it here.
   std::shared_ptr<rclcpp::Node> node_;
+  /// Dedicated node for the service clients, spun on its own executor thread.
+  /// A planning plugin runs inside move_group's callback, and move_group can use
+  /// a single-threaded executor: a synchronous `future.wait_for()` on move_group's
+  /// own node would block the only thread that could deliver the response, so
+  /// every service call would time out. An independent node/executor keeps the
+  /// request/response cycle alive no matter how move_group is spun.
+  std::shared_ptr<rclcpp::Node> client_node_;
+  std::shared_ptr<rclcpp::executors::SingleThreadedExecutor> client_executor_;
+  std::thread client_spinner_;
+
   std::string ns_;  // service namespace, e.g. "curobo_server"
   double service_timeout_secs_;  // per-call service timeout (cumotion_service_timeout)
 
@@ -127,7 +153,8 @@ private:
   rclcpp::Client<curobov2_ros_interfaces::srv::RemoveObject>::SharedPtr remove_object_client_;
   rclcpp::Client<curobov2_ros_interfaces::srv::AttachObject>::SharedPtr attach_object_client_;
   rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr detach_object_client_;
-  rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr get_obstacles_client_;
+  rclcpp::Client<curobov2_ros_interfaces::srv::GetSceneObjects>::SharedPtr
+    get_scene_objects_client_;
 
   /// Obstacles mirrored into cuRobo, keyed by their MoveIt object id. Values are
   /// the expanded curobo-side names (`{id}` for single-shape objects, `{id}__{i}`
@@ -143,14 +170,28 @@ private:
   std::vector<std::string> synced_attached_names_;
 
   /// Per curobo-side name, the AddObject request that last mirrored it. Forward
-  /// sync populates this; the reverse sync (syncObstaclesFromServer) replays it
-  /// into MoveIt as a CollisionObject (Sec 6d). Keyed by the exact name sent to
-  /// add_object (i.e. the expanded member name).
+  /// sync populates this, which is the ONLY way to recover inline mesh geometry
+  /// in the reverse direction: `get_scene_objects` deliberately does not echo
+  /// vertex/triangle buffers. Primitives are rebuilt from the service reply.
   std::map<std::string, curobov2_ros_interfaces::srv::AddObject::Request>
     cached_geometry_;
 
   /// Names mirrored into MoveIt by the reverse sync (stale-removal tracking).
   std::vector<std::string> mirrored_in_moveit_names_;
+  /// Per reverse-mirrored name, a signature of the server object that was
+  /// written into MoveIt. Repeated syncs leave an unchanged mirror alone.
+  std::map<std::string, std::string> mirrored_in_moveit_signatures_;
+  /// Names that have actually shown up in a MoveIt planning-scene snapshot.
+  /// Reverse mirroring is asynchronous (see removeMoveItMirror); until a name
+  /// has been observed, its absence from the world means "publish still in
+  /// flight", NOT "the user deleted it", so the forward pass must not delete the
+  /// server object.
+  std::set<std::string> mirrored_seen_in_moveit_;
+  /// MoveIt world / attached-body names seen by the last forward sync. A server
+  /// object whose name is in here (and is not a reverse mirror) is already
+  /// represented in MoveIt by that forward sync and must not be mirrored back.
+  std::vector<std::string> last_moveit_world_names_;
+  std::vector<std::string> last_moveit_attached_names_;
 
   std::mutex sync_mutex_;
 };
