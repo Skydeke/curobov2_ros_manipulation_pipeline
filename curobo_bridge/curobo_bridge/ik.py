@@ -84,11 +84,14 @@ def ik(handle: int, poses, tool_frame: str = ""):
     import numpy as np
     import torch
     from curobo.types import Pose, GoalToolPose
+    from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
     entry = _REGISTRY[handle]
     solver = _ik_solver(entry)
     device = torch.device("cuda", torch.cuda.current_device())
     poses = np.asarray(poses, dtype=np.float32)
+    if poses.ndim != 2 or poses.shape[1] != 7:
+        raise ValueError(f"ik expects [N,7] poses, got {poses.shape}")
 
     pose = Pose(
         position=torch.tensor(poses[:, 0:3], dtype=torch.float32, device=device),
@@ -99,8 +102,35 @@ def ik(handle: int, poses, tool_frame: str = ""):
         raise ValueError(
             f"unknown tool frame {tool_frame!r}; configured: "
             f"{list(solver.kinematics.tool_frames)}")
-    goal = GoalToolPose.from_poses({tool_frame: pose})
-    result = solver.solve_pose(goal_tool_poses=goal)
+
+    # cuRobo requires a goal for every configured tool frame. The frames this
+    # request does not target get a dummy pose at the model's default FK; their
+    # pose cost is disabled for the solve, so they do not constrain the target
+    # arm. Without this a bimanual model rejects a single-frame IK goal with
+    # "Ordered link names [...] not a subset of [...]".
+    pose_dict = {tool_frame: pose}
+    passive_frames = [
+        frame for frame in solver.kinematics.tool_frames if frame != tool_frame
+    ]
+    if passive_frames:
+        default_state = solver.kinematics.default_joint_state.unsqueeze(0)
+        fk = solver.kinematics.compute_kinematics(default_state)
+        for frame in passive_frames:
+            here = fk.tool_poses.get_link_pose(frame)
+            pose_dict[frame] = Pose(
+                position=here.position.repeat(len(poses), 1).contiguous(),
+                quaternion=here.quaternion.repeat(len(poses), 1).contiguous())
+        solver.update_tool_pose_criteria(
+            {frame: ToolPoseCriteria.disabled() for frame in passive_frames})
+
+    goal = GoalToolPose.from_poses(
+        pose_dict, ordered_tool_frames=list(solver.kinematics.tool_frames))
+    try:
+        result = solver.solve_pose(goal_tool_poses=goal)
+    finally:
+        if passive_frames:
+            solver.update_tool_pose_criteria(
+                {frame: ToolPoseCriteria() for frame in passive_frames})
 
     solution = result.solution.detach().cpu().numpy()
     success = result.success.detach().cpu().numpy()
