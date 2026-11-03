@@ -149,6 +149,32 @@ def graph_attempt_used(cfg) -> bool:
     ``enable_graph_attempt < max_attempts``."""
     max_attempts, enable_graph_attempt = cfg
     return enable_graph_attempt < max_attempts
+def _prime_passive_hold(planner) -> None:
+    """Capture the target-cspace cost kernel while it is enabled.
+
+    cuRobo bakes the set of active cost kernels into its CUDA graphs during
+    ``warmup``. A cost that is disabled then (the normal weight-0 state) is
+    absent from the graph, and enabling it later has no effect on replay. So
+    arm the cost before warmup with zero per-DOF weight (inert during capture)
+    and leave it enabled afterwards; per-request weights then take effect.
+    """
+    for rollout in planner.trajopt_solver.get_all_rollout_instances():
+        for cost in rollout.get_cost_component_by_name("target_cspace_dist"):
+            cfg = cost.config
+            cfg.weight.fill_(1.0)
+            cfg.terminal_dof_weight.zero_()
+            cfg.non_terminal_dof_weight.zero_()
+            cost.enable_cost()
+
+
+def _disarm_passive_hold(planner) -> None:
+    """Leave the primed cost enabled but contribute nothing until requested."""
+    for rollout in planner.trajopt_solver.get_all_rollout_instances():
+        for cost in rollout.get_cost_component_by_name("target_cspace_dist"):
+            cost.config.weight.fill_(0.0)
+            cost._weight.fill_(0.0)
+
+
 def _warmup_cspace(
     planner,
     iterations: int = 3,
@@ -241,17 +267,37 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
         if cfg.get("graph_planner"):
             graph_config["graph_planner"].update(cfg["graph_planner"])
         kwargs["graph_planner_config"] = graph_config
+    def _trajopt_optimizer_config(relative_path):
+        """Load a trajopt task config and add the passive-arm hold cost.
+
+        ``target_cspace_dist`` is registered with weight 0, so it is inert
+        unless the bridge enables it for a pose plan that must keep a passive
+        arm still. Putting it in the optimizer's ``cost_cfg`` (not only the
+        convergence metrics) is what makes the hold influence the solve.
+        """
+        conf = resolve_config(join_path(get_task_configs_path(), relative_path))
+        cost_cfg = (conf.setdefault("rollout", {}) or {}).setdefault("cost_cfg", {})
+        cost_cfg.setdefault("target_cspace_dist_cfg", {
+            "weight": 0.0,
+            "use_null_space": False,
+            "only_terminal_cost": False,
+        })
+        return conf
+
     kwargs.update({
         "ik_optimizer_configs": ["ik/particle_ik.yml", "ik/lbfgs_ik.yml"],
         "ik_transition_model": "ik/transition_ik.yml",
         "metrics_rollout": "metrics_base.yml",
         "trajopt_optimizer_configs": [
-            "trajopt/particle_trajopt.yml", "trajopt/lbfgs_bspline_trajopt.yml"],
+            _trajopt_optimizer_config("trajopt/particle_trajopt.yml"),
+            _trajopt_optimizer_config("trajopt/lbfgs_bspline_trajopt.yml"),
+        ],
         "trajopt_transition_model": "trajopt/transition_bspline_trajopt.yml",
         "store_debug": False,
     })
 
     planner = MotionPlanner(MotionPlannerCfg.create(**kwargs))
+    _prime_passive_hold(planner)
     if "interpolation_dt" in cfg:
         try:
             planner.trajopt_solver.config.interpolation_dt = float(cfg["interpolation_dt"])
@@ -292,6 +338,7 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
         print(
             f"[curobo_bridge] cspace CUDA-graph warmup failed ({exc!r}); the first "
             f"joint-space plan will capture its graphs unchecked", flush=True)
+    _disarm_passive_hold(planner)
     entry["motion_planner"] = planner
     # PORT: config_wrapper_motion.set_motion_gen_config tail - a freshly built
     # solver arrives with every obstacle enabled, so an already-attached payload
