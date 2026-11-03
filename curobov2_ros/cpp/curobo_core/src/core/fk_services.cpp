@@ -401,6 +401,9 @@ void FKServices::handle_fk_batch(
       }
     }
   }
+  if (node_->has_parameter("base_link")) {
+    response->base_link = node_->get_parameter("base_link").as_string();
+  }
   response->success = true;
 }
 

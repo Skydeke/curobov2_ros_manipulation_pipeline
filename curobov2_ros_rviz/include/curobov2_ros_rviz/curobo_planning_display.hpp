@@ -153,6 +153,9 @@ private:
   Ogre::SceneNode * goal_root_ = nullptr;
   Ogre::SceneNode * trajectory_root_ = nullptr;
   std::string robot_root_frame_;
+  // Frame of the server's FK poses (cuRobo base link). Empty falls back to
+  // the URDF root for older servers.
+  std::string fk_base_link_;
   Ogre::Vector3 robot_root_offset_ = Ogre::Vector3::ZERO;
   Ogre::Quaternion robot_root_rotation_ = Ogre::Quaternion::IDENTITY;
 
@@ -189,6 +192,7 @@ private:
     uint64_t seq = 0;
     bool ok = false;
     std::string error;
+    std::string base_link;
     std::vector<std::string> link_names;
     std::vector<std::array<double, 7>> poses;
   };
@@ -220,6 +224,7 @@ private:
     uint64_t seq = 0;
     bool ok = false;
     std::string error;
+    std::string base_link;
     std::vector<std::string> link_names;
     std::vector<std::array<double, 7>> poses;
   };

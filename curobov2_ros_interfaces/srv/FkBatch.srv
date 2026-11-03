@@ -18,4 +18,6 @@ bool success
 # Link poses actually returned (unknown names are filtered out), flattened as
 # link_poses[i * len(link_names) + j] for joint state i and link j.
 string[] link_names
+# Frame the link poses are expressed in (the planner's cuRobo base link).
+string base_link
 geometry_msgs/Pose[] link_poses

@@ -324,6 +324,7 @@ void CuroboPlanningDisplay::fixedFrameChanged()
     gizmo_client_->setTargetFrame(fixed_frame_.toStdString());
   }
   Display::fixedFrameChanged();
+  updateTrajectoryRoot();
 }
 
 void CuroboPlanningDisplay::reset()
@@ -339,6 +340,7 @@ void CuroboPlanningDisplay::reset()
   current_frac_ = 0.0;
   anim_time_ = 0.0;
   current_transforms_.clear();
+  fk_base_link_.clear();
   clearTrailRobots();
   if (trajectory_robot_) {
     trajectory_robot_->setVisible(false);
@@ -564,14 +566,16 @@ void CuroboPlanningDisplay::updateTrajectoryRoot()
   Ogre::Vector3 offset = Ogre::Vector3::ZERO;
   Ogre::Quaternion rotation = Ogre::Quaternion::IDENTITY;
   auto * frame_manager = context_ ? context_->getFrameManager() : nullptr;
-  if (!robot_root_frame_.empty() && frame_manager != nullptr &&
-    robot_root_frame_ != frame_manager->getFixedFrame())
+  const std::string root_frame =
+    fk_base_link_.empty() ? robot_root_frame_ : fk_base_link_;
+  if (!root_frame.empty() && frame_manager != nullptr &&
+    root_frame != frame_manager->getFixedFrame())
   {
     rclcpp::Time stamp(0, 0, RCL_ROS_TIME);
-    if (frame_manager->getTransform(robot_root_frame_, stamp, offset, rotation)) {
+    if (frame_manager->getTransform(root_frame, stamp, offset, rotation)) {
       setTransformOk();
     } else {
-      setMissingTransformToFixedFrame(robot_root_frame_);
+      setMissingTransformToFixedFrame(root_frame);
       return;
     }
   }
@@ -612,6 +616,7 @@ void CuroboPlanningDisplay::updateTopic()
   current_frac_ = 0.0;
   anim_time_ = 0.0;
   current_transforms_.clear();
+  fk_base_link_.clear();
   waypoints_.clear();
   clearTrailRobots();
   resetFkState();
@@ -725,6 +730,7 @@ bool CuroboPlanningDisplay::requestFk(
         response->ok = result->success;
         response->error = result->error_msg.data;
         response->link_names = result->link_names;
+        response->base_link = result->base_link;
         response->poses.reserve(result->link_poses.size());
         for (const auto & pose : result->link_poses) {
           response->poses.push_back({
@@ -765,6 +771,9 @@ bool CuroboPlanningDisplay::consumeFk(uint64_t seq)
   }
   if (!fk_pending_msg_) {
     return false;
+  }
+  if (!response->base_link.empty()) {
+    fk_base_link_ = response->base_link;
   }
 
   const size_t points = fk_pending_msg_->points.size();
@@ -811,6 +820,7 @@ bool CuroboPlanningDisplay::consumeFk(uint64_t seq)
   current_frac_ = 0.0;
   animating_ = true;
   fk_pending_msg_.reset();
+  updateTrajectoryRoot();
   deleteStatus("FK");
   return true;
 }
@@ -1013,6 +1023,7 @@ void CuroboPlanningDisplay::consumeGoalIk()
         result->ok = response->success;
         result->error = response->error_msg.data;
         result->link_names = response->link_names;
+        result->base_link = response->base_link;
         result->poses.reserve(response->link_poses.size());
         for (const auto & pose : response->link_poses) {
           result->poses.push_back({
@@ -1056,6 +1067,9 @@ void CuroboPlanningDisplay::consumeGoalFk()
     return;
   }
 
+  if (!result->base_link.empty()) {
+    fk_base_link_ = result->base_link;
+  }
   const size_t links = result->link_names.size();
   std::map<std::string, Eigen::Isometry3d> transforms;
   for (size_t j = 0; j < links && j < result->poses.size(); ++j) {
@@ -1078,6 +1092,7 @@ void CuroboPlanningDisplay::consumeGoalFk()
       show_goal_state_property_ && show_goal_state_property_->getBool());
     deleteStatus("Goal State");
   }
+  updateTrajectoryRoot();
 }
 
 // ============================================================================
@@ -1621,8 +1636,13 @@ void CuroboPlanningDisplay::updateToolFrames()
   if (applying_tool_frames_) {
     return;
   }
-  tool_frames_user_set_ = true;
-  setToolFrames(splitToolFrames(tool_frames_property_->getStdString()));
+  const auto frames = splitToolFrames(tool_frames_property_->getStdString());
+  // An EMPTY property means "use the server's configured tool frames", not
+  // "one unnamed target". RViz loads a saved config's empty value through
+  // this slot; treating that as an override left the task-planning display
+  // with one unnamed target and an empty Active Tool list.
+  tool_frames_user_set_ = !frames.empty();
+  setToolFrames(frames);
 }
 
 void CuroboPlanningDisplay::updateActiveTool()
