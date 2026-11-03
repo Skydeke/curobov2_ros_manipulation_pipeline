@@ -188,6 +188,85 @@ def _active_tool_frame(planner):
     return frames, 0, []
 
 
+def _passive_joint_mask(planner, active_index, passive_indices):
+    """Joints that belong to a passive frame and not to the active one.
+
+    ``joint_affects_endeffector`` is [n_dof * n_tool_frames]. A bimanual arm's
+    seven joints affect only that arm's frame; the shared lift affects both and
+    is therefore NOT held. Returns a float mask on the solver device, or None
+    when the model does not expose the matrix.
+    """
+    import torch
+
+    try:
+        kin = planner.kinematics
+        cfg = kin.config.kinematics_config
+        matrix = cfg.joint_affects_endeffector
+        dof = len(kin.joint_names)
+        n_frames = len(planner.tool_frames)
+        if matrix is None or matrix.numel() != dof * n_frames:
+            return None
+        affects = matrix.view(dof, n_frames).bool()
+        passive_any = affects[:, list(passive_indices)].any(dim=1)
+        active_any = affects[:, active_index]
+        mask = passive_any & torch.logical_not(active_any)
+        if not bool(mask.any()):
+            return None
+        return mask.to(dtype=torch.float32, device=matrix.device)
+    except Exception:
+        return None
+
+
+def _apply_passive_hold(planner, mask, weight=1.0e4):
+    """Enable the target-cspace distance cost on ``mask`` only.
+
+    The passive arm stays in the cspace (both arms must remain independently
+    planable), so the hold is a cost, not a joint lock. ``goal_js`` is the
+    start state supplied to ``plan_pose``; per-DOF weights zero every joint
+    except the passive arm's, so the lift and the active arm are untouched.
+    The cost is registered in the trajopt task config with weight 0 (see
+    ``motion_planner_build``) and is enabled only for this request.
+    """
+    saved = []
+    seen = set()
+    for rollout in planner.trajopt_solver.get_all_rollout_instances():
+        for cost in rollout.get_cost_component_by_name("target_cspace_dist"):
+            if id(cost) in seen:
+                continue
+            seen.add(id(cost))
+            cfg = cost.config
+            saved.append((
+                cost,
+                cfg.weight.clone(),
+                cost._weight.clone(),
+                cfg.terminal_dof_weight.clone(),
+                cfg.non_terminal_dof_weight.clone(),
+                getattr(cfg, "only_terminal_cost", None),
+            ))
+            cfg.weight.fill_(float(weight))
+            # The cost is primed (enabled) during planner warmup and stays
+            # enabled; update its live weight in place so the captured CUDA
+            # graph sees the request. Toggling enable/disable here would leave
+            # the captured kernel reading the wrong value (or be absent).
+            cost._weight.fill_(float(weight))
+            cfg.terminal_dof_weight.copy_(mask)
+            cfg.non_terminal_dof_weight.copy_(mask)
+            if hasattr(cfg, "only_terminal_cost"):
+                cfg.only_terminal_cost = False
+    return saved
+
+
+def _restore_passive_hold(saved):
+    for (cost, weight, live_weight, terminal, non_terminal, only_terminal) in saved:
+        cfg = cost.config
+        cfg.weight.copy_(weight)
+        cost._weight.copy_(live_weight)
+        cfg.terminal_dof_weight.copy_(terminal)
+        cfg.non_terminal_dof_weight.copy_(non_terminal)
+        if only_terminal is not None and hasattr(cfg, "only_terminal_cost"):
+            cfg.only_terminal_cost = bool(only_terminal)
+
+
 def plan_pose(handle: int, req) -> dict:
     """Pose plan (PORT: single_planner._plan_trajectory / classic_planner)."""
     import numpy as np
