@@ -151,22 +151,21 @@ def plan_cspace(handle: int, req) -> dict:
         max_attempts=int(req.get("max_attempts", 1)),
         enable_graph_attempt=int(req.get("enable_graph_attempt", 1)))
     return _plan_outcome(planner, result)
-def _active_tool_frame(planner, start_state=None, goal_poses=None):
-    """Pick the frame the caller is driving.
+def _active_tool_frame(planner):
+    """Pick the configured active tool frame.
 
     A bimanual cuRobo config declares one tool frame per arm, but a request
     carries ONE pose goal. ``GoalToolPose`` still needs an entry for every
     configured frame, so the other frames are filled with a dummy pose.
 
-    Selection has two signals:
+    The active frame is the FIRST configured tool frame. A caller that wants
+    the other arm launches with that arm's frame first (the OpenArm launch
+    rewrites ``tool_frames`` for ``arm:=right``). Do NOT infer it from the goal
+    pose: a grasp near the robot midline can then flip between arms from cycle
+    to cycle, while the gripper/perception side is still configured for one arm.
 
-    * ``joint_affects_endeffector`` mobility. If one arm has fewer optimizable
-      joints (a locked/reduced planner), that frame is passive and the other
-      is the active one.
-    * When both arms are equally movable (the normal bimanual cspace), the
-      frame whose CURRENT FK pose is closest to the requested goal is the one
-      the caller means. This is what makes ``arm:=right`` work without a
-      separate server-side arm switch.
+    ``joint_affects_endeffector`` mobility is used only to detect a reduced
+    planner (one arm locked out): then the mobile frame is active.
 
     Returns ``(frames, active_index, counts)``; ``counts`` is empty when the
     model does not expose the matrix.
@@ -174,7 +173,6 @@ def _active_tool_frame(planner, start_state=None, goal_poses=None):
     frames = list(planner.tool_frames)
     if not frames:
         return frames, 0, []
-    counts = []
     try:
         kin = planner.kinematics
         cfg = kin.config.kinematics_config
@@ -182,109 +180,12 @@ def _active_tool_frame(planner, start_state=None, goal_poses=None):
         dof = len(kin.joint_names)
         if matrix is not None and matrix.numel() == dof * len(frames):
             counts = [int(c) for c in matrix.view(dof, len(frames)).sum(dim=0).tolist()]
+            if len(set(counts)) > 1:
+                return frames, max(range(len(frames)), key=lambda i: (counts[i], -i)), counts
+            return frames, 0, counts
     except Exception:
-        counts = []
-    if counts and len(set(counts)) > 1:
-        # One arm is locked out (or has fewer DOF): the mobile one is active.
-        return frames, max(range(len(frames)), key=lambda i: (counts[i], -i)), counts
-    if start_state is not None and goal_poses is not None and len(goal_poses) > 0:
-        try:
-            import torch
-            fk = planner.kinematics.compute_kinematics(start_state)
-            gp = torch.as_tensor(goal_poses, dtype=torch.float32,
-                                 device=start_state.position.device)
-            gp = gp[:, :3]
-            best = None
-            for i, frame in enumerate(frames):
-                here = fk.tool_poses.get_link_pose(frame)
-                hp = here.position.reshape(-1, 3)
-                d = torch.cdist(hp, gp).min().item()
-                if best is None or d < best[0]:
-                    best = (d, i)
-            if best is not None:
-                return frames, best[1], counts
-        except Exception:
-            pass
-    return frames, 0, counts
-
-
-def _passive_joint_mask(planner, active_index, passive_indices):
-    """Joints that belong to a passive frame and not to the active one.
-
-    ``joint_affects_endeffector`` is [n_dof * n_tool_frames]. A bimanual arm's
-    seven joints affect only that arm's frame; the shared lift affects both and
-    is therefore NOT held. Returns a float mask on the solver device, or None
-    when the model does not expose the matrix.
-    """
-    import torch
-
-    try:
-        kin = planner.kinematics
-        cfg = kin.config.kinematics_config
-        matrix = cfg.joint_affects_endeffector
-        dof = len(kin.joint_names)
-        n_frames = len(planner.tool_frames)
-        if matrix is None or matrix.numel() != dof * n_frames:
-            return None
-        affects = matrix.view(dof, n_frames).bool()
-        passive_any = affects[:, list(passive_indices)].any(dim=1)
-        active_any = affects[:, active_index]
-        mask = passive_any & torch.logical_not(active_any)
-        if not bool(mask.any()):
-            return None
-        return mask.to(dtype=torch.float32, device=matrix.device)
-    except Exception:
-        return None
-
-
-def _apply_passive_hold(planner, mask, weight=1.0e4):
-    """Enable the target-cspace distance cost on ``mask`` only.
-
-    The passive arm stays in the cspace (both arms must remain independently
-    planable), so the hold is a cost, not a joint lock. ``goal_js`` is the
-    start state supplied to ``plan_pose``; per-DOF weights zero every joint
-    except the passive arm's, so the lift and the active arm are untouched.
-    The cost is registered in the trajopt task config with weight 0 (see
-    ``motion_planner_build``) and is enabled only for this request.
-    """
-    saved = []
-    seen = set()
-    for rollout in planner.trajopt_solver.get_all_rollout_instances():
-        for cost in rollout.get_cost_component_by_name("target_cspace_dist"):
-            if id(cost) in seen:
-                continue
-            seen.add(id(cost))
-            cfg = cost.config
-            saved.append((
-                cost,
-                cfg.weight.clone(),
-                cost._weight.clone(),
-                cfg.terminal_dof_weight.clone(),
-                cfg.non_terminal_dof_weight.clone(),
-                getattr(cfg, "only_terminal_cost", None),
-            ))
-            cfg.weight.fill_(float(weight))
-            # The cost is primed (enabled) during planner warmup and stays
-            # enabled; update its live weight in place so the captured CUDA
-            # graph sees the request. Toggling enable/disable here would leave
-            # the captured kernel reading the wrong value (or be absent).
-            cost._weight.fill_(float(weight))
-            cfg.terminal_dof_weight.copy_(mask)
-            cfg.non_terminal_dof_weight.copy_(mask)
-            if hasattr(cfg, "only_terminal_cost"):
-                cfg.only_terminal_cost = False
-    return saved
-
-
-def _restore_passive_hold(saved):
-    for (cost, weight, live_weight, terminal, non_terminal, only_terminal) in saved:
-        cfg = cost.config
-        cfg.weight.copy_(weight)
-        cost._weight.copy_(live_weight)
-        cfg.terminal_dof_weight.copy_(terminal)
-        cfg.non_terminal_dof_weight.copy_(non_terminal)
-        if only_terminal is not None and hasattr(cfg, "only_terminal_cost"):
-            cfg.only_terminal_cost = bool(only_terminal)
+        pass
+    return frames, 0, []
 
 
 def plan_pose(handle: int, req) -> dict:
@@ -312,8 +213,7 @@ def plan_pose(handle: int, req) -> dict:
     pose = Pose(
         position=torch.tensor(goalset[:, 0:3], dtype=torch.float32, device=device),
         quaternion=torch.tensor(goalset[:, 3:7], dtype=torch.float32, device=device))
-    frames, active_index, _mobility = _active_tool_frame(
-        planner, start_state=start_state, goal_poses=goalset)
+    frames, active_index, _mobility = _active_tool_frame(planner)
     tool_frame = frames[active_index] if frames else planner.tool_frames[0]
     from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
 
