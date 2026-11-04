@@ -22,6 +22,7 @@ from curobo_task_constructor.core.stage import TrajectoryStage
 from curobo_task_constructor.core.state import InterfaceState
 from curobo_task_constructor.stages._util import (
     axis_holds,
+    carry_missing_joints,
     cost_of,
     full_request,
     pose_from_params,
@@ -103,7 +104,8 @@ class CartesianPath(TrajectoryStage):
 
     def make_end_state(self, start: InterfaceState, result, raw=None):
         # An arrived result is accepted as-is (there is no straightness gate).
-        return start.clone(joint_state=result.last_state)
+        return start.clone(joint_state=carry_missing_joints(
+            start.joint_state, result.last_state))
 
     def _comment(self, req: PlanRequest, result) -> str:
         gs = req.goalsets[0] if req.goalsets else None

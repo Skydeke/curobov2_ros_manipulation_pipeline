@@ -641,6 +641,19 @@ void PlannerServices::fill_result(
     }
   }
 
+  // Make the collision model use this leg's commanded non-cspace joints (the
+  // gripper jaws) before solving. Otherwise a pre-grasp leg planned right after
+  // "open gripper" can still collide against the previous closed jaw state.
+  if (start_lock_callback_ && !resolved_goal.start_pose.name.empty()) {
+    try {
+      start_lock_callback_(resolved_goal.start_pose);
+    } catch (const std::exception & e) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 5000,
+        "Could not apply start-pose lock joints: %s", e.what());
+    }
+  }
+
   // PORT: the Python planning callbacks wrap the plan in try/except and return
   // success=false with the message (e.g. an invalid partial start pose).
   curobo_runtime::PlanRequest request;

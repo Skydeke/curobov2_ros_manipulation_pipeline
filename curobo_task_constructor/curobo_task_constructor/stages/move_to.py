@@ -13,6 +13,7 @@ from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.stage import PropagatingEitherWay
 from curobo_task_constructor.core.state import InterfaceState
 from curobo_task_constructor.stages._util import (
+    carry_missing_joints,
     cost_of,
     full_request,
     goalset_for_scene,
@@ -167,7 +168,8 @@ class MoveTo(PropagatingEitherWay):
                 result = self._try_plan(req, state, "move_to plan failed")
                 if result is None:
                     continue
-                end = state.clone(joint_state=result.last_state)
+                end = state.clone(joint_state=carry_missing_joints(
+                    state.joint_state, result.last_state))
                 sol = Solution(
                     state, end, trajectory=result.trajectory,
                     cost=self._cost_of(result), comment=self._comment(result),

@@ -235,7 +235,8 @@ private:
   void clearPending(const QString& task_id, uint32_t id);
 
   std::vector<sensor_msgs::msg::JointState> currentWaypoints() const;
-  static std::vector<sensor_msgs::msg::JointState> waypointsOf(SolutionShared sol);
+  static std::vector<sensor_msgs::msg::JointState> waypointsOf(
+      SolutionShared sol, uint32_t focus_id = 0);
   std::vector<visualization_msgs::msg::Marker> selectedMarkers() const;
 
   void publishSolutionTrajectory(const std::vector<sensor_msgs::msg::JointState>& waypoints);
@@ -247,8 +248,11 @@ private:
       curobo_task_constructor_interfaces::msg::TaskDescription::ConstSharedPtr msg);
   bool selectedStage(QString& task_id, uint32_t& stage_id) const;
   void applyTaskExpansion(QTreeWidgetItem* top);
-  void requestDisplay(const QString& task_id, SolutionShared msg, bool lock);
-  void showDisplayed(const QString& task_id, SolutionShared msg);
+  void requestDisplay(
+      const QString& task_id, SolutionShared msg, bool lock,
+      uint32_t focus_id = 0);
+  void showDisplayed(
+      const QString& task_id, SolutionShared msg, uint32_t focus_id = 0);
   void maybePromotePending();
   void onPlaybackTick();
 
@@ -279,8 +283,10 @@ private:
   // Ghost display state (MTC TaskSolutionVisualization dynamics).
   QString displayed_task_;
   SolutionShared displayed_msg_ = nullptr;
+  uint32_t displayed_focus_id_ = 0;
   QString pending_task_;
   SolutionShared pending_msg_ = nullptr;
+  uint32_t pending_focus_id_ = 0;
   bool display_locked_ = false;
   // Currently highlighted stage (MTC highlighted_row_index_): repaint
   // nothing while it does not move.

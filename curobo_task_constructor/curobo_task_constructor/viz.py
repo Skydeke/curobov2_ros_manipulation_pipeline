@@ -26,12 +26,13 @@ def waypoint_names_positions(waypoint):
 
 
 def to_joint_trajectory(waypoints, msg_cls=None, point_cls=None,
-                        dt: float = DEFAULT_POINT_DT):
+                        dt: float = DEFAULT_POINT_DT, fallback_state=None):
     """Waypoints -> ``trajectory_msgs/JointTrajectory`` (or stub equivalent).
 
-    ``msg_cls``/``point_cls`` default to the ROS messages; tests pass
-    duck-typed stand-ins. Returns ``None`` when there is nothing plottable
-    (no waypoints, or waypoints without joint names).
+    ``fallback_state`` supplies joints a planned waypoint omits. The planner's
+    cspace has no gripper joints, so a pose leg's waypoints can carry only the
+    arm; the task state still knows the commanded jaw. Without this the ghost
+    rendered the finger at 0.0 (closed) even though the task had opened it.
     """
     points = list(waypoints or [])
     if not points:
@@ -39,6 +40,13 @@ def to_joint_trajectory(waypoints, msg_cls=None, point_cls=None,
     names, _ = waypoint_names_positions(points[0])
     if not names:
         return None
+    fallback = {}
+    if fallback_state is not None:
+        fb_names, fb_positions = waypoint_names_positions(fallback_state)
+        fallback = dict(zip(fb_names, fb_positions))
+        for name in fb_names:
+            if name not in names:
+                names.append(name)
     if msg_cls is None or point_cls is None:
         from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
         msg_cls = JointTrajectory
@@ -46,11 +54,13 @@ def to_joint_trajectory(waypoints, msg_cls=None, point_cls=None,
     msg = msg_cls()
     msg.joint_names = list(names)
     for i, wp in enumerate(points):
-        _, positions = waypoint_names_positions(wp)
-        if len(positions) < len(names):
-            continue
+        wp_names, wp_positions = waypoint_names_positions(wp)
+        values = dict(zip(wp_names, wp_positions))
         pt = point_cls()
-        pt.positions = [float(v) for v in positions[:len(names)]]
+        pt.positions = [
+            float(values[name]) if name in values else float(fallback.get(name, 0.0))
+            for name in names
+        ]
         total = float(i) * float(dt)
         sec = int(total)
         pt.time_from_start.sec = sec
@@ -78,7 +88,11 @@ def publish_solution_trajectory(node, solution, topic: str = SOLUTION_TRAJECTORY
     Returns True when a message was published.
     """
     from trajectory_msgs.msg import JointTrajectory
-    msg = to_joint_trajectory(solution_waypoints(solution), dt=dt)
+    fallback = getattr(getattr(solution, "end", None), "joint_state", None)
+    if fallback is None:
+        fallback = getattr(getattr(solution, "start", None), "joint_state", None)
+    msg = to_joint_trajectory(
+        solution_waypoints(solution), dt=dt, fallback_state=fallback)
     if msg is None:
         return False
     cache = getattr(node, "_curobo_traj_pubs", None)

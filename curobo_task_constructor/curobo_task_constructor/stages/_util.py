@@ -93,6 +93,40 @@ def goalset_for_scene(scene, *, poses=None, joint_positions=None) -> GoalsetSpec
     )
 
 
+def carry_missing_joints(previous, planned):
+    """Keep joints the planner's trajectory omits (e.g. gripper fingers).
+
+    The planner's cspace does not contain the jaws, so some responses carry
+    only cspace names. The task state must still remember the commanded jaw
+    value for the next leg; without this a pre-grasp leg planned right after
+    ``ready`` would hand a closed finger state to descend/attach.
+    """
+    if planned is None:
+        return previous
+    if previous is None:
+        return planned
+    names = list(getattr(planned, "name", []) or [])
+    positions = list(getattr(planned, "position", []) or [])
+    prev_names = list(getattr(previous, "name", []) or [])
+    prev_positions = list(getattr(previous, "position", []) or [])
+    if not names or not prev_names:
+        return planned
+    present = set(names)
+    changed = False
+    for name, position in zip(prev_names, prev_positions):
+        if name not in present:
+            names.append(name)
+            positions.append(float(position))
+            changed = True
+    if not changed:
+        return planned
+    try:
+        from curobo_task_constructor.core.state import make_joint_state
+        return make_joint_state(type(planned), names, positions)
+    except Exception:
+        return planned
+
+
 def full_request(robot, start_joints, goalsets, params, planner=None,
                  scene=None) -> PlanRequest:
     """Build a PlanRequest, folding in the leg's CartesianPath interpolation

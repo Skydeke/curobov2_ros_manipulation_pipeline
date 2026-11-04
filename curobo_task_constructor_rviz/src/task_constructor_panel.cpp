@@ -40,6 +40,8 @@
 #include <chrono>
 #include <functional>
 #include <future>
+#include <map>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -575,6 +577,13 @@ void TaskView::setupUi()
           [this](QTreeWidgetItem*, QTreeWidgetItem*) { onCurrentSolutionChanged(); });
   connect(solutions_view_, &QTreeWidget::itemSelectionChanged, this,
           &TaskView::onSolutionSelectionChanged);
+  // A plain click must also re-show the row even when it is already the current
+  // item (currentItemChanged then does not fire). MTC's TaskView previews the
+  // clicked solution either way.
+  connect(solutions_view_, &QTreeWidget::itemClicked, this,
+          [this](QTreeWidgetItem*, int) { showSelectedSolution(); });
+  connect(solutions_view_, &QTreeWidget::itemActivated, this,
+          [this](QTreeWidgetItem*, int) { showSelectedSolution(); });
   connect(actionShowTimeColumn_, &QAction::toggled, this, [this](bool) { onShowTimeChanged(); });
 }
 
@@ -1471,13 +1480,14 @@ void TaskView::showSelectedSolution()
   // row's markers).
   QString tid;
   SolutionShared sol;
+  uint32_t focus_id = 0;
   if (auto* current = solutions_view_->currentItem()) {
     tid = current->data(1, Qt::UserRole).toString();
-    const uint32_t id = static_cast<uint32_t>(current->data(0, Qt::UserRole).toUInt());
-    sol = cachedSolution(tid, id);
+    focus_id = static_cast<uint32_t>(current->data(0, Qt::UserRole).toUInt());
+    sol = cachedSolution(tid, focus_id);
   }
   if (sol)
-    requestDisplay(tid, sol, /*lock=*/true);
+    requestDisplay(tid, sol, /*lock=*/true, focus_id);
   QSet<QPair<QString, int>> sel;
   for (auto* row : selected) {
     if (row) {
@@ -1492,7 +1502,9 @@ void TaskView::showSelectedSolution()
   refreshProperties();
 }
 
-void TaskView::requestDisplay(const QString& task_id, SolutionShared msg, bool lock)
+void TaskView::requestDisplay(
+    const QString& task_id, SolutionShared msg, bool lock,
+    uint32_t focus_id)
 {
   // MTC showTrajectory/next_solution_to_display_ dynamics: a new solution
   // request overwrites any queued one (latest wins); selection locks the
@@ -1502,32 +1514,43 @@ void TaskView::requestDisplay(const QString& task_id, SolutionShared msg, bool l
   if (!msg)
     return;
   if (lock) {
-    // Already showing exactly this payload locked: skip (per-tick refreshes
-    // must neither republish the trajectory nor restart the highlight
-    // playback — that storm dropped RViz to 1 fps).
-    if (display_locked_ && msg == displayed_msg_ && task_id == displayed_task_)
+    // Already showing exactly this payload AND stage: skip (per-tick
+    // refreshes must neither republish the trajectory nor restart the
+    // highlight playback — that storm dropped RViz to 1 fps). The focus id
+    // is part of the identity: every stage row shares the same Solution
+    // payload, so without it selecting a different stage would be a no-op.
+    if (display_locked_ && msg == displayed_msg_ &&
+        task_id == displayed_task_ && focus_id == displayed_focus_id_) {
       return;
+    }
     pending_task_.clear();
     pending_msg_ = nullptr;
+    pending_focus_id_ = 0;
     display_locked_ = true;
-    showDisplayed(task_id, msg);
+    showDisplayed(task_id, msg, focus_id);
     return;
   }
   // Unlocked (live broadcast): queue latest-wins. Skip payloads already
   // showing or queued, so repeat deliveries never restart playback.
-  if ((msg == displayed_msg_ && task_id == displayed_task_) ||
-      (msg == pending_msg_ && task_id == pending_task_))
+  if ((msg == displayed_msg_ && task_id == displayed_task_ &&
+       displayed_focus_id_ == 0) ||
+      (msg == pending_msg_ && task_id == pending_task_ &&
+       pending_focus_id_ == 0)) {
     return;
+  }
   pending_task_ = task_id;
   pending_msg_ = msg;
+  pending_focus_id_ = 0;
   maybePromotePending();
 }
 
-void TaskView::showDisplayed(const QString& task_id, SolutionShared msg)
+void TaskView::showDisplayed(
+    const QString& task_id, SolutionShared msg, uint32_t focus_id)
 {
   displayed_task_ = task_id;
   displayed_msg_ = msg;
-  publishSolutionTrajectory(waypointsOf(msg));
+  displayed_focus_id_ = focus_id;
+  publishSolutionTrajectory(waypointsOf(msg, focus_id));
   playback_sol_ = msg;
   playback_task_ = task_id;
   playback_index_ = 0;
@@ -1547,9 +1570,11 @@ void TaskView::maybePromotePending()
     return;
   QString tid = pending_task_;
   SolutionShared msg = pending_msg_;
+  const uint32_t focus_id = pending_focus_id_;
   pending_task_.clear();
   pending_msg_ = nullptr;
-  showDisplayed(tid, msg);
+  pending_focus_id_ = 0;
+  showDisplayed(tid, msg, focus_id);
 }
 
 void TaskView::onPlaybackTick()
@@ -1734,14 +1759,14 @@ std::vector<sensor_msgs::msg::JointState> TaskView::currentWaypoints() const
     return {};
   const QString tid = current->data(1, Qt::UserRole).toString();
   const uint32_t id = static_cast<uint32_t>(current->data(0, Qt::UserRole).toUInt());
-  return waypointsOf(cachedSolution(tid, id));
+  return waypointsOf(cachedSolution(tid, id), id);
 }
 
-std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(SolutionShared sol)
+std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(
+    SolutionShared sol, uint32_t focus_id)
 {
-  std::vector<sensor_msgs::msg::JointState> out;
   if (!sol)
-    return out;
+    return {};
 
   // Gripper joints are driven by GripperCommand stages, never by the motion
   // planner. cuRobo's full-DOF plan points still carry the jaw's plan-time
@@ -1759,16 +1784,33 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(SolutionShared s
     }
   }
 
-  // The start_scene carries the task's full start pose, finger included. The
-  // motion points are stripped of the commanded jaw joints below, so without
-  // this leading point every display frame falls back to the URDF default for
-  // the jaws until the first gripper command.
+  struct OwnedWaypoint
+  {
+    uint32_t solution_id = 0;
+    bool command = false;
+    sensor_msgs::msg::JointState wp;
+  };
+  std::vector<OwnedWaypoint> all;
+  auto appendUnique = [&all](OwnedWaypoint owned) {
+    if (owned.wp.position.empty())
+      return;
+    if (!all.empty()) {
+      const auto& prev = all.back().wp;
+      if (prev.name == owned.wp.name && prev.position == owned.wp.position)
+        return;
+    }
+    all.push_back(std::move(owned));
+  };
+
+  // The start_scene carries the task's full start pose, finger included. It
+  // belongs to the whole-task preview only; a stage preview starts at that
+  // stage's first waypoint (with any earlier jaw commands carried in).
   const auto& start = sol->start_scene.robot_state.joint_state;
   if (!start.name.empty() && !start.position.empty()) {
-    sensor_msgs::msg::JointState wp;
-    wp.name = start.name;
-    wp.position = start.position;
-    out.push_back(std::move(wp));
+    OwnedWaypoint owned;
+    owned.wp.name = start.name;
+    owned.wp.position = start.position;
+    appendUnique(std::move(owned));
   }
 
   for (const auto& sub : sol->sub_trajectory) {
@@ -1784,21 +1826,10 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(SolutionShared s
         wp.name.push_back(jt.joint_names[j]);
         wp.position.push_back(pt.positions[j]);
       }
-      if (wp.position.empty())
-        continue;
-      if (!out.empty() && !wp.position.empty() && !out.back().position.empty() &&
-          out.back().position.size() == wp.position.size() && out.back().name == wp.name) {
-        bool same = true;
-        for (size_t j = 0; j < wp.position.size(); ++j) {
-          if (out.back().position[j] != wp.position[j]) {
-            same = false;
-            break;
-          }
-        }
-        if (same)
-          continue;
-      }
-      out.push_back(wp);
+      OwnedWaypoint owned;
+      owned.solution_id = sub.info.id;
+      owned.wp = std::move(wp);
+      appendUnique(std::move(owned));
     }
 
     // A gripper command is a zero-length segment (no trajectory points); its
@@ -1806,11 +1837,70 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(SolutionShared s
     // waypoint so the jaws actually open/close at this point in the chain.
     const GripperCommandStep cmd = parseGripperCommand(sub.replay_goal_yaml);
     if (cmd.valid) {
-      sensor_msgs::msg::JointState wp;
-      wp.name = {cmd.joint};
-      wp.position = {cmd.position};
-      out.push_back(std::move(wp));
+      OwnedWaypoint owned;
+      owned.solution_id = sub.info.id;
+      owned.command = true;
+      owned.wp.name = {cmd.joint};
+      owned.wp.position = {cmd.position};
+      appendUnique(std::move(owned));
     }
+  }
+
+  // A stage row addresses one sub-solution; every row shares the same whole
+  // Solution payload. Expand the selected id to its subtree so selecting a
+  // fallback/serial container still shows all of its leaves. Earlier gripper
+  // commands are retained to establish the jaw state, but earlier arm motion
+  // is not: the preview then starts at the selected stage with the jaw already
+  // in the state that stage inherited (e.g. open for a pre-grasp leg).
+  std::set<uint32_t> focus_ids;
+  bool focus_valid = false;
+  if (focus_id != 0) {
+    std::map<uint32_t, std::vector<uint32_t>> children;
+    for (const auto& sub : sol->sub_solution) {
+      children[sub.info.id] = sub.sub_solution_id;
+      if (sub.info.id == focus_id)
+        focus_valid = true;
+    }
+    if (focus_valid) {
+      std::vector<uint32_t> stack{focus_id};
+      while (!stack.empty()) {
+        const uint32_t id = stack.back();
+        stack.pop_back();
+        if (!focus_ids.insert(id).second)
+          continue;
+        auto it = children.find(id);
+        if (it != children.end())
+          stack.insert(stack.end(), it->second.begin(), it->second.end());
+      }
+      // The root row covers the complete solution; keep its leading start
+      // state rather than turning it into an empty "prior commands" preview.
+      if (focus_ids.size() >= sol->sub_solution.size())
+        focus_valid = false;
+    }
+  }
+
+  std::vector<sensor_msgs::msg::JointState> out;
+  if (!focus_valid) {
+    out.reserve(all.size());
+    for (auto& owned : all)
+      out.push_back(std::move(owned.wp));
+    return out;
+  }
+
+  size_t first_focus = all.size();
+  for (size_t i = 0; i < all.size(); ++i) {
+    if (focus_ids.count(all[i].solution_id) != 0) {
+      first_focus = i;
+      break;
+    }
+  }
+  for (size_t i = 0; i < all.size(); ++i) {
+    const bool in_focus = focus_ids.count(all[i].solution_id) != 0;
+    if (i < first_focus && !all[i].command)
+      continue;
+    if (i >= first_focus && !in_focus)
+      continue;
+    out.push_back(std::move(all[i].wp));
   }
   return out;
 }

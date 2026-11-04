@@ -567,6 +567,10 @@ void UnifiedPlannerNode::setup() {
         return resolve_poses_to_base(poses, frame, base_link_,
                                      tf_buffer_.get());
       });
+  planner_services_->set_start_lock_callback(
+      [this](const sensor_msgs::msg::JointState &start) {
+        apply_request_lock_joints(start);
+      });
   // PORT: robot_context - the control strategy comes from `control_strategy`,
   // its params from the descriptor's strategy_params (falling back to the
   // emulator's joint_states topic), and the seed pose from `home`.
@@ -763,6 +767,45 @@ void UnifiedPlannerNode::handle_joint_state_for_locks(
     if (index < msg.position.size()) {
       unpinned_lock_positions_[name] = msg.position[index];
     }
+  }
+}
+
+void UnifiedPlannerNode::apply_request_lock_joints(
+    const sensor_msgs::msg::JointState &start) {
+  if (unpinned_lock_joint_names_.empty() || start.name.empty()) {
+    return;
+  }
+  std::map<std::string, double> values;
+  for (const auto &name : unpinned_lock_joint_names_) {
+    const auto it = std::find(start.name.begin(), start.name.end(), name);
+    if (it == start.name.end()) {
+      continue;
+    }
+    const auto index = static_cast<std::size_t>(it - start.name.begin());
+    if (index < start.position.size()) {
+      values[name] = start.position[index];
+    }
+  }
+  if (values.empty()) {
+    return;
+  }
+
+  std::ostringstream json;
+  json << "{";
+  bool first = true;
+  for (const auto &[name, value] : values) {
+    json << (first ? "" : ",") << "\"" << name << "\":" << value;
+    first = false;
+  }
+  json << "}";
+  // Called on the plan lane, which already holds the GPU barrier, so do not
+  // try to take it exclusively here. The bridge call is under the GIL and the
+  // periodic perception push uses the same in-place update.
+  bridge_->robot_model_update_lock_joints(handle_, json.str());
+  std::lock_guard<std::mutex> lk(unpinned_lock_mutex_);
+  for (const auto &[name, value] : values) {
+    unpinned_lock_positions_[name] = value;
+    pushed_unpinned_lock_positions_[name] = value;
   }
 }
 

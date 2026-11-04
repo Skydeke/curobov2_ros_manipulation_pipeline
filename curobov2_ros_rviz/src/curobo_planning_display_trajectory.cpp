@@ -449,6 +449,10 @@ bool CuroboPlanningDisplay::consumeFk(uint64_t seq)
     return false;
   }
 
+  // Trajectories may omit non-cspace joints (the gripper fingers). Seed the
+  // client-side FK with the live state so an omitted jaw keeps its real
+  // position instead of falling back to zero (closed).
+  const auto live_joints = currentJointPositions();
   waypoints_.clear();
   waypoints_.reserve(points);
   for (size_t i = 0; i < points; ++i) {
@@ -465,13 +469,16 @@ bool CuroboPlanningDisplay::consumeFk(uint64_t seq)
       transform.linear() = q.toRotationMatrix();
       waypoint.link_transforms[response->link_names[j]] = transform;
     }
-    std::map<std::string, double> joint_positions;
+    std::map<std::string, double> joint_positions = live_joints;
     const auto & msg = *fk_pending_msg_;
     const auto & point = msg.points[i];
     const size_t n = std::min(msg.joint_names.size(), point.positions.size());
     for (size_t j = 0; j < n; ++j) {
       joint_positions[msg.joint_names[j]] = point.positions[j];
     }
+    // The message is authoritative for every joint it names. `live_joints`
+    // only supplies joints the trajectory omits (e.g. a finger a producer
+    // forgot); it must never override an explicit planned jaw value.
     mergeClientFk(joint_positions, waypoint.link_transforms);
     const auto & time = fk_pending_msg_->points[i].time_from_start;
     waypoint.time_from_start = time.sec + time.nanosec * 1e-9;
@@ -516,9 +523,30 @@ void CuroboPlanningDisplay::mergeClientFk(
   for (auto & entry : all) {
     entry.second = world_to_base * entry.second;
   }
-  // Server poses are authoritative where present.
-  for (const auto & entry : transforms) {
-    all[entry.first] = entry.second;
+  // The server only knows the planner cspace. Any other joint in the request
+  // (the gripper fingers are the important case) is invisible to it, so its
+  // fk_batch poses for those links are the URDF default (closed) and must NOT
+  // overwrite the client FK that used the full joint state. When extra joints
+  // are present the client URDF result is authoritative for the whole model;
+  // server-only links are still added below.
+  bool has_non_cspace_joint = false;
+  for (const auto & entry : joint_positions) {
+    if (std::find(cspace_joints_.begin(), cspace_joints_.end(), entry.first) ==
+        cspace_joints_.end()) {
+      has_non_cspace_joint = true;
+      break;
+    }
+  }
+  if (has_non_cspace_joint) {
+    for (const auto & entry : transforms) {
+      if (all.find(entry.first) == all.end())
+        all[entry.first] = entry.second;
+    }
+  } else {
+    // Server poses are authoritative where present.
+    for (const auto & entry : transforms) {
+      all[entry.first] = entry.second;
+    }
   }
   transforms.swap(all);
 }

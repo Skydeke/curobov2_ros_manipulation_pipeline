@@ -111,6 +111,9 @@ private:
   rclcpp::TimerBase::SharedPtr unpinned_lock_timer_;
   // PORT: the active strategy's raw joint state -> the unpinned lock values.
   void handle_joint_state_for_locks(const sensor_msgs::msg::JointState & msg);
+  // Apply the unpinned lock joints from one plan request's start pose to the
+  // collision model before that request is solved.
+  void apply_request_lock_joints(const sensor_msgs::msg::JointState & start);
   // Push the latest unpinned lock values into the model (no rebuild).
   void push_unpinned_lock_joints();
 

@@ -23,6 +23,7 @@ from curobo_task_constructor.core.stage import PropagatingEitherWay
 from curobo_task_constructor.core.state import InterfaceState
 from curobo_task_constructor.stages._util import (
     axis_holds,
+    carry_missing_joints,
     cost_of,
     full_request,
     goalset_for_scene,
@@ -124,7 +125,8 @@ class MoveRelative(PropagatingEitherWay):
         if not result.success:
             self._fail(state, None, result.message or "move_relative plan failed")
             return True
-        end = state.clone(joint_state=result.last_state)
+        end = state.clone(joint_state=carry_missing_joints(
+            state.joint_state, result.last_state))
         self.send_forward(state, end, trajectory=result.trajectory,
                           cost=self._cost_of(result),
                           comment=f"{self.name} joint offset",
@@ -154,7 +156,8 @@ class MoveRelative(PropagatingEitherWay):
             if not result.success:
                 self._fail(state, None, result.message or "move_relative plan failed")
                 continue
-            end = state.clone(joint_state=result.last_state)
+            end = state.clone(joint_state=carry_missing_joints(
+                state.joint_state, result.last_state))
             self.send_forward(state, end, trajectory=result.trajectory,
                               cost=self._cost_of(result),
                               comment=f"{self.name} d={d:.3f}",

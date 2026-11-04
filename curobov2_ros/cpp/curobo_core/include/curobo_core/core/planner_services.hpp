@@ -60,6 +60,14 @@ public:
       const std::vector<geometry_msgs::msg::Pose> &, const std::string &)> resolver)
   {pose_resolver_ = std::move(resolver);}
 
+  // Update the collision model's unpinned lock joints (e.g. gripper fingers)
+  // from a request's start pose before that request is solved. This is what
+  // makes a leg planned after "open gripper" collide with the open jaws
+  // instead of the last live (possibly still closed) reading.
+  void set_start_lock_callback(
+    std::function<void(const sensor_msgs::msg::JointState &)> callback)
+  {start_lock_callback_ = std::move(callback);}
+
   // PORT: single_planner._publish_plan_image (latched, once per new plan).
   void publish_plan_image(const curobo_runtime::PlanOutcome & outcome);
 
@@ -133,6 +141,7 @@ private:
   // PORT: single_planner._debug_img_pub (transient_local depth-1).
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr plan_image_pub_;
   std::function<std::vector<float>()> current_pose_provider_;
+  std::function<void(const sensor_msgs::msg::JointState &)> start_lock_callback_;
   RobotContext * robot_context_ = nullptr;
   PlannerManager manager_;
 
