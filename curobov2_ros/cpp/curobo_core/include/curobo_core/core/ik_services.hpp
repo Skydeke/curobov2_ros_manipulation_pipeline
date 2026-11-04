@@ -78,7 +78,8 @@ public:
 private:
   bool solve(
     const std::vector<Pose7> & poses, curobo_runtime::IkOutcome & outcome,
-    const std::string & tool_frame = "");
+    const std::string & tool_frame = "",
+    const std::vector<std::string> & tool_frames = {});
 
   void handle_warmup_ik(
     const std::shared_ptr<curobov2_ros_interfaces::srv::WarmupIK::Request> request,

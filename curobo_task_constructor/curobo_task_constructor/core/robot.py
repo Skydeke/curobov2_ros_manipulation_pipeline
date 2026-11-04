@@ -205,6 +205,15 @@ class RobotInterface(ABC):
         """
         return contextlib.nullcontext()
 
+    def gripper_joint(self, gripper: str = "") -> str:
+        """Joint that carries the commanded opening for ``gripper``.
+
+        The stage needs this to write the new jaw value into the propagated
+        InterfaceState, so the ghost preview of the following motion segment
+        shows the gripper in the state the task will actually be in.
+        """
+        return ""
+
     def gripper_command(self, gripper: str = "", joint: str = "",
                         position: float = 0.0, effort: float = 0.0,
                         controller: str = "", action_ns: str = "",

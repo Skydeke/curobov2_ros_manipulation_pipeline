@@ -45,6 +45,9 @@ public:
   IkOutcome ik(
     RobotHandle handle, const TensorF32 & poses,
     const std::string & tool_frame = "") override;
+  IkOutcome ik_multi(
+    RobotHandle handle, const TensorF32 & poses,
+    const std::vector<std::string> & tool_frames) override;
   void ik_config(
     RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,
     bool use_lm_seed, bool use_cuda_graph) override;

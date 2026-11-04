@@ -20,6 +20,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <tf2_ros/buffer.h>
+#include <tf2_ros/transform_listener.h>
 
 #include "curobo_runtime/gpu_lanes.hpp"
 
@@ -144,6 +145,7 @@ private:
   // Perception (M4): the mapper cameras, the lidar feeds and the depth-map
   // robot segmentation (mask services registered via RosServiceManager).
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
+  std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
   rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mpc_goal_sub_;
   // PORT: obstacle_manager._build_mapper - the mapper cfg JSON is built at
   // startup but COMPLETED (with decay_factor, which needs the camera/laser

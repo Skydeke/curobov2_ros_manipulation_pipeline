@@ -674,6 +674,24 @@ void PlannerServices::fill_result(
     }
   }
 
+  // The inverse routing: a pose/tool-frame request cannot be solved by the
+  // joint-space planner (it would call plan_cspace with an empty q). Another
+  // client (task constructor, Joints tab, a previous request) may have left
+  // the server on Joint Space; solve THIS pose request with Classic instead of
+  // leaving the planner in a mode that can only fail.
+  if (request.joint_target.empty() && planner->is_open_loop() &&
+    planner->get_planner_name().find("Joint Space") != std::string::npos)
+  {
+    TrajectoryPlanner * classic = manager_.get_planner("classic");
+    if (classic != nullptr) {
+      RCLCPP_INFO(
+        node_->get_logger(),
+        "Pose goal: using %s (was %s) for this request",
+        classic->get_planner_name().c_str(), planner->get_planner_name().c_str());
+      effective = classic;
+    }
+  }
+
   // PORT: single_planner._apply_pose_constraints' "holding axes along path"
   // log (ToolPoseCriteria order is [x, y, z, roll, pitch, yaw]).
   if (request.trajectory_constraints.size() == 6) {

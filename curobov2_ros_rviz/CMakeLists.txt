@@ -81,10 +81,19 @@ set(${PROJECT_NAME}_SRCS
   # stacked above the object list in a QSplitter, which is not a shape MoveIt's
   # Scene Objects tab has. Its form and its add_object call now live in MoveIt's
   # own "Add/Remove scene object(s)" group, inside scene_objects_tab.ui.
+  # CuroboPlanningDisplay is split by responsibility to keep each translation
+  # unit reviewable: lifecycle/URDF, trajectory+FK, goal/IK, gizmo, overlays
+  # (spheres+trail), and targets.
   src/curobo_planning_display.cpp
+  src/curobo_planning_display_trajectory.cpp
+  src/curobo_planning_display_goal.cpp
+  src/curobo_planning_display_gizmo.cpp
+  src/curobo_planning_display_world.cpp
+  src/curobo_planning_display_targets.cpp
   src/sparse_voxel_grid_display.cpp
   src/trajectory_panel.cpp
   src/reachability_map_display.cpp
+  src/reachability_map_display_gizmo.cpp
   src/curobo_fk.cpp
   src/curobo_link_updater.cpp
   # The five tabs of the composite "curobo" panel, which mirror MoveIt's Motion
@@ -96,7 +105,10 @@ set(${PROJECT_NAME}_SRCS
   src/curobo_panel.cpp
   src/context_tab.cpp
   src/planning_tab.cpp
+  src/planning_tab_planning.cpp
+  src/planning_tab_targets.cpp
   src/joints_tab.cpp
+  src/joints_tab_planning.cpp
   src/scene_objects_tab.cpp
   # MoveIt's draggable joint-value bar, ported. Needs moc (it declares Q_OBJECT),
   # hence its presence in HDRS as well as SRCS.

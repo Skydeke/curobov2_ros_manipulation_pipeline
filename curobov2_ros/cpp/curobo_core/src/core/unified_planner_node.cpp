@@ -538,6 +538,10 @@ void UnifiedPlannerNode::setup() {
     // Populated by this node's executor thread, not the caller: required for a
     // lookup timeout to be honoured (see camera_strategy.cpp).
     tf_buffer_->setUsingDedicatedThread(true);
+    // Without a listener the buffer stays empty and every non-base frame goal
+    // fails with "... target_frame does not exist".
+    tf_listener_ =
+      std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, this, false);
   }
   reachability_services_ = std::make_unique<ReachabilityServices>(
       this, ik_services_.get(), base_link_, tf_buffer_);

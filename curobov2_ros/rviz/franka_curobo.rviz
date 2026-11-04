@@ -149,7 +149,7 @@ Visualization Manager:
       Name: Curobo CollisionDomain
     - Class: rviz_common/Group
       Displays:
-        - Active Tool: grasping_frame
+        - Active Tools: grasping_frame
           Alpha: 0.800000011920929
           Class: curobov2_ros_rviz/CuroboPlanningDisplay
           Collision Spheres Topic: /unified_planner/collision_spheres
@@ -159,12 +159,10 @@ Visualization Manager:
           Loop Animation: false
           Name: CuroboPlanning
           Planner Node: unified_planner
-          Scene Robot Alpha: 1
-          Seed From TF: true
+          Place target at tool: true
           Show Attached: true
-          Show Goal State: true
+          Show IK result: true
           Show Robot Collision Spheres: false
-          Show Scene Robot: false
           Show Trail: false
           Speed: 1
           Target Orientation W: 1
@@ -174,7 +172,6 @@ Visualization Manager:
           Target Position X: 0.5
           Target Position Y: 0.15000000596046448
           Target Position Z: 0.6800000071525574
-          Tool Frames: grasping_frame
           Trail Step Size: 10
           Trajectory Topic: /unified_planner/trajectory
           Value: true

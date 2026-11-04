@@ -235,7 +235,8 @@ void IKServices::handle_warmup_ik(
 // PORT: ik_services.IKServices._solve / _solve_locked
 bool IKServices::solve(
   const std::vector<Pose7> & poses, curobo_runtime::IkOutcome & outcome,
-  const std::string & tool_frame)
+  const std::string & tool_frame,
+  const std::vector<std::string> & tool_frames)
 {
   if (poses.empty()) {
     return false;
@@ -257,16 +258,21 @@ bool IKServices::solve(
     // barrier here: blocking on the lane while holding a read hold deadlocks
     // against a capture (writer) that is waiting for readers to drain.
     const auto pose_tensor = poses_to_tensor(poses);
+    const auto run_ik = [&]() {
+        return tool_frames.empty() ?
+               bridge_->ik(handle_, pose_tensor, tool_frame) :
+               bridge_->ik_multi(handle_, pose_tensor, tool_frames);
+      };
     if (!ik_graph_ready_.exchange(true)) {
       // First solve after a build records the IK CUDA graph; keep every other
       // lane off the GPU while it does.
       outcome = on_kin_lane(lane_, [&]() {
           auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-          return bridge_->ik(handle_, pose_tensor, tool_frame);
+          return run_ik();
         });
     } else {
       outcome = on_kin_lane(lane_, [&]() {
-          return bridge_->ik(handle_, pose_tensor, tool_frame);
+          return run_ik();
         });
     }
     // PORT: ik_services._solve_call - the torch_sync CPU/GPU ordering bridge.
@@ -323,6 +329,7 @@ void IKServices::handle_ik(
   }
 
   sensor_msgs::msg::JointState js;
+  js.name = outcome.joint_names;
   const std::size_t dof = outcome.positions.shape.size() > 2 ?
     static_cast<std::size_t>(outcome.positions.shape[2]) : 0;
   for (std::size_t j = 0; j < dof; ++j) {
@@ -358,9 +365,20 @@ void IKServices::handle_ik_batch(
     return;
   }
 
+  if (!request->tool_frames.empty() &&
+    request->tool_frames.size() != request->poses.size())
+  {
+    response->success = false;
+    response->error_msg.data =
+      "tool_frames and poses must be parallel (" +
+      std::to_string(request->tool_frames.size()) + " vs " +
+      std::to_string(request->poses.size()) + ")";
+    return;
+  }
+
   curobo_runtime::IkOutcome outcome;
   try {
-    if (!solve(poses, outcome, request->tool_frame)) {
+    if (!solve(poses, outcome, request->tool_frame, request->tool_frames)) {
       response->success = false;
       response->error_msg.data = "IK batch solve failed";
       return;
@@ -376,8 +394,14 @@ void IKServices::handle_ik_batch(
 
   const std::size_t dof = outcome.positions.shape.size() > 2 ?
     static_cast<std::size_t>(outcome.positions.shape[2]) : 0;
-  for (std::size_t i = 0; i < poses.size(); ++i) {   // padded rows ignored
+  // Multi-tool request: `poses` is the per-tool goal list, but the solver
+  // returns ONE combined joint state for the whole goal, so do not emit one
+  // response per input pose.
+  const std::size_t result_count =
+    request->tool_frames.empty() ? poses.size() : 1;
+  for (std::size_t i = 0; i < result_count; ++i) {   // padded rows ignored
     sensor_msgs::msg::JointState js;
+    js.name = outcome.joint_names;
     for (std::size_t j = 0; j < dof; ++j) {
       const std::size_t idx = i * dof + j;
       js.position.push_back(idx < outcome.positions.data.size() ?

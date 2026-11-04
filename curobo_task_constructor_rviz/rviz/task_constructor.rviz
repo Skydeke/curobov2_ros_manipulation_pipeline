@@ -26,11 +26,9 @@ Visualization Manager:
       Loop Animation: false
       Name: CuroboPlanning
       Planner Node: curobo_server
-      Scene Robot Alpha: 1
-      Seed From TF: true
-      Show Goal State: false
+      Place target at tool: true
+      Show IK result: false
       Show Attached: true
-      Show Scene Robot: true
       Show Trail: false
       Speed: 1
       Target Orientation W: 1
@@ -40,7 +38,6 @@ Visualization Manager:
       Target Position X: 0.4
       Target Position Y: 0
       Target Position Z: 0.4
-      Tool Frames: ""
       Trail Step Size: 10
       Trajectory Topic:
         Depth: 5

@@ -12,7 +12,6 @@
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 
 // Projet
-#include "curobov2_ros_interfaces/srv/get_joint_info.hpp"
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
 #include "curobov2_ros_interfaces/srv/trajectory_generation.hpp"
 #include "curobov2_ros_rviz/node_spinner.hpp"
@@ -145,7 +144,9 @@ private Q_SLOTS:
   void updateMarkerPoseDisplay();
   void refreshPlanningDisplays();
   void applyPoseFromSpinboxes();
-  void onTargetToolChanged(int index);
+  void onTargetToolChecked(QListWidgetItem * item);
+  void onTargetToolSelected(
+    QListWidgetItem * current, QListWidgetItem * previous);
 
   // The goal orientation is a QUATERNION, not RPY -- see the block comment above
   static void canonicalize(geometry_msgs::msg::Quaternion & q);
@@ -216,21 +217,12 @@ private:
   CuroboPlanningDisplay *target_display_;
   std::vector<CuroboPlanningDisplay *> target_displays_;
 
-  // Tool frames reported by the planner (get_joint_info). Pushed into the
-  // primary CuroboPlanningDisplay so one marker exists per arm.
-  std::vector<std::string> tool_frames_;
-  // Last list pushed into the display, so the 500 ms poll never overwrites a
-  // user-edited Tool Frames property.
-  std::vector<std::string> pushed_tool_frames_;
-  rclcpp::Client<curobov2_ros_interfaces::srv::GetJointInfo>::SharedPtr
-      joint_info_client_;
-  bool tool_frames_in_flight_;
-
-  // Active tool selector in the Query group.
-  QComboBox *target_tool_combo_;
-  void refreshToolFrames();
-  void applyToolFramesToDisplay();
-  void refreshTargetToolCombo();
+  // Multi-select goal-tool list in the Query group. Checked rows are sent
+  // together; selecting a row picks the single tool edited by the pose fields.
+  // The list itself comes from the display, which reads it from the server's
+  // get_joint_info service.
+  QListWidget *target_tool_list_;
+  void refreshTargetToolList();
 
   // Collects every CuroboPlanningDisplay under `group` (in display-tree order) into
   void collectPlanningDisplaysInGroup(rviz_common::DisplayGroup *group,
@@ -246,6 +238,9 @@ private:
   // Planner node this tab's clients currently point at. Owned by the Context
   // tab; see setPlannerNode().
   std::string planner_node_;
+  // Planner node last pushed into the CuroboPlanningDisplay(s), so a steady
+  // config does not overwrite a display node the user deliberately set.
+  std::string last_display_planner_node_;
 
   // MPC live-tracking members.
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mpc_goal_pub_;

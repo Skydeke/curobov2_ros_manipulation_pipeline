@@ -141,5 +141,78 @@ def ik(handle: int, poses, tool_frame: str = ""):
         "joint_names": list(solver.kinematics.joint_names),
     }
 
+
+def ik_multi(handle: int, poses, tool_frames):
+    """Solve one pose per named tool frame in a SINGLE IK solve.
+
+    This is the multi-tool counterpart of :func:`ik`: every listed frame is an
+    active goal at the same time, so the returned joint state puts all of them
+    at their requested poses (e.g. both arms of a bimanual robot). Frames not
+    listed are unconstrained, exactly like ``ik``'s passive frames.
+    """
+    import numpy as np
+    import torch
+    from curobo.types import Pose, GoalToolPose
+    from curobo._src.cost.tool_pose_criteria import ToolPoseCriteria
+
+    entry = _REGISTRY[handle]
+    solver = _ik_solver(entry)
+    device = torch.device("cuda", torch.cuda.current_device())
+    poses = np.asarray(poses, dtype=np.float32)
+    if poses.ndim != 2 or poses.shape[1] != 7:
+        raise ValueError(f"ik_multi expects [N,7] poses, got {poses.shape}")
+    tool_frames = [str(frame) for frame in (tool_frames or [])]
+    if len(tool_frames) != poses.shape[0]:
+        raise ValueError(
+            f"ik_multi tool_frames/poses length mismatch: {len(tool_frames)} "
+            f"frame(s), {poses.shape[0]} pose(s)")
+    if len(set(tool_frames)) != len(tool_frames):
+        raise ValueError(f"ik_multi tool_frames contains duplicates: {tool_frames}")
+    unknown = [f for f in tool_frames if f not in solver.kinematics.tool_frames]
+    if unknown:
+        raise ValueError(
+            f"unknown tool frame(s) {unknown}; configured: "
+            f"{list(solver.kinematics.tool_frames)}")
+
+    pose_dict = {}
+    for i, frame in enumerate(tool_frames):
+        pose_dict[frame] = Pose(
+            position=torch.tensor(
+                poses[i:i + 1, 0:3], dtype=torch.float32, device=device),
+            quaternion=torch.tensor(
+                poses[i:i + 1, 3:7], dtype=torch.float32, device=device))
+
+    passive_frames = [
+        frame for frame in solver.kinematics.tool_frames if frame not in pose_dict
+    ]
+    if passive_frames:
+        default_state = solver.kinematics.default_joint_state.unsqueeze(0)
+        fk = solver.kinematics.compute_kinematics(default_state)
+        for frame in passive_frames:
+            here = fk.tool_poses.get_link_pose(frame)
+            pose_dict[frame] = Pose(
+                position=here.position.repeat(len(tool_frames), 1).contiguous(),
+                quaternion=here.quaternion.repeat(len(tool_frames), 1).contiguous())
+        solver.update_tool_pose_criteria(
+            {frame: ToolPoseCriteria.disabled() for frame in passive_frames})
+
+    goal = GoalToolPose.from_poses(
+        pose_dict, ordered_tool_frames=list(solver.kinematics.tool_frames))
+    try:
+        result = solver.solve_pose(goal_tool_poses=goal)
+    finally:
+        if passive_frames:
+            solver.update_tool_pose_criteria(
+                {frame: ToolPoseCriteria() for frame in passive_frames})
+
+    solution = result.solution.detach().cpu().numpy()
+    success = result.success.detach().cpu().numpy()
+    return {
+        "success": bool(np.any(success)),
+        "positions": solution.astype(np.float32),
+        "valid": success.reshape(-1).astype(int).tolist(),
+        "joint_names": list(solver.kinematics.joint_names),
+    }
+
 from .runtime import _REGISTRY
 from .world_push import world_push

@@ -377,6 +377,29 @@ IkOutcome PyBridge::ik(
   }
 }
 
+// Multi-tool IK: poses[i] -> tool_frames[i], one solve.
+IkOutcome PyBridge::ik_multi(
+  RobotHandle handle, const TensorF32 & poses,
+  const std::vector<std::string> & tool_frames)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    py::object result = bridge_module().attr("ik_multi")(
+      handle, tensor_to_array(poses), py::cast(tool_frames));
+    IkOutcome outcome;
+    outcome.success = result.attr("__getitem__")("success").cast<bool>();
+    outcome.positions = array_to_tensor(result.attr("__getitem__")("positions"));
+    for (auto v : result.attr("__getitem__")("valid").cast<std::vector<int>>()) {
+      outcome.valid.push_back(static_cast<std::uint8_t>(v != 0));
+    }
+    outcome.joint_names =
+      result.attr("__getitem__")("joint_names").cast<std::vector<std::string>>();
+    return outcome;
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("programming", e.what());
+  }
+}
+
 // PORT: config_wrapper_ik.ConfigWrapperIK.build
 void PyBridge::ik_config(
   RobotHandle handle, int batch_size, int num_seeds, bool self_collision_check,

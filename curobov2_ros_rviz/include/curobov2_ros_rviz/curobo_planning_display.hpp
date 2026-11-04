@@ -53,7 +53,9 @@
 #endif
 
 #include <curobov2_ros_interfaces/srv/fk_batch.hpp>
+#include <curobov2_ros_interfaces/srv/get_joint_info.hpp>
 #include <curobov2_ros_interfaces/srv/ik_batch.hpp>
+#include <curobov2_ros_rviz/curobo_fk.hpp>
 #include <curobov2_ros_rviz/trajectory_panel.hpp>
 
 namespace Ogre
@@ -96,8 +98,24 @@ public:
   void setActiveTool(const std::string & tool);
   std::vector<std::string> getToolFrames() const;
   void setToolFrames(const std::vector<std::string> & frames);
-  bool toolFramesUserSet() const {return tool_frames_user_set_;}
+  // The tools whose targets are sent together in one goalset. Empty means
+  // "all configured tool frames" (the default), which keeps the historical
+  // single/unnamed-target behaviour.
+  std::vector<std::string> getEnabledTools() const;
+  void setEnabledTools(const std::vector<std::string> & tools);
+  void setToolEnabled(const std::string & tool, bool enabled);
+  bool isToolEnabled(const std::string & tool) const;
   std::vector<std::pair<std::string, geometry_msgs::msg::Pose>> getToolPoses() const;
+  // Same list, expressed in the planner's base_link. The server's IK/FK use
+  // this frame, and sending it directly avoids depending on the server's TF
+  // buffer for a goalset.
+  std::vector<std::pair<std::string, geometry_msgs::msg::Pose>>
+  getToolPosesInBase() const;
+  bool poseInBase(
+    const geometry_msgs::msg::Pose & pose,
+    geometry_msgs::msg::Pose & base_pose) const;
+  std::string plannerNode() const {return planner_node_;}
+  void setPlannerNode(const std::string & node);
 
 protected:
   void onInitialize() override;
@@ -118,15 +136,12 @@ private Q_SLOTS:
   void updateCollisionTopic();
   void updateShowAttached();
   void updateShowCollisionSpheres();
-  void updateSceneRobotVisibility();
-  void updateSceneRobotAlpha();
   void updateGoalStateVisibility();
   void updateGoalStateAlpha();
   void updateTargetPose();
   void updateGizmoVisible();
   void updateGizmoScale();
-  void updateToolFrames();
-  void updateActiveTool();
+  void updateActiveTools();
   void publishGizmoFeedback(visualization_msgs::msg::InteractiveMarkerFeedback & feedback);
   void gizmoStatusUpdate(
     rviz_common::properties::StatusProperty::Level level,
@@ -137,19 +152,19 @@ private:
   // --- URDF / robots ---
   bool loadURDF();
   void loadRobotModel();
-  void updateSceneRobot();
   void updateTrajectoryRoot();
   void updateTrailVisibility();
   void rebuildTrail();
   void clearTrailRobots();
 
-  std::unique_ptr<rviz_default_plugins::robot::Robot> scene_robot_;
   std::unique_ptr<rviz_default_plugins::robot::Robot> goal_robot_;
   std::unique_ptr<rviz_default_plugins::robot::Robot> trajectory_robot_;
   urdf::ModelInterfaceSharedPtr urdf_model_;
+  // Client-side FK fills links the server's FK omits (static base/foot links
+  // above the cuRobo base_link), so ghost robots keep their complete base.
+  CuroboFK fk_engine_;
   bool robot_loaded_ = false;
   std::string urdf_xml_;
-  Ogre::SceneNode * scene_robot_root_ = nullptr;
   Ogre::SceneNode * goal_root_ = nullptr;
   Ogre::SceneNode * trajectory_root_ = nullptr;
   std::string robot_root_frame_;
@@ -197,6 +212,40 @@ private:
     std::vector<std::array<double, 7>> poses;
   };
   rclcpp::Client<curobov2_ros_interfaces::srv::FkBatch>::SharedPtr fk_client_;
+  // The server is the single source of truth for its tool frames; the display
+  // asks get_joint_info instead of exposing a user-editable list.
+  rclcpp::Client<curobov2_ros_interfaces::srv::GetJointInfo>::SharedPtr
+    tool_info_client_;
+  bool tool_info_in_flight_ = false;
+  std::chrono::steady_clock::time_point last_tool_info_request_{};
+  mutable std::mutex tool_frames_mutex_;
+  std::vector<std::string> pending_tool_frames_;
+  bool pending_tool_frames_ready_ = false;
+  std::vector<std::string> cspace_joints_;
+  void refreshToolFrames();
+
+  // Live robot joints, used to keep passive tool chains exactly at the current
+  // state when the IK ghost is built from an active-only solve.
+  rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
+  mutable std::mutex joint_state_mutex_;
+  std::map<std::string, double> current_joints_;
+  void onJointState(const sensor_msgs::msg::JointState::ConstSharedPtr & msg);
+  std::map<std::string, double> currentJointPositions() const;
+  std::set<std::string> activeChainJoints() const;
+  void overlayPassiveJoints(sensor_msgs::msg::JointState & joint_state) const;
+  // The planner's configured base_link (the frame its FK poses and IK targets
+  // use). Queried from the planner parameter as well as taken from fk_batch,
+  // because the goal-state IK has to transform into THIS frame before the first
+  // trajectory ever arrives.
+  rclcpp::AsyncParametersClient::SharedPtr param_client_;
+  std::atomic<bool> base_link_query_in_flight_{false};
+  std::atomic<bool> base_link_query_sent_{false};
+  // Discards a base_link reply belonging to a planner we have already switched
+  // away from (the old AsyncParametersClient callback can outlive the rebind).
+  std::atomic<uint64_t> param_generation_{0};
+  std::mutex base_link_mutex_;
+  std::string pending_base_link_;
+  void queryBaseLink();
   std::string planner_node_;
   uint64_t fk_seq_ = 0;
   uint64_t fk_inflight_seq_ = 0;
@@ -209,6 +258,11 @@ private:
   void resetFkState();
   bool requestFk(const trajectory_msgs::msg::JointTrajectory::ConstSharedPtr & msg);
   bool consumeFk(uint64_t seq);
+  // Add URDF links the server's fk_batch omits, converted from the URDF root
+  // into the server base frame. Server poses are authoritative and overwrite.
+  void mergeClientFk(
+    const std::map<std::string, double> & joint_positions,
+    std::map<std::string, Eigen::Isometry3d> & transforms) const;
 
   // --- Goal-state ghost (IK the active target, then FK it) ---
   enum class GoalStage { Idle, WaitingIk, WaitingFk };
@@ -225,6 +279,7 @@ private:
     bool ok = false;
     std::string error;
     std::string base_link;
+    sensor_msgs::msg::JointState joint_state;
     std::vector<std::string> link_names;
     std::vector<std::array<double, 7>> poses;
   };
@@ -235,7 +290,12 @@ private:
   uint64_t goal_inflight_seq_ = 0;
   bool goal_valid_ = false;
   bool goal_attempted_ = false;
+  // Any target move forces a fresh combined IK solve.
+  bool goal_refresh_all_ = false;
   geometry_msgs::msg::Pose last_goal_pose_;
+  // Every tool pose that contributed to the last combined multi-tool IK.
+  std::vector<geometry_msgs::msg::Pose> last_goal_poses_;
+  std::vector<std::string> last_goal_tools_;
   std::chrono::steady_clock::time_point last_goal_request_;
   std::chrono::steady_clock::time_point goal_stage_start_;
   std::mutex goal_mutex_;
@@ -245,6 +305,9 @@ private:
   void consumeGoalIk();
   void consumeGoalFk();
   void resetGoalState();
+  // Only the kinematic chains of the active tools are visible in the goal
+  // ghost; passive arms stay visible only through the live RobotModel.
+  void updateGoalRobotLinks();
   bool goalPoseInBase(
     const geometry_msgs::msg::Pose & pose, geometry_msgs::msg::Pose & base_pose) const;
   static bool posesEqual(
@@ -296,7 +359,9 @@ private:
   std::map<std::string, ToolTarget> tools_;
   std::vector<std::string> tool_order_;
   std::string active_tool_;
-  bool tool_frames_user_set_ = false;
+  // Empty => every configured tool frame is enabled.
+  std::set<std::string> enabled_tools_;
+  bool applying_enabled_tools_ = false;
 
   // --- Interactive marker gizmo ---
   void createGizmo();
@@ -325,8 +390,7 @@ private:
   std::set<std::string> feedback_dirty_;
   std::set<std::string> sync_pending_;
   bool applying_gizmo_ = false;
-  bool applying_tool_frames_ = false;
-  bool applying_active_tool_ = false;
+  bool applying_planner_node_ = false;
   bool gizmo_active_ = false;
 
   void gizmoInitializeCallback(
@@ -351,8 +415,7 @@ private:
 
   // --- Properties ---
   // Planning request / targets
-  rviz_common::properties::StringProperty * tool_frames_property_;
-  rviz_common::properties::EditableEnumProperty * active_tool_property_;
+  rviz_common::properties::StringProperty * active_tools_property_;
   rviz_common::properties::BoolProperty * seed_from_tf_property_;
   rviz_common::properties::BoolProperty * gizmo_visible_property_;
   rviz_common::properties::FloatProperty * gizmo_scale_property_;
@@ -363,10 +426,6 @@ private:
   rviz_common::properties::FloatProperty * target_orientation_y_;
   rviz_common::properties::FloatProperty * target_orientation_z_;
   rviz_common::properties::FloatProperty * target_orientation_w_;
-
-  // Scene robot
-  rviz_common::properties::BoolProperty * show_scene_robot_property_;
-  rviz_common::properties::FloatProperty * scene_robot_alpha_property_;
 
   // Goal-state ghost
   rviz_common::properties::BoolProperty * show_goal_state_property_;

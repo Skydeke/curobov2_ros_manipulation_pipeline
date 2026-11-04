@@ -41,6 +41,10 @@ class GripperCommand(PropagatingEitherWay):
         # ignores the extra joint; it is only there for the state chain, the
         # solution's start/end snapshots and the ghost preview.
         joint = cmd.get("joint")
+        if not joint:
+            resolver = getattr(self.robot, "gripper_joint", None)
+            if callable(resolver):
+                joint = resolver(cmd.get("gripper", ""))
         if joint:
             js = getattr(end, "joint_state", None)
             names = list(getattr(js, "name", []) or [])

@@ -369,6 +369,14 @@ public:
   virtual IkOutcome ik(
     RobotHandle handle, const TensorF32 & poses,
     const std::string & tool_frame = "") = 0;
+  // Multi-tool IK: poses[i] targets tool_frames[i] in ONE solve. The default
+  // implementation falls back to single-tool IK (fake bridge / old backends).
+  virtual IkOutcome ik_multi(
+    RobotHandle handle, const TensorF32 & poses,
+    const std::vector<std::string> & tool_frames)
+  {
+    return ik(handle, poses, tool_frames.empty() ? "" : tool_frames.front());
+  }
   // PORT: config_wrapper_ik.ConfigWrapperIK.build (solver lifecycle).
   // `self_collision_check` drives BOTH self-collision and scene collision (the
   // old Python's single `ik_collision_check` flag; false = pure-kinematics IK

@@ -372,6 +372,11 @@ class _PlanClientMixin:
         finally:
             self._set_links_collision([request], True)
 
+    def gripper_joint(self, gripper: str = "") -> str:
+        cfg = (self._grippers.get(gripper)
+               or self._grippers.get(self._default_gripper) or {})
+        return str(cfg.get("command_joint") or "")
+
     def gripper_command(self, gripper: str = "", joint: str = "",
                         position: float = 0.0, effort: float = 0.0,
                         controller: str = "", action_ns: str = "",

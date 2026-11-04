@@ -202,6 +202,8 @@ def _apply_passive_hold(planner, mask, weight=1.0e4):
 
 
 def _restore_passive_hold(saved):
+    if not saved:
+        return
     for (cost, weight, live_weight, terminal, non_terminal, only_terminal) in saved:
         cfg = cost.config
         cfg.weight.copy_(weight)
@@ -312,6 +314,7 @@ def plan_pose(handle: int, req) -> dict:
         planner.update_tool_pose_criteria({
             constraint_frame: ToolPoseCriteria(
                 non_terminal_pose_axes_weight_factor=[cx, cy, cz, tx, ty, tz])})
+    hold_saved = None
     if hold_mask is not None:
         hold_saved = _apply_passive_hold(planner, hold_mask)
     try:

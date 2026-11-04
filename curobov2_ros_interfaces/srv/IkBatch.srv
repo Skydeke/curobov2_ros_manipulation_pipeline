@@ -8,6 +8,11 @@ string frame_id ""
 # Tool frame the poses target. Empty means the first configured tool frame.
 string tool_frame ""
 
+# Optional per-pose tool frames, parallel to `poses`. When non-empty, poses[i]
+# is solved for tool_frames[i] in ONE IK solve (a combined multi-tool goal).
+# `tool_frame` is then ignored. Each frame may appear at most once.
+string[] tool_frames
+
 ---
 
 sensor_msgs/JointState[] joint_states

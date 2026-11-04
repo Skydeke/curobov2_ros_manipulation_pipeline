@@ -162,39 +162,49 @@ always what the server is doing.
 **MPC mode:** with "MPC (Real-time)" selected, "Compute + Execute" on the
 Planning tab switches the planner to MPC, sends an `execute_trajectory` goal, and
 streams the target pose to `/<planner>/mpc_goal` at 10 Hz while the gizmo is
-dragged. MPC tracks one tool frame; with several configured, restrict
-`Tool Frames` to the one to track.
+dragged. MPC tracks one tool frame; with several configured, check only the one
+to track in the Planning tab's `Target tools` list.
 
 **Multiple targets:** the Planning tab finds the first `CuroboPlanningDisplay` in
 the display tree (including inside Groups). That display holds one target per
-tool frame reported by `get_joint_info`, so a bimanual robot gets one draggable
-marker per arm and `buildGoalsets()` sends them together as
-`Goalset.tool_frames` / `tool_poses`. Restrict the set with the display's
-`Tool Frames` property to plan a single arm.
+tool frame reported by the server's `get_joint_info`, so a bimanual robot gets
+one draggable marker per arm. The `Target tools` list is a multi-select: every
+checked target is sent together as `Goalset.tool_frames` / `tool_poses`, and an
+unchecked arm is left out of the goalset so the server's seed masking keeps it
+at its start pose.
 
 ### Future development
 - [ ] Save and load the system's state
 
 ## CuroboPlanningDisplay
 
-One display for everything MoveIt's MotionPlanning display shows:
+One display for the planning overlays MoveIt's MotionPlanning display shows.
+The live robot is deliberately not rendered here — RViz's own `RobotModel`
+display already draws it from TF; duplicating it only produced overlapping
+robots.
 
-- **Scene Robot** — the live robot, driven by TF (`Show Scene Robot`,
-  `Scene Robot Alpha`).
 - **Planned Path** — a `trajectory_msgs/JointTrajectory` animated as a ghost
   robot, with `Show Trail`, `Loop Animation`, `Speed`, `Alpha`, and a docked
   scrubber. Waypoint link poses come from `<planner>/fk_batch`; the display
   runs no forward kinematics.
 - **Planning Request** — one draggable 6-DOF marker per tool frame, built with
   MoveIt's 6-DOF control layout (three rotate rings, three move axes). Tool
-  frames arrive from `get_joint_info`; new markers are seeded at their TF pose.
-  `Active Tool` and the Planning tab's pose fields edit one marker; dragging a
-  marker makes it active.
-- **Goal State** — a green ghost robot at the IK solution for the active
-  target (`Show Goal State`, `Goal State Alpha`). The target is transformed to
-  the robot base with TF, solved through `/<planner>/ik_batch`, then FK'd
-  through `fk_batch`. It updates while the marker is dragged and stays visible
-  between plans.
+  frames arrive from the server's `get_joint_info`; `Place target at tool`
+  optionally initialises a new marker at that tool's current TF pose.
+  The Planning tab's `Target tools` list is a multi-select: every checked tool
+  target is sent together in one goalset, so multiple arms hit their targets in
+  the same plan. An unchecked arm is not part of the goalset, so the server's
+  seed masking keeps it at its start pose. Selecting a row (or dragging its
+  marker) chooses the single tool edited by the pose fields. `Active Tools`
+  mirrors the same checked set as a comma-separated property.
+- **IK result** — ONE green ghost robot showing the combined IK solution
+  (`Show IK result`, `Goal State Alpha`). Moving any target refreshes it.
+  Only active tools are IK goals. Passive tool frames are not sent as
+  end-effector poses at all; their joints are restored from the live
+  `/joint_states` after the solve, exactly like passive motion planning, so
+  their arms stay visible and unchanged. The combined goal is solved through
+  `/<planner>/ik_batch` with a parallel `tool_frames`/`poses` list, then FK'd
+  through `fk_batch`; links the server omits are filled from the URDF.
 - **Sphere overlays** — the server's `<planner>/collision_spheres`
   MarkerArray. `attached_spheres` (the grasped object, blue) is controlled by
   `Show Attached`; `collision_spheres` (the robot's own spheres, green/red) by
