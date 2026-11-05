@@ -250,6 +250,13 @@ class MockCuroboServer(RobotInterface):
     def _goal_joints(self, goalset) -> Optional[list]:
         if getattr(goalset, "target_joint_positions", None):
             return [float(v) for v in goalset.target_joint_positions]
+        # Multi-tool goalset (parallel tool_frames/tool_poses). The mock has a
+        # single tool frame, so it solves the FIRST named pose; tests assert
+        # the request carries every frame/pose pair.
+        tool_poses = getattr(goalset, "tool_poses", None)
+        if tool_poses:
+            joint = self.ik(tool_poses[0])
+            return list(getattr(joint, "position", [])) if joint else None
         poses = getattr(goalset, "poses", None)
         if poses:
             joint = self.ik(poses[self._winner(poses)])
@@ -412,7 +419,7 @@ class MockCuroboServer(RobotInterface):
         self.attached.clear()
         self.world_ops.append(("remove_all", None))
 
-    def attach_object(self, name: str, joint_state=None) -> bool:
+    def attach_object(self, name: str, joint_state=None, link=None) -> bool:
         self.attached.add(name)
         # the object travels with the flange; keep its world pose available
         # so a later GeneratePlacePose can still read it (the real pipeline
@@ -443,30 +450,38 @@ class MockCuroboServer(RobotInterface):
         if not self._plan_scene_active:
             self._plan_scene_active = True
             self._plan_scene_original = set(self.attached)
-            self._plan_scene_attached = None
-        desired = getattr(scene, "attached_object", None)
-        if desired == self._plan_scene_attached:
+            self._plan_scene_attached = []
+        attached_names = getattr(scene, "attached_names", None)
+        if callable(attached_names):
+            desired = list(attached_names())
+        else:
+            desired = list(getattr(scene, "attached_objects", {}) or {})
+            if not desired and getattr(scene, "attached_object", None):
+                desired = [scene.attached_object]
+        if desired == list(self._plan_scene_attached or []):
             return
-        if self._plan_scene_attached is not None:
-            self.attached.discard(self._plan_scene_attached)
-            self.plan_scene_ops.append(("detach", self._plan_scene_attached))
-        if desired is not None:
-            self.attached.add(desired)
-            self.plan_scene_ops.append(("attach", desired))
-            self.plan_attach_states.append(
-                list(getattr(joint_state, "position", []) or []))
-        self._plan_scene_attached = desired
+        for name in list(self._plan_scene_attached or []):
+            if name not in desired:
+                self.attached.discard(name)
+                self.plan_scene_ops.append(("detach", name))
+        for name in desired:
+            if name not in self.attached:
+                self.attached.add(name)
+                self.plan_scene_ops.append(("attach", name))
+                self.plan_attach_states.append(
+                    list(getattr(joint_state, "position", []) or []))
+        self._plan_scene_attached = list(desired)
 
     def end_plan_scene(self) -> None:
         """Undo the ``plan_scene`` previews (see CuroboServerInterface)."""
         if not self._plan_scene_active:
             return
-        if self._plan_scene_attached is not None:
-            self.attached.discard(self._plan_scene_attached)
+        for name in list(self._plan_scene_attached or []):
+            self.attached.discard(name)
         self.attached |= set(self._plan_scene_original)
         self._plan_scene_active = False
         self._plan_scene_original = set()
-        self._plan_scene_attached = None
+        self._plan_scene_attached = []
 
 
 #: A reachable object pose for pick&place tests (the mock arm's reachable

@@ -22,8 +22,7 @@ class CurrentState(GeneratorStage):
         # declarative base scene: an object may already be attached when the
         # task starts (the pick&place PredicateFilter rejection case).
         attached = set(self.robot.get_attached_objects() or [])
-        if scene.attached_object:
-            attached.add(scene.attached_object)
+        attached.update(scene.attached_names())
         for obj in self.params.get("require_not_attached", []) or []:
             if obj in attached:
                 self._fail(None, None,

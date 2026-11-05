@@ -36,9 +36,7 @@ class ModifyScene(PropagatingStage):
             # obstacles but NOT the attach, and a leftover attached name
             # re-disables the re-added object in every solver checker
             # (reapply_attached_disables after each world push).
-            new_scene = scene
-            if scene.attached_object is not None:
-                new_scene = new_scene.with_detached(scene.attached_object)
+            new_scene = scene.with_detached(None)
             ops = [("detach_all", None)]
         elif self.params.get("add"):
             spec = self._object_spec(self.params["add"])

@@ -308,8 +308,14 @@ class TaskExecutor(_ExecutorSerializationMixin):
             # checkers re-assert after the re-add.
             self.robot.detach_object(None)
         elif kind == "attach":
+            # The payload IS the object name. Two arms' attaches are two
+            # distinct keys in _applied_ops, so the second does not overwrite
+            # the first (the bridge tracks one payload per attach link).
             self.robot.attach_object(payload)
         elif kind == "detach":
+            # Named detach releases exactly that object where the adapter
+            # supports it; the Trigger-based ROS adapter falls back to
+            # detach-all (its service has no name field).
             self.robot.detach_object(payload)
         else:
             raise ValueError(f"unknown scene op kind {kind!r}")

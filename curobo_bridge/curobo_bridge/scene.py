@@ -118,14 +118,105 @@ def scene_get(handle: int) -> str:
         "names": entry.get("scene_names", []),
     }, sort_keys=True)
 ATTACH_LINK = "attached_object"
-def _select_attach_link(entry, kin, fk_result, spec):
+
+
+def _attached_links(entry) -> dict:
+    """name -> attach link for every attached object (legacy-aware)."""
+    links = dict(entry.get("attached_links") or {})
+    legacy = entry.get("attached_name")
+    if legacy and legacy not in links:
+        links[legacy] = entry.get("attach_link_used") or ATTACH_LINK
+    return links
+
+
+def _attached_parent_links(entry) -> dict:
+    """name -> parent flange link for every attached object (legacy-aware)."""
+    parents = dict(entry.get("attached_parent_links") or {})
+    legacy = entry.get("attached_name")
+    if legacy and legacy not in parents and entry.get("attach_parent_link_used"):
+        parents[legacy] = entry["attach_parent_link_used"]
+    return parents
+
+
+def _attached_names(entry) -> list:
+    """Every attached object name, in attach order (legacy-aware)."""
+    names = []
+    for name in list(entry.get("attached_disabled") or []):
+        if name not in names:
+            names.append(name)
+    for name in _attached_links(entry):
+        if name not in names:
+            names.append(name)
+    legacy = entry.get("attached_name")
+    if legacy and legacy not in names:
+        names.append(legacy)
+    return names
+
+
+def _record_attached(entry, name: str, attach_link: str,
+                     parent_link: str = "") -> None:
+    """Record one more attached payload without overwriting the previous one.
+
+    ``attached_name`` / ``attach_link_used`` / ``attach_parent_link_used``
+    stay as the last/primary object for older single-payload readers;
+    ``attached_links`` and ``attached_parent_links`` carry every object, and
+    ``attached_disabled`` lists every name the solver checkers must keep off.
+    """
+    links = _attached_links(entry)
+    parents = _attached_parent_links(entry)
+    links[name] = attach_link
+    if parent_link:
+        parents[name] = parent_link
+    else:
+        parents.pop(name, None)
+    disabled = [n for n in (entry.get("attached_disabled") or []) if n != name]
+    disabled.append(name)
+    entry["attached_links"] = links
+    entry["attached_parent_links"] = parents
+    entry["attached_disabled"] = disabled
+    entry["attached_name"] = name
+    entry["attach_link_used"] = attach_link
+    entry["attach_parent_link_used"] = parent_link or ""
+
+
+def _drop_attached(entry, name: str) -> list:
+    """Remove one attached object from the bookkeeping; return remaining names."""
+    links = _attached_links(entry)
+    parents = _attached_parent_links(entry)
+    links.pop(name, None)
+    parents.pop(name, None)
+    disabled = [n for n in _attached_names(entry) if n != name]
+    entry["attached_links"] = links
+    entry["attached_parent_links"] = parents
+    entry["attached_disabled"] = disabled
+    last = disabled[-1] if disabled else ""
+    entry["attached_name"] = last
+    entry["attach_link_used"] = links.get(last, "") if last else ""
+    entry["attach_parent_link_used"] = parents.get(last, "") if last else ""
+    return disabled
+
+
+def _clear_attached(entry) -> list:
+    """Clear every attachment record; return the released names."""
+    names = _attached_names(entry)
+    entry["attached_links"] = {}
+    entry["attached_parent_links"] = {}
+    entry["attached_disabled"] = []
+    entry["attached_name"] = ""
+    entry["attach_link_used"] = ""
+    entry["attach_parent_link_used"] = ""
+    return names
+
+
+def _select_attach_link(entry, kin, fk_result, spec, preferred=None):
     """Pick the payload attach link for this grasp.
 
-    A bimanual robot declares one attach link per arm (``attached_object_left``
-    / ``attached_object_right``). The caller only says which OBJECT it grabbed,
-    not which arm grabbed it, so use the object's world position: the attach
-    link whose parent flange is closest to the object is the arm holding it.
-    Single-attach-link robots (Franka, KATE, UR10e) always use their one link.
+    A multi-arm robot declares one attach link per arm (``attached_object_left``
+    / ``attached_object_right`` / ...; bimanual is the two-arm case). The caller
+    may name the arm's link (``preferred``); otherwise use the object's world
+    position: the attach link whose parent flange is closest to the object is
+    the arm holding it. Single-attach-link robots (Franka, KATE, UR10e) always
+    use their one link.
     """
     import numpy as np
 
@@ -147,6 +238,15 @@ def _select_attach_link(entry, kin, fk_result, spec):
             f"Robot YAML does not declare a payload attach link ({declared}) — "
             "attach is unavailable for this robot (the robot YAML must declare "
             "one).")
+    if preferred:
+        if preferred in candidates:
+            return preferred, candidates[preferred]
+        parent = (entry.get("attach_links") or {}).get(preferred)
+        if parent and preferred in kc.link_name_to_idx_map:
+            return preferred, parent
+        raise ValueError(
+            f"Attach link '{preferred}' is not declared by this robot "
+            f"(available: {', '.join(sorted(candidates))})")
     if len(candidates) == 1:
         name, parent = next(iter(candidates.items()))
         return name, parent
@@ -283,7 +383,7 @@ def _reapply_attached_disables(entry) -> None:
     (``SceneData.load_from_scene_cfg`` clears + re-adds with enable=1), so the
     flag must be re-armed after every push: the grasped obstacle stays
     REGISTERED in the solver scenes while attached, but collision-inert."""
-    names = entry.get("attached_disabled") or []
+    names = entry.get("attached_disabled") or _attached_names(entry)
     if not names:
         return
     for name in tuple(names):
@@ -314,8 +414,14 @@ def _clear_attached_voxels(handle: int, spec) -> bool:
     except Exception:
         return False
     return False
-def attach_object(handle: int, name: str, q) -> None:
-    """Fit + attach `name` to the attach link at joint config `q`.
+def attach_object(handle: int, name: str, q,
+                  link: Optional[str] = None) -> None:
+    """Fit + attach `name` to its arm's attach link at joint config `q`.
+
+    ``link`` forces a specific per-arm attach link (``attached_object_left`` /
+    ``attached_object_right``); ``None`` selects the nearest flange, which is
+    the backward-compatible single-payload behaviour. Several payloads may be
+    attached at once (one per link) and are tracked independently.
 
     PORT: attachment_services.attach / _fit_and_attach (the local sphere write
     that avoids cuRobo's single-sphere `update` crash).
@@ -347,7 +453,18 @@ def attach_object(handle: int, name: str, q) -> None:
     fk_result = kin.compute_kinematics(joint_state)
     if fk_result.tool_poses is None:
         raise RuntimeError("FK result has no tool_poses; cannot resolve EE for attachment")
-    attach_link, parent_link = _select_attach_link(entry, kin, fk_result, spec)
+    attach_link, parent_link = _select_attach_link(
+        entry, kin, fk_result, spec, preferred=link)
+    # Re-attaching the same object on a different link: release the old link's
+    # sphere slots first so they do not stay behind as a ghost payload.
+    old_link = _attached_links(entry).get(name)
+    if old_link and old_link != attach_link and am is not None:
+        try:
+            am.detach(old_link, enable_obstacle_names=[name])
+        except TypeError:
+            am.detach(old_link)
+        except Exception:
+            pass
     link_idx = kparams.get_sphere_index_from_link_name(attach_link)
     n_slots = int(link_idx.shape[0])
 
@@ -387,7 +504,7 @@ def attach_object(handle: int, name: str, q) -> None:
 
     # The payload is fitted in its OWN arm's flange frame so the fitted spheres
     # land where that arm's gripper actually holds the object (not always the
-    # first tool frame, which on a bimanual robot is the left arm's).
+    # first tool frame, which on a multi-arm robot is the first arm's).
     ee_link = parent_link
     obj_to_link = fk_result.tool_poses.get_link_pose(ee_link).inverse()
 
@@ -412,6 +529,11 @@ def attach_object(handle: int, name: str, q) -> None:
             env_spheres = torch.cat([env_spheres, padding], dim=0)
         kparams.link_spheres[i, link_idx, :] = env_spheres
     am._attached_link_name = attach_link
+    # Record this payload WITHOUT clobbering any object already attached on the
+    # other arm. `attached_name`/`attach_link_used` remain the last/primary
+    # object for older single-payload readers; attached_links carries them all.
+    _record_attached(entry, name, attach_link, parent_link)
+    entry["attached_num_envs"] = num_envs
     # PORT: _fit_and_attach's cuRobo-native disable - records the name and turns
     # the world obstacle off on the attachment manager's scene checker (the
     # solver's own checker once the manager comes from the planner). The
@@ -424,21 +546,17 @@ def attach_object(handle: int, name: str, q) -> None:
                 for env_idx in range(num_envs):
                     scene_collision.enable_obstacle(
                         name, enable=False, env_idx=env_idx)
-                am._disabled_obstacle_names = [name]
-                am._disabled_num_envs = num_envs
         except Exception:
             pass
-    entry["attached_name"] = name
-    # Which of the per-arm attach links this payload actually went to; detach
-    # and the link-relative sphere report read it back.
-    entry["attach_link_used"] = attach_link
-    entry["attach_parent_link_used"] = parent_link
+    # cuRobo's AttachmentManager has one `_attached_link_name` slot; keep the
+    # last/primary link there but disable EVERY attached name.
+    am._disabled_obstacle_names = list(entry["attached_disabled"])
+    am._disabled_num_envs = num_envs
     # PORT: attachment_services.attach - keep the grasped obstacle REGISTERED in
     # the solver scenes but disabled by name (re-armed after every world push via
     # _reapply_attached_disables), then drop it from the voxel-map rasterization
     # and clear its leftover depth voxels so the fitted spheres do not collide
     # with the object's own copy.
-    entry["attached_disabled"] = [name]
     if not _clear_attached_voxels(handle, spec):
         # PORT: no mapper / non-cuboid - nothing to clear or refresh, but the
         # world must still be pushed ONCE so the exclusion reaches the solvers
@@ -447,29 +565,64 @@ def attach_object(handle: int, name: str, q) -> None:
         # _clear_attached_voxels on the ESDF path, here on the fallback path.
         world_push(handle)
     _reapply_attached_disables(entry)
-def detach_object(handle: int) -> str:
-    """Detach the current payload; returns the released name ("" if none).
+def detach_object(handle: int, name: Optional[str] = None) -> str:
+    """Detach one payload by ``name``, or every payload when ``name`` is None.
+
+    Returns the released name. For a detach-all the return value is the
+    comma-joined list of every released name ("" when nothing was attached),
+    preserving the original single-payload contract for one object.
 
     PORT: attachment_services.detach.
     """
     entry = _REGISTRY[handle]
-    released = entry.get("attached_name") or ""
-    # _attachment_manager (not the cached standalone one) so the SAME manager the
-    # attach wrote into resets `link_spheres` for the attach link - the solver's
-    # kinematics once the planner exists. cuRobo's AttachmentManager.detach also
-    # re-enables its recorded disabled names on its scene checker.
-    am = _attachment_manager(entry)
-    used_link = entry.get("attach_link_used") or ATTACH_LINK
-    if am is not None:
-        am.detach(used_link)
-    entry["attached_name"] = ""
-    entry["attach_link_used"] = ""
-    entry["attach_parent_link_used"] = ""
-    # PORT: attachment_services.detach - restore the released obstacle to
-    # collision checking. Dropping it from the disabled set, then pushing the
-    # world, re-adds it with enable=1 (the push clears + re-adds every
-    # obstacle, and _reapply_attached_disables now no-ops).
-    entry["attached_disabled"] = []
+    links = _attached_links(entry)
+    attached = _attached_names(entry)
+    if name is None:
+        targets = attached
+        released = ", ".join(targets)
+    else:
+        targets = [name] if name in attached else []
+        released = name if targets else ""
+    if targets:
+        # _attachment_manager (not the cached standalone one) so the SAME
+        # manager the attach wrote into resets `link_spheres` for the attach
+        # link - the solver's kinematics once the planner exists. Pass the
+        # released name explicitly so detaching one arm does not re-enable the
+        # other arm's payload on the shared scene checker.
+        am = _attachment_manager(entry)
+        num_envs = int(entry.get("attached_num_envs") or 1)
+        for target in targets:
+            used_link = (
+                links.get(target) or entry.get("attach_link_used") or ATTACH_LINK)
+            if am is not None:
+                try:
+                    am.detach(used_link, enable_obstacle_names=[target])
+                except TypeError:  # older AttachmentManager without the kwarg
+                    am.detach(used_link)
+                except Exception:
+                    pass
+            # PORT: attachment_services.detach - restore this obstacle to
+            # collision checking. The world push below re-adds it with enable=1
+            # and then re-disables whatever is still attached.
+            for checker in _solver_scene_checkers(entry):
+                try:
+                    if checker.check_obstacle_exists(target):
+                        checker.enable_obstacle(target, enable=True)
+                except Exception:
+                    continue
+            _drop_attached(entry, target)
+        remaining = _attached_names(entry)
+        if not remaining:
+            entry["attached_num_envs"] = 0
+        if am is not None:
+            last = remaining[-1] if remaining else ""
+            am._attached_link_name = (
+                _attached_links(entry).get(last) if last else None)
+            am._disabled_obstacle_names = list(remaining)
+            am._disabled_num_envs = num_envs if remaining else 0
+    # PORT: attachment_services.detach - dropping the name from the disabled
+    # set, then pushing the world, re-adds it with enable=1. world_push's tail
+    # re-asserts the disable for every object that is still attached.
     try:
         world_push(handle)
     except Exception:

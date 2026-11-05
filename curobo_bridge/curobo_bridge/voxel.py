@@ -15,10 +15,12 @@ def _primitives_only_scene(entry):
     """
     from curobo.scene import Scene
 
-    attached = entry.get("attached_name")
+    from .scene import _attached_names
+
+    attached = set(_attached_names(entry))
     scene = Scene()
     for spec in entry.get("scene_specs", []):
-        if attached and spec.get("name") == attached:
+        if spec.get("name") in attached:
             continue
         primitive = _to_scene(spec)
         attr = {0: "cuboid", 1: "sphere", 2: "capsule", 3: "cylinder", 4: "mesh"}[
@@ -97,7 +99,9 @@ def _rasterize_primitives_gpu(entry, voxel_grid, grid_min, voxel_size) -> int:
         cache["caps"] = (n_cub, n_mesh)
     # Static analytic scene => identical result every call. Key on the specs, not
     # the (freshly rebuilt) Scene object, and skip the model reload + SDF launch.
-    scene_key = (repr(entry.get("scene_specs", [])), entry.get("attached_name"),
+    from .scene import _attached_names
+
+    scene_key = (repr(entry.get("scene_specs", [])), tuple(_attached_names(entry)),
                  _obstacle_mode(entry), grid_key)
     if cache.get("occ") is not None and cache.get("occ_key") == scene_key:
         occ = cache["occ"]

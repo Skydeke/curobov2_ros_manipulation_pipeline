@@ -179,25 +179,36 @@ def scene_diff_to_msg(diff: dict, msg_cls=None):
         remove.id = str(name)
         remove.operation = CollisionObject.REMOVE
         msg.world.collision_objects.append(remove)
-    attached = diff.get("attached")
-    if attached is not None:
+    attached_names = list(diff.get("attached_list", None) or [])
+    if not attached_names and diff.get("attached") is not None:
+        attached_names = [diff["attached"]]
+    for name in attached_names:
         entry = AttachedCollisionObject()
-        entry.object.id = str(attached)
+        entry.object.id = str(name)
         entry.object.operation = CollisionObject.ADD
         msg.robot_state.attached_collision_objects.append(entry)
-    detached = diff.get("detached")
-    if detached is not None:
+    detached_names = list(diff.get("detached_list", None) or [])
+    if not detached_names and diff.get("detached") is not None:
+        detached_names = [diff["detached"]]
+    for name in detached_names:
         entry = AttachedCollisionObject()
-        entry.object.id = str(detached)
+        entry.object.id = str(name)
         entry.object.operation = CollisionObject.REMOVE
         msg.robot_state.attached_collision_objects.append(entry)
     return msg
 
 
 def _merge_scene_diff(before: dict, after: dict) -> dict:
-    """Net scene effect of a segment (before + after ops, display order)."""
+    """Net scene effect of a segment (before + after ops, display order).
+
+    Attach/detach are merged per object name so two arms' attaches survive as
+    two entries. The single ``attached``/``detached`` fields keep the old
+    last-operation-wins meaning for single-payload consumers.
+    """
     merged = {"added": [], "removed": [], "attached": None, "detached": None,
+              "attached_list": [], "detached_list": [],
               "remove_all": False, "detach_all": False}
+    last_op: dict = {}
     for part in (before or {}, after or {}):
         merged["added"].extend(part.get("added", None) or [])
         merged["removed"].extend(part.get("removed", None) or [])
@@ -207,12 +218,36 @@ def _merge_scene_diff(before: dict, after: dict) -> dict:
             part.get("remove_all"))
         merged["detach_all"] = merged["detach_all"] or bool(
             part.get("detach_all"))
+        attached_names = list(part.get("attached_list", None) or [])
+        if not attached_names and part.get("attached") is not None:
+            attached_names = [part["attached"]]
+        detached_names = list(part.get("detached_list", None) or [])
+        if not detached_names and part.get("detached") is not None:
+            detached_names = [part["detached"]]
+        for name in attached_names:
+            last_op.pop(name, None)
+            last_op[name] = "attach"
+        for name in detached_names:
+            last_op.pop(name, None)
+            last_op[name] = "detach"
+        # The single-field form wins when both forms describe the same name
+        # (this mirrors the old attached-then-detached ordering).
         if part.get("attached") is not None:
-            merged["attached"] = part["attached"]
-            merged["detached"] = None
+            name = part["attached"]
+            last_op.pop(name, None)
+            last_op[name] = "attach"
         if part.get("detached") is not None:
-            merged["detached"] = part["detached"]
-            merged["attached"] = None
+            name = part["detached"]
+            last_op.pop(name, None)
+            last_op[name] = "detach"
+    merged["attached_list"] = [
+        name for name, op in last_op.items() if op == "attach"]
+    merged["detached_list"] = [
+        name for name, op in last_op.items() if op == "detach"]
+    merged["attached"] = (
+        merged["attached_list"][-1] if merged["attached_list"] else None)
+    merged["detached"] = (
+        merged["detached_list"][-1] if merged["detached_list"] else None)
     return merged
 
 

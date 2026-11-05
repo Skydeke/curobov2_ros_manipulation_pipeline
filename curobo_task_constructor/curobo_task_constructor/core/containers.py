@@ -22,7 +22,7 @@ from curobo_task_constructor.core.stage import (
     Solution,
     TrajectoryStage,
 )
-from curobo_task_constructor.core.state import InterfaceState
+from curobo_task_constructor.core.state import InterfaceState, make_joint_state
 from curobo_task_constructor.core.robot import RobotInterface
 
 
@@ -204,9 +204,104 @@ class IndependentComponents(ParallelContainerBase):
         if sol is not None:
             self._lift_child_solution(sol)
 
+class Merger(ParallelContainerBase):
+    """Plan disjoint child groups in parallel and merge them into ONE solution.
+
+    ``IndependentComponents`` lifts each child as a separate container
+    solution, which is right for alternatives but wrong for bimanual gripper
+    commands / scene mutations: ``Task.best()`` would pick one child and the
+    other jaw would never be commanded. ``Merger`` collects the best solution
+    per child, merges their end joint states/scene diffs, and emits one
+    solution whose ``children`` are all child solutions.
+    """
+
+    stage_kind = "merger"
+
+    def reset(self) -> None:
+        self._best_by_child = {}
+        super().reset()
+
+    def compute(self) -> None:
+        self._feed_all()
+        self._best_by_child = {}
+        for child in self.children:
+            if child.can_compute():
+                child.run_compute()
+        if len(self._best_by_child) != len(self.children):
+            return
+        chain = [self._best_by_child[id(child)] for child in self.children]
+        start = chain[0].start
+        end = self._merge_ends(start, chain)
+        self._push_written(self._ends, end)
+        self._lift(Solution(
+            start=start,
+            end=end,
+            trajectory=None,
+            cost=sum(s.cost for s in chain),
+            comment="merger: " + " + ".join(
+                getattr(s.stage, "name", "") for s in chain),
+            children=list(chain),
+            scene_ops=[op for s in chain for op in (s.scene_ops or [])],
+        ))
+
+    def _on_child_solution(self, child: Stage, sol: Solution) -> None:
+        if sol is None:
+            return
+        current = self._best_by_child.get(id(child))
+        if current is None or sol.cost < current.cost:
+            self._best_by_child[id(child)] = sol
+
+    @staticmethod
+    def _merge_ends(start: InterfaceState, chain: list) -> InterfaceState:
+        names = list(getattr(start.joint_state, "name", []) or [])
+        positions = list(getattr(start.joint_state, "position", []) or [])
+        by_name = dict(zip(names, positions))
+        scene = start.scene.copy() if start.scene is not None else None
+        for sol in chain:
+            js = getattr(sol.end, "joint_state", None)
+            for name, pos in zip(
+                getattr(js, "name", []) or [],
+                getattr(js, "position", []) or [],
+            ):
+                value = float(pos)
+                if name not in by_name:
+                    # A child can ADD a joint the incoming state does not carry
+                    # (a GripperCommand adds its jaw to the state). Dropping it
+                    # here would hand the next motion leg a start pose without
+                    # the commanded jaw value, so the planner's collision model
+                    # would keep the previous (e.g. closed) finger geometry.
+                    by_name[name] = value
+                    names.append(name)
+                    positions.append(value)
+                elif abs(value - float(by_name[name])) > 1e-12:
+                    by_name[name] = value
+            src = getattr(sol.end, "scene", None)
+            if src is None:
+                continue
+            if scene is None:
+                scene = src.copy()
+                continue
+            scene.objects_added.update(src.objects_added)
+            for name in src.objects_removed:
+                if name not in scene.objects_removed:
+                    scene.objects_removed.append(name)
+            scene.attached_objects.update(
+                getattr(src, "attached_objects", {}) or {})
+            for name in getattr(src, "detached_objects", []) or []:
+                if name not in scene.detached_objects:
+                    scene.detached_objects.append(name)
+            scene.disabled_collisions.update(src.disabled_collisions)
+            scene.attached_object = src.attached_object or scene.attached_object
+            scene.detached_object = src.detached_object or scene.detached_object
+        merged_js = make_joint_state(
+            type(start.joint_state), names, [by_name[name] for name in names])
+        return start.clone(joint_state=merged_js, scene=scene)
+
+
 __all__ = [
     'ParallelContainerBase',
     'Alternatives',
     'Fallbacks',
     'IndependentComponents',
+    'Merger',
 ]

@@ -9,12 +9,14 @@ namespace curobo_core
 // PORT: cartesian_planner.CartesianPlanner._is_cartesian_request
 bool CartesianPlanner::is_cartesian_request(const curobo_runtime::PlanRequest & request)
 {
-  // PORT: _is_cartesian_request - ONE goalset holding >= 1 pose, no joint
-  // target. The comparison is on the GOALSET count (the request's first
-  // segment's poses are what `goalset` carries); requiring exactly one POSE
-  // wrongly refused MTC CartesianPath legs, which send several candidate goal
-  // poses.
-  return request.goalset_count == 1 && !request.goalset.data.empty() &&
+  // PORT: _is_cartesian_request - ONE goalset holding >= 1 pose OR a
+  // multi-tool goalset (parallel tool_frames/tool_poses), no joint target. The
+  // comparison is on the GOALSET count (the request's first segment's poses
+  // are what `goalset` carries); requiring exactly one POSE wrongly refused
+  // MTC CartesianPath legs, which send several candidate goal poses.
+  const bool has_pose_goal = !request.goalset.data.empty() ||
+    !request.tool_poses.data.empty();
+  return request.goalset_count == 1 && has_pose_goal &&
          request.joint_target.empty();
 }
 

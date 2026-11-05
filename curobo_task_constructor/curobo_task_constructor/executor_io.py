@@ -209,6 +209,7 @@ def _scene_ops_to_dict(ops) -> dict:
     the scene is left stale forever.
     """
     added, removed, attached, detached = [], [], None, None
+    attached_list, detached_list = [], []
     remove_all = detach_all = False
     for kind, payload in (ops or []):
         if kind == "add":
@@ -217,14 +218,19 @@ def _scene_ops_to_dict(ops) -> dict:
             removed.append(str(payload))
         elif kind == "attach":
             attached = str(payload)
+            if attached not in attached_list:
+                attached_list.append(attached)
         elif kind == "detach":
             detached = None if payload is None else str(payload)
+            if detached is not None and detached not in detached_list:
+                detached_list.append(detached)
         elif kind == "remove_all":
             remove_all = True
         elif kind == "detach_all":
             detach_all = True
     return {"added": added, "removed": removed,
             "attached": attached, "detached": detached,
+            "attached_list": attached_list, "detached_list": detached_list,
             "remove_all": remove_all, "detach_all": detach_all}
 
 
@@ -245,10 +251,16 @@ def _scene_ops_from_dict(d) -> list:
         ops.append(("remove", str(name)))
     for spec in (d.get("added", None) or []):
         ops.append(("add", _object_spec_from_dict(spec)))
-    if d.get("detached") is not None:
-        ops.append(("detach", str(d["detached"])))
-    if d.get("attached") is not None:
-        ops.append(("attach", str(d["attached"])))
+    detached_names = list(d.get("detached_list", None) or [])
+    if not detached_names and d.get("detached") is not None:
+        detached_names = [d["detached"]]
+    for name in detached_names:
+        ops.append(("detach", str(name)))
+    attached_names = list(d.get("attached_list", None) or [])
+    if not attached_names and d.get("attached") is not None:
+        attached_names = [d["attached"]]
+    for name in attached_names:
+        ops.append(("attach", str(name)))
     return ops
 
 
@@ -263,8 +275,16 @@ def _plan_request_to_dict(req) -> Optional[dict]:
             pd = _pose_to_dict(p)
             if pd is not None:
                 poses.append(pd)
+        tool_poses = []
+        for p in (getattr(gs, "tool_poses", None) or []):
+            pd = _pose_to_dict(p)
+            if pd is not None:
+                tool_poses.append(pd)
         goalsets.append({
             "poses": poses,
+            "tool_frames": [str(f) for f in (
+                getattr(gs, "tool_frames", None) or [])],
+            "tool_poses": tool_poses,
             "target_joints": [float(v) for v in (
                 getattr(gs, "target_joint_positions", None) or [])],
             "allowed": [str(v) for v in (
@@ -293,6 +313,9 @@ def _plan_request_from_dict(d) -> Optional[Any]:
     for gs in (d.get("goalsets", None) or []):
         goalsets.append(GoalsetSpec(
             poses=[_pose_stub_from_dict(p) for p in (gs.get("poses", None) or [])],
+            tool_frames=[str(f) for f in (gs.get("tool_frames", None) or [])],
+            tool_poses=[_pose_stub_from_dict(p) for p in (
+                gs.get("tool_poses", None) or [])],
             target_joint_positions=[float(v) for v in (
                 gs.get("target_joints", None) or [])],
             allowed_collisions=[str(v) for v in (gs.get("allowed", None) or [])],

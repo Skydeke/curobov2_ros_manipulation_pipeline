@@ -100,6 +100,7 @@ class TaskConstructorNode(rclpy.node.Node):
     # ------------------------------------------------------------------
     def _on_joint_state(self, msg):
         self._joint_state_cache = self._solver.normalize_joint_state(msg)
+        self._solver.set_current_joint_state(self._joint_state_cache)
 
     def _joint_state_watchdog(self):
         if self._joint_state_cache is None:

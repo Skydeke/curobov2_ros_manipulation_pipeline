@@ -22,9 +22,23 @@ class GoalsetSpec:
     """One segment of a goal path (mirror of curobov2_ros_interfaces Goalset.msg)."""
 
     poses: list = field(default_factory=list)  # Pose-like candidate(s)
+    #: Parallel per-tool targets (bimanual): ``tool_frames[i]`` reaches
+    #: ``tool_poses[i]`` in the same solve. Non-empty means a multi-tool goal
+    #: and ``poses`` is ignored by the server.
+    tool_frames: list = field(default_factory=list)  # tool frame names
+    tool_poses: list = field(default_factory=list)  # Pose-like, parallel
     target_joint_positions: list = field(default_factory=list)  # joint-space
     allowed_collisions: list = field(default_factory=list)  # link names
-    trajectory_constraints: list = field(default_factory=list)  # axis holds
+    #: Legacy single-tool whole-path axis holds, ``int8[6]`` in wire order
+    #: ``[theta_x, theta_y, theta_z, x, y, z]`` (1 = hold). The server applies
+    #: it to the first named tool frame. Kept for single-tool requests.
+    trajectory_constraints: list = field(default_factory=list)
+    #: Per-tool whole-path axis holds, flat ``6 * N`` in wire order
+    #: ``[theta_x, theta_y, theta_z, x, y, z]`` per tool, parallel to
+    #: ``tool_frames`` / ``tool_poses``. When non-empty the server applies each
+    #: group to its own tool exactly once; ``trajectory_constraints`` then
+    #: stays empty.
+    tool_trajectory_constraints: list = field(default_factory=list)
 
 
 @dataclass
@@ -241,14 +255,24 @@ class RobotInterface(ABC):
         pass
 
     @abstractmethod
-    def attach_object(self, name: str, joint_state: Any = None) -> bool:
+    def attach_object(self, name: str, joint_state: Any = None,
+                      link: Optional[str] = None) -> bool:
         """Attach scene obstacle `name` to the robot flange.
 
         ``joint_state`` (MTC parity) is the configuration the payload's
         collision spheres are fitted at — the pose the grasp completes at.
         ``None`` fits at the robot's current state (the classic call).
+
+        ``link`` optionally names the per-arm attach link (a bimanual robot
+        declares ``attached_object_left`` / ``attached_object_right``).
+        ``None`` lets the server select the nearest flange for the object,
+        which is the backward-compatible single-payload behaviour.
         """
 
     @abstractmethod
     def detach_object(self, name: Optional[str] = None) -> bool:
-        """Detach the attached obstacle (server detaches by name or all)."""
+        """Detach one attached obstacle by name, or every one when ``None``.
+
+        Adapters whose service carries no object-name field may ignore the
+        name and detach all; see the ROS adapter's note.
+        """

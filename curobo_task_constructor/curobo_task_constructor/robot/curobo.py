@@ -88,6 +88,8 @@ class CuroboServerInterface(_MsgMixin, _PlanClientMixin, _SceneClientMixin, Robo
         self._gripper_clients: dict = {}
         #: once-flag for the reorder log in ``normalize_joint_state``
         self._joint_order_logged = False
+        #: newest /joint_states snapshot, set through the public API below
+        self._current_joint_state = None
         #: per-call service/action budget (see _SERVICE_TIMEOUT)
         self._service_timeout = (
             service_timeout if service_timeout is not None else _SERVICE_TIMEOUT
@@ -167,7 +169,7 @@ class CuroboServerInterface(_MsgMixin, _PlanClientMixin, _SceneClientMixin, Robo
         #: is True only between the first `plan_scene` and `end_plan_scene`.
         self._plan_scene_active: bool = False
         self._plan_scene_original: list = []
-        self._plan_scene_attached = None
+        self._plan_scene_attached: list = []
 
     def _client(self, srv_cls, name):
         # Creation is non-blocking — the node starts even when the curobo
@@ -251,13 +253,26 @@ class CuroboServerInterface(_MsgMixin, _PlanClientMixin, _SceneClientMixin, Robo
             )
         return js
 
+    def set_current_joint_state(self, joint_state) -> None:
+        """Publish the newest /joint_states snapshot to the task interface.
+
+        The driver owns the subscription; the task constructor must not reach
+        into a private node attribute to find the snapshot. Call this from the
+        node's /joint_states callback (after ``normalize_joint_state``).
+        """
+        self._current_joint_state = joint_state
+
     def get_current_joint_state(self):
         # The task constructor starts from the newest /joint_states reading.
         # The driver node caches it on a timer subscription; this interface
         # hands that snapshot out (a synchronous subscriber would not deliver
         # without spinning the executor, which would deadlock a service
         # callback).
-        snap = getattr(self._node, "_joint_state_cache", None)
+        snap = self._current_joint_state
+        if snap is None:
+            # Backward-compatible fallback for older drivers that still set
+            # the node attribute directly. New code uses the setter above.
+            snap = getattr(self._node, "_joint_state_cache", None)
         if snap is not None:
             return snap
         raise ServiceError("no cached /joint_states reading available")

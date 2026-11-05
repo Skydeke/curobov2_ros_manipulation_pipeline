@@ -18,4 +18,13 @@ from curobo_task_constructor.stages import (  # noqa: F401  (side-effect: regist
     modify_scene,
     move_relative,
     move_to,
+    multi_tool_cartesian_path,
+    multi_tool_move_to,
+)
+
+from curobo_task_constructor.stages.multi_tool_cartesian_path import (  # noqa: F401
+    MultiToolCartesianPath,
+)
+from curobo_task_constructor.stages.multi_tool_move_to import (  # noqa: F401
+    MultiToolMoveTo,
 )

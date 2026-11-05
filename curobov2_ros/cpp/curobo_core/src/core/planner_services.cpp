@@ -112,6 +112,14 @@ std::pair<bool, std::string> check_goal_request(
       return {false, name + ": a goalset cannot mix multi-tool poses with "
         "target_joint_positions"};
     }
+    if (!g.tool_trajectory_constraints.empty() &&
+      g.tool_trajectory_constraints.size() != 6 * g.tool_frames.size())
+    {
+      return {false, name + ": tool_trajectory_constraints must be empty or "
+        "exactly 6 * len(tool_frames) (got " +
+        std::to_string(g.tool_trajectory_constraints.size()) + " value(s) for " +
+        std::to_string(g.tool_frames.size()) + " frame(s))"};
+    }
   }
   if (!planner->is_open_loop()) {
     const bool single_pose = goalsets.size() == 1 &&
@@ -421,6 +429,11 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
     wrap_full_turn_targets(plan_request);
   } else if (!goal.goalsets.empty() && !goal.goalsets.front().tool_frames.empty()) {
     const auto & g = goal.goalsets.front();
+    // One goalset, N simultaneous per-tool targets.  The Cartesian planner's
+    // is_cartesian_request checks goalset_count, and the Classic planner uses
+    // this count only for the single-tool candidate path; setting it to 1 is
+    // what lets a multi-tool CartesianPath reach the multi-tool solve.
+    plan_request.goalset_count = 1;
     plan_request.tool_frames.assign(g.tool_frames.begin(), g.tool_frames.end());
     plan_request.tool_poses.shape = {
       static_cast<std::int64_t>(g.tool_poses.size()), 7};
@@ -432,6 +445,20 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
       plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.x));
       plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.y));
       plan_request.tool_poses.data.push_back(static_cast<float>(pose.orientation.z));
+    }
+    // Per-tool Cartesian holds (flat 6 * N, parallel to tool_frames). Empty
+    // means legacy: the single trajectory_constraints vector below applies to
+    // the first named tool.
+    plan_request.tool_trajectory_constraints.assign(
+      g.tool_trajectory_constraints.begin(), g.tool_trajectory_constraints.end());
+    // PORT: single_planner._apply_pose_constraints - the FIRST non-empty
+    // Goalset.trajectory_constraints holds its axes along the whole path.
+    for (const auto & gs : goal.goalsets) {
+      if (!gs.trajectory_constraints.empty()) {
+        plan_request.trajectory_constraints.assign(
+          gs.trajectory_constraints.begin(), gs.trajectory_constraints.end());
+        break;
+      }
     }
   } else if (!goal.goalsets.empty()) {
     plan_request.goalset_count = static_cast<std::int64_t>(goal.goalsets.size());
@@ -707,23 +734,53 @@ void PlannerServices::fill_result(
 
   // PORT: single_planner._apply_pose_constraints' "holding axes along path"
   // log (ToolPoseCriteria order is [x, y, z, roll, pitch, yaw]).
+  //
+  // Always print the hold vector for the Cartesian planner, including the
+  // all-zero free-space case.  A Cartesian leg that unexpectedly holds no
+  // axis is exactly the failure this line needs to make visible; the old
+  // `any_hold` guard hid it.
+  const bool is_cartesian =
+    effective->get_planner_name().find("Cartesian") != std::string::npos;
   if (request.trajectory_constraints.size() == 6) {
-    bool any_hold = false;
-    for (int c : request.trajectory_constraints) {
-      any_hold = any_hold || (c == 1);
+    const auto & tc = request.trajectory_constraints;
+    const double tx = tc[0] == 1 ? 1.0 : 0.0;
+    const double ty = tc[1] == 1 ? 1.0 : 0.0;
+    const double tz = tc[2] == 1 ? 1.0 : 0.0;
+    const double x = tc[3] == 1 ? 1.0 : 0.0;
+    const double y = tc[4] == 1 ? 1.0 : 0.0;
+    const double z = tc[5] == 1 ? 1.0 : 0.0;
+    RCLCPP_INFO(
+      node_->get_logger(), "%s: holding axes along path (x,y,z,roll,pitch,yaw)=[%g, %g, %g, %g, %g, %g]",
+      effective->get_planner_name().c_str(), x, y, z, tx, ty, tz);
+  } else if (is_cartesian) {
+    RCLCPP_INFO(
+      node_->get_logger(),
+      "%s: holding axes along path (x,y,z,roll,pitch,yaw)=[0, 0, 0, 0, 0, 0] (no constraints)",
+      effective->get_planner_name().c_str());
+  }
+
+  // Per-tool holds (multi-tool CartesianPath): one [x,y,z,roll,pitch,yaw]
+  // group per named tool, in `tool_frames` order.
+  if (!request.tool_trajectory_constraints.empty() &&
+    request.tool_trajectory_constraints.size() == 6 * request.tool_frames.size())
+  {
+    const auto & ttc = request.tool_trajectory_constraints;
+    std::ostringstream holds;
+    for (std::size_t i = 0; i < request.tool_frames.size(); ++i) {
+      const auto * group = &ttc[6 * i];
+      const double tx = group[0] == 1 ? 1.0 : 0.0;
+      const double ty = group[1] == 1 ? 1.0 : 0.0;
+      const double tz = group[2] == 1 ? 1.0 : 0.0;
+      const double x = group[3] == 1 ? 1.0 : 0.0;
+      const double y = group[4] == 1 ? 1.0 : 0.0;
+      const double z = group[5] == 1 ? 1.0 : 0.0;
+      holds << (i ? " " : "") << "[" << request.tool_frames[i] << "]=["
+            << x << ", " << y << ", " << z << ", "
+            << tx << ", " << ty << ", " << tz << "]";
     }
-    if (any_hold) {
-      const auto & tc = request.trajectory_constraints;
-      const double tx = tc[0] == 1 ? 1.0 : 0.0;
-      const double ty = tc[1] == 1 ? 1.0 : 0.0;
-      const double tz = tc[2] == 1 ? 1.0 : 0.0;
-      const double x = tc[3] == 1 ? 1.0 : 0.0;
-      const double y = tc[4] == 1 ? 1.0 : 0.0;
-      const double z = tc[5] == 1 ? 1.0 : 0.0;
-      RCLCPP_INFO(
-        node_->get_logger(), "%s: holding axes along path (x,y,z,roll,pitch,yaw)=[%g, %g, %g, %g, %g, %g]",
-        effective->get_planner_name().c_str(), x, y, z, tx, ty, tz);
-    }
+    RCLCPP_INFO(
+      node_->get_logger(), "%s: holding axes per tool %s",
+      effective->get_planner_name().c_str(), holds.str().c_str());
   }
 
   // PORT: unified_planner_node "Planning with {planner.get_planner_name()}".

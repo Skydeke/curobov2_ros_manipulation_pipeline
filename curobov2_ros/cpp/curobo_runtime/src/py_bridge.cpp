@@ -748,6 +748,9 @@ py::dict plan_request_to_dict(const PlanRequest & request)
   if (!request.trajectory_constraints.empty()) {
     out["trajectory_constraints"] = request.trajectory_constraints;
   }
+  if (!request.tool_trajectory_constraints.empty()) {
+    out["tool_trajectory_constraints"] = request.tool_trajectory_constraints;
+  }
   if (!request.goalset.shape.empty()) {
     out["goalset"] = tensor_to_array(request.goalset);
   }

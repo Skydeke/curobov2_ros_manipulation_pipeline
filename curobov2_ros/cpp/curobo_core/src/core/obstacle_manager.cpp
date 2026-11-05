@@ -122,6 +122,7 @@ void ObstacleManager::clear_all()
   }
   objects_.clear();
   order_.clear();
+  attached_names_.clear();
   attached_name_.clear();
 }
 
@@ -278,8 +279,8 @@ bool ObstacleManager::remove_object(const std::string & name, std::string & mess
   objects_.erase(it);
   order_.erase(std::remove(order_.begin(), order_.end(), name), order_.end());
   bucket_counts_[bucket] -= 1;
-  if (attached_name_ == name) {
-    attached_name_.clear();
+  if (attached_names_.erase(name) > 0 && attached_name_ == name) {
+    attached_name_ = attached_names_.empty() ? std::string() : *attached_names_.rbegin();
   }
   message = "Object '" + name + "' removed from " + bucket + "s";
   notify_world_changed();
@@ -422,7 +423,7 @@ SceneView ObstacleManager::get_scene_objects() const
     }
     view.colors.push_back(spec.color);
     view.mesh_file_paths.push_back(spec.type == MESH ? spec.mesh_file_path : "");
-    view.attached.push_back(spec.name == attached_name_);
+    view.attached.push_back(is_attached(spec.name));
   }
   return view;
 }

@@ -220,6 +220,99 @@ class MoveTo(_MotionBase):
         pass
 
 
+class MultiToolMoveTo(_MotionBase):
+    """Simultaneous per-tool pose goals (bimanual move).
+
+    One goalset reaches every named tool frame at its absolute pose in a
+    single solve. MTC-shaped API::
+
+        move = stages.MultiToolMoveTo("bimanual", planner)
+        move.setGoals([
+            {"frame": "openarm_left_grasp_frame", "pose": left_pose},
+            {"frame": "openarm_right_grasp_frame", "pose": right_pose},
+        ])
+
+    Each entry may also be a ``(frame, pose)`` pair; ``pose`` may be any
+    Pose-like or a flat ``{x,y,z,qx,qy,qz,qw}`` dict.
+    """
+
+    stage_type = "multi_tool_move_to"
+
+    def __init__(self, name: str = "multi tool move to",
+                 planner: Any = None, planning_attempts: int = None):
+        super().__init__(name, planner, planning_attempts)
+
+    def setTools(self, tools) -> None:
+        """Set the parallel ``{frame, pose}`` goals (one per tool frame)."""
+        out = []
+        for i, tool in enumerate(tools or []):
+            if isinstance(tool, dict):
+                frame = tool.get("frame") or tool.get("link")
+                pose = tool.get("pose")
+            elif isinstance(tool, (list, tuple)) and len(tool) == 2:
+                frame, pose = tool
+            else:
+                raise TypeError(
+                    f"{type(self).__name__}.setTools: entry {i} must be a "
+                    "{frame, pose} dict or a (frame, pose) pair")
+            pose_dict = _pose_dict_of(pose)
+            if not frame or pose_dict is None:
+                raise TypeError(
+                    f"{type(self).__name__}.setTools: entry {i} needs a frame "
+                    "name and a pose")
+            out.append({"frame": str(frame), "pose": pose_dict})
+        if not out:
+            raise ValueError(f"{type(self).__name__}.setTools: at least one "
+                             "tool is required")
+        self.params["goal"] = {"tools": out}
+
+    def setGoals(self, tools) -> None:
+        """Alias for :meth:`setTools` (the MTC ``setGoals`` spelling)."""
+        self.setTools(tools)
+
+
+class MultiToolCartesianPath(MultiToolMoveTo):
+    """Straight-line simultaneous per-tool goals (multi-tool Cartesian move).
+
+    Accepts any non-empty ``{frame, pose}`` list (N >= 1), exactly like
+    :class:`MultiToolMoveTo`, plus :meth:`setHolds` for one whole-path axis
+    hold per tool (N groups of ``int8[6]``, wire order ``[theta_x, theta_y,
+    theta_z, x, y, z]``). :meth:`setHold` remains the legacy single-vector
+    API: it pins the first named tool frame and leaves the other groups
+    unconstrained.
+    """
+
+    stage_type = "multi_tool_cartesian_path"
+
+    def __init__(self, name: str = "multi tool cartesian path",
+                 planner: Any = None, planning_attempts: int = None):
+        super().__init__(name, planner, planning_attempts)
+
+    def setHolds(self, holds) -> None:
+        """Pin one held-axis vector per tool (N groups of ``int8[6]``).
+
+        ``holds`` is a list of 6-int groups, parallel to the tool goals set by
+        :meth:`setTools` / :meth:`setGoals`. The stage also accepts a flat
+        ``6 * N`` list in the same order.
+        """
+        self.params.pop("hold", None)
+        self.params["holds"] = [[int(c) for c in (group or [])]
+                                for group in (holds or [])]
+
+    def setHold(self, hold) -> None:
+        """Pin the held axes explicitly (legacy ``int8[6]``; 1 = hold).
+
+        The vector applies to the FIRST named tool frame; every other tool
+        gets an all-zero group. A list of 6-int groups is accepted too and
+        delegated to :meth:`setHolds`.
+        """
+        if hold and all(isinstance(group, (list, tuple)) for group in hold):
+            self.setHolds(hold)
+            return
+        self.params.pop("holds", None)
+        self.params["hold"] = [int(c) for c in (hold or [])]
+
+
 class GripperCommand(_StageBase):
     """Move one end effector's jaws without planning.
 
@@ -423,6 +516,8 @@ __all__ = [
     'FixedState',
     'MoveRelative',
     'MoveTo',
+    'MultiToolMoveTo',
+    'MultiToolCartesianPath',
     'GripperCommand',
     'Connect',
     'CartesianPath',

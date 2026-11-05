@@ -101,6 +101,12 @@ class _MsgMixin:
         g = Goalset()
         for pose in gs.poses or []:
             g.poses.append(parse_pose_msg(pose, self.pose_cls))
+        # Parallel per-tool goals (bimanual): frame names and their absolute
+        # poses travel together; the server plans all of them in one solve.
+        # Empty on a single-link/joint goalset, preserving the old wire form.
+        g.tool_frames = [str(frame) for frame in (gs.tool_frames or [])]
+        g.tool_poses = [parse_pose_msg(pose, self.pose_cls)
+                        for pose in (gs.tool_poses or [])]
         g.target_joint_positions = [float(v) for v in (gs.target_joint_positions or [])]
         # Whole-path Cartesian axis holds, int8[6] = [theta_x, theta_y,
         # theta_z, x, y, z] (1 = hold that axis). This is the only way to ask
@@ -112,6 +118,13 @@ class _MsgMixin:
         # either [] (unconstrained) or exactly 6 ints.
         hold = [int(c) for c in (gs.trajectory_constraints or [])]
         g.trajectory_constraints = hold if len(hold) == 6 else []
+        # Per-tool holds: flat int8[6 * N], parallel to tool_frames/tool_poses,
+        # one [theta_x, theta_y, theta_z, x, y, z] group per tool. Non-empty
+        # means the server applies each group to its own frame; the legacy
+        # single vector above stays empty so no criteria are applied twice.
+        per_tool = [int(c) for c in (gs.tool_trajectory_constraints or [])]
+        if per_tool:
+            g.tool_trajectory_constraints = per_tool
         return g
 
     @staticmethod

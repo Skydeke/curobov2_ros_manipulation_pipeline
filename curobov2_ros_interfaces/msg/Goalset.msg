@@ -40,6 +40,13 @@ string[] target_joint_names
 # Applied via ToolPoseCriteria (held along the length of this segment).
 int8[] trajectory_constraints
 
+# Per-tool Cartesian axis holds for a multi-tool segment (bimanual):
+# flat 6 * N, parallel to `tool_frames` / `tool_poses`, groups in wire order
+# [theta_x, theta_y, theta_z, x, y, z] (1 = lock that axis along the path).
+# Empty means legacy behaviour: the single `trajectory_constraints` applies to
+# the first named tool. When non-empty it must be exactly 6 * len(tool_frames).
+int8[] tool_trajectory_constraints
+
 # Flattened per-waypoint constraints for THIS segment:
 # [theta_x0, theta_y0, theta_z0, x0, y0, z0, theta_x1, theta_y1, theta_z1,
 #  x1, y1, z1, ...]

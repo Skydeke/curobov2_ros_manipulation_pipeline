@@ -139,6 +139,7 @@ def msg_to_scene_diff(msg) -> dict:
     """PlanningScene -> scene_diff dict (inverse of scene_diff_to_msg)."""
     from moveit_msgs.msg import CollisionObject
     out = {"added": [], "removed": [], "attached": None, "detached": None,
+           "attached_list": [], "detached_list": [],
            "remove_all": False, "detach_all": False}
     world = getattr(msg, "world", None)
     for co in (getattr(world, "collision_objects", []) or []):
@@ -178,8 +179,12 @@ def msg_to_scene_diff(msg) -> dict:
                 out["detach_all"] = True
             else:
                 out["detached"] = name
+                if name not in out["detached_list"]:
+                    out["detached_list"].append(name)
         else:
             out["attached"] = name
+            if name not in out["attached_list"]:
+                out["attached_list"].append(name)
     return out
 
 
@@ -198,7 +203,8 @@ def msg_to_sub_trajectory(msg) -> dict:
         "scene_diff": {
             "before": msg_to_scene_diff(getattr(msg, "scene_diff", None)),
             "after": {"added": [], "removed": [], "attached": None,
-                      "detached": None, "remove_all": False,
+                      "detached": None, "attached_list": [],
+                      "detached_list": [], "remove_all": False,
                       "detach_all": False},
         },
         "replay_goal": _load_yaml(getattr(msg, "replay_goal_yaml", "")),

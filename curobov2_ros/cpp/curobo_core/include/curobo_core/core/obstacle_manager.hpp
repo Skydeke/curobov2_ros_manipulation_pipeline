@@ -115,9 +115,23 @@ public:
   bool empty() const {return order_.empty();}
 
   // Attach bookkeeping (PORT: AttachmentServices / attached_name).
-  void set_attached(const std::string & name) {attached_name_ = name;}
-  void clear_attached() {attached_name_.clear();}
+  // A bimanual robot holds one payload per arm, so track the SET of attached
+  // names; attached_name() remains the last/primary name for legacy callers.
+  void set_attached(const std::string & name)
+  {
+    attached_names_.insert(name);
+    attached_name_ = name;
+  }
+  void clear_attached()
+  {
+    attached_names_.clear();
+    attached_name_.clear();
+  }
   const std::string & attached_name() const {return attached_name_;}
+  bool is_attached(const std::string & name) const
+  {
+    return attached_names_.find(name) != attached_names_.end();
+  }
 
   int bucket_count(const std::string & bucket) const;
 
@@ -131,6 +145,7 @@ private:
   std::vector<std::string> order_;                       // insertion order
   std::map<std::string, SceneObjectSpec> objects_;
   std::map<std::string, int> bucket_counts_;
+  std::set<std::string> attached_names_;
   std::string attached_name_;
   std::int64_t epoch_ = 0;
   std::int64_t perception_epoch_ = 0;

@@ -51,6 +51,19 @@ from curobo_task_constructor.core.robot_config import (
 
 from curobo_task_constructor.robot.session import *
 
+
+def _desired_attached(scene) -> list:
+    """Attached names a ``SceneDiff`` wants, multi-attach first."""
+    names = getattr(scene, "attached_names", None)
+    if callable(names):
+        return list(names())
+    attached = getattr(scene, "attached_objects", None)
+    if attached:
+        return list(attached)
+    single = getattr(scene, "attached_object", None)
+    return [single] if single else []
+
+
 class _SceneClientMixin:
     def get_object_pose(self, name: str):
         rec = self._query_scene_objects().get(name)
@@ -71,7 +84,8 @@ class _SceneClientMixin:
     def get_attached_objects(self) -> list:
         """Names of objects attached to the robot, per the server.
 
-        The attach link holds one payload, so this is a 0- or 1-element list.
+        A multi-arm robot can hold one payload per arm, so this has one entry
+        per ``attached_object_*`` link (bimanual is the two-arm case).
         """
         return sorted(
             name for name, rec in self._query_scene_objects().items()
@@ -223,7 +237,8 @@ class _SceneClientMixin:
         self._call(self._remove_all_client, Trigger.Request())
         self._invalidate_scene_cache()
 
-    def attach_object(self, name: str, joint_state=None) -> bool:
+    def attach_object(self, name: str, joint_state=None,
+                      link: Optional[str] = None) -> bool:
         req = AttachObject.Request()
         req.object_name = name
         if joint_state is not None:
@@ -231,6 +246,10 @@ class _SceneClientMixin:
             # configuration, so they land in the flange frame where the object
             # is actually picked (see AttachObject.srv).
             req.joint_state = self._to_joint_msg(joint_state)
+        # AttachObject.srv has no link field: the server picks the per-arm
+        # attach link whose parent flange is nearest the object (see
+        # curobo_bridge.scene._select_attach_link). `link` is accepted for
+        # interface parity and cannot be forwarded over this service.
         res = self._call(self._attach_client, req)
         if res.success:
             # attach keeps the object LISTED (it is disabled by name, not
@@ -241,9 +260,11 @@ class _SceneClientMixin:
         return res.success
 
     def detach_object(self, name: Optional[str] = None) -> bool:
-        # `name` is accepted for interface parity and ignored: the server's
-        # detach is a bare Trigger over the single attach link and takes no
-        # argument. Which object it released comes back from get_scene_objects.
+        # DetachObject is a bare std_srvs/Trigger with no object-name field, so
+        # a named detach falls back to detach-all. That is still correct for
+        # the common single-payload call; a bimanual caller that must release
+        # exactly one arm cannot express it over this service (the bridge's
+        # Python detach_object(handle, name) can, but the ROS service cannot).
         res = self._call(self._detach_client, Trigger.Request())
         if res.success:
             self._invalidate_scene_cache()
@@ -272,34 +293,48 @@ class _SceneClientMixin:
         """Reconcile the server's attach state to ``scene`` for planning. See ``RobotInterface.plan_scene``. The shared ``/curobo_server`` holds
         one attach state; a plan burst previews the scene each leg must be
         solved in (MTC applies ``ModifyPlanningScene`` to the planning scene at
-        compute time)."""
+        compute time). A bimanual leg may carry two attached payloads.
+
+        The ROS detach service is all-or-nothing (no name field), so a change
+        in the desired attach set rebuilds the whole set: detach all, restore
+        whatever was attached before the burst, then attach the desired names.
+        """
         if scene is None:
             return
         if not self._plan_scene_active:
             self._plan_scene_active = True
             self._plan_scene_original = list(self.get_attached_objects() or [])
-            self._plan_scene_attached = None
-        desired = getattr(scene, "attached_object", None)
-        if desired == self._plan_scene_attached:
+            self._plan_scene_attached = []
+        desired = _desired_attached(scene)
+        if desired == list(self._plan_scene_attached or []):
             return
-        if self._plan_scene_attached is not None:
-            self.detach_object(self._plan_scene_attached)
-        if desired is not None:
-            self.attach_object(desired, joint_state=joint_state)
-        self._plan_scene_attached = desired
+        if (not self._plan_scene_attached
+                and desired == self._plan_scene_original):
+            # Already in the requested state; no preview mutation needed.
+            self._plan_scene_attached = list(desired)
+            return
+        self.detach_object(None)
+        for name in self._plan_scene_original:
+            if name not in desired:
+                self.attach_object(name)
+        for name in desired:
+            self.attach_object(name, joint_state=joint_state)
+        self._plan_scene_attached = list(desired)
 
     def end_plan_scene(self) -> None:
         """Restore the attach state captured by ``plan_scene``. Called at the end of a plan burst (``TaskExecutor.plan``). Detaches the
-        previewed object and re-attaches whatever was attached before, so
+        previewed objects and re-attaches whatever was attached before, so
         execution starts from the task's base scene and materializes its scene
         ops in chain order."""
         if not self._plan_scene_active:
             return
-        if self._plan_scene_attached is not None:
-            self.detach_object(self._plan_scene_attached)
-            self._plan_scene_attached = None
-        for name in self._plan_scene_original:
-            self.attach_object(name)
+        if self._plan_scene_attached:
+            # Detach-all is the only release the Trigger service offers, so
+            # the pre-burst attachments are restored explicitly.
+            self.detach_object(None)
+            for name in self._plan_scene_original:
+                self.attach_object(name)
+        self._plan_scene_attached = []
         self._plan_scene_active = False
         self._plan_scene_original = []
 

@@ -221,6 +221,52 @@ def test_independent_components_lift_every_child():
 # ----------------------------------------------------------------------
 # nested containers share the same InterfaceState objects across boundaries
 # ----------------------------------------------------------------------
+def test_merger_combines_all_child_solutions():
+    """Parallel gripper/attach children must become ONE execution chain."""
+    robot = _home_robot()
+    spec = _root_spec("merger", [
+        StageSpec(stage_type="gripper_command", name="left",
+                  params_yaml="joint: finger_joint\nposition: 0.1\n"),
+        StageSpec(stage_type="gripper_command", name="right",
+                  params_yaml="joint: finger_joint\nposition: 0.2\n"),
+    ])
+    ex = TaskExecutor(spec, robot)
+    assert ex.init()
+    assert ex.plan()
+    par = ex.root.children[1]
+    assert par.stage_type() == "merger"
+    assert len(par.solutions) == 1
+    assert len(par.solutions[0].children) == 2
+    assert {c.stage.name for c in par.solutions[0].children} == {
+        "left", "right"
+    }
+
+
+def test_merger_keeps_joints_a_child_adds():
+    """A jaw a GripperCommand adds to the state must survive the merge.
+
+    The incoming CurrentState is cspace-only; the gripper children append
+    their jaw joints. If the merger only updates joints already present, the
+    next motion leg plans from a start pose with no commanded jaw value and
+    the planner keeps its previous (closed) finger geometry.
+    """
+    robot = _home_robot()
+    spec = _root_spec("merger", [
+        StageSpec(stage_type="gripper_command", name="left",
+                  params_yaml="joint: left_finger\nposition: 0.7\n"),
+        StageSpec(stage_type="gripper_command", name="right",
+                  params_yaml="joint: right_finger\nposition: -0.7\n"),
+    ])
+    ex = TaskExecutor(spec, robot)
+    assert ex.init()
+    assert ex.plan()
+    par = ex.root.children[1]
+    end = par.solutions[0].end.joint_state
+    positions = dict(zip(end.name, end.position))
+    assert positions["left_finger"] == pytest.approx(0.7)
+    assert positions["right_finger"] == pytest.approx(-0.7)
+
+
 def test_nested_containers_states_thread_by_identity():
     """Alternatives inside a serial container: each alternative's start state
     must be the same object the preceding stage wrote (identity threading)."""

@@ -15,6 +15,7 @@ from curobo_task_constructor.core.container import (
     ContainerStage,
     Fallbacks,
     IndependentComponents,
+    Merger,
     SerialContainer,
 )
 from curobo_task_constructor.core.registry import create_stage
@@ -30,8 +31,7 @@ CONTAINERS: dict = {
     "alternatives": Alternatives,
     "fallbacks": Fallbacks,
     "independent": IndependentComponents,
-    # MTC Merger: same disjoint-groups contract as independent components.
-    "merger": IndependentComponents,
+    "merger": Merger,
 }
 
 

@@ -110,6 +110,10 @@ struct PlanRequest
   // request carries no holds. Applied as cuRobo ToolPoseCriteria on the shared
   // MotionPlanner around the solve (single_planner._apply_pose_constraints).
   std::vector<int> trajectory_constraints;
+  // PORT: Goalset.tool_trajectory_constraints (flat 6 * N, parallel to
+  // `tool_frames`; groups in wire order [theta_x, theta_y, theta_z, x, y, z]).
+  // Empty = legacy: `trajectory_constraints` applies to the first named tool.
+  std::vector<int> tool_trajectory_constraints;
   int max_attempts = 1;
   int enable_graph_attempt = 1;
   // PORT: TrajectoryGoal.cartesian_* (MTC CartesianPath properties).

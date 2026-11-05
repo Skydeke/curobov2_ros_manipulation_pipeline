@@ -37,13 +37,42 @@ class SceneDiff:
     A scene diff is cumulative: each state's diff describes the complete
     delta from the base scene, so a later stage knows everything an earlier
     stage did (object now attached, collisions disabled, ...).
+
+    A multi-arm robot can hold one payload per arm (bimanual is the two-arm
+    case), so the diff tracks a SET of attached objects (``attached_objects``:
+    name -> attach link or ``None``) and a set of detached names.
+    ``attached_object`` / ``detached_object`` remain as the last/primary entry
+    for older single-payload callers.
     """
 
     objects_added: dict = field(default_factory=dict)  # name -> ObjectSpec
     objects_removed: list = field(default_factory=list)  # names
-    attached_object: Optional[str] = None  # currently attached object name
-    detached_object: Optional[str] = None  # object detached by this diff
+    attached_object: Optional[str] = None  # last/primary attached object name
+    detached_object: Optional[str] = None  # last/primary detached object name
     disabled_collisions: set = field(default_factory=set)  # (object, link)
+    #: Every object attached by this diff: name -> attach link (or None).
+    attached_objects: dict = field(default_factory=dict)
+    #: Every name detached by this diff (in order).
+    detached_objects: list = field(default_factory=list)
+
+    def __post_init__(self):
+        # Keep the single-object compatibility fields in sync with the
+        # multi-object containers, whichever form the caller supplied.
+        if self.attached_object and self.attached_object not in self.attached_objects:
+            self.attached_objects[self.attached_object] = None
+        if self.attached_objects and not self.attached_object:
+            self.attached_object = next(reversed(self.attached_objects))
+        if self.detached_object and self.detached_object not in self.detached_objects:
+            self.detached_objects.append(self.detached_object)
+        if self.detached_objects and not self.detached_object:
+            self.detached_object = self.detached_objects[-1]
+
+    def attached_names(self) -> list:
+        """Every attached object name, in attach order (compat-aware)."""
+        names = list(self.attached_objects)
+        if self.attached_object and self.attached_object not in names:
+            names.append(self.attached_object)
+        return names
 
     # ------------------------------------------------------------------
     # Mutation helpers — each returns a NEW cumulative diff.
@@ -62,19 +91,35 @@ class SceneDiff:
         out.objects_added.pop(name, None)
         return out
 
-    def with_attached(self, name: str) -> "SceneDiff":
+    def with_attached(self, name: str, link: Optional[str] = None) -> "SceneDiff":
+        """Attach ``name``; ``link`` records the per-arm attach link if known."""
         out = self.copy()
+        out.attached_objects[name] = link
         out.attached_object = name
-        out.detached_object = None
+        if name in out.detached_objects:
+            out.detached_objects.remove(name)
+        out.detached_object = (
+            out.detached_objects[-1] if out.detached_objects else None)
         # A picked object leaves the world and joins the hand.
         out.objects_added.pop(name, None)
         return out
 
-    def with_detached(self, name: str) -> "SceneDiff":
+    def with_detached(self, name: Optional[str] = None) -> "SceneDiff":
+        """Detach ``name``; ``None`` detaches every object this diff knows."""
         out = self.copy()
-        out.detached_object = name
-        if out.attached_object == name:
-            out.attached_object = None
+        if name is None:
+            names = list(out.attached_objects)
+            if out.attached_object and out.attached_object not in names:
+                names.append(out.attached_object)
+        else:
+            names = [name]
+        for attached in names:
+            out.attached_objects.pop(attached, None)
+            if attached not in out.detached_objects:
+                out.detached_objects.append(attached)
+        out.attached_object = next(reversed(out.attached_objects), None)
+        out.detached_object = (
+            out.detached_objects[-1] if out.detached_objects else None)
         return out
 
     def with_collisions(self, object_name: str, links, enabled: bool) -> "SceneDiff":
@@ -102,6 +147,8 @@ class SceneDiff:
             attached_object=self.attached_object,
             detached_object=self.detached_object,
             disabled_collisions=set(self.disabled_collisions),
+            attached_objects=dict(self.attached_objects),
+            detached_objects=list(self.detached_objects),
         )
 
     def key(self) -> tuple:
@@ -111,12 +158,18 @@ class SceneDiff:
         added = tuple(sorted((k, repr(v)) for k, v in self.objects_added.items()))
         removed = tuple(sorted(self.objects_removed))
         disabled = tuple(sorted((o, l) for o, l in self.disabled_collisions))
-        return (added, removed, self.attached_object, self.detached_object, disabled)
+        attached = tuple(sorted(
+            (name, repr(self.attached_objects.get(name)))
+            for name in self.attached_names()))
+        detached = tuple(dict.fromkeys(
+            self.detached_objects
+            + ([self.detached_object] if self.detached_object else [])))
+        return (added, removed, attached, detached, disabled)
 
     def is_empty(self) -> bool:
         return not (self.objects_added or self.objects_removed or
-                    self.attached_object or self.detached_object or
-                    self.disabled_collisions)
+                    self.attached_names() or self.detached_objects or
+                    self.detached_object or self.disabled_collisions)
 
     # ------------------------------------------------------------------
     # Materialization deltas — what must be pushed to the curobo server
@@ -133,10 +186,13 @@ class SceneDiff:
             ops.append(("add", spec))
         for name in self.objects_removed:
             ops.append(("remove", name))
-        if self.detached_object:
-            ops.append(("detach", self.detached_object))
-        if self.attached_object:
-            ops.append(("attach", self.attached_object))
+        detached = list(dict.fromkeys(
+            self.detached_objects
+            + ([self.detached_object] if self.detached_object else [])))
+        for name in detached:
+            ops.append(("detach", name))
+        for name in self.attached_names():
+            ops.append(("attach", name))
         return ops
 
 

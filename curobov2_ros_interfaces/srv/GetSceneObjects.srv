@@ -84,8 +84,10 @@ std_msgs/ColorRGBA[] colors
 # copy.
 string[] mesh_file_paths
 
-# True for the object currently attached to the arm's `attached_object` link.
-# At most one entry can be true; the attach link holds a single payload.
+# True for each object currently attached to one of the robot's attach links
+# (`attached_object`, or `attached_object_left` / `attached_object_right` on a
+# bimanual robot). One payload can be attached per link, so more than one entry
+# can be true at the same time.
 #
 # An ATTACHED object is still listed here: attach keeps it registered in the
 # solver scenes (it is disabled by name, not removed) and only drops it from the

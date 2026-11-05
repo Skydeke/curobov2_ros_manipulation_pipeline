@@ -214,6 +214,37 @@ def _restore_passive_hold(saved):
             cfg.only_terminal_cost = bool(only_terminal)
 
 
+def _per_tool_hold_axes(tool_trajectory_constraints, num_tools):
+    """Convert flat per-tool holds into ToolPoseCriteria axis weights.
+
+    `tool_trajectory_constraints` is ``Goalset.tool_trajectory_constraints``:
+    6 ints per tool, groups in wire order
+    ``[theta_x, theta_y, theta_z, x, y, z]``. Returns
+    ``{tool_index: [x, y, z, roll, pitch, yaw]}`` for every tool whose group
+    holds at least one axis, or ``None`` when the vector is absent/empty (the
+    legacy single-tool behaviour). A non-empty vector of the wrong length is a
+    request error, not a silent fallback.
+    """
+    flat = [int(c) for c in (tool_trajectory_constraints or [])]
+    if not flat:
+        return None
+    if len(flat) != 6 * num_tools:
+        raise ValueError(
+            f"tool_trajectory_constraints has {len(flat)} value(s) for "
+            f"{num_tools} tool frame(s) (expected {6 * num_tools})")
+    axes_by_tool = {}
+    for i in range(num_tools):
+        tx, ty, tz, x, y, z = flat[6 * i:6 * i + 6]
+        group = [
+            1.0 if x == 1 else 0.0, 1.0 if y == 1 else 0.0,
+            1.0 if z == 1 else 0.0, 1.0 if tx == 1 else 0.0,
+            1.0 if ty == 1 else 0.0, 1.0 if tz == 1 else 0.0,
+        ]
+        if any(group):
+            axes_by_tool[i] = group
+    return axes_by_tool
+
+
 def plan_pose(handle: int, req) -> dict:
     """Pose plan (PORT: single_planner._plan_trajectory / classic_planner)."""
     import numpy as np
@@ -305,10 +336,29 @@ def plan_pose(handle: int, req) -> dict:
     if passive_criteria:
         planner.update_tool_pose_criteria(passive_criteria)
 
+    # Per-tool holds for a multi-tool request: flat 6 * N, parallel to
+    # tool_frames. Absent/empty falls back to the single-vector path below;
+    # when present it owns every tool's criteria (never both for a frame).
+    per_tool_axes = (
+        _per_tool_hold_axes(
+            req.get("tool_trajectory_constraints"), len(tool_frames_arg))
+        if tool_frames_arg else None)
+    per_tool_criteria = None
+    if per_tool_axes is not None:
+        per_tool_criteria = {
+            tool_frames_arg[i]: ToolPoseCriteria(
+                non_terminal_pose_axes_weight_factor=axes)
+            for i, axes in per_tool_axes.items()
+        }
+        if per_tool_criteria:
+            planner.update_tool_pose_criteria(per_tool_criteria)
+
     # Goalset.trajectory_constraints: [theta_x, theta_y, theta_z, x, y, z]
-    # -> ToolPoseCriteria [x, y, z, roll, pitch, yaw].
+    # -> ToolPoseCriteria [x, y, z, roll, pitch, yaw]. Legacy single-tool path:
+    # applies to the first named tool only when no per-tool vector was sent.
     constraints = [int(c) for c in (req.get("trajectory_constraints") or [])]
-    applied = len(constraints) == 6 and any(c == 1 for c in constraints)
+    applied = (per_tool_axes is None and len(constraints) == 6
+               and any(c == 1 for c in constraints))
     if applied:
         tx, ty, tz, cx, cy, cz = (1.0 if c == 1 else 0.0 for c in constraints)
         planner.update_tool_pose_criteria({
@@ -326,7 +376,10 @@ def plan_pose(handle: int, req) -> dict:
             seed_hold_mask=hold_mask.bool() if hold_mask is not None else None)
     finally:
         _restore_passive_hold(hold_saved)
-        if applied:
+        if per_tool_criteria:
+            planner.update_tool_pose_criteria(
+                {frame: ToolPoseCriteria() for frame in per_tool_criteria})
+        elif applied:
             planner.update_tool_pose_criteria(
                 {constraint_frame: ToolPoseCriteria()})
         if passive_criteria:
