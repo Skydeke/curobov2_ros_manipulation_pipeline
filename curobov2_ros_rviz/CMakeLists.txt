@@ -41,6 +41,7 @@ find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Gui Widgets)
 set(dependencies_pkgs
   rclcpp
   rclcpp_action
+  control_msgs
   rcl_interfaces
   std_msgs
   std_srvs

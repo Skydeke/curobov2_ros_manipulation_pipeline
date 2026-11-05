@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
@@ -48,6 +49,11 @@ public:
 
   // PORT: ros_service_manager.init_services (M2 subset)
   void init_services();
+  // The robot descriptor loaded by the node. GetJointInfo reports its named
+  // joint configs and gripper controllers so tooling (the RViz panel) does not
+  // need MoveIt's SRDF to offer the same poses.
+  void set_robot_description(curobo_runtime::RobotDescriptionOutcome desc)
+  {robot_description_ = std::move(desc);}
   // PORT: ros_service_manager.init_services - node.lane_viz. The GPU-backed viz
   // timers (sparse voxel grid, collision spheres) run on this lane and SKIP the
   // cycle when it is busy, instead of blocking the timer on the GPU barrier.
@@ -127,6 +133,7 @@ private:
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
   ObstacleManager * obstacle_manager_;
+  curobo_runtime::RobotDescriptionOutcome robot_description_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::AddObject>::SharedPtr add_object_srv_;
   rclcpp::Service<curobov2_ros_interfaces::srv::RemoveObject>::SharedPtr remove_object_srv_;

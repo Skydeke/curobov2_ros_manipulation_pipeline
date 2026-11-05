@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
 
 #include <QAbstractItemView>
@@ -21,7 +22,6 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
-#include <QXmlStreamReader>
 
 namespace curobov2_ros_rviz
 {
@@ -102,7 +102,7 @@ double targetOf(const QTreeWidgetItem * item)
 /// here, so the clamp to the joint's own limits cannot be bypassed by one path.
 ///
 /// A CONTINUOUS joint (reported range is a full turn or wider) is periodic, so
-/// a value written as the "other" turn — e.g. the SRDF's
+/// a value written as the "other" turn — e.g. the descriptor's
 /// laundry_check_gripper j5 = 6.3641, just past the 6.28 top — is not out of
 /// range, it is the SAME pose as 6.3641 - 2*pi = 0.0809. Clamping it to 6.28
 /// (what a plain std::clamp does) silently plans a different configuration;
@@ -159,24 +159,28 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
   // MoveIt's Joints tab itself has no named-pose control: its "Goal State"
   // combo lives on the Planning tab. curobo's named poses are JOINT
   // configurations, which is exactly what this tab's target column holds, so the
-  // control is here: a combo that seeds the target column from the robot's SRDF
-  // <group_state> entries (home, retract, vertical, open, close for the kortex).
-  // Selecting one never plans or sends anything — it edits the request, exactly
-  // like "Set from current" / Zero below, so Plan / Plan + send stay the only
-  // things that can move the robot.
+  // control is here: a combo seeded from the robot descriptor's
+  // `named_joint_configs` (via get_joint_info) plus one open/close entry per
+  // `gripper_controllers` entry. The SRDF is deliberately not used: the
+  // descriptor is the planner's own source of truth, and a gripper's jaws are
+  // usually locked out of the cspace, so they cannot be planned at all.
+  // Selecting an arm pose edits the request exactly like "Set from current" /
+  // Zero below; selecting a gripper entry commands the controller directly.
   auto * preset_row = new QHBoxLayout();
   preset_row->addWidget(new QLabel(tr("Named pose:"), this));
   named_pose_combo_ = new QComboBox(this);
   named_pose_combo_->setToolTip(
-    tr("Named joint configurations from the robot's SRDF (its <group_state> "
-       "entries). Selecting one writes its joints into the target column BY "
-       "NAME; a joint the pose does not name falls back to the current "
-       "/joint_states value, and a joint the cspace does not contain (e.g. one "
-       "that is locked) is reported, not dropped silently. This only edits the "
-       "target — use Plan / Plan + send to act on it."));
+    tr("Named joint configurations from the robot descriptor's "
+       "named_joint_configs. Selecting an arm pose writes its joints into the "
+       "target column BY NAME; a joint the pose does not name falls back to the "
+       "current /joint_states value, and a joint the cspace does not contain "
+       "(e.g. one that is locked) is reported, not dropped silently. The "
+       "open/close entries come from the descriptor's gripper_controllers and "
+       "are sent straight to the gripper action, because the jaws are not "
+       "planning joints — use Plan / Plan + send for arm poses."));
   named_pose_combo_->addItem(tr("— select a named pose —"));
-  // Gated until an SRDF has been parsed (see loadNamedPoses): an empty combo is
-  // a truthful "no named poses available", not a control that does nothing.
+  // Gated until get_joint_info has answered (see setNamedPoses): an empty combo
+  // is a truthful "no named poses available", not a control that does nothing.
   named_pose_combo_->setEnabled(false);
   preset_row->addWidget(named_pose_combo_, 1);
   // "Preview": mirror the target column onto <planner_node>/trajectory (a
@@ -354,28 +358,6 @@ void JointsTab::initialize(rclcpp::Node::SharedPtr node)
 
   setPlannerNode(planner_node_);
 
-  // Named poses come from the robot's SRDF, not from the planner. rviz.launch.py
-  // passes `robot_description_semantic` as a node parameter even though no
-  // MoveIt node runs, so the parameter is the primary source (loadNamedPoses);
-  // the latched topic is the fallback for a setup that publishes it instead
-  // (move_group's planning-scene monitor does). Both paths converge on
-  // parseNamedPoses().
-  rclcpp::QoS srdf_qos(rclcpp::KeepLast(1));
-  srdf_qos.durability(rclcpp::DurabilityPolicy::TransientLocal);
-  srdf_sub_ = node_->create_subscription<std_msgs::msg::String>(
-    "/robot_description_semantic", srdf_qos,
-    [this](std_msgs::msg::String::ConstSharedPtr msg)
-    {
-      if (named_poses_loaded_) {
-        return;  // already parsed from the parameter
-      }
-      const QString xml = QString::fromStdString(msg->data);
-      // Fires on rviz's spinner thread; parseNamedPoses touches the combo.
-      runOnGuiThread([this, xml]() { parseNamedPoses(xml); });
-    },
-    sub_options);
-  loadNamedPoses();
-
   // Poll the cspace: it is read-only and cheap (it reads the parsed kinematics
   // model, touches no solver), so a 2 s poll is cheap insurance against
   // missing the very first response while the planner is still warming up.
@@ -427,6 +409,18 @@ void JointsTab::setPlannerNode(const QString & planner_node)
   locked_.clear();
   cspace_known_ = false;
   tree_->clear();
+  // A different planner is a different robot: its named poses and gripper
+  // actions mean nothing here either.
+  named_poses_.clear();
+  gripper_clients_.clear();
+  parallel_gripper_clients_.clear();
+  gripper_trajectory_clients_.clear();
+  named_pose_combo_->blockSignals(true);
+  named_pose_combo_->clear();
+  named_pose_combo_->addItem(tr("— select a named pose —"));
+  named_pose_combo_->setCurrentIndex(0);
+  named_pose_combo_->blockSignals(false);
+  named_pose_combo_->setEnabled(false);
   refreshJointInfo();
   setStatus(tr("planner node: %1").arg(planner_node_));
 }
@@ -453,12 +447,6 @@ void JointsTab::setButtonsEnabled()
 
 void JointsTab::refreshJointInfo()
 {
-  // Retry the SRDF read here too: the parameter can be the only source and it
-  // might not have been in place at initialize() time. Idempotent and cheap
-  // (both early-return once poses are loaded).
-  if (!named_poses_loaded_) {
-    loadNamedPoses();
-  }
   if (joint_info_client_ == nullptr || !joint_info_client_->service_is_ready()) {
     return;
   }
@@ -471,6 +459,7 @@ void JointsTab::refreshJointInfo()
       QVector<double> lower;
       QVector<double> upper;
       QStringList locked;
+      QVector<NamedPose> poses;
       bool success = false;
       QString message;
       try {
@@ -489,11 +478,86 @@ void JointsTab::refreshJointInfo()
         for (const auto & n : result->locked_joint_names) {
           locked << QString::fromStdString(n);
         }
+
+        // Arm poses: the descriptor's named_joint_configs, already grouped by
+        // the server (a pose names its joints; it need not cover the cspace).
+        for (const auto & cfg : result->named_joint_configs) {
+          NamedPose pose;
+          pose.name = QString::fromStdString(cfg.name);
+          for (std::size_t i = 0;
+            i < cfg.joint_names.size() && i < cfg.positions.size(); ++i)
+          {
+            pose.joints.append(
+              qMakePair(
+                QString::fromStdString(cfg.joint_names[i]),
+                cfg.positions[i]));
+          }
+          if (!pose.name.isEmpty() && !pose.joints.isEmpty()) {
+            poses.append(pose);
+          }
+        }
+
+        // Gripper entries: one open + one close per descriptor controller. They
+        // are not planning targets, so they carry the action to call instead.
+        for (const auto & gripper : result->grippers) {
+          const QString name = QString::fromStdString(gripper.name);
+          const QString type = QString::fromStdString(gripper.type);
+          const QString controller = QString::fromStdString(gripper.controller);
+          const QString action_ns = QString::fromStdString(gripper.action_ns);
+          QStringList joints;
+          for (const auto & joint : gripper.joints) {
+            joints << QString::fromStdString(joint);
+          }
+          const bool trajectory =
+            type == QLatin1String("JointTrajectory") ||
+            type == QLatin1String("FollowJointTrajectory");
+          QString action;
+          if (trajectory) {
+            action = controller.isEmpty()
+              ? QStringLiteral("follow_joint_trajectory")
+              : QStringLiteral("/%1/follow_joint_trajectory").arg(controller);
+          } else {
+            const QString ns = action_ns.isEmpty()
+              ? QStringLiteral("gripper_cmd") : action_ns;
+            action = controller.isEmpty()
+              ? ns : QStringLiteral("/%1/%2").arg(controller, ns);
+          }
+          const QString command_joint = QString::fromStdString(gripper.command_joint);
+          const QString single_joint = command_joint.isEmpty()
+            ? (joints.isEmpty() ? QString() : joints.first()) : command_joint;
+
+          for (int open = 1; open >= 0; --open) {
+            NamedPose pose;
+            pose.name = open != 0 ? tr("open") : tr("close");
+            pose.group = name;
+            pose.gripper = true;
+            pose.gripper_type = type;
+            pose.gripper_action = action;
+            pose.gripper_command_joint = single_joint;
+            pose.gripper_max_effort = gripper.max_effort;
+            pose.gripper_time_from_start =
+              gripper.time_from_start > 0.0 ? gripper.time_from_start : 2.0;
+            const double value = open != 0 ? gripper.open : gripper.close;
+            if (trajectory || type == QLatin1String("ParallelGripperCommand")) {
+              pose.gripper_joints = joints;
+              for (const QString & joint : joints) {
+                pose.joints.append(qMakePair(joint, value));
+              }
+            } else if (!single_joint.isEmpty()) {
+              pose.gripper_joints.clear();
+              pose.gripper_joints << single_joint;
+              pose.joints.append(qMakePair(single_joint, value));
+            }
+            if (!pose.gripper_action.isEmpty() && !pose.joints.isEmpty()) {
+              poses.append(pose);
+            }
+          }
+        }
       } catch (const std::exception & e) {
         message = QString::fromStdString(e.what());
       }
       runOnGuiThread(
-        [this, names, lower, upper, locked, success, message]()
+        [this, names, lower, upper, locked, poses, success, message]()
         {
           if (!success) {
             setStatus(tr("get_joint_info failed: %1").arg(message));
@@ -508,6 +572,7 @@ void JointsTab::refreshJointInfo()
           if (changed || tree_->topLevelItemCount() == 0) {
             rebuildRows(cspace_, limits_lower_, limits_upper_);
           }
+          setNamedPoses(poses);
           setButtonsEnabled();
           if (cspace_known_) {
             setStatus(
@@ -667,113 +732,43 @@ void JointsTab::zeroTargets()
   setStatus(tr("targets zeroed"));
 }
 
-void JointsTab::loadNamedPoses()
+void JointsTab::setNamedPoses(const QVector<NamedPose> & poses)
 {
-  if (named_poses_loaded_ || node_ == nullptr) {
-    return;
+  if (poses == named_poses_) {
+    return;  // the 2 s poll usually reports the same descriptor data
   }
 
-  // Source 1: the rviz node's `robot_description_semantic` parameter, which
-  // rviz.launch.py sets from moveit_config.robot_description_semantic (so it is
-  // present even though no MoveIt node is running). Launch parameters are
-  // usually OVERRIDES rather than declared parameters, and which accessor sees
-  // them differs (rclcpp exposes undeclared overrides through
-  // get_parameter_overrides(); get_parameter() throws
-  // ParameterUninitializedException). Try the override map first, then the
-  // declared parameter, so both layouts work.
-  QString srdf;
-  try {
-    const auto & overrides =
-      node_->get_node_parameters_interface()->get_parameter_overrides();
-    const auto it = overrides.find("robot_description_semantic");
-    if (it != overrides.end() &&
-        it->second.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
-      srdf = QString::fromStdString(it->second.get<std::string>());
-    }
-  } catch (const std::exception &) {
-    // No override map, or an unexpected type: fall through to the declared
-    // parameter and then the topic.
-  }
-  if (srdf.isEmpty() && node_->has_parameter("robot_description_semantic")) {
-    try {
-      const auto param = node_->get_parameter("robot_description_semantic");
-      if (param.get_type() == rclcpp::ParameterType::PARAMETER_STRING) {
-        srdf = QString::fromStdString(param.as_string());
-      }
-    } catch (const std::exception &) {
-      // Uninitialised (override present but not declared): the topic fallback
-      // is the remaining source.
-    }
-  }
-
-  if (!srdf.isEmpty()) {
-    parseNamedPoses(srdf);
-  }
-}
-
-void JointsTab::parseNamedPoses(const QString & srdf_xml)
-{
-  if (named_poses_loaded_ || srdf_xml.isEmpty()) {
-    return;
-  }
-
-  // <group_state name="home" group="manipulator"> <joint name="joint_1"
-  // value="0"/> ... </group_state>. QXmlStreamReader is already linked in
-  // through QtCore, so parsing the couple of attributes needed here needs no
-  // new dependency (and no SRDF library).
-  QVector<NamedPose> poses;
-  QXmlStreamReader reader(srdf_xml);
-  NamedPose current;
-  bool in_pose = false;
-  // .toString() rather than holding the raw QStringRef: Qt6 removed QStringRef
-  // (name()/attributes().value() return QStringView there), so the version-
-  // agnostic form is the one that compiles on both Qt5 and Qt6.
-  while (!reader.atEnd()) {
-    reader.readNext();
-    const QString tag = reader.name().toString();
-    if (reader.isStartElement()) {
-      if (tag == QLatin1String("group_state")) {
-        current = NamedPose();
-        current.name = reader.attributes().value("name").toString();
-        current.group = reader.attributes().value("group").toString();
-        in_pose = !current.name.isEmpty();
-      } else if (in_pose && tag == QLatin1String("joint")) {
-        const QString joint = reader.attributes().value("name").toString();
-        bool ok = false;
-        const double value = reader.attributes().value("value").toString().toDouble(&ok);
-        if (ok && !joint.isEmpty()) {
-          current.joints.append(qMakePair(joint, value));
-        }
-      }
-    } else if (reader.isEndElement() && tag == QLatin1String("group_state")) {
-      // A state with no joints (or a group state for a group we cannot use) is
-      // not a goal we could ever set, so it is not offered.
-      if (in_pose && !current.joints.isEmpty()) {
-        poses.append(current);
-      }
-      in_pose = false;
-    }
-  }
-  if (reader.hasError() || poses.isEmpty()) {
-    return;  // not an SRDF, or no usable named poses: stay disabled/empty
+  // Preserve the user's selection across a poll that changed the list for an
+  // unrelated reason (a joint-lock rebuild, a re-connecting planner). Match by
+  // name AND group: "open" is deliberately shared by every gripper.
+  QString selected_name;
+  QString selected_group;
+  const int selected = named_pose_combo_->currentIndex();
+  if (selected > 0 && selected - 1 < named_poses_.size()) {
+    selected_name = named_poses_[selected - 1].name;
+    selected_group = named_poses_[selected - 1].group;
   }
 
   named_poses_ = poses;
-  named_poses_loaded_ = true;
 
   named_pose_combo_->blockSignals(true);
   named_pose_combo_->clear();
   named_pose_combo_->addItem(tr("— select a named pose —"));
-  for (const NamedPose & pose : named_poses_) {
-    // The group is shown because two groups can share a state name in general
-    // (the kortex ones do not, but nothing prevents it).
+  int restore = 0;
+  for (int i = 0; i < named_poses_.size(); ++i) {
+    const NamedPose & pose = named_poses_[i];
+    // The group is shown because two groups can share a state name (every
+    // gripper offers "open"/"close"), and the arm poses' group is empty.
     named_pose_combo_->addItem(
       pose.group.isEmpty() ? pose.name
                            : tr("%1  [%2]").arg(pose.name, pose.group));
+    if (pose.name == selected_name && pose.group == selected_group) {
+      restore = i + 1;
+    }
   }
-  named_pose_combo_->setCurrentIndex(0);
+  named_pose_combo_->setCurrentIndex(restore);
   named_pose_combo_->blockSignals(false);
-  named_pose_combo_->setEnabled(true);
+  named_pose_combo_->setEnabled(!named_poses_.isEmpty());
 }
 
 void JointsTab::onNamedPoseChosen(int index)
@@ -781,7 +776,17 @@ void JointsTab::onNamedPoseChosen(int index)
   if (index <= 0) {
     return;  // the placeholder row, or a cleared combo
   }
+  const bool gripper =
+    (index - 1) < named_poses_.size() && named_poses_[index - 1].gripper;
   applyNamedPose(index - 1);
+  if (gripper) {
+    // A gripper command is an action, not a staged target: return the combo to
+    // the placeholder so choosing the SAME open/close again still emits a
+    // signal (currentIndexChanged only fires when the index changes).
+    named_pose_combo_->blockSignals(true);
+    named_pose_combo_->setCurrentIndex(0);
+    named_pose_combo_->blockSignals(false);
+  }
 }
 
 void JointsTab::applyNamedPose(int index)
@@ -790,6 +795,15 @@ void JointsTab::applyNamedPose(int index)
     return;
   }
   const NamedPose & pose = named_poses_[index];
+
+  // A gripper's open/close is a controller command, not a planning goal. Send
+  // it even when the finger joints are locked out of the cspace (the normal
+  // case): there is no target row to edit, and planning could never reach it.
+  if (pose.gripper) {
+    sendGripperCommand(pose);
+    return;
+  }
+
   if (tree_->topLevelItemCount() == 0) {
     setStatus(
       tr("named pose '%1' needs the cspace — waiting for get_joint_info")
@@ -797,9 +811,9 @@ void JointsTab::applyNamedPose(int index)
     return;
   }
 
-  // Index the pose by joint NAME: an SRDF group state names only the joints it
-  // pins, so its joints are a SUBSET of the cspace, and the SRDF's order need
-  // not match the cspace's.
+  // Index the pose by joint NAME: a descriptor pose names only the joints it
+  // pins, so its joints are a SUBSET of the cspace, and the descriptor's order
+  // need not match the cspace's.
   QHash<QString, double> pose_values;
   for (const QPair<QString, double> & joint : pose.joints) {
     pose_values.insert(joint.first, joint.second);
@@ -813,8 +827,8 @@ void JointsTab::applyNamedPose(int index)
   // holds is considered: a joint the pose does NOT name falls back to the live
   // /joint_states value rather than silently keeping whatever target was staged
   // before. That is what MoveIt does with a goal state's unnamed joints, and it
-  // is what makes selecting "close" (a 1-joint gripper state) leave the arm
-  // where it is instead of holding some stale arm target.
+  // is what makes a partial descriptor pose leave the rest of the arm where it
+  // is instead of holding some stale arm target.
   for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
     QTreeWidgetItem * item = tree_->topLevelItem(i);
     const QString joint = item->text(COL_JOINT);
@@ -852,6 +866,160 @@ void JointsTab::applyNamedPose(int index)
     message += tr("; not in the cspace (locked?): %1").arg(absent.join(", "));
   }
   setStatus(message);
+}
+
+void JointsTab::sendGripperCommand(const NamedPose & pose)
+{
+  if (node_ == nullptr || pose.gripper_action.isEmpty() ||
+    pose.joints.isEmpty())
+  {
+    setStatus(tr("gripper '%1' has no action or position in the descriptor")
+                .arg(pose.group));
+    return;
+  }
+
+  const std::string action = pose.gripper_action.toStdString();
+  const QString label = pose.group.isEmpty()
+    ? pose.name : tr("%1 [%2]").arg(pose.name, pose.group);
+
+  const bool trajectory =
+    pose.gripper_type == QLatin1String("JointTrajectory") ||
+    pose.gripper_type == QLatin1String("FollowJointTrajectory");
+
+  if (trajectory) {
+    auto & client = gripper_trajectory_clients_[pose.gripper_action];
+    if (!client) {
+      client =
+        rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
+        node_, action);
+    }
+    if (!client->action_server_is_ready()) {
+      setStatus(tr("gripper action %1 unavailable").arg(pose.gripper_action));
+      return;
+    }
+    control_msgs::action::FollowJointTrajectory::Goal goal;
+    for (const QPair<QString, double> & joint : pose.joints) {
+      goal.trajectory.joint_names.push_back(joint.first.toStdString());
+    }
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    for (const QPair<QString, double> & joint : pose.joints) {
+      point.positions.push_back(joint.second);
+      point.velocities.push_back(0.0);
+    }
+    const double duration = pose.gripper_time_from_start;
+    point.time_from_start.sec = static_cast<int32_t>(duration);
+    point.time_from_start.nanosec =
+      static_cast<uint32_t>((duration - std::floor(duration)) * 1e9);
+    goal.trajectory.points.push_back(point);
+
+    rclcpp_action::Client<
+      control_msgs::action::FollowJointTrajectory>::SendGoalOptions options;
+    options.goal_response_callback =
+      [this, label](rclcpp_action::ClientGoalHandle<
+          control_msgs::action::FollowJointTrajectory>::SharedPtr handle)
+      {
+        const bool accepted = handle != nullptr;
+        runOnGuiThread([this, label, accepted]() {
+          if (!accepted) {
+            setStatus(tr("%1: gripper goal rejected").arg(label));
+          }
+        });
+      };
+    options.result_callback =
+      [this, label](const rclcpp_action::ClientGoalHandle<
+          control_msgs::action::FollowJointTrajectory>::WrappedResult & result)
+      {
+        const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED;
+        runOnGuiThread([this, label, ok]() {
+          setStatus(ok ? tr("%1: gripper command done").arg(label)
+                       : tr("%1: gripper command failed").arg(label));
+        });
+      };
+    client->async_send_goal(goal, options);
+    setStatus(tr("%1: sent to %2").arg(label, pose.gripper_action));
+    return;
+  }
+
+  if (pose.gripper_type == QLatin1String("ParallelGripperCommand")) {
+    auto & client = parallel_gripper_clients_[pose.gripper_action];
+    if (!client) {
+      client = rclcpp_action::create_client<
+        control_msgs::action::ParallelGripperCommand>(node_, action);
+    }
+    if (!client->action_server_is_ready()) {
+      setStatus(tr("gripper action %1 unavailable").arg(pose.gripper_action));
+      return;
+    }
+    control_msgs::action::ParallelGripperCommand::Goal goal;
+    for (const QPair<QString, double> & joint : pose.joints) {
+      goal.command.name.push_back(joint.first.toStdString());
+      goal.command.position.push_back(joint.second);
+      goal.command.effort.push_back(pose.gripper_max_effort);
+    }
+    rclcpp_action::Client<
+      control_msgs::action::ParallelGripperCommand>::SendGoalOptions options;
+    options.goal_response_callback =
+      [this, label](rclcpp_action::ClientGoalHandle<
+          control_msgs::action::ParallelGripperCommand>::SharedPtr handle)
+      {
+        const bool accepted = handle != nullptr;
+        runOnGuiThread([this, label, accepted]() {
+          if (!accepted) {
+            setStatus(tr("%1: gripper goal rejected").arg(label));
+          }
+        });
+      };
+    options.result_callback =
+      [this, label](const rclcpp_action::ClientGoalHandle<
+          control_msgs::action::ParallelGripperCommand>::WrappedResult & result)
+      {
+        const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED;
+        runOnGuiThread([this, label, ok]() {
+          setStatus(ok ? tr("%1: gripper command done").arg(label)
+                       : tr("%1: gripper command failed").arg(label));
+        });
+      };
+    client->async_send_goal(goal, options);
+    setStatus(tr("%1: sent to %2").arg(label, pose.gripper_action));
+    return;
+  }
+
+  auto & client = gripper_clients_[pose.gripper_action];
+  if (!client) {
+    client = rclcpp_action::create_client<control_msgs::action::GripperCommand>(
+      node_, action);
+  }
+  if (!client->action_server_is_ready()) {
+    setStatus(tr("gripper action %1 unavailable").arg(pose.gripper_action));
+    return;
+  }
+  control_msgs::action::GripperCommand::Goal goal;
+  goal.command.position = pose.joints.first().second;
+  goal.command.max_effort = pose.gripper_max_effort;
+  rclcpp_action::Client<control_msgs::action::GripperCommand>::SendGoalOptions options;
+  options.goal_response_callback =
+    [this, label](rclcpp_action::ClientGoalHandle<
+        control_msgs::action::GripperCommand>::SharedPtr handle)
+    {
+      const bool accepted = handle != nullptr;
+      runOnGuiThread([this, label, accepted]() {
+        if (!accepted) {
+          setStatus(tr("%1: gripper goal rejected").arg(label));
+        }
+      });
+    };
+  options.result_callback =
+    [this, label](const rclcpp_action::ClientGoalHandle<
+        control_msgs::action::GripperCommand>::WrappedResult & result)
+    {
+      const bool ok = result.code == rclcpp_action::ResultCode::SUCCEEDED;
+      runOnGuiThread([this, label, ok]() {
+        setStatus(ok ? tr("%1: gripper command done").arg(label)
+                     : tr("%1: gripper command failed").arg(label));
+      });
+    };
+  client->async_send_goal(goal, options);
+  setStatus(tr("%1: sent to %2").arg(label, pose.gripper_action));
 }
 
 namespace

@@ -34,6 +34,28 @@ Pose7 pose_from_msg(const geometry_msgs::msg::Pose & msg)
     msg.orientation.w, msg.orientation.x, msg.orientation.y, msg.orientation.z;
   return pose;
 }
+
+// The descriptor bridge joins a joint list into one space-separated string so
+// it can cross pybind without a nested container. This is the inverse.
+std::vector<std::string> split_words(const std::string & text)
+{
+  std::vector<std::string> out;
+  std::string current;
+  for (const char c : text) {
+    if (c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '\r') {
+      if (!current.empty()) {
+        out.push_back(current);
+        current.clear();
+      }
+    } else {
+      current.push_back(c);
+    }
+  }
+  if (!current.empty()) {
+    out.push_back(current);
+  }
+  return out;
+}
 }  // namespace
 
 // PORT: the AddObject request -> spec extraction
@@ -289,6 +311,66 @@ void RosServiceManager::handle_get_joint_info(
     response->locked_joint_names = limits.locked_joint_names;
     response->locked_positions = limits.locked_positions;
     response->tool_frames = bridge_->tool_frames(handle_);
+
+    // Named poses and gripper controllers come from the robot descriptor the
+    // node loaded. They are the planner's own definitions, so a client no
+    // longer has to parse MoveIt's SRDF (`robot_description_semantic`) to find
+    // the same poses. A gripper's open/close is reported here too because the
+    // finger joints are usually locked out of the cspace: the UI must be able
+    // to command the controller directly.
+    const auto & desc = robot_description_;
+    std::size_t joint_offset = 0;
+    for (std::size_t i = 0; i < desc.named_config_names.size(); ++i) {
+      curobov2_ros_interfaces::msg::NamedJointConfig pose;
+      pose.name = desc.named_config_names[i];
+      const std::size_t count =
+        (i < desc.named_config_sizes.size())
+        ? static_cast<std::size_t>(desc.named_config_sizes[i]) : 0U;
+      for (std::size_t j = 0; j < count; ++j) {
+        if (joint_offset >= desc.named_config_joint_names.size() ||
+          joint_offset >= desc.named_config_positions.size())
+        {
+          break;
+        }
+        pose.joint_names.push_back(desc.named_config_joint_names[joint_offset]);
+        pose.positions.push_back(desc.named_config_positions[joint_offset]);
+        ++joint_offset;
+      }
+      response->named_joint_configs.push_back(std::move(pose));
+    }
+    for (std::size_t i = 0; i < desc.gripper_names.size(); ++i) {
+      curobov2_ros_interfaces::msg::GripperController gripper;
+      gripper.name = desc.gripper_names[i];
+      if (i < desc.gripper_types.size()) {
+        gripper.type = desc.gripper_types[i];
+      }
+      if (i < desc.gripper_controllers.size()) {
+        gripper.controller = desc.gripper_controllers[i];
+      }
+      if (i < desc.gripper_action_ns.size()) {
+        gripper.action_ns = desc.gripper_action_ns[i];
+      }
+      if (i < desc.gripper_joint_lists.size()) {
+        gripper.joints = split_words(desc.gripper_joint_lists[i]);
+      }
+      if (i < desc.gripper_command_joints.size()) {
+        gripper.command_joint = desc.gripper_command_joints[i];
+      }
+      if (i < desc.gripper_open_positions.size()) {
+        gripper.open = desc.gripper_open_positions[i];
+      }
+      if (i < desc.gripper_close_positions.size()) {
+        gripper.close = desc.gripper_close_positions[i];
+      }
+      if (i < desc.gripper_max_efforts.size()) {
+        gripper.max_effort = desc.gripper_max_efforts[i];
+      }
+      if (i < desc.gripper_time_from_start.size()) {
+        gripper.time_from_start = desc.gripper_time_from_start[i];
+      }
+      response->grippers.push_back(std::move(gripper));
+    }
+
     response->success = true;
     response->message = std::to_string(dof) + " joints in cspace";
     if (!limits.locked_joint_names.empty()) {

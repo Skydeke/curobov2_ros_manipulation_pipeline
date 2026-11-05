@@ -372,6 +372,9 @@ void UnifiedPlannerNode::setup() {
   });
   ros_service_manager_ = std::make_unique<RosServiceManager>(
       this, bridge_, handle_, obstacle_manager_.get());
+  // GetJointInfo reports the descriptor's named poses + grippers so the RViz
+  // panel does not depend on MoveIt's SRDF.
+  ros_service_manager_->set_robot_description(desc);
   // PORT: ros_service_manager.init_services - the GPU-backed viz timers run on
   // lane_viz and drop the cycle when it is busy.
   ros_service_manager_->set_viz_lane(lane_viz_.get());

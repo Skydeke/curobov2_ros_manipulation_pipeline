@@ -66,7 +66,13 @@ next to the code it would have gone in.
   strip (`Set from current` / `Zero` / `Check` / `Clear locks`) and the run strip
   (`Plan` / `Plan + send` / `Stop`). MoveIt's "Nullspace exploration:" sliders are
   absent: curobo's `generate_trajectory` takes a goal configuration, not a
-  nullspace goal.
+  nullspace goal. Above the table, "Named pose:" is filled from the planner's
+  own robot descriptor via `get_joint_info` — `named_joint_configs` for arm
+  poses plus one `open`/`close` entry per `gripper_controllers` entry. It does
+  **not** read MoveIt's SRDF, so the same names work with or without a MoveIt
+  config. Arm poses only seed the target column; a gripper entry is sent
+  straight to the gripper action, so open/close keeps working when the finger
+  joints are locked out of the planning cspace.
 - **Scene Objects** — MoveIt's "Current Scene Objects" group over a live,
   flat list from the server's `get_scene_objects` service, with a strip that acts
   on the selection (Refresh / Remove / Clear / Attach / Detach), then the

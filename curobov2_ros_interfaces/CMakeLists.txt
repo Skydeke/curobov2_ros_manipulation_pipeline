@@ -34,6 +34,8 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/SetMask.srv"
   "msg/ObjectParameters.msg"
   "msg/SceneObject.msg"
+  "msg/NamedJointConfig.msg"
+  "msg/GripperController.msg"
   "msg/SparseVoxelGrid.msg"
   "msg/Goalset.msg"
   "msg/ConsideredTrajectory.msg"

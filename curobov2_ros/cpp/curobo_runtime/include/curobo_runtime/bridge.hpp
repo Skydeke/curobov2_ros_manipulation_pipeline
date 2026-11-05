@@ -130,6 +130,27 @@ struct RobotDescriptionOutcome
   std::map<std::string, std::string> strategy_params;
   std::vector<std::string> home_names;
   std::vector<double> home_positions;
+  // The descriptor's full `named_joint_configs` map, flattened for the pybind
+  // boundary (one name per pose, then a concatenated joint/value list with
+  // per-pose sizes). GetJointInfo exposes these so the RViz panel does not have
+  // to parse MoveIt's SRDF.
+  std::vector<std::string> named_config_names;
+  std::vector<std::string> named_config_joint_names;
+  std::vector<double> named_config_positions;
+  std::vector<std::int64_t> named_config_sizes;
+  // The descriptor's `gripper_controllers` map, flattened the same way. A
+  // gripper is not a planning DOF, so its open/close is executed on the
+  // controller rather than planned.
+  std::vector<std::string> gripper_names;
+  std::vector<std::string> gripper_types;
+  std::vector<std::string> gripper_controllers;
+  std::vector<std::string> gripper_action_ns;
+  std::vector<std::string> gripper_joint_lists;  // space-separated joints
+  std::vector<std::string> gripper_command_joints;
+  std::vector<double> gripper_open_positions;
+  std::vector<double> gripper_close_positions;
+  std::vector<double> gripper_max_efforts;
+  std::vector<double> gripper_time_from_start;
 };
 
 // PORT: robot_model_manager.get_collision_spheres_with_attached - world

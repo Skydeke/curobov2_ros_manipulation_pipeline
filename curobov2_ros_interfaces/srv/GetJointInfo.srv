@@ -49,3 +49,15 @@ float64[] locked_positions
 # Cartesian tool frames the planner accepts goals for (cuRobo `tool_frames`).
 # One per arm on a bimanual robot.
 string[] tool_frames
+
+# Named joint configurations from the robot descriptor (`named_joint_configs`).
+# These are the planner's own named poses, so a UI no longer has to parse
+# MoveIt's SRDF (`robot_description_semantic`) to offer them. Each entry names
+# its joints, and may cover only a subset of the cspace.
+NamedJointConfig[] named_joint_configs
+
+# Gripper controllers from the robot descriptor (`gripper_controllers`). A
+# gripper is not a planning DOF: these carry the open/close positions and the
+# controller action, so a UI can still open/close the jaws when the finger
+# joints are locked out of the cspace.
+GripperController[] grippers

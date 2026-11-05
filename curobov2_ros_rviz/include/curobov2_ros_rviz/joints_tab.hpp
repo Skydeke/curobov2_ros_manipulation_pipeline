@@ -8,10 +8,12 @@
 #include <curobov2_ros_interfaces/srv/set_joint_locks.hpp>
 #include <curobov2_ros_interfaces/srv/trajectory_generation.hpp>
 #include <curobov2_ros_interfaces/action/send_trajectory.hpp>
+#include <control_msgs/action/follow_joint_trajectory.hpp>
+#include <control_msgs/action/gripper_command.hpp>
+#include <control_msgs/action/parallel_gripper_command.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
 #include <rviz_common/config.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/string.hpp>
 
 #include "curobov2_ros_rviz/node_spinner.hpp"
 
@@ -65,39 +67,67 @@ namespace curobov2_ros_rviz
 ///  * `kinematics.lock_joints`, fetched with the cspace from the read-only
 ///    `get_joint_info` service, reported in the status line, plus a "Clear locks"
 ///    button that drops the override and rebuilds the model.
-///  * a "Named pose:" combo of the robot's SRDF `<group_state>` named poses
-///    (home, retract, vertical, open, close for the kortex). MoveIt exposes the
-///    same thing as the "Goal State" combo on its Planning tab; here it belongs
-///    on the Joints tab because these are JOINT configurations, i.e. exactly the
-///    target column this tab already owns and plans to. Selecting one writes the
-///    named joints into the target column BY NAME (a pose names its joints, and
+///  * a "Named pose:" combo of the robot descriptor's named joint
+///    configurations (`named_joint_configs`), fetched from the planner's
+///    `get_joint_info` service. This deliberately does NOT read MoveIt's SRDF:
+///    the descriptor is the planner's own source of truth, and the task
+///    constructor resolves the same names from it. Selecting an arm pose writes
+///    its joints into the target column BY NAME (a pose names its joints, and
 ///    the cspace may not contain all of them); a joint the pose does NOT name
-///    falls back to the live /joint_states value, so a subset state like the
-///    gripper's "close" leaves the arm where it is rather than holding a stale
-///    target. This keeps the combo compatible with the bar/slider and with
-///    Plan / Plan + send on the same request. The SRDF is
-///    read from the rviz node's `robot_description_semantic` parameter — which
-///    rviz.launch.py passes even though no MoveIt node runs — with the latched
-///    `/robot_description_semantic` topic as a fallback.
+///    falls back to the live /joint_states value, so a subset state leaves the
+///    rest of the arm where it is rather than holding a stale target. This keeps
+///    the combo compatible with the bar/slider and with Plan / Plan + send on
+///    the same request.
+///  * one "open"/"close" entry per gripper controller from the descriptor's
+///    `gripper_controllers` map. A gripper is NOT a planning DOF, and its
+///    finger joints are usually locked out of the cspace, so selecting one of
+///    these sends the descriptor's open/close position to the controller action
+///    directly (MoveIt's simple-controller-manager semantics) instead of
+///    editing the target. That is what keeps open/close working even when the
+///    gripper is not in the planning space.
 ///
 /// A locked joint is pinned OUT of the cspace, so it has no row here and cannot
-/// be commanded — the panel says so explicitly rather than silently dropping
-/// it from the target, which is the failure mode that produces a plan the
-/// operator did not ask for.
+/// be planned — the panel says so explicitly rather than silently dropping it
+/// from the target, which is the failure mode that produces a plan the operator
+/// did not ask for.
 class JointsTab : public QWidget
 {
   Q_OBJECT
 
 public:
-  /// A named pose from the robot's SRDF (`<group_state>`): the pose name, the
-  /// group it belongs to, and the joint values it pins, each by joint NAME (the
-  /// cspace index is not known until get_joint_info answers, and the pose's
-  /// joints may be a superset of the cspace's, so names are the only stable key).
+  /// A named pose from the robot descriptor: the pose name, the group it
+  /// belongs to (empty for `named_joint_configs`, the gripper name for a
+  /// synthesized open/close entry), and the joint values it pins, each by joint
+  /// NAME (the cspace index is not known until get_joint_info answers, and the
+  /// pose's joints may be a superset of the cspace's, so names are the only
+  /// stable key).
   struct NamedPose
   {
     QString name;
     QString group;
     QVector<QPair<QString, double>> joints;
+
+    /// True for a synthesized gripper open/close entry: selecting it sends a
+    /// controller action instead of editing the planning target.
+    bool gripper = false;
+    QString gripper_type;
+    QString gripper_action;
+    QString gripper_command_joint;
+    QStringList gripper_joints;
+    double gripper_max_effort = 0.0;
+    double gripper_time_from_start = 2.0;
+
+    bool operator==(const NamedPose & other) const
+    {
+      return name == other.name && group == other.group &&
+             joints == other.joints && gripper == other.gripper &&
+             gripper_type == other.gripper_type &&
+             gripper_action == other.gripper_action &&
+             gripper_command_joint == other.gripper_command_joint &&
+             gripper_joints == other.gripper_joints &&
+             gripper_max_effort == other.gripper_max_effort &&
+             gripper_time_from_start == other.gripper_time_from_start;
+    }
   };
 
 public:
@@ -166,16 +196,17 @@ private:
   QTreeWidgetItem * rowFor(const QString & joint) const;
   void rebuildRows(const QStringList & names, const QVector<double> & lower,
                    const QVector<double> & upper);
-  /// Load the robot's named poses from the rviz node's
-  /// `robot_description_semantic` parameter, falling back to the latched
-  /// `/robot_description_semantic` topic (see the class comment). Idempotent:
-  /// once poses are found it stops trying.
-  void loadNamedPoses();
-  /// Parse the `<group_state>` elements of an SRDF document into named_poses_
-  /// and repopulate named_pose_combo_.
-  void parseNamedPoses(const QString & srdf_xml);
-  /// Write the joints of named_poses_[index] into the target column, by name.
+  /// Replace the combo's poses, preserving the selected item when the new list
+  /// still contains it. get_joint_info is polled, so this runs repeatedly with
+  /// the same descriptor data and must not reset the user's selection.
+  void setNamedPoses(const QVector<NamedPose> & poses);
+  /// Write the joints of named_poses_[index] into the target column, by name, or
+  /// send its gripper action when it is a synthesized open/close entry.
   void applyNamedPose(int index);
+  /// Send an open/close command to the descriptor's gripper controller. The
+  /// jaws are not planning DOFs, so this is the only way a locked gripper can
+  /// still be opened or closed from this panel.
+  void sendGripperCommand(const NamedPose & pose);
 
   rclcpp::Node::SharedPtr node_;
   QString planner_node_ = QStringLiteral("curobo_server");
@@ -237,14 +268,23 @@ private:
   QPushButton * check_button_ = nullptr;
   QPushButton * clear_locks_button_ = nullptr;
 
-  /// Named poses from the robot's SRDF, in document order (empty until loaded).
+  /// Named poses from the robot descriptor (empty until get_joint_info
+  /// answers).
   QVector<NamedPose> named_poses_;
-  /// True once loadNamedPoses() has found a usable SRDF; then the 2 s retry in
-  /// refreshJointInfo() stops re-reading it.
-  bool named_poses_loaded_ = false;
-  /// Fallback SRDF source: the latched /robot_description_semantic topic.
-  rclcpp::Subscription<std_msgs::msg::String>::SharedPtr srdf_sub_;
   QComboBox * named_pose_combo_ = nullptr;
+
+  /// Gripper action clients, keyed by action name. Created lazily on the first
+  /// open/close selection and kept for the planner's lifetime so the goal can
+  /// outlive the click that sent it. The three maps match the three action
+  /// shapes the descriptor schema allows.
+  QHash<QString, rclcpp_action::Client<control_msgs::action::GripperCommand>::SharedPtr>
+  gripper_clients_;
+  QHash<QString,
+    rclcpp_action::Client<control_msgs::action::ParallelGripperCommand>::SharedPtr>
+  parallel_gripper_clients_;
+  QHash<QString,
+    rclcpp_action::Client<control_msgs::action::FollowJointTrajectory>::SharedPtr>
+  gripper_trajectory_clients_;
 
   /// "Preview" gate + its topic. Checked => the target column is mirrored onto
   /// <planner_node>/trajectory (a one-waypoint JointTrajectory) whenever it

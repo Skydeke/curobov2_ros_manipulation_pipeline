@@ -146,7 +146,9 @@ def robot_description(robot_arg: str, robot_config_file: str):
 
     Returns the fields the C++ node needs: base_link, the resolved cuRobo config
     (`curobo_config`, a package:// URI resolved to a path), the control strategy
-    key + its params, and the `home` named joint config.
+    key + its params, the `home` named joint config, and the full
+    `named_joint_configs` / `gripper_controllers` maps flattened for
+    GetJointInfo (so tooling does not need MoveIt's SRDF).
     """
     import os
 
@@ -161,7 +163,58 @@ def robot_description(robot_arg: str, robot_config_file: str):
     if curobo_config:
         curobo_config = _resolve_uri(curobo_config, os.path.dirname(path))
     params = data.get("strategy_params") or {}
-    home = (data.get("named_joint_configs") or {}).get("home") or {}
+    named = data.get("named_joint_configs") or {}
+    home = named.get("home") or {}
+
+    # Flatten the named configs for the C++ -> ROS boundary. A dict of dicts
+    # cannot cross the pybind bridge without a JSON dependency, so each pose
+    # becomes (name, joint names, positions, size). Order is the YAML's own
+    # document order, which is the order a UI should show.
+    named_config_names = []
+    named_config_joint_names = []
+    named_config_positions = []
+    named_config_sizes = []
+    for pose_name, joints in named.items():
+        if not isinstance(joints, dict):
+            continue
+        pairs = [(str(j), float(v)) for j, v in joints.items()]
+        named_config_names.append(str(pose_name))
+        named_config_sizes.append(len(pairs))
+        for joint, value in pairs:
+            named_config_joint_names.append(joint)
+            named_config_positions.append(value)
+
+    # Gripper controllers: same schema the task constructor consumes. The
+    # legacy single `gripper_controller:` block is the one-entry form.
+    grippers = data.get("gripper_controllers") or {}
+    if not grippers and isinstance(data.get("gripper_controller"), dict):
+        grippers = {"default": data["gripper_controller"]}
+    gripper_names = []
+    gripper_types = []
+    gripper_controllers = []
+    gripper_action_ns = []
+    gripper_joint_lists = []
+    gripper_command_joints = []
+    gripper_open_positions = []
+    gripper_close_positions = []
+    gripper_max_efforts = []
+    gripper_time_from_start = []
+    for gripper_name, cfg in grippers.items():
+        if not isinstance(cfg, dict):
+            continue
+        joints = cfg.get("joints") or []
+        gripper_names.append(str(gripper_name))
+        gripper_types.append(str(cfg.get("type") or "GripperCommand"))
+        gripper_controllers.append(str(cfg.get("name") or ""))
+        gripper_action_ns.append(str(cfg.get("action_ns") or "gripper_cmd"))
+        gripper_joint_lists.append(" ".join(str(j) for j in joints))
+        gripper_command_joints.append(str(cfg.get("command_joint") or ""))
+        gripper_open_positions.append(float(cfg.get("open", 0.0) or 0.0))
+        gripper_close_positions.append(float(cfg.get("close", 0.0) or 0.0))
+        gripper_max_efforts.append(float(cfg.get("max_effort", 0.0) or 0.0))
+        gripper_time_from_start.append(
+            float(cfg.get("time_from_start", 2.0) or 2.0))
+
     return {
         "found": True,
         "path": os.path.abspath(path),
@@ -172,6 +225,20 @@ def robot_description(robot_arg: str, robot_config_file: str):
         "strategy_params": {str(k): str(v) for k, v in params.items()},
         "home_names": [str(k) for k in home.keys()],
         "home_positions": [float(v) for v in home.values()],
+        "named_config_names": named_config_names,
+        "named_config_joint_names": named_config_joint_names,
+        "named_config_positions": named_config_positions,
+        "named_config_sizes": named_config_sizes,
+        "gripper_names": gripper_names,
+        "gripper_types": gripper_types,
+        "gripper_controllers": gripper_controllers,
+        "gripper_action_ns": gripper_action_ns,
+        "gripper_joint_lists": gripper_joint_lists,
+        "gripper_command_joints": gripper_command_joints,
+        "gripper_open_positions": gripper_open_positions,
+        "gripper_close_positions": gripper_close_positions,
+        "gripper_max_efforts": gripper_max_efforts,
+        "gripper_time_from_start": gripper_time_from_start,
     }
 def collision_spheres_with_attached(handle: int, q):
     """World collision spheres + per-sphere attached flag.

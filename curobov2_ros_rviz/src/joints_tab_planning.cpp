@@ -102,7 +102,7 @@ double targetOf(const QTreeWidgetItem * item)
 /// here, so the clamp to the joint's own limits cannot be bypassed by one path.
 ///
 /// A CONTINUOUS joint (reported range is a full turn or wider) is periodic, so
-/// a value written as the "other" turn — e.g. the SRDF's
+/// a value written as the "other" turn — e.g. the descriptor's
 /// laundry_check_gripper j5 = 6.3641, just past the 6.28 top — is not out of
 /// range, it is the SAME pose as 6.3641 - 2*pi = 0.0809. Clamping it to 6.28
 /// (what a plain std::clamp does) silently plans a different configuration;

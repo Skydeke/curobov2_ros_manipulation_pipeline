@@ -309,6 +309,39 @@ RobotDescriptionOutcome PyBridge::robot_description(
       result.attr("__getitem__")("home_names").cast<std::vector<std::string>>();
     out.home_positions =
       result.attr("__getitem__")("home_positions").cast<std::vector<double>>();
+    out.named_config_names =
+      result.attr("__getitem__")("named_config_names").cast<std::vector<std::string>>();
+    out.named_config_joint_names =
+      result.attr("__getitem__")("named_config_joint_names")
+      .cast<std::vector<std::string>>();
+    out.named_config_positions =
+      result.attr("__getitem__")("named_config_positions").cast<std::vector<double>>();
+    out.named_config_sizes =
+      result.attr("__getitem__")("named_config_sizes")
+      .cast<std::vector<std::int64_t>>();
+    out.gripper_names =
+      result.attr("__getitem__")("gripper_names").cast<std::vector<std::string>>();
+    out.gripper_types =
+      result.attr("__getitem__")("gripper_types").cast<std::vector<std::string>>();
+    out.gripper_controllers =
+      result.attr("__getitem__")("gripper_controllers")
+      .cast<std::vector<std::string>>();
+    out.gripper_action_ns =
+      result.attr("__getitem__")("gripper_action_ns").cast<std::vector<std::string>>();
+    out.gripper_joint_lists =
+      result.attr("__getitem__")("gripper_joint_lists")
+      .cast<std::vector<std::string>>();
+    out.gripper_command_joints =
+      result.attr("__getitem__")("gripper_command_joints")
+      .cast<std::vector<std::string>>();
+    out.gripper_open_positions =
+      result.attr("__getitem__")("gripper_open_positions").cast<std::vector<double>>();
+    out.gripper_close_positions =
+      result.attr("__getitem__")("gripper_close_positions").cast<std::vector<double>>();
+    out.gripper_max_efforts =
+      result.attr("__getitem__")("gripper_max_efforts").cast<std::vector<double>>();
+    out.gripper_time_from_start =
+      result.attr("__getitem__")("gripper_time_from_start").cast<std::vector<double>>();
     return out;
   } catch (const py::error_already_set & e) {
     throw BridgeError("config", e.what());
