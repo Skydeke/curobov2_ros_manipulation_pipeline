@@ -8,6 +8,7 @@ never change.
 
 from curobo_task_constructor.stages import (  # noqa: F401  (side-effect: registry)
     cartesian_path,
+    cartesian_waypoints,
     compute_ik,
     connect,
     current_state,
@@ -20,11 +21,18 @@ from curobo_task_constructor.stages import (  # noqa: F401  (side-effect: regist
     move_to,
     multi_tool_cartesian_path,
     multi_tool_move_to,
+    multi_tool_waypoints,
 )
 
+from curobo_task_constructor.stages.cartesian_waypoints import (  # noqa: F401
+    CartesianWaypoints,
+)
 from curobo_task_constructor.stages.multi_tool_cartesian_path import (  # noqa: F401
     MultiToolCartesianPath,
 )
 from curobo_task_constructor.stages.multi_tool_move_to import (  # noqa: F401
     MultiToolMoveTo,
+)
+from curobo_task_constructor.stages.multi_tool_waypoints import (  # noqa: F401
+    MultiToolWaypoints,
 )

@@ -3,14 +3,11 @@
 #include <rclcpp/rclcpp.hpp>
 
 #include <curobov2_ros_interfaces/srv/get_robot_strategies.hpp>
-#include <curobov2_ros_interfaces/srv/get_workspace.hpp>
 #include <curobov2_ros_interfaces/srv/set_planner.hpp>
 #include <curobov2_ros_interfaces/srv/set_robot_strategy.hpp>
-#include <curobov2_ros_interfaces/srv/set_workspace.hpp>
 #include <rviz_common/config.hpp>
 
 #include <QString>
-#include <QVector>
 #include <QWidget>
 
 #include <functional>
@@ -19,7 +16,6 @@
 #include <string>
 
 class QComboBox;
-class QDoubleSpinBox;
 class QGroupBox;
 class QLabel;
 class QPushButton;
@@ -53,15 +49,9 @@ namespace curobov2_ros_rviz
 ///    generated trajectory is handed to the robot. Genuinely per-server state
 ///    that no other tab could set. Switchable at runtime, which is what the
 ///    server's `set_robot_strategy` exists for.
-///  * **Workspace** — the centre and size of the collision workspace, MoveIt's
-///    third Context group. In curobo that is exactly the Mapper's TSDF/ESDF
-///    grid extent: the box the cameras can observe, the box whose voxels become
-///    collision geometry, and the box the `mapper_workspace` wireframe draws.
-///    Backed by the server's `get_workspace` / `set_workspace`, so the drawn box
-///    and the collision world move together. Unlike MoveIt — which applies the
-///    bounds the instant a spin box changes — an edit here is committed by
-///    "Apply workspace", because a resize rebuilds the Mapper and every solver
-///    (blocking, ~20 s) and must not fire on every keystroke.
+/// The collision workspace (MoveIt's third Context group) is deliberately not
+/// editable here: the native artifact fixes the mapper extent and voxel layout,
+/// so changing it requires a new export rather than a runtime service.
 ///
 /// MoveIt's "Warehouse" group (planning-database host/port) has no curobo
 /// equivalent, so it is absent rather than rendered permanently disabled.
@@ -80,13 +70,7 @@ namespace curobov2_ros_rviz
 ///
 /// Deliberately NOT here, despite looking like it belongs:
 ///
-///  * `set_collision_cache`. The service still exists, but the v2 rewrite
-///    deleted the triple OBB/mesh/blox cache it drove ("v2 uses a single
-///    `collision_cache` parameter on MotionPlannerCfg"), so the knob is
-///    vestigial. The one part of it that still matters — the voxel cache's
-///    extent — is derived from the Workspace group above, which is the control
-///    an operator actually reasons about. A dead triple in a panel is worse
-///    than no control.
+///  * `set_collision_cache`. The native artifact fixes these capacities.
 ///  * `set_link_collision`. It needs link names, and no service enumerates
 ///    them — the panel would have to make the user type them blind.
 ///  * MoveIt's "Start State" / "Goal State" combos. curobo has no selectable
@@ -110,9 +94,8 @@ public:
   int trajectoryType() const { return trajectory_type_; }
 
   /// Forwarded from the Planning tab's readiness probe. Gates the trajectory
-  /// type combo and the Workspace group, which are both calls against that
-  /// server; the planner-node combo stays live regardless, since repointing
-  /// merely re-runs the probe.
+  /// type combo, which is a call against that server; the planner-node combo
+  /// stays live regardless, since repointing merely re-runs the probe.
   void setPlannerReady(bool ready);
 
   /// Called once rviz has handed us a display context, so the tab can take the
@@ -139,19 +122,11 @@ private Q_SLOTS:
   void refreshStrategies();
   void applyStrategy();
   void applyTrajectoryType();
-  void refreshWorkspace();
-  void applyWorkspace();
-  void markWorkspaceDirty();
 
 private:
   void runOnGuiThread(std::function<void()> fn);
   void setStatus(const QString & text);
   void rebuildClients();
-  /// Writes the six workspace spin boxes from a server reply, with signals
-  /// blocked so populating them never marks the group dirty or sends anything.
-  void showWorkspace(const QVector<double> & center, const QVector<double> & extent,
-                     double voxel_size, bool perception_active);
-
   rclcpp::Node::SharedPtr node_;
   QString planner_node_ = QStringLiteral("curobo_server");
   bool initialized_ = false;
@@ -173,11 +148,6 @@ private:
     set_strategy_client_;
   rclcpp::Client<curobov2_ros_interfaces::srv::SetPlanner>::SharedPtr
     set_planner_client_;
-  rclcpp::Client<curobov2_ros_interfaces::srv::GetWorkspace>::SharedPtr
-    get_workspace_client_;
-  rclcpp::Client<curobov2_ros_interfaces::srv::SetWorkspace>::SharedPtr
-    set_workspace_client_;
-
   /// Last node set shown in the planner-node combo, so refreshPlannerNodeList()
   /// only rebuilds items when the graph actually changed.
   std::set<std::string> last_planner_nodes_;
@@ -188,27 +158,11 @@ private:
   QStringList last_strategies_;
   QString last_current_strategy_;
 
-  /// True when the user has edited a workspace spin box but not yet pressed
-  /// Apply. While set, refreshWorkspace() leaves the fields alone so a poll can
-  /// never wipe out an edit in progress.
-  bool workspace_dirty_ = false;
-  /// Whether the last get_workspace reply said a Mapper exists. Reported in the
-  /// group's caption; also what makes an Apply worth a ~20 s rebuild.
-  bool workspace_perception_active_ = false;
-
   QComboBox * planner_node_combo_ = nullptr;
   QComboBox * trajectory_type_combo_ = nullptr;
   QLabel * current_strategy_label_ = nullptr;
   QComboBox * strategy_combo_ = nullptr;
   QPushButton * apply_button_ = nullptr;
-  /// MoveIt's Workspace group: centre and size of the collision workspace, one
-  /// spin box per axis, in x/y/z order.
-  QDoubleSpinBox * workspace_center_[3] = {nullptr, nullptr, nullptr};
-  QDoubleSpinBox * workspace_size_[3] = {nullptr, nullptr, nullptr};
-  QPushButton * workspace_apply_button_ = nullptr;
-  /// Read-only caption under the workspace fields: voxel size and whether the
-  /// box has any collision geometry behind it.
-  QLabel * workspace_info_label_ = nullptr;
   QLabel * status_ = nullptr;
 };
 

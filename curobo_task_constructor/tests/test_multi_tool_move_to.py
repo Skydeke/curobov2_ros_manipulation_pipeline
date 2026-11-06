@@ -239,6 +239,15 @@ def _install_ros_stubs():
             self.target_joint_positions = []
             self.trajectory_constraints = []
             self.tool_trajectory_constraints = []
+            self.waypoints = []
+            self.tool_waypoints = []
+            self.waypoint_count = 0
+            self.path_position_tolerance = 0.05
+            self.path_orientation_tolerance = 0.261799388
+            self.final_position_tolerance = 0.005
+            self.final_orientation_tolerance = 0.05
+            self.track_orientation = True
+            self.outer_iterations = 4
 
     class _TrajectoryGoal:
         def __init__(self):

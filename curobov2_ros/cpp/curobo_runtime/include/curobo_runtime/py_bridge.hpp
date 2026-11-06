@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // PyBridge: the real bridge. Owns the embedded CPython interpreter and forwards
-// to the ROS-free Python module `curobo_bridge` (design sections 5, 6).
+// to the ROS-free Python module `curobo_python_runtime` (design sections 5, 6).
 //
 // pybind11 is confined to this package (rule 11.3); this header exposes no
 // pybind types (pimpl).

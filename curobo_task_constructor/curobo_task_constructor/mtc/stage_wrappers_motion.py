@@ -313,6 +313,163 @@ class MultiToolCartesianPath(MultiToolMoveTo):
         self.params["hold"] = [int(c) for c in (hold or [])]
 
 
+def _waypoint_dicts(poses) -> list:
+    """Normalize one tool's ordered poses to flat pose dicts (MTC shape)."""
+    if isinstance(poses, dict) and {"x", "y", "z"} <= set(poses):
+        poses = [poses]
+    if not isinstance(poses, (list, tuple)) or not poses:
+        raise ValueError("waypoint stages need a non-empty list of poses")
+    out = [_pose_dict_of(p) for p in poses]
+    if any(d is None for d in out):
+        raise TypeError("every waypoint must be a Pose-like or "
+                        "{x,y,z,qx,qy,qz,qw} dict")
+    return out
+
+
+def _waypoint_tool_entries(tools) -> list:
+    """Normalize per-tool waypoint goals to ``[{frame, waypoints}]``.
+
+    Accepts a ``{frame: [poses]}`` mapping, a list of
+    ``{frame, waypoints}`` / ``{frame, pose}`` dicts, or ``(frame, poses)``
+    pairs. A single pose is accepted wherever an ordered list is expected and
+    becomes a one-waypoint path.
+    """
+    if isinstance(tools, dict):
+        items = [{"frame": frame, "waypoints": poses}
+                 for frame, poses in tools.items()]
+    elif isinstance(tools, (list, tuple)) and tools:
+        items = []
+        for i, tool in enumerate(tools):
+            if isinstance(tool, (list, tuple)) and len(tool) == 2:
+                frame, raw = tool
+                items.append({"frame": frame, "waypoints": raw})
+            elif isinstance(tool, dict):
+                frame = tool.get("frame") or tool.get("link")
+                raw = tool.get("waypoints")
+                if raw is None:
+                    raw = tool.get("poses", tool.get("pose"))
+                items.append({"frame": frame, "waypoints": raw})
+            else:
+                raise TypeError(
+                    f"MultiToolWaypoints waypoint entry {i} must be a "
+                    "{frame, waypoints} dict or a (frame, poses) pair")
+    else:
+        raise ValueError("MultiToolWaypoints needs at least one tool entry")
+    out = []
+    for i, item in enumerate(items):
+        frame = str(item.get("frame") or "").strip()
+        if not frame:
+            raise ValueError(f"MultiToolWaypoints entry {i} has no frame")
+        out.append({"frame": frame,
+                    "waypoints": _waypoint_dicts(item.get("waypoints"))})
+    frames = [item["frame"] for item in out]
+    if len(set(frames)) != len(frames):
+        raise ValueError(f"MultiToolWaypoints repeats a tool frame ({frames})")
+    counts = {len(item["waypoints"]) for item in out}
+    if len(counts) != 1:
+        per_tool = {item["frame"]: len(item["waypoints"]) for item in out}
+        raise ValueError(
+            "MultiToolWaypoints needs the same number of waypoints per tool, "
+            f"got {per_tool}")
+    return out
+
+
+class _WaypointOptions:
+    """Shared waypoint solve-option setters (tolerances / tracking / passes)."""
+
+    def setTrackOrientation(self, enabled: bool = True) -> None:
+        """Track waypoint orientations (full pose) or positions only."""
+        self.params["track_orientation"] = bool(enabled)
+
+    def setPathTolerances(self, position: float, orientation: float) -> None:
+        """Tolerances for non-terminal waypoints: position (m), angle (rad)."""
+        self.params["path_position_tolerance"] = float(position)
+        self.params["path_orientation_tolerance"] = float(orientation)
+
+    def setFinalTolerances(self, position: float, orientation: float) -> None:
+        """Tolerances for the terminal waypoint: position (m), angle (rad)."""
+        self.params["final_position_tolerance"] = float(position)
+        self.params["final_orientation_tolerance"] = float(orientation)
+
+    def setTolerances(self, path_position: float, path_orientation: float,
+                      final_position: float, final_orientation: float) -> None:
+        """Set all four waypoint tolerances in one call."""
+        self.setPathTolerances(path_position, path_orientation)
+        self.setFinalTolerances(final_position, final_orientation)
+
+    def setOuterIterations(self, count: int) -> None:
+        """Outer solve/check passes issued by the waypoint solver (>= 1)."""
+        self.params["outer_iterations"] = int(count)
+
+
+class CartesianWaypoints(_WaypointOptions, _MotionBase):
+    """Ordered single-tool Cartesian path (``SetPlanner.MULTIPOINT``).
+
+    MTC-shaped surface for the ``cartesian_waypoints`` stage::
+
+        move = stages.CartesianWaypoints("descend", waypoint_planner)
+        move.setWaypoints([grasp_pose, ...])   # start pose excluded
+        move.setLink("tool_link")              # optional
+
+    The stage tracks the full poses; it never sends axis holds.
+    """
+
+    stage_type = "cartesian_waypoints"
+
+    def __init__(self, name: str = "cartesian waypoints", planner: Any = None,
+                 planning_attempts: int = None):
+        super().__init__(name, planner, planning_attempts)
+
+    def setWaypoints(self, waypoints) -> None:
+        """Set the ordered path (``K`` poses, the start pose excluded)."""
+        self.params.setdefault("goal", {})["waypoints"] = \
+            _waypoint_dicts(waypoints)
+
+    def setGoal(self, goal: Any) -> None:
+        """Single-pose override: a one-waypoint ordered path."""
+        self.setWaypoints([goal])
+
+    def setLink(self, link: str) -> None:
+        """Tool frame the waypoints refer to (blank = server default)."""
+        self.params["link"] = str(link)
+
+
+class MultiToolWaypoints(_WaypointOptions, MultiToolMoveTo):
+    """Ordered per-tool Cartesian paths planned together (``MULTIPOINT``).
+
+    MTC-shaped surface::
+
+        move = stages.MultiToolWaypoints("descend", waypoint_planner)
+        move.setWaypoints({
+            "left_tool": [left_grasp_pose],
+            "right_tool": [right_grasp_pose],
+        })
+
+    Each tool's list is ordered; every tool must provide the same number of
+    waypoints because the wire layout is waypoint-major. ``setTools`` is the
+    alias that also accepts the single-target ``{frame, pose}`` shape of
+    :class:`MultiToolMoveTo`. No axis holds are ever emitted.
+    """
+
+    stage_type = "multi_tool_waypoints"
+
+    def __init__(self, name: str = "multi tool waypoints",
+                 planner: Any = None, planning_attempts: int = None):
+        super().__init__(name, planner, planning_attempts)
+
+    def setWaypoints(self, tools) -> None:
+        """Set one ordered pose list per tool frame."""
+        self.params["goal"] = {"tools": _waypoint_tool_entries(tools)}
+
+    def setTools(self, tools) -> None:
+        """Alias for :meth:`setWaypoints` (single poses become 1-waypoint lists)."""
+        self.setWaypoints(tools)
+
+    def setGoals(self, tools) -> None:
+        """Alias for :meth:`setWaypoints` (the MTC ``setGoals`` spelling)."""
+        self.setWaypoints(tools)
+
+
 class GripperCommand(_StageBase):
     """Move one end effector's jaws without planning.
 
@@ -518,6 +675,8 @@ __all__ = [
     'MoveTo',
     'MultiToolMoveTo',
     'MultiToolCartesianPath',
+    'CartesianWaypoints',
+    'MultiToolWaypoints',
     'GripperCommand',
     'Connect',
     'CartesianPath',

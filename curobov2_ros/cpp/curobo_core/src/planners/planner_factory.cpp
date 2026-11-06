@@ -8,6 +8,7 @@
 #include "curobo_core/planners/classic_planner.hpp"
 #include "curobo_core/planners/joint_space_planner.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
+#include "curobo_core/planners/multipoint_planner.hpp"
 #include "curobo_core/planners/retarget_controller.hpp"
 
 namespace curobo_core
@@ -20,6 +21,7 @@ const std::vector<PlannerFactory::CatalogEntry> & PlannerFactory::catalog()
     {"classic", 0, "Classic"},
     {"mpc", 1, "MPC"},
     {"cartesian", 3, "Cartesian"},
+    {"multipoint", 4, "Cartesian Waypoint"},
     {"joint_space", 5, "Joint Space"},
     {"retarget", 6, "Motion Retargeting"},
   };
@@ -39,6 +41,11 @@ std::string canonical_key(const std::string & planner_type)
     key.end());
   if (key == "motion_gen") {return "classic";}
   if (key == "cartes" || key == "cartesian_path") {return "cartesian";}
+  if (key == "waypoint" || key == "waypoints" || key == "cartesian_waypoint" ||
+    key == "cartesian_waypoints")
+  {
+    return "multipoint";
+  }
   if (key == "model_predictive_control") {return "mpc";}
   if (key == "motion_retargeting" || key == "teleop") {return "retarget";}
   return key;
@@ -59,6 +66,9 @@ std::unique_ptr<TrajectoryPlanner> PlannerFactory::create(
     // PORT: CartesianPlanner subclasses ClassicPlanner (the reference's inert
     // min_fraction gate is removed - see the class header).
     return std::make_unique<CartesianPlanner>(bridge, handle, std::move(joint_names));
+  }
+  if (key == "multipoint") {
+    return std::make_unique<MultipointPlanner>(bridge, handle, std::move(joint_names));
   }
   if (key == "joint_space") {
     return std::make_unique<JointSpacePlanner>(bridge, handle, std::move(joint_names));

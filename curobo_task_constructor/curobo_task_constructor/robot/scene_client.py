@@ -248,7 +248,7 @@ class _SceneClientMixin:
             req.joint_state = self._to_joint_msg(joint_state)
         # AttachObject.srv has no link field: the server picks the per-arm
         # attach link whose parent flange is nearest the object (see
-        # curobo_bridge.scene._select_attach_link). `link` is accepted for
+        # curobo_python_runtime.scene._select_attach_link). `link` is accepted for
         # interface parity and cannot be forwarded over this service.
         res = self._call(self._attach_client, req)
         if res.success:

@@ -3,7 +3,7 @@
 //
 // Closed-loop MPC built on cuRobo ModelPredictiveControl (v2). The solver config
 // assembly (the MPPI/L-BFGS dicts and the cuRobo task-config paths) lives in
-// curobo_bridge (mpc_build); this class owns the ROS-facing behaviour: goal
+// curobo_python_runtime (mpc_build); this class owns the ROS-facing behaviour: goal
 // validation, the Cartesian->joint-tracking fallback, the live-retarget reseed
 // and the RViz debug publishers.
 #ifndef CUROBO_CORE__PLANNERS__MPC_PLANNER_HPP_

@@ -37,3 +37,9 @@
 **/*.py[cod]
 **/*.egg-info
 **/*.so
+
+# Native cuRobo artifact bundles are prepared by docker/export_artifacts.sh and
+# must stay inside the Docker build context: the pipeline Dockerfile copies them
+# into /opt/curobo/artifacts.  Keep this after the broad exclude patterns above.
+!.curobo_artifacts
+!.curobo_artifacts/**

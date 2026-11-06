@@ -32,7 +32,7 @@ public:
   void stop();
   bool started() const {return started_;}
 
-  // The bridge handle created by start() (curobo_bridge.init).
+  // The bridge handle created by start() (curobo_python_runtime.init).
   RobotHandle handle() const {return handle_;}
 
   // PORT: node.gpu.exclusive() / gpu_lock - the process-global CaptureBarrier.

@@ -88,11 +88,7 @@ private:
   std::function<std::string()> integration_frame_provider_;
   std::function<void()> world_invalidate_;
 
-  rclcpp::Service<curobov2_ros_interfaces::srv::SetCollisionCache>::SharedPtr cache_srv_;
-  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr motion_gen_srv_;
-  rclcpp::Service<curobov2_ros_interfaces::srv::SetJointLocks>::SharedPtr locks_srv_;
   rclcpp::Service<curobov2_ros_interfaces::srv::GetWorkspace>::SharedPtr get_workspace_srv_;
-  rclcpp::Service<curobov2_ros_interfaces::srv::SetWorkspace>::SharedPtr set_workspace_srv_;
 };
 
 }  // namespace curobo_core

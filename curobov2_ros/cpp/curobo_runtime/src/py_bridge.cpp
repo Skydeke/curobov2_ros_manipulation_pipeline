@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-// PyBridge: embedded CPython + the ROS-free `curobo_bridge` module.
+// PyBridge: embedded CPython + the ROS-free `curobo_python_runtime` module.
 // pybind11 lives only in this translation unit of this package.
 //
 // C1: there is ONE interpreter per process. It is owned here, created once and
@@ -87,7 +87,7 @@ struct PyBridge::Impl
 PyBridge::PyBridge() : impl_(std::make_unique<Impl>()) {}
 PyBridge::~PyBridge() = default;
 
-// PORT: curobo_bridge:init (design bridge_api.md section 1)
+// PORT: curobo_python_runtime:init (design bridge_api.md section 1)
 RobotHandle PyBridge::init(const std::string & cfg)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -116,16 +116,16 @@ RobotHandle PyBridge::init(const std::string & cfg)
       if (!module_importable("torch")) {
         throw BridgeError("config", "torch is not importable inside the embedded interpreter");
       }
-      // curobo_bridge is our own module; it may not exist yet (M1 skeleton).
+      // curobo_python_runtime is our own module; it may not exist yet (M1 skeleton).
       try {
-        py::module_::import("curobo_bridge");
+        py::module_::import("curobo_python_runtime");
       } catch (const py::error_already_set &) {
         // Imported lazily when it is installed; not fatal at M1.
       }
       // Build the registry entry the rest of the bridge indexes by handle
-      // (PORT: curobo_bridge:init). `cfg` is a JSON object string; the
+      // (PORT: curobo_python_runtime:init). `cfg` is a JSON object string; the
       // site-packages prepend happens above only when it is not JSON.
-      py::object bridge_init = py::module_::import("curobo_bridge").attr("init");
+      py::object bridge_init = py::module_::import("curobo_python_runtime").attr("init");
       py::object py_cfg;
       {
         py::object json = py::module_::import("json");
@@ -191,9 +191,9 @@ void PyBridge::bind_lane(const std::string & name)
   }
   py::gil_scoped_acquire gil;
   try {
-    py::module_::import("curobo_bridge").attr("bind_lane")(name);
+    py::module_::import("curobo_python_runtime").attr("bind_lane")(name);
   } catch (const py::error_already_set &) {
-    // curobo_bridge not installed yet; the stream binding is a no-op.
+    // curobo_python_runtime not installed yet; the stream binding is a no-op.
   }
 }
 
@@ -226,7 +226,7 @@ void PyBridge::set_global_flags(bool cuda_graph_reset, bool debug_cuda_graphs)
   }
   py::gil_scoped_acquire gil;
   try {
-    py::module_::import("curobo_bridge").attr("set_global_flags")(
+    py::module_::import("curobo_python_runtime").attr("set_global_flags")(
       cuda_graph_reset, debug_cuda_graphs);
   } catch (const py::error_already_set &) {
   }
@@ -281,7 +281,7 @@ F32Array tensor_to_array(const TensorF32 & tensor)
 
 py::module_ bridge_module()
 {
-  return py::module_::import("curobo_bridge");
+  return py::module_::import("curobo_python_runtime");
 }
 }  // namespace
 
@@ -702,7 +702,7 @@ PlanOutcome dict_to_plan_outcome(py::object result)
   }
   // PORT: PlanningStats.considered (single_planner._segment_considered_rows).
   // Optional: tolerate a bridge build that predates the key (a stale
-  // curobo_bridge must not turn every plan into a KeyError).
+  // curobo_python_runtime must not turn every plan into a KeyError).
   py::object considered = py::none();
   if (result.attr("__contains__")("considered").cast<bool>()) {
     considered = result.attr("__getitem__")("considered");
@@ -760,6 +760,22 @@ py::dict plan_request_to_dict(const PlanRequest & request)
   if (!request.tool_poses.shape.empty()) {
     out["tool_poses"] = tensor_to_array(request.tool_poses);
   }
+  // PORT: Goalset waypoint path (MULTIPOINT / Cartesian Waypoint). Always
+  // forward the scalar fields so curobo_python_runtime.planning sees the configured
+  // defaults even when it falls back to the legacy plan_pose path.
+  if (!request.waypoints.shape.empty()) {
+    out["waypoints"] = tensor_to_array(request.waypoints);
+  }
+  if (!request.tool_waypoints.shape.empty()) {
+    out["tool_waypoints"] = tensor_to_array(request.tool_waypoints);
+  }
+  out["waypoint_count"] = request.waypoint_count;
+  out["path_position_tolerance"] = request.path_position_tolerance;
+  out["path_orientation_tolerance"] = request.path_orientation_tolerance;
+  out["final_position_tolerance"] = request.final_position_tolerance;
+  out["final_orientation_tolerance"] = request.final_orientation_tolerance;
+  out["track_orientation"] = request.track_orientation;
+  out["outer_iterations"] = request.outer_iterations;
   return out;
 }
 }  // namespace

@@ -11,17 +11,21 @@ from curobo_task_constructor.core.geom import (
 )
 from curobo_task_constructor.core.robot import GoalsetSpec, PlanRequest
 
-#: SetPlanner mirror (CLASSIC=0, MPC=1, BATCH=2, CARTESIAN=3, JOINT_SPACE=5,
-#: RETARGET=6). MULTIPOINT=4 was removed together with the old
-#: MultiPointPlanner server planner (the enum constant still exists in
-#: SetPlanner.srv for ABI). CARTESIAN is the MTC ``solvers::CartesianPath``
-#: backend: it plans a straight line via the axis-hold cost.
+#: SetPlanner mirror (CLASSIC=0, MPC=1, BATCH=2, CARTESIAN=3, MULTIPOINT=4,
+#: JOINT_SPACE=5, RETARGET=6). MULTIPOINT is the ordered-waypoint backend:
+#: the Python bridge selects ``plan_pose_waypoints`` for a goalset carrying
+#: ``waypoints`` / ``tool_waypoints``; the native runtime has the same
+#: planner (factory id ``multipoint``). CARTESIAN is the MTC
+#: ``solvers::CartesianPath`` backend: it plans a straight line via the
+#: axis-hold cost.
 PLANNER_KEYS = {
     "classic": 0,
     "mpc": 1,
     "batch": 2,
     "cartesian": 3,
     "cartes": 3,
+    "multipoint": 4,
+    "waypoints": 4,
     "joint_space": 5,
     "retarget": 6,
 }
@@ -152,6 +156,73 @@ def full_request(robot, start_joints, goalsets, params, planner=None,
 #: wire order, NOT cuRobo's ``ToolPoseCriteria`` order (the server re-orders it
 #: in ``SinglePlanner._apply_pose_constraints``).
 CONSTRAINT_ORDER = "theta_x theta_y theta_z x y z"
+
+#: Waypoint solve options and their server defaults (``Goalset.msg``).
+WAYPOINT_OPTION_DEFAULTS = {
+    "path_position_tolerance": 0.05,
+    "path_orientation_tolerance": 0.261799388,
+    "final_position_tolerance": 0.005,
+    "final_orientation_tolerance": 0.05,
+    "track_orientation": True,
+    "outer_iterations": 4,
+}
+
+
+def waypoint_goalset_options(params: dict) -> dict:
+    """Validate and return the waypoint solve options for a goalset.
+
+    The stage params use the wire field names (``path_position_tolerance``,
+    ...), so a YAML-authored task and a ``GoalsetSpec`` carry the same keys.
+    Every tolerance must be a finite, non-negative number; ``outer_iterations``
+    must be a positive integer (the solver's own contract). A bad value raises
+    ``ValueError`` so the stage fails with a clear comment instead of sending a
+    request the server will reject.
+    """
+    params = params or {}
+    out = {}
+    for key in ("path_position_tolerance", "path_orientation_tolerance",
+                "final_position_tolerance", "final_orientation_tolerance"):
+        default = WAYPOINT_OPTION_DEFAULTS[key]
+        try:
+            value = float(params.get(key, default))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"waypoint option {key!r} must be a number, got "
+                f"{params.get(key)!r}") from None
+        if not math.isfinite(value) or value <= 0.0:
+            raise ValueError(
+                f"waypoint option {key!r} must be a finite, positive number, "
+                f"got {value!r}")
+        if key.endswith("orientation_tolerance") and value > math.pi:
+            raise ValueError(
+                f"waypoint option {key!r} must be in (0, pi] radians, got "
+                f"{value!r}")
+        out[key] = value
+
+    track = params.get("track_orientation",
+                       WAYPOINT_OPTION_DEFAULTS["track_orientation"])
+    if isinstance(track, str):
+        track = track.strip().lower() not in ("", "0", "false", "no", "off")
+    out["track_orientation"] = bool(track)
+
+    outer = params.get("outer_iterations",
+                       WAYPOINT_OPTION_DEFAULTS["outer_iterations"])
+    if isinstance(outer, bool):
+        raise ValueError(
+            f"waypoint option 'outer_iterations' must be a positive integer, "
+            f"got {outer!r}")
+    try:
+        outer = int(outer)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"waypoint option 'outer_iterations' must be a positive integer, "
+            f"got {params.get('outer_iterations')!r}") from None
+    if outer < 1:
+        raise ValueError(
+            f"waypoint option 'outer_iterations' must be a positive integer, "
+            f"got {outer}")
+    out["outer_iterations"] = outer
+    return out
 
 
 def axis_holds(

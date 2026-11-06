@@ -348,7 +348,7 @@ void ObstacleManager::mark_world_pushed()
 
 // PORT: obstacle_manager.get_voxel_grid. The dense grid (mapper perception OR
 // the GPU-rasterized analytic primitives) is computed by the bridge
-// (curobo_bridge.voxel_grid -> _compute_dense_voxel_grid); the C++ layer only
+// (curobo_python_runtime.voxel_grid -> _compute_dense_voxel_grid); the C++ layer only
 // shapes it into the response.
 curobo_runtime::VoxelGrid ObstacleManager::get_voxel_grid()
 {

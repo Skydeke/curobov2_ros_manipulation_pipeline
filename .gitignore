@@ -5,3 +5,6 @@
 # Ignore TensorRT plan files
 *.plan
 *.engine
+
+# Locally exported cuRobo native artifact bundles (generated, never checked in)
+.curobo_artifacts/

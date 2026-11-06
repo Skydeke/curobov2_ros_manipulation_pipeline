@@ -110,6 +110,7 @@ add_library(curobo_core SHARED
   cpp/curobo_core/src/core/camera_system_manager.cpp
   cpp/curobo_core/src/planners/classic_planner.cpp
   cpp/curobo_core/src/planners/cartesian_planner.cpp
+  cpp/curobo_core/src/planners/multipoint_planner.cpp
   cpp/curobo_core/src/planners/reactive_controller.cpp
   cpp/curobo_core/src/planners/mpc_planner.cpp
   cpp/curobo_core/src/planners/retarget_controller.cpp
@@ -305,6 +306,9 @@ if(BUILD_TESTING)
 
   ament_add_gtest(test_planners cpp/curobo_core/test/test_planners.cpp)
   target_link_libraries(test_planners curobo_core)
+
+  ament_add_gtest(test_multipoint_planner cpp/curobo_core/test/test_multipoint_planner.cpp)
+  target_link_libraries(test_multipoint_planner curobo_core)
 
   ament_add_gtest(test_reactive_controller cpp/curobo_core/test/test_reactive_controller.cpp)
   target_link_libraries(test_reactive_controller curobo_core rclcpp::rclcpp ${curobov2_ros_interfaces_TARGETS})

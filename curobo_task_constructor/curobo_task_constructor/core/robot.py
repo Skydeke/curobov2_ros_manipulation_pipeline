@@ -40,6 +40,33 @@ class GoalsetSpec:
     #: stays empty.
     tool_trajectory_constraints: list = field(default_factory=list)
 
+    # ----- ordered Cartesian waypoints (MULTIPOINT) ---------------------
+    #: Ordered single-tool Cartesian path, ``K`` absolute poses EXCLUDING the
+    #: start (FK of the current state). The server follows them in order with
+    #: ``plan_pose_waypoints``; empty means this is not a waypoint goalset.
+    waypoints: list = field(default_factory=list)  # Pose-like, K poses
+    #: Ordered multi-tool path, ``K * N`` poses in WAYPOINT-MAJOR order:
+    #: ``[wp0 tool0, wp0 tool1, ..., wp1 tool0, ...]``, parallel to
+    #: ``tool_frames``. This is the native layout the Python bridge and the
+    #: C++ runtime both consume; the task constructor flattens tool-major
+    #: inputs into it.
+    tool_waypoints: list = field(default_factory=list)  # Pose-like, K * N
+    #: Number of ordered waypoints in ``waypoints`` / ``tool_waypoints`` (``K``).
+    #: ``0`` lets the receiver derive it from the list length.
+    waypoint_count: int = 0
+    #: Tolerances for every NON-terminal waypoint: position (m), orientation
+    #: (rad). Defaults match the server's waypoint defaults.
+    path_position_tolerance: float = 0.05
+    path_orientation_tolerance: float = 0.261799388
+    #: Tolerances for the LAST waypoint (the terminal goal).
+    final_position_tolerance: float = 0.005
+    final_orientation_tolerance: float = 0.05
+    #: Follow the waypoint orientations (full pose tracking). False tracks
+    #: positions only, including at the final target.
+    track_orientation: bool = True
+    #: Outer solve/check passes issued by the waypoint solver (>= 1).
+    outer_iterations: int = 4
+
 
 @dataclass
 class PlanRequest:

@@ -4,9 +4,7 @@
 // popup whether it is on screen.
 #include <QAbstractItemView>
 #include <QComboBox>
-#include <QDoubleSpinBox>
 #include <QFormLayout>
-#include <QGridLayout>
 #include <QGroupBox>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -38,8 +36,8 @@ ContextTab::ContextTab(QWidget * parent) : QWidget(parent)
   //
   // MoveIt also has a "Warehouse" group here (the planning-database host and
   // port). curobo has no planning database, so that group is absent rather than
-  // rendered permanently disabled. MoveIt's third group, "Workspace", IS ported
-  // — it is built below.
+  // rendered permanently disabled. MoveIt's third group, "Workspace", is not
+  // ported: the native artifact fixes the mapper extent.
   auto * server_group = new QGroupBox(tr("Planning Library"), this);
   auto * server_form = new QFormLayout(server_group);
   // Same field-growth policy the other four tabs use, so this form and theirs
@@ -96,74 +94,6 @@ ContextTab::ContextTab(QWidget * parent) : QWidget(parent)
 
   layout->addWidget(server_group);
 
-  // --- Workspace: the collision workspace (Mapper TSDF/ESDF extent) ----------
-  // MoveIt's third Context group, "Workspace" — the scene's centre and size,
-  // which in curobo is exactly the Mapper's TSDF/ESDF grid extent: the box the
-  // cameras can observe, the box whose voxels become collision geometry, and
-  // the box the `mapper_workspace` wireframe draws. Same grid as MoveIt: a
-  // "Center (XYZ):" row of three spin boxes, then a "Size (XYZ):" row.
-  //
-  // The one deliberate deviation: MoveIt commits on every spin-box change
-  // because its scene update is instant, whereas a curobo resize rebuilds the
-  // Mapper and every solver (blocking, ~20 s) — so a commit button is added and
-  // nothing reaches the server until it is pressed.
-  auto * workspace_group = new QGroupBox(tr("Workspace"), this);
-  auto * workspace_grid = new QGridLayout(workspace_group);
-  workspace_grid->setContentsMargins(6, 4, 6, 4);
-
-  auto make_workspace_spin = [&](bool is_size, const QString & tip)
-  {
-    auto * spin = new QDoubleSpinBox(workspace_group);
-    spin->setDecimals(3);
-    spin->setSingleStep(0.05);
-    // Centre may be anywhere; a size must be positive, which the server enforces
-    // too — the widget range only stops obviously-invalid input at the source.
-    spin->setRange(is_size ? 0.0 : -10000.0, 10000.0);
-    spin->setToolTip(tip);
-    // Editing never sends anything (that is Apply's job); it only marks the
-    // group dirty so the 2 s poll stops overwriting what the user is typing.
-    connect(
-      spin, QOverload<double>::of(&QDoubleSpinBox::valueChanged), this,
-      &ContextTab::markWorkspaceDirty);
-    return spin;
-  };
-
-  workspace_grid->addWidget(new QLabel(tr("Center (XYZ):"), workspace_group), 0, 0);
-  for (int i = 0; i < 3; ++i) {
-    workspace_center_[i] = make_workspace_spin(
-      false,
-      tr("Centre of the collision workspace in the robot base frame (x/y/z, "
-         "metres). This is the centre of the Mapper's TSDF/ESDF grid — the same "
-         "box the cyan mapper_workspace wireframe draws."));
-    workspace_grid->addWidget(workspace_center_[i], 0, i + 1);
-  }
-  workspace_grid->addWidget(new QLabel(tr("Size (XYZ):"), workspace_group), 1, 0);
-  for (int i = 0; i < 3; ++i) {
-    workspace_size_[i] = make_workspace_spin(
-      true,
-      tr("Size of the collision workspace along x/y/z (metres, all > 0). Only "
-         "this box is sensed and only the voxels inside it collide; making it "
-         "smaller also shrinks the solvers' voxel cache, which makes planning "
-         "cheaper but hides anything outside the box."));
-    workspace_grid->addWidget(workspace_size_[i], 1, i + 1);
-  }
-
-  workspace_apply_button_ = new QPushButton(tr("Apply workspace"), workspace_group);
-  workspace_apply_button_->setToolTip(
-    tr("Send the centre and size above to the server (set_workspace). The server "
-       "rebuilds its Mapper and every solver against the new box — blocking, "
-       "~20 s — and is refused while a trajectory is executing. The fields are "
-       "always re-read from the server, so what is shown is what is in force."));
-  connect(
-    workspace_apply_button_, &QPushButton::clicked, this, &ContextTab::applyWorkspace);
-  workspace_grid->addWidget(workspace_apply_button_, 2, 0, 1, 4);
-
-  workspace_info_label_ = new QLabel(tr("workspace unknown"), workspace_group);
-  workspace_info_label_->setWordWrap(true);
-  workspace_grid->addWidget(workspace_info_label_, 3, 0, 1, 4);
-
-  layout->addWidget(workspace_group);
-
   // Collision-sphere visualisation lives on the trajectory display now (Show
   // Collision / Show Attached over the spheres topic), not here: it is
   // display state, and a per-server enable switch for it does not belong on
@@ -175,10 +105,7 @@ ContextTab::ContextTab(QWidget * parent) : QWidget(parent)
 
   // Both combos change state on the server, so both start inert: the planner is
   // not known to be up yet, and the node is still the placeholder below. The
-  // node list poll is what first proves anything exists. The workspace group is
-  // gated the same way (see setPlannerReady): a cheap get_workspace could run
-  // early, but an Apply implies a blocking server-side rebuild, so the controls
-  // wait until the planner is confirmed ready.
+  // node list poll is what first proves anything exists.
   trajectory_type_combo_->setEnabled(false);
   setPlannerReady(false);
 
@@ -231,7 +158,6 @@ void ContextTab::initialize(rclcpp::Node::SharedPtr node)
 
   rebuildClients();
   refreshStrategies();
-  refreshWorkspace();
   refreshPlannerNodeList();
 
   // The same graph poll that used to live in the Planning tab, so a planner
@@ -260,18 +186,6 @@ void ContextTab::initialize(rclcpp::Node::SharedPtr node)
   });
   strategy_timer->start(2000);
 
-  // Same reasoning for the workspace fields: they are a get_workspace away, so
-  // the poll is what first fills them and what reflects a `ros2 param set` made
-  // from outside this panel. It only writes the fields when the user has not
-  // edited them (see refreshWorkspace / markWorkspaceDirty).
-  auto * workspace_timer = new QTimer(this);
-  connect(workspace_timer, &QTimer::timeout, this, [this]()
-  {
-    if (isVisible()) {
-      refreshWorkspace();
-    }
-  });
-  workspace_timer->start(2000);
 }
 
 void ContextTab::setPlannerReady(bool ready)
@@ -280,15 +194,6 @@ void ContextTab::setPlannerReady(bool ready)
   // The planner-node combo is deliberately NOT gated: repointing the panel at
   // another server is always allowed, it only re-runs the readiness probe.
   trajectory_type_combo_->setEnabled(ready);
-  // Same gate for the workspace controls: an edit is a blocking (~20 s) rebuild
-  // on that server, so they stay inert until the planner is confirmed up.
-  for (QDoubleSpinBox * spin : workspace_center_) {
-    spin->setEnabled(ready);
-  }
-  for (QDoubleSpinBox * spin : workspace_size_) {
-    spin->setEnabled(ready);
-  }
-  workspace_apply_button_->setEnabled(ready);
 }
 
 void ContextTab::onPlannerNodeChosen(const QString & text)
@@ -308,10 +213,6 @@ void ContextTab::onPlannerNodeChosen(const QString & text)
   if (node_ != nullptr) {
     rebuildClients();
     refreshStrategies();
-    // A different planner is a different workspace; drop any pending edit and
-    // read the new server's box rather than leaving the old one on screen.
-    workspace_dirty_ = false;
-    refreshWorkspace();
   }
   setStatus(tr("planner node: %1").arg(planner_node_));
 
@@ -387,10 +288,6 @@ void ContextTab::rebuildClients()
     ns + "set_robot_strategy");
   set_planner_client_ = node_->create_client<curobov2_ros_interfaces::srv::SetPlanner>(
     ns + "set_planner");
-  get_workspace_client_ = node_->create_client<curobov2_ros_interfaces::srv::GetWorkspace>(
-    ns + "get_workspace");
-  set_workspace_client_ = node_->create_client<curobov2_ros_interfaces::srv::SetWorkspace>(
-    ns + "set_workspace");
 }
 
 void ContextTab::runOnGuiThread(std::function<void()> fn)
@@ -572,160 +469,6 @@ void ContextTab::applyStrategy()
           success ? tr("control strategy is now '%1': %2").arg(chosen, message)
                   : tr("could not switch strategy: %1").arg(message));
       });
-    });
-}
-
-void ContextTab::markWorkspaceDirty()
-{
-  // An edit has not reached the server yet (Apply does that), so from now until
-  // Apply succeeds the fields belong to the user and the 2 s poll must not
-  // overwrite them.
-  workspace_dirty_ = true;
-}
-
-void ContextTab::showWorkspace(
-  const QVector<double> & center, const QVector<double> & extent, double voxel_size,
-  bool perception_active)
-{
-  // blockSignals on every write: setValue() emits valueChanged, which is wired
-  // to markWorkspaceDirty() — a programmatic refresh must not make the group
-  // look dirtied by the user.
-  if (center.size() == 3) {
-    for (int i = 0; i < 3; ++i) {
-      workspace_center_[i]->blockSignals(true);
-      workspace_center_[i]->setValue(center[i]);
-      workspace_center_[i]->blockSignals(false);
-    }
-  }
-  if (extent.size() == 3) {
-    for (int i = 0; i < 3; ++i) {
-      workspace_size_[i]->blockSignals(true);
-      workspace_size_[i]->setValue(extent[i]);
-      workspace_size_[i]->blockSignals(false);
-    }
-  }
-  workspace_perception_active_ = perception_active;
-
-  const QString voxel = tr("voxel %1 m").arg(QString::number(voxel_size, 'f', 3));
-  workspace_info_label_->setText(
-    perception_active
-      ? tr("%1 — this box is sensed and collides.").arg(voxel)
-      : tr("%1 — no perception source: the box and its wireframe move, but no "
-           "collision geometry is built for it.").arg(voxel));
-  workspace_info_label_->setToolTip(
-    tr("The collision workspace is the Mapper's TSDF/ESDF grid: everything "
-       "inside it can become collision geometry, nothing outside it can. The "
-       "solvers' voxel cache is sized from the same box, so a smaller box also "
-       "makes planning cheaper."));
-}
-
-void ContextTab::refreshWorkspace()
-{
-  if (get_workspace_client_ == nullptr || !get_workspace_client_->service_is_ready()) {
-    return;
-  }
-  auto request = std::make_shared<curobov2_ros_interfaces::srv::GetWorkspace::Request>();
-  get_workspace_client_->async_send_request(
-    request,
-    [this](
-      rclcpp::Client<curobov2_ros_interfaces::srv::GetWorkspace>::SharedFuture future) {
-      QVector<double> center;
-      QVector<double> extent;
-      double voxel = 0.0;
-      bool perception_active = false;
-      bool success = false;
-      try {
-        auto result = future.get();
-        success = result->success;
-        for (double v : result->center) {
-          center << v;
-        }
-        for (double v : result->extent) {
-          extent << v;
-        }
-        voxel = result->voxel_size;
-        perception_active = result->perception_active;
-      } catch (const std::exception &) {
-        // Runs on rviz's ROS thread; nothing here touches a widget.
-        return;
-      }
-      runOnGuiThread(
-        [this, center, extent, voxel, perception_active, success]()
-        {
-          if (!success) {
-            return;  // keep the last known values on screen
-          }
-          // A poll must never wipe an edit in progress: while the group is dirty
-          // the fields are the user's and only Apply may replace them. The
-          // perception state is still refreshed, since it is not editable.
-          if (workspace_dirty_) {
-            workspace_perception_active_ = perception_active;
-            return;
-          }
-          showWorkspace(center, extent, voxel, perception_active);
-        });
-    });
-}
-
-void ContextTab::applyWorkspace()
-{
-  if (set_workspace_client_ == nullptr || !set_workspace_client_->service_is_ready()) {
-    setStatus(tr("set_workspace service not available"));
-    return;
-  }
-  if (!planner_ready_) {
-    setStatus(tr("planner is not ready; workspace unchanged"));
-    return;
-  }
-  auto request = std::make_shared<curobov2_ros_interfaces::srv::SetWorkspace::Request>();
-  for (int i = 0; i < 3; ++i) {
-    request->center.push_back(workspace_center_[i]->value());
-    request->extent.push_back(workspace_size_[i]->value());
-  }
-
-  setStatus(
-    tr("setting the workspace — the server rebuilds its Mapper and every solver "
-       "(blocking, ~20 s). Watch its console; this panel stays responsive."));
-  set_workspace_client_->async_send_request(
-    request,
-    [this](
-      rclcpp::Client<curobov2_ros_interfaces::srv::SetWorkspace>::SharedFuture future) {
-      QVector<double> center;
-      QVector<double> extent;
-      double voxel = 0.0;
-      bool perception_active = false;
-      bool success = false;
-      QString message;
-      try {
-        auto result = future.get();
-        success = result->success;
-        message = QString::fromStdString(result->message);
-        for (double v : result->center) {
-          center << v;
-        }
-        for (double v : result->extent) {
-          extent << v;
-        }
-        voxel = result->voxel_size;
-        perception_active = result->perception_active;
-      } catch (const std::exception & e) {
-        message = QString::fromStdString(e.what());
-      }
-      runOnGuiThread(
-        [this, center, extent, voxel, perception_active, success, message]()
-        {
-          if (success) {
-            // Adopt the SERVER's answer — the echoed values in force, never the
-            // request — and clear the dirty flag: the fields now show truth.
-            workspace_dirty_ = false;
-            showWorkspace(center, extent, voxel, perception_active);
-          }
-          // On failure the user's values are left in place (and the group stays
-          // dirty) so a rejected edit — e.g. a box larger than the cap — can be
-          // corrected instead of being silently reverted.
-          setStatus(success ? tr("workspace updated: %1").arg(message)
-                            : tr("could not set the workspace: %1").arg(message));
-        });
     });
 }
 

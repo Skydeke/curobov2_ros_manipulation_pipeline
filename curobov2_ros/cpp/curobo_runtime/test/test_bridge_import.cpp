@@ -20,7 +20,7 @@ TEST(PyBridge, NumpyAndTorchImportInsideInterpreter)
 
   EXPECT_TRUE(bridge.module_available("numpy"));
   EXPECT_TRUE(bridge.module_available("torch"));
-  EXPECT_TRUE(bridge.module_available("curobo_bridge"));
+  EXPECT_TRUE(bridge.module_available("curobo_python_runtime"));
 
   // Re-init is idempotent: the interpreter is created once.
   bridge.init("");

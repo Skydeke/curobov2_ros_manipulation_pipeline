@@ -31,6 +31,8 @@ via `to_spec()` — so it can be built and unit-tested without ROS.
 | `move_to` | `MoveTo` | Plan to a goal: `goal: {name}` \| `{joints}` \| `{joints: {j: v}}` \| `{pose}` \| `{poses}`. |
 | `move_relative` | `MoveRelative` | Plan a translation with the tool orientation frozen. `axis` (named config) or `distance`, or sample `min_distance`..`max_distance` in `num_samples` steps. `hold`, `pos_tol`, `rot_tol`, `link`, `direction`. |
 | `cartesian_path` | `CartesianPath` | Plan a **straight line**. See below. |
+| `cartesian_waypoints` | `CartesianWaypoints` | Follow `K` **ordered** tool poses (single tool) with the MULTIPOINT planner. See below. |
+| `multi_tool_waypoints` | `MultiToolWaypoints` | Follow ordered poses for every named tool frame at once (`K * N`, waypoint-major). See below. |
 | `connect` | `Connect` | Plan a motion between two already-known states. |
 | `modify_scene` | `ModifyScene` | `add` (an object spec: `name`, `shape`, `pose` as a flat `{x,y,z,qx,qy,qz,qw}` dict, `dimensions`) / `remove` (by name) / `remove_all` (clear the server world) / `attach` / `detach` an object, `detach_all` (release whatever is attached — clears the attach state that `remove_all` does not), or `allow_collisions: {object, links, enabled}`. |
 | `gripper_command` | `GripperCommand` | Move one end effector's jaws **without planning**: `gripper` (a key of the descriptor's `gripper_controllers` map; blank = first entry), `position`, optional `joint`/`effort`/`max_effort`/`controller`/`action_ns`. Executed as a `control_msgs` `GripperCommand` (single position) or `ParallelGripperCommand` (one position per joint). |
@@ -125,6 +127,42 @@ move is simply an empty hold planned by a non-Cartesian planner.
 This stage is **forward-only**: the hold comes from the start pose, so a
 backward (end-seeded) move would need a two-pass plan.
 
+## `cartesian_waypoints` / `multi_tool_waypoints` — ordered paths
+
+A straight line is a special case. When the path has **ordered** poses, send
+them as waypoints instead of deriving axis holds: the server follows them
+directly with `plan_pose_waypoints` (positions interpolate linearly between
+waypoints, orientations use SLERP) and checks every dense sample against the
+requested tolerances. Both stages select the **MULTIPOINT** planner
+(`SetPlanner.MULTIPOINT` = 4).
+
+Wire fields (`Goalset`):
+
+| field | meaning |
+|---|---|
+| `waypoints` | single tool: `K` absolute poses, **start excluded** |
+| `tool_waypoints` | multi tool: `K * N` poses, **waypoint-major** (`wp0 tool0, wp0 tool1, wp1 tool0, ...`), parallel to `tool_frames` |
+| `waypoint_count` | `K` (0 = derive from the list length) |
+| `path_position_tolerance` / `path_orientation_tolerance` | non-terminal waypoint tolerances (m / rad), defaults `0.05` / `0.261799388` |
+| `final_position_tolerance` / `final_orientation_tolerance` | terminal goal tolerances, defaults `0.005` / `0.05` |
+| `track_orientation` | follow orientations (full pose) or positions only; default `true` |
+| `outer_iterations` | solver solve/check passes, default `4` |
+
+Task params mirror the field names. `cartesian_waypoints` reads
+`goal.waypoints` (plus optional `goal.link` / `link`); `multi_tool_waypoints`
+reads `goal.tools` as `{frame, waypoints}` entries (a `{frame: [poses]}`
+mapping is also accepted). The multi-tool stage flattens the natural
+tool-major input into the wire's waypoint-major order, and every tool must
+provide the same `K`.
+
+There are **no axis holds** in waypoint mode: neither stage ever sends
+`trajectory_constraints` or `tool_trajectory_constraints` (legacy `hold` /
+`holds` params are ignored). Both stages are forward-only.
+
+`stages.CartesianWaypoints` and `stages.MultiToolWaypoints` expose
+`setWaypoints(...)`, `setTrackOrientation(...)`, `setPathTolerances(...)`,
+`setFinalTolerances(...)` and `setOuterIterations(...)`.
+
 ## Server requirements
 
 - `max_goalset > 1` for `goal.poses` / candidate fan-out. The server rejects an
@@ -134,10 +172,12 @@ backward (end-seeded) move would need a two-pass plan.
 - `trajectory_constraints` is honoured by the **CARTESIAN** planner
   (`SetPlanner.CARTESIAN`, the `core.CartesianPath` backend) and by
   `ClassicPlanner`. `JointSpacePlanner` ignores it.
-- `MULTIPOINT` (4) is reserved-but-unimplemented in `SetPlanner.srv`, as is
-  `BATCH` (2). `max_goalset` caps **candidates within one goalset**, not
-  waypoints — a multipoint path is one goalset with one pose per waypoint, and
-  no shipped planner consumes that shape.
+- `MULTIPOINT` (4) is the ordered-waypoint backend: the Python bridge
+  dispatches to `plan_pose_waypoints` when a goalset carries `waypoints` /
+  `tool_waypoints`; the native runtime's factory entry is
+  `{"multipoint", 4, "Cartesian Waypoint"}`. `BATCH` (2) remains reserved.
+  `max_goalset` caps **candidates within one goalset**, not waypoints — a
+  waypoint path is one goalset with `K` ordered poses per tool.
 
 ## Tests
 

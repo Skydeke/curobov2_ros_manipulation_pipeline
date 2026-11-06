@@ -18,6 +18,7 @@
 #include <set>
 #include <stdexcept>
 
+#include <geometry_msgs/msg/pose.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
 
 #include "curobo_core/core/obstacle_manager.hpp"
@@ -96,12 +97,107 @@ std::pair<bool, std::string> check_goal_request(
     return {false, name + ": request must provide `goalsets` (one Goalset entry per segment)"};
   }
   for (const auto & g : goalsets) {
+    const bool has_waypoints = !g.waypoints.empty();
+    const bool has_tool_waypoints = !g.tool_waypoints.empty();
     if (g.poses.empty() && g.target_joint_positions.empty() &&
-      g.tool_poses.empty())
+      g.tool_poses.empty() && !has_waypoints && !has_tool_waypoints)
     {
       return {false, name + ": every goalset entry must hold >= 1 pose, a "
-        "non-empty target_joint_positions, or multi-tool poses (got pose sizes [" +
+        "non-empty target_joint_positions, multi-tool poses, or an ordered "
+        "waypoint path (got pose sizes [" +
         sizes + "], joint sizes [" + joints + "], tool pose sizes [" + tools + "])"};
+    }
+    // Ordered waypoint path (MULTIPOINT): the waypoint fields own the segment.
+    // A joint target and a waypoint path are two different solves, and the
+    // single-tool / multi-tool path layouts exclude each other.
+    if ((has_waypoints || has_tool_waypoints) &&
+      !g.target_joint_positions.empty())
+    {
+      return {false, name + ": a waypoint path cannot mix with "
+        "target_joint_positions (use the joint-space planner for a joint goal)"};
+    }
+    if (has_waypoints && has_tool_waypoints) {
+      return {false, name + ": waypoints and tool_waypoints are mutually "
+        "exclusive; send one single-tool path or one waypoint-major multi-tool path"};
+    }
+    if (g.waypoint_count > 0 && !has_waypoints && !has_tool_waypoints) {
+      return {false, name + ": waypoint_count=" + std::to_string(g.waypoint_count) +
+        " is set but the goalset holds no waypoints or tool_waypoints"};
+    }
+    if (has_waypoints) {
+      if (g.tool_frames.size() > 1) {
+        return {false, name + ": waypoints is a single-tool path but tool_frames "
+          "names " + std::to_string(g.tool_frames.size()) +
+          " frame(s); use tool_waypoints for multiple tools"};
+      }
+      if (g.waypoint_count > 0 &&
+        static_cast<std::size_t>(g.waypoint_count) != g.waypoints.size())
+      {
+        return {false, name + ": waypoint_count=" +
+          std::to_string(g.waypoint_count) + " but waypoints holds " +
+          std::to_string(g.waypoints.size()) + " pose(s)"};
+      }
+    }
+    if (has_tool_waypoints) {
+      if (g.tool_frames.empty()) {
+        return {false, name + ": tool_waypoints requires tool_frames (one name "
+          "per tracked tool)"};
+      }
+      if (g.waypoint_count > 0) {
+        const std::size_t expected =
+          static_cast<std::size_t>(g.waypoint_count) * g.tool_frames.size();
+        if (g.tool_waypoints.size() != expected) {
+          return {false, name + ": tool_waypoints holds " +
+            std::to_string(g.tool_waypoints.size()) + " pose(s) for waypoint_count=" +
+            std::to_string(g.waypoint_count) + " and " +
+            std::to_string(g.tool_frames.size()) + " tool frame(s) (expected " +
+            std::to_string(expected) + ")"};
+        }
+      } else if (g.tool_waypoints.size() % g.tool_frames.size() != 0) {
+        return {false, name + ": tool_waypoints holds " +
+          std::to_string(g.tool_waypoints.size()) + " pose(s), which is not a "
+          "multiple of " + std::to_string(g.tool_frames.size()) + " tool frame(s)"};
+      }
+    }
+    if (has_waypoints || has_tool_waypoints) {
+      // cuRobo's interpolate_pose_waypoints accepts 1..256 ordered targets.
+      const std::size_t waypoint_count = has_waypoints ?
+        g.waypoints.size() :
+        (g.waypoint_count > 0 ? static_cast<std::size_t>(g.waypoint_count) :
+        (g.tool_frames.empty() ? 0 : g.tool_waypoints.size() / g.tool_frames.size()));
+      if (waypoint_count < 1 || waypoint_count > 256) {
+        return {false, name + ": an ordered waypoint path supports 1..256 "
+          "waypoints, got " + std::to_string(waypoint_count)};
+      }
+      constexpr double kPi = 3.14159265358979323846;
+      const auto bad_position = [](double v) {
+          return !std::isfinite(v) || v <= 0.0;
+        };
+      const auto bad_orientation = [](double v) {
+          return !std::isfinite(v) || v <= 0.0 || v > kPi;
+        };
+      if (bad_position(g.path_position_tolerance)) {
+        return {false, name + ": path_position_tolerance must be finite and "
+          "positive (metres), got " + std::to_string(g.path_position_tolerance)};
+      }
+      if (bad_orientation(g.path_orientation_tolerance)) {
+        return {false, name + ": path_orientation_tolerance must be finite and "
+          "in (0, pi] radians, got " +
+          std::to_string(g.path_orientation_tolerance)};
+      }
+      if (bad_position(g.final_position_tolerance)) {
+        return {false, name + ": final_position_tolerance must be finite and "
+          "positive (metres), got " + std::to_string(g.final_position_tolerance)};
+      }
+      if (bad_orientation(g.final_orientation_tolerance)) {
+        return {false, name + ": final_orientation_tolerance must be finite and "
+          "in (0, pi] radians, got " +
+          std::to_string(g.final_orientation_tolerance)};
+      }
+      if (g.outer_iterations < 1) {
+        return {false, name + ": outer_iterations must be >= 1, got " +
+          std::to_string(g.outer_iterations)};
+      }
     }
     if (!g.tool_poses.empty() && g.tool_poses.size() != g.tool_frames.size()) {
       return {false, name + ": tool_frames and tool_poses must be parallel "
@@ -126,7 +222,10 @@ std::pair<bool, std::string> check_goal_request(
       goalsets.front().poses.size() == 1 && goalsets.front().tool_poses.empty();
     const bool multi_tool = goalsets.size() == 1 &&
       !goalsets.front().tool_poses.empty();
-    if (!single_pose && !multi_tool) {
+    const bool waypoint_path = goalsets.size() == 1 &&
+      (!goalsets.front().waypoints.empty() ||
+      !goalsets.front().tool_waypoints.empty());
+    if (!single_pose && !multi_tool && !waypoint_path) {
       return {false, name + ": requires exactly one goalset entry with a single "
         "pose, got " + std::to_string(goalsets.size()) + " set(s) of sizes [" +
         sizes + "]"};
@@ -418,9 +517,64 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
   plan_request.cartesian_step_size = goal.cartesian_step_size;
   plan_request.cartesian_precision = goal.cartesian_precision;
 
+  const bool waypoint_path = !goal.goalsets.empty() &&
+    (!goal.goalsets.front().waypoints.empty() ||
+    !goal.goalsets.front().tool_waypoints.empty());
   const bool joint_space = !goal.goalsets.empty() &&
     !goal.goalsets.front().target_joint_positions.empty();
-  if (joint_space) {
+  if (waypoint_path) {
+    const auto & g = goal.goalsets.front();
+    const auto append_pose = [](curobo_runtime::TensorF32 & tensor,
+        const geometry_msgs::msg::Pose & pose) {
+        tensor.data.push_back(static_cast<float>(pose.position.x));
+        tensor.data.push_back(static_cast<float>(pose.position.y));
+        tensor.data.push_back(static_cast<float>(pose.position.z));
+        tensor.data.push_back(static_cast<float>(pose.orientation.w));
+        tensor.data.push_back(static_cast<float>(pose.orientation.x));
+        tensor.data.push_back(static_cast<float>(pose.orientation.y));
+        tensor.data.push_back(static_cast<float>(pose.orientation.z));
+      };
+    // One ordered path, one goalset. `poses` keeps its candidate semantics for
+    // every legacy request; a waypoint path simply does not use it.
+    plan_request.goalset_count = 1;
+    plan_request.tool_frames.assign(g.tool_frames.begin(), g.tool_frames.end());
+    if (!g.tool_trajectory_constraints.empty()) {
+      plan_request.tool_trajectory_constraints.assign(
+        g.tool_trajectory_constraints.begin(), g.tool_trajectory_constraints.end());
+    }
+    if (!g.waypoints.empty()) {
+      plan_request.waypoints.shape = {
+        static_cast<std::int64_t>(g.waypoints.size()), 7};
+      for (const auto & pose : g.waypoints) {
+        append_pose(plan_request.waypoints, pose);
+      }
+    }
+    if (!g.tool_waypoints.empty()) {
+      plan_request.tool_waypoints.shape = {
+        static_cast<std::int64_t>(g.tool_waypoints.size()), 7};
+      for (const auto & pose : g.tool_waypoints) {
+        append_pose(plan_request.tool_waypoints, pose);
+      }
+    }
+    // K: explicit waypoint_count when the client/front-end supplied it, else
+    // derived from the array layout (the validator already checked divisibility).
+    std::int64_t count = static_cast<std::int64_t>(g.waypoint_count);
+    if (count <= 0) {
+      if (!g.waypoints.empty()) {
+        count = static_cast<std::int64_t>(g.waypoints.size());
+      } else if (!g.tool_frames.empty()) {
+        count = static_cast<std::int64_t>(
+          g.tool_waypoints.size() / g.tool_frames.size());
+      }
+    }
+    plan_request.waypoint_count = count;
+    plan_request.path_position_tolerance = g.path_position_tolerance;
+    plan_request.path_orientation_tolerance = g.path_orientation_tolerance;
+    plan_request.final_position_tolerance = g.final_position_tolerance;
+    plan_request.final_orientation_tolerance = g.final_orientation_tolerance;
+    plan_request.track_orientation = g.track_orientation;
+    plan_request.outer_iterations = g.outer_iterations;
+  } else if (joint_space) {
     for (double v : goal.goalsets.front().target_joint_positions) {
       plan_request.joint_target.push_back(static_cast<float>(v));
     }
@@ -740,7 +894,8 @@ void PlannerServices::fill_result(
   // axis is exactly the failure this line needs to make visible; the old
   // `any_hold` guard hid it.
   const bool is_cartesian =
-    effective->get_planner_name().find("Cartesian") != std::string::npos;
+    effective->get_planner_name().find("Cartesian") != std::string::npos &&
+    effective->get_planner_name().find("Waypoint") == std::string::npos;
   if (request.trajectory_constraints.size() == 6) {
     const auto & tc = request.trajectory_constraints;
     const double tx = tc[0] == 1 ? 1.0 : 0.0;

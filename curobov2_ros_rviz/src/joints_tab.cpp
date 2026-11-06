@@ -285,12 +285,6 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
                     "configuration -- reports self-collision, scene collision "
                     "or a joint-limit violation before you plan"),
     &JointsTab::checkTarget);
-  clear_locks_button_ = add_attempt_button(
-    tr("Clear locks"),
-    tr("Drop the joint-lock override and reload the robot config's own "
-       "lock_joints. Rebuilds the model and every solver -- blocking, ~20 s, "
-       "and refused while a goal executes."),
-    &JointsTab::clearLocks);
   attempt_buttons->addStretch(1);
   commands_form->addRow(tr("Planning Attempt:"), attempt_buttons);
 
@@ -386,8 +380,6 @@ void JointsTab::setPlannerNode(const QString & planner_node)
     ns + "get_joint_info");
   fk_client_ = node_->create_client<curobov2_ros_interfaces::srv::FkBatch>(
     ns + "fk_batch");
-  joint_locks_client_ = node_->create_client<curobov2_ros_interfaces::srv::SetJointLocks>(
-    ns + "set_joint_locks");
   trajectory_client_ =
     node_->create_client<curobov2_ros_interfaces::srv::TrajectoryGeneration>(
       ns + "generate_trajectory");
@@ -441,7 +433,6 @@ void JointsTab::setButtonsEnabled()
   plan_button_->setEnabled(ready);
   send_button_->setEnabled(ready);
   check_button_->setEnabled(ready);
-  clear_locks_button_->setEnabled(initialized_ && !goal_active_);
   stop_button_->setEnabled(goal_active_);
 }
 

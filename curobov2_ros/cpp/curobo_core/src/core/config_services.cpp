@@ -20,30 +20,14 @@ ConfigServices::ConfigServices(
 : node_(node), bridge_(bridge), handle_(handle), joint_names_(joint_names)
 {
   const std::string name = node_->get_name();
-  cache_srv_ = node_->create_service<curobov2_ros_interfaces::srv::SetCollisionCache>(
-    name + "/set_collision_cache",
-    std::bind(
-      &ConfigServices::handle_set_collision_cache, this,
-      std::placeholders::_1, std::placeholders::_2));
-  motion_gen_srv_ = node_->create_service<std_srvs::srv::Trigger>(
-    name + "/update_motion_gen_config",
-    std::bind(
-      &ConfigServices::handle_update_motion_gen_config, this,
-      std::placeholders::_1, std::placeholders::_2));
-  locks_srv_ = node_->create_service<curobov2_ros_interfaces::srv::SetJointLocks>(
-    name + "/set_joint_locks",
-    std::bind(
-      &ConfigServices::handle_set_joint_locks, this,
-      std::placeholders::_1, std::placeholders::_2));
+  // Native artifacts are immutable. The old live-reconfiguration services
+  // (set_workspace, update_motion_gen_config, set_collision_cache,
+  // set_joint_locks) rebuilt the Python planner/scene and cannot be honoured by
+  // CppBridge. Keep only read-only workspace introspection.
   get_workspace_srv_ = node_->create_service<curobov2_ros_interfaces::srv::GetWorkspace>(
     name + "/get_workspace",
     std::bind(
       &ConfigServices::handle_get_workspace, this,
-      std::placeholders::_1, std::placeholders::_2));
-  set_workspace_srv_ = node_->create_service<curobov2_ros_interfaces::srv::SetWorkspace>(
-    name + "/set_workspace",
-    std::bind(
-      &ConfigServices::handle_set_workspace, this,
       std::placeholders::_1, std::placeholders::_2));
 
   // Seed the lock state from the model.

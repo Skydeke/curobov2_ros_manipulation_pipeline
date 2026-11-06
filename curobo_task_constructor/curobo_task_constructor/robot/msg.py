@@ -125,6 +125,34 @@ class _MsgMixin:
         per_tool = [int(c) for c in (gs.tool_trajectory_constraints or [])]
         if per_tool:
             g.tool_trajectory_constraints = per_tool
+        # Ordered Cartesian waypoints (MULTIPOINT). The scalar options ride on
+        # every goalset when the message definition has them (older builds
+        # simply keep the server defaults). A waypoint PAYLOAD on a message
+        # without the fields is an error: dropping it would silently plan a
+        # different motion than the task asked for.
+        waypoints = list(getattr(gs, "waypoints", None) or [])
+        tool_waypoints = list(getattr(gs, "tool_waypoints", None) or [])
+        for field in ("waypoints", "tool_waypoints", "waypoint_count",
+                      "path_position_tolerance", "path_orientation_tolerance",
+                      "final_position_tolerance", "final_orientation_tolerance",
+                      "track_orientation", "outer_iterations"):
+            if not hasattr(g, field) and (waypoints or tool_waypoints):
+                raise RuntimeError(
+                    f"curobov2_ros_interfaces/Goalset has no {field!r} field; "
+                    "rebuild the interfaces package to send ordered waypoints")
+        if hasattr(g, "waypoints"):
+            g.waypoints = [parse_pose_msg(pose, self.pose_cls)
+                           for pose in waypoints]
+        if hasattr(g, "tool_waypoints"):
+            g.tool_waypoints = [parse_pose_msg(pose, self.pose_cls)
+                                for pose in tool_waypoints]
+        if hasattr(g, "waypoint_count"):
+            g.waypoint_count = int(getattr(gs, "waypoint_count", 0) or 0)
+        for field in ("path_position_tolerance", "path_orientation_tolerance",
+                      "final_position_tolerance", "final_orientation_tolerance",
+                      "track_orientation", "outer_iterations"):
+            if hasattr(g, field):
+                setattr(g, field, getattr(gs, field))
         return g
 
     @staticmethod

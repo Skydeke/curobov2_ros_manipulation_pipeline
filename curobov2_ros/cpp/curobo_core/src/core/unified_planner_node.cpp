@@ -112,6 +112,7 @@ void UnifiedPlannerNode::declare_parameters() {
   declare_parameter<bool>("enable_curobo_debug_mode", false);
   declare_parameter<int>("graph_new_nodes_per_iteration", 20);
   declare_parameter<int>("graph_max_path_finding_iterations", 10);
+  declare_parameter<int>("rrt_max_iterations", 32);
   declare_parameter<int>("graph_max_nodes", 20000);
   // PORT: Mapper / ESDF tunables.
   declare_parameter<double>("decay_half_life_s", 0.7);
@@ -299,6 +300,7 @@ void UnifiedPlannerNode::setup() {
         // replays (and skips the PRM warmup when `enable_graph_attempt >=
         // max_attempts`, i.e. when no attempt can reach the graph planner).
         << ",\"max_attempts\":" << get_parameter("max_attempts").as_int()
+        << ",\"rrt_max_iterations\":" << get_parameter("rrt_max_iterations").as_int()
         << ",\"enable_graph_attempt\":"
         << get_parameter("enable_graph_attempt").as_int()
         << ",\"obstacle_collision_mode\":\""

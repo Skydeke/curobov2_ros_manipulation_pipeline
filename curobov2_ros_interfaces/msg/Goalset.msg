@@ -58,3 +58,49 @@ int8[] trajectories_contraints
 # configured base link via TF before planning (SetMask.srv convention).
 # Joint-space segments (target_joint_positions) are frame-free and ignore it.
 string frame_id ""
+
+# ---------------------------------------------------------------------------
+# Ordered Cartesian waypoint path (MULTIPOINT / Cartesian Waypoint planner).
+#
+# A waypoint path is an ordered list of tool poses the end effector must pass
+# through, in order, starting AFTER the segment start (the start pose itself is
+# excluded; the planner prepends the start FK). Unlike `poses` (a candidate set
+# where the planner picks the best one), EVERY waypoint below is an ordered
+# target along one continuous trajectory. When `waypoints` or `tool_waypoints`
+# is non-empty this segment is a waypoint path and `poses` is ignored.
+# Waypoint poses are absolute poses in the robot base frame (`frame_id` is the
+# legacy candidate-pose selector and does not apply to them).
+#
+# `waypoints` is a single-tool path: K poses, one per waypoint. When
+# `tool_frames` is empty the first configured tool frame is used; otherwise it
+# must name exactly that one tool.
+geometry_msgs/Pose[] waypoints
+
+# Simultaneous multi-tool waypoint path: K * N poses in WAYPOINT-MAJOR order
+# (wp0 tool0, wp0 tool1, ..., wp1 tool0, ...), matching the native layout.
+# Parallel to `tool_frames` (N frames); all N tools are tracked at every
+# waypoint. Cannot be combined with `waypoints` or `target_joint_positions`.
+geometry_msgs/Pose[] tool_waypoints
+
+# Number of ordered waypoints (K) in `waypoints` / `tool_waypoints`. 0 means
+# "infer from the pose array" (K = len(waypoints) or
+# len(tool_waypoints) / len(tool_frames)); a non-zero value is validated
+# against the arrays.
+uint32 waypoint_count 0
+
+# Tolerances for an ordered waypoint path. Every sampled point along the path
+# must stay within the PATH tolerances; the final waypoint must additionally
+# satisfy the tighter FINAL tolerances. Position is metres, orientation is
+# radians (0, pi].
+float64 path_position_tolerance 0.05
+float64 path_orientation_tolerance 0.261799388
+float64 final_position_tolerance 0.005
+float64 final_orientation_tolerance 0.05
+
+# Track orientation along a waypoint path. false ignores rotations (including
+# the final waypoint) and plans a position-only path.
+bool track_orientation true
+
+# Maximum number of initial solve/check passes for a waypoint path. Must be
+# >= 1; each pass uses the solver's default iteration budget.
+int32 outer_iterations 4

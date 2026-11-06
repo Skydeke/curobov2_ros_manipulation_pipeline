@@ -22,7 +22,12 @@ PlannerResult ClassicPlanner::plan(const curobo_runtime::PlanRequest & request)
   // it is rather than letting the solver raise a bare KeyError.
   const bool multi_tool =
     !request.tool_frames.empty() && !request.tool_poses.shape.empty();
-  if (!multi_tool &&
+  // An ordered waypoint path carries its targets in `waypoints` /
+  // `tool_waypoints`, not in the candidate `goalset`; it is still one pose
+  // solve on the same bridge entry point.
+  const bool waypoint_path = !request.waypoints.data.empty() ||
+    !request.tool_waypoints.data.empty();
+  if (!multi_tool && !waypoint_path &&
     (request.goalset.shape.empty() || request.goalset.shape[0] == 0))
   {
     RCLCPP_WARN(
@@ -42,9 +47,14 @@ PlannerResult ClassicPlanner::plan(const curobo_runtime::PlanRequest & request)
 
   // PORT: classic_planner "planning to candidate set (N poses) resolved within
   // a single solve" / "Planning with max_attempts=N".
-  const std::int64_t num_goalset = multi_tool ? 1 :
+  const std::int64_t num_goalset = (multi_tool || waypoint_path) ? 1 :
     (request.goalset.shape.empty() ? 0 : request.goalset.shape[0]);
-  if (num_goalset > 1) {
+  if (waypoint_path) {
+    RCLCPP_INFO(
+      rclcpp::get_logger("classic_planner"),
+      "Classic Motion Generation: planning an ordered waypoint path (%ld "
+      "waypoint(s))", static_cast<long>(request.waypoint_count));
+  } else if (num_goalset > 1) {
     RCLCPP_INFO(
       rclcpp::get_logger("classic_planner"),
       "Classic Motion Generation: planning to candidate set (%ld poses) resolved "

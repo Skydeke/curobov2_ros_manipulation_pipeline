@@ -250,6 +250,21 @@ class MockCuroboServer(RobotInterface):
     def _goal_joints(self, goalset) -> Optional[list]:
         if getattr(goalset, "target_joint_positions", None):
             return [float(v) for v in goalset.target_joint_positions]
+        # Ordered Cartesian waypoints (MULTIPOINT): follow the path to its
+        # FINAL pose. The real server interpolates every intermediate waypoint;
+        # the mock has one tool frame and only needs a reachable endpoint, and
+        # tests assert the request carries the whole ordered list.
+        waypoints = getattr(goalset, "waypoints", None)
+        if waypoints:
+            joint = self.ik(waypoints[-1])
+            return list(getattr(joint, "position", [])) if joint else None
+        tool_waypoints = getattr(goalset, "tool_waypoints", None)
+        if tool_waypoints:
+            # Waypoint-major: the LAST waypoint's first tool starts N from the
+            # end, where N is the number of tool frames.
+            count = len(getattr(goalset, "tool_frames", None) or []) or 1
+            joint = self.ik(tool_waypoints[-count])
+            return list(getattr(joint, "position", [])) if joint else None
         # Multi-tool goalset (parallel tool_frames/tool_poses). The mock has a
         # single tool frame, so it solves the FIRST named pose; tests assert
         # the request carries every frame/pose pair.

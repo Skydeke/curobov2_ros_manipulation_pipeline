@@ -236,47 +236,6 @@ void JointsTab::checkTarget()
     });
 }
 
-void JointsTab::clearLocks()
-{
-  if (joint_locks_client_ == nullptr || !joint_locks_client_->service_is_ready()) {
-    setStatus(tr("set_joint_locks service not available"));
-    return;
-  }
-  setStatus(
-    tr("clearing joint locks — the server rebuilds its model and solvers "
-       "(blocking, ~20 s). Watch its console; this tab stays responsive."));
-  auto request = std::make_shared<curobov2_ros_interfaces::srv::SetJointLocks::Request>();
-  // restore: true drops the whole override and re-parses the robot YAML's own
-  // lock_joints; every other request field is ignored. An empty (non-restore)
-  // request would be a read-only query instead, which is what refreshJointInfo
-  // already gets for free.
-  request->restore = true;
-  joint_locks_client_->async_send_request(
-    request,
-    [this](
-      rclcpp::Client<curobov2_ros_interfaces::srv::SetJointLocks>::SharedFuture future)
-    {
-      bool success = false;
-      QString message;
-      try {
-        auto result = future.get();
-        success = result->success;
-        message = QString::fromStdString(result->message);
-      } catch (const std::exception & e) {
-        message = QString::fromStdString(e.what());
-      }
-      runOnGuiThread(
-        [this, success, message]()
-        {
-          setStatus(success ? tr("joint locks updated: %1").arg(message)
-                            : tr("could not clear joint locks: %1").arg(message));
-          // The cspace just changed shape (a locked joint may have come back
-          // into it), so re-read it rather than trusting the old row set.
-          refreshJointInfo();
-        });
-    });
-}
-
 void JointsTab::planTarget()
 {
   if (!cspace_known_) {

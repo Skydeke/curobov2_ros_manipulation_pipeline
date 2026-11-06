@@ -41,6 +41,11 @@ PLANNER_CLASSIC = 0
 #: SetPlanner CARTESIAN (=3): the MTC ``solvers::CartesianPath`` backend. It
 #: plans a straight line through the axis-hold cost.
 PLANNER_CARTESIAN = 3
+#: SetPlanner MULTIPOINT (=4): the ordered Cartesian waypoint backend. The
+#: Python bridge dispatches to ``plan_pose_waypoints`` when a goalset carries
+#: ``waypoints`` / ``tool_waypoints``; the native runtime's factory entry is
+#: ``{"multipoint", 4, "Cartesian Waypoint"}``.
+PLANNER_MULTIPOINT = 4
 PLANNER_JOINT_SPACE = 5
 
 __all__ = [
@@ -53,5 +58,6 @@ __all__ = [
     'EXECUTE_WAIT_SEC',
     'PLANNER_CLASSIC',
     'PLANNER_CARTESIAN',
+    'PLANNER_MULTIPOINT',
     'PLANNER_JOINT_SPACE',
 ]

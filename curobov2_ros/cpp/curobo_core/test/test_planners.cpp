@@ -43,11 +43,13 @@ TEST(ZeroMotion, ToleratesFloat32QuantizationAtTheJointLimits)
 TEST(PlannerFactory, CatalogAndCreation)
 {
   // PORT: PlannerFactory._PLANNER_CATALOG
-  ASSERT_EQ(PlannerFactory::catalog().size(), 5u);
+  ASSERT_EQ(PlannerFactory::catalog().size(), 6u);
   EXPECT_EQ(std::string(PlannerFactory::catalog()[0].key), "classic");
   EXPECT_EQ(PlannerFactory::catalog()[0].id, 0);
-  EXPECT_EQ(std::string(PlannerFactory::catalog()[3].key), "joint_space");
-  EXPECT_EQ(PlannerFactory::catalog()[3].id, 5);
+  EXPECT_EQ(std::string(PlannerFactory::catalog()[3].key), "multipoint");
+  EXPECT_EQ(PlannerFactory::catalog()[3].id, 4);
+  EXPECT_EQ(std::string(PlannerFactory::catalog()[4].key), "joint_space");
+  EXPECT_EQ(PlannerFactory::catalog()[4].id, 5);
 
   curobo_runtime::FakeBridge bridge;
   auto classic = PlannerFactory::create("classic", &bridge, 1, {"j1", "j2"});

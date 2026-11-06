@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // The bridge seam: everything that touches cuRobo/torch/Python goes through
 // IBridge (design sections 5, 6, 14.2). Two implementations:
-//   * PyBridge   (real)  - the embedded CPython interpreter + curobo_bridge.
+//   * PyBridge   (real)  - the embedded CPython interpreter + curobo_python_runtime.
 //   * FakeBridge (tests) - deterministic, no interpreter, no GPU.
 //
 // M1 declares only the runtime/lane surface. Later milestones extend it with
@@ -114,6 +114,24 @@ struct PlanRequest
   // `tool_frames`; groups in wire order [theta_x, theta_y, theta_z, x, y, z]).
   // Empty = legacy: `trajectory_constraints` applies to the first named tool.
   std::vector<int> tool_trajectory_constraints;
+  // PORT: Goalset.waypoints / Goalset.tool_waypoints - an ordered Cartesian
+  // waypoint path. `waypoints` is [K, 7] (x, y, z, qw, qx, qy, qz) for a
+  // single tool; `tool_waypoints` is [K * N, 7] in waypoint-major order
+  // (wp0 tool0, wp0 tool1, ...), parallel to `tool_frames`. Empty means the
+  // legacy candidate `goalset` / multi-tool `tool_poses` path. Never both, and
+  // never together with `joint_target`.
+  TensorF32 waypoints;
+  TensorF32 tool_waypoints;
+  // PORT: Goalset.waypoint_count - K. 0 means "infer from the arrays".
+  std::int64_t waypoint_count = 0;
+  // PORT: Goalset.path_/final_* tolerances (metres / radians), the
+  // track-orientation switch and the outer solve/check pass cap.
+  double path_position_tolerance = 0.05;
+  double path_orientation_tolerance = 0.261799388;
+  double final_position_tolerance = 0.005;
+  double final_orientation_tolerance = 0.05;
+  bool track_orientation = true;
+  int outer_iterations = 4;
   int max_attempts = 1;
   int enable_graph_attempt = 1;
   // PORT: TrajectoryGoal.cartesian_* (MTC CartesianPath properties).
@@ -346,7 +364,7 @@ private:
   std::string traceback_;
 };
 
-// PORT: curobo_bridge:init / shutdown / bind_lane (design bridge_api.md section 1)
+// PORT: curobo_python_runtime:init / shutdown / bind_lane (design bridge_api.md section 1)
 class IBridge
 {
 public:
@@ -540,7 +558,7 @@ public:
   // ---- M5: reactive control (MPC) ---------------------------------------
   // PORT: mpc_planner.MPCController.build_solver. `cfg_json` carries the node's
   // mpc_* parameters; the bridge assembles the ModelPredictiveControlCfg (the
-  // MPPI/L-BFGS dicts live in curobo_bridge, next to the cuRobo paths) and builds
+  // MPPI/L-BFGS dicts live in curobo_python_runtime, next to the cuRobo paths) and builds
   // ModelPredictiveControl against an EMPTY scene (the real world is pushed by
   // mpc_load_scene).
   virtual void mpc_build(RobotHandle handle, const std::string & cfg_json) = 0;

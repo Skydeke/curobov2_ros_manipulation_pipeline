@@ -280,11 +280,35 @@ def _plan_request_to_dict(req) -> Optional[dict]:
             pd = _pose_to_dict(p)
             if pd is not None:
                 tool_poses.append(pd)
+        waypoints = []
+        for p in (getattr(gs, "waypoints", None) or []):
+            pd = _pose_to_dict(p)
+            if pd is not None:
+                waypoints.append(pd)
+        tool_waypoints = []
+        for p in (getattr(gs, "tool_waypoints", None) or []):
+            pd = _pose_to_dict(p)
+            if pd is not None:
+                tool_waypoints.append(pd)
         goalsets.append({
             "poses": poses,
             "tool_frames": [str(f) for f in (
                 getattr(gs, "tool_frames", None) or [])],
             "tool_poses": tool_poses,
+            "waypoints": waypoints,
+            "tool_waypoints": tool_waypoints,
+            "waypoint_count": int(getattr(gs, "waypoint_count", 0) or 0),
+            "path_position_tolerance": float(getattr(
+                gs, "path_position_tolerance", 0.05)),
+            "path_orientation_tolerance": float(getattr(
+                gs, "path_orientation_tolerance", 0.261799388)),
+            "final_position_tolerance": float(getattr(
+                gs, "final_position_tolerance", 0.005)),
+            "final_orientation_tolerance": float(getattr(
+                gs, "final_orientation_tolerance", 0.05)),
+            "track_orientation": bool(getattr(
+                gs, "track_orientation", True)),
+            "outer_iterations": int(getattr(gs, "outer_iterations", 4)),
             "target_joints": [float(v) for v in (
                 getattr(gs, "target_joint_positions", None) or [])],
             "allowed": [str(v) for v in (
@@ -316,6 +340,21 @@ def _plan_request_from_dict(d) -> Optional[Any]:
             tool_frames=[str(f) for f in (gs.get("tool_frames", None) or [])],
             tool_poses=[_pose_stub_from_dict(p) for p in (
                 gs.get("tool_poses", None) or [])],
+            waypoints=[_pose_stub_from_dict(p) for p in (
+                gs.get("waypoints", None) or [])],
+            tool_waypoints=[_pose_stub_from_dict(p) for p in (
+                gs.get("tool_waypoints", None) or [])],
+            waypoint_count=int(gs.get("waypoint_count", 0) or 0),
+            path_position_tolerance=float(gs.get(
+                "path_position_tolerance", 0.05)),
+            path_orientation_tolerance=float(gs.get(
+                "path_orientation_tolerance", 0.261799388)),
+            final_position_tolerance=float(gs.get(
+                "final_position_tolerance", 0.005)),
+            final_orientation_tolerance=float(gs.get(
+                "final_orientation_tolerance", 0.05)),
+            track_orientation=bool(gs.get("track_orientation", True)),
+            outer_iterations=int(gs.get("outer_iterations", 4)),
             target_joint_positions=[float(v) for v in (
                 gs.get("target_joints", None) or [])],
             allowed_collisions=[str(v) for v in (gs.get("allowed", None) or [])],

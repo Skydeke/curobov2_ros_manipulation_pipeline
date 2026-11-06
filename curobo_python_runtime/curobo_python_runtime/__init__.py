@@ -1,0 +1,187 @@
+"""Package facade: implementations live in the sibling modules."""
+
+# torch.compile is kept enabled; make its inductor worker pool use every CPU
+# instead of the conservative default.  This must happen before torch is
+# imported anywhere in the embedded interpreter.
+import os as _os
+
+_os.environ.setdefault(
+    "TORCHINDUCTOR_COMPILE_THREADS", str(_os.cpu_count() or 1))
+
+
+def _configure_torch_compile() -> None:
+    """Tune cuRobo's compile options without forking its optimizer modules.
+
+    cuRobo enables inductor autotune/coordinate-descent searches by default.
+    On the deployment GPUs those searches add minutes to the one-time warmup
+    for kernels the solver executes only a few times.  Keep compilation on and
+    let its worker pool use every CPU, but disable the searches.  The override
+    is installed before any ``curobo`` module that applies the decorator is
+    imported.
+    """
+    try:
+        import curobo._src.util.torch_util as _torch_util
+
+        _original = _torch_util.get_torch_compile_options
+
+        def _options() -> dict:
+            values = _original()
+            for key in (
+                "max_autotune",
+                "coordinate_descent_tuning",
+                "coordinate_descent_check_all_directions",
+                "aggressive_fusion",
+            ):
+                if key in values:
+                    values[key] = False
+            return values
+
+        _torch_util.get_torch_compile_options = _options
+    except Exception:
+        # cuRobo unavailable (unit tests / documentation builds): keep the
+        # normal import path working.
+        pass
+
+
+_configure_torch_compile()
+
+from .runtime import _GLOBAL_FLAGS, _LANES, _NEXT_HANDLE, _REGISTRY, bind_lane, init, lane_names, registered_handles, set_global_flags, shutdown
+from .robot_model import _detect_asset_root, _resolve_uri, _robot_kinematics_block, _translate_xrdf, robot_model_build
+from .robot_introspection import _resolve_descriptor, collision_spheres_with_attached, robot_description, robot_model_rebuild_locks, robot_model_update_lock_joints, robot_spheres, tool_frames
+from .kinematics import fk, joint_limits, link_poses
+from .ik import _build_ik_solver, _ik_solver, ik, ik_config, ik_multi
+from .collision import _link_of_factory, _rot_from_quat_wxyz, _sphere_snapshot, collision_attribution, collision_distance, validate
+from .scene import ATTACH_LINK, _attachment_manager, _clear_attached_voxels, _cuboid_world_aabb, _reapply_attached_disables, _scene_collision, _solver_scene_checkers, _to_scene, attach_object, detach_object, scene_get, scene_set
+from .link_collision import _solver_bound_scene, set_link_collision
+from .motion_planner import _reset_scene_cuda_graphs, _warmup_cspace, _warmup_pose, motion_planner_build, prepare_solve_mode
+from .plan_result import _as_2d_list, _flat_list, _knot_motion_time, _plan_outcome, _position_error_mm, _select_goal_index, _select_seed_index, considered_rows
+from .planning import collision_cache_bucket_counts, plan_cspace, plan_pose, render_plan_image, reset_seed, torch_synchronize
+from .mapper import MAPPER_DEFAULTS, _inspect_esdf, _mapper, clear_voxel_map, clear_voxel_region, configure_mapper, esdf_refresh, voxel_grid, warmup_mapper
+from .voxel import _collision_supported, _inside_shape, _obstacle_mode, _pose_matrix, _primitives_only_scene, _quat_to_matrix_wxyz, _rasterize_primitives_gpu, depth_integrate, lidar_integrate, robot_segment
+from .mpc import _MPPI_CSPACE_REGULARIZATION, _build_metrics_rollout_cfg, _build_mppi_optimizer_config, _build_mppi_transition_model, _mpc, _mpc_ensure_ik_solver, _mpc_goal_tool_pose, mpc_build, mpc_load_scene, mpc_reseed, mpc_setup
+from .mpc_step import _mpc_apply_goal, _mpc_js_to_dict, _mpc_state_from_dict, mpc_cost_breakdown, mpc_metrics, mpc_solve_goal_state, mpc_step, mpc_update_goal_pose, mpc_update_goal_state
+from .retarget import _retargeter, retarget_build, retarget_load_scene, retarget_reset, retarget_step
+from .world_push import _LAST_WORLD_PUSH_ERROR_T, _log_world_push_failure, world_push
+
+__all__ = [
+    'ATTACH_LINK',
+    'MAPPER_DEFAULTS',
+    '_GLOBAL_FLAGS',
+    '_LANES',
+    '_LAST_WORLD_PUSH_ERROR_T',
+    '_MPPI_CSPACE_REGULARIZATION',
+    '_NEXT_HANDLE',
+    '_REGISTRY',
+    '_as_2d_list',
+    '_attachment_manager',
+    '_build_ik_solver',
+    '_build_metrics_rollout_cfg',
+    '_build_mppi_optimizer_config',
+    '_build_mppi_transition_model',
+    '_clear_attached_voxels',
+    '_collision_supported',
+    '_cuboid_world_aabb',
+    '_detect_asset_root',
+    '_flat_list',
+    '_ik_solver',
+    '_inside_shape',
+    '_inspect_esdf',
+    '_knot_motion_time',
+    '_link_of_factory',
+    '_log_world_push_failure',
+    'link_poses',
+    '_mapper',
+    '_mpc',
+    '_mpc_apply_goal',
+    '_mpc_ensure_ik_solver',
+    '_mpc_goal_tool_pose',
+    '_mpc_js_to_dict',
+    '_mpc_state_from_dict',
+    '_obstacle_mode',
+    '_plan_outcome',
+    '_pose_matrix',
+    '_position_error_mm',
+    '_primitives_only_scene',
+    '_quat_to_matrix_wxyz',
+    '_rasterize_primitives_gpu',
+    '_reapply_attached_disables',
+    '_reset_scene_cuda_graphs',
+    '_resolve_descriptor',
+    '_resolve_uri',
+    '_retargeter',
+    '_robot_kinematics_block',
+    '_rot_from_quat_wxyz',
+    '_scene_collision',
+    '_select_goal_index',
+    '_select_seed_index',
+    '_solver_bound_scene',
+    '_solver_scene_checkers',
+    '_sphere_snapshot',
+    '_to_scene',
+    '_translate_xrdf',
+    '_warmup_cspace',
+    '_warmup_pose',
+    'attach_object',
+    'bind_lane',
+    'clear_voxel_map',
+    'clear_voxel_region',
+    'collision_attribution',
+    'collision_cache_bucket_counts',
+    'collision_distance',
+    'collision_spheres_with_attached',
+    'configure_mapper',
+    'considered_rows',
+    'depth_integrate',
+    'detach_object',
+    'esdf_refresh',
+    'fk',
+    'ik',
+    'ik_config',
+    'ik_multi',
+    'init',
+    'joint_limits',
+    'lane_names',
+    'lidar_integrate',
+    'motion_planner_build',
+    'mpc_build',
+    'mpc_cost_breakdown',
+    'mpc_load_scene',
+    'mpc_metrics',
+    'mpc_reseed',
+    'mpc_setup',
+    'mpc_solve_goal_state',
+    'mpc_step',
+    'mpc_update_goal_pose',
+    'mpc_update_goal_state',
+    'plan_cspace',
+    'plan_pose',
+    'prepare_solve_mode',
+    'registered_handles',
+    'render_plan_image',
+    'reset_seed',
+    'retarget_build',
+    'retarget_load_scene',
+    'retarget_reset',
+    'retarget_step',
+    'robot_description',
+    'robot_model_build',
+    'robot_model_rebuild_locks',
+    'robot_model_update_lock_joints',
+    'robot_segment',
+    'robot_spheres',
+    'scene_get',
+    'scene_set',
+    'set_global_flags',
+    'set_link_collision',
+    'shutdown',
+    'tool_frames',
+    'torch_synchronize',
+    'validate',
+    'voxel_grid',
+    'warmup_mapper',
+    'world_push',
+]
+
+from . import gpu_profile as _gpu_profile
+import sys as _sys
+_gpu_profile.install(_sys.modules[__name__])

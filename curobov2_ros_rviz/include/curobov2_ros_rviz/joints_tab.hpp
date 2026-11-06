@@ -5,7 +5,6 @@
 
 #include <curobov2_ros_interfaces/srv/fk_batch.hpp>
 #include <curobov2_ros_interfaces/srv/get_joint_info.hpp>
-#include <curobov2_ros_interfaces/srv/set_joint_locks.hpp>
 #include <curobov2_ros_interfaces/srv/trajectory_generation.hpp>
 #include <curobov2_ros_interfaces/action/send_trajectory.hpp>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
@@ -170,7 +169,6 @@ private Q_SLOTS:
   /// target actually changed.
   void publishPreview();
   void checkTarget();
-  void clearLocks();
   void planTarget();
   void sendTarget();
   void stopGoal();
@@ -216,7 +214,6 @@ private:
 
   rclcpp::Client<curobov2_ros_interfaces::srv::GetJointInfo>::SharedPtr joint_info_client_;
   rclcpp::Client<curobov2_ros_interfaces::srv::FkBatch>::SharedPtr fk_client_;
-  rclcpp::Client<curobov2_ros_interfaces::srv::SetJointLocks>::SharedPtr joint_locks_client_;
   rclcpp::Client<curobov2_ros_interfaces::srv::TrajectoryGeneration>::SharedPtr
     trajectory_client_;
   rclcpp_action::Client<curobov2_ros_interfaces::action::SendTrajectory>::SharedPtr
@@ -266,7 +263,6 @@ private:
   QPushButton * send_button_ = nullptr;
   QPushButton * stop_button_ = nullptr;
   QPushButton * check_button_ = nullptr;
-  QPushButton * clear_locks_button_ = nullptr;
 
   /// Named poses from the robot descriptor (empty until get_joint_info
   /// answers).
