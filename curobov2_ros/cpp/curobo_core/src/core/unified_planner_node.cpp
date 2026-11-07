@@ -337,6 +337,19 @@ void UnifiedPlannerNode::setup() {
       auto gpu_guard =
           curobo_runtime::Runtime::instance().barrier().exclusive();
       bridge_->motion_planner_build(handle_, cfg.str());
+      const double payload_mass = get_parameter("robot_payload_mass").as_double();
+      if (payload_mass > 0.0) {
+        try {
+          bridge_->update_link_inertial(
+            handle_, "attached_object", payload_mass);
+          RCLCPP_INFO(
+            get_logger(), "Applied %.3f kg payload to attached_object",
+            payload_mass);
+        } catch (const std::exception & e) {
+          RCLCPP_WARN(
+            get_logger(), "could not apply payload mass: %s", e.what());
+        }
+      }
     }
     RCLCPP_INFO(get_logger(), "%s planner ready",
                 get_parameter("planner_type").as_string().c_str());

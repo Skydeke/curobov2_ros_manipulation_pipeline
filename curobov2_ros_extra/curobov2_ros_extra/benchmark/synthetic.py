@@ -409,13 +409,7 @@ def order_ros_parity_setup(
     cuboids than the server's active collision-cache capacity."""
     node.clear_world(timeout=timeout)
 
-    if size_collision_cache:
-        node.size_collision_cache(timeout=timeout)
-    else:
-        node.get_logger().warn(
-            "size_collision_cache=False: leaving the server's collision "
-            "cache in place (padded kernel grids — diagnostic)"
-        )
-
+    # The server no longer exposes set_collision_cache: the cache is fixed at
+    # launch / in the native artifact. Nothing to resize here.
     node.add_world(timeout=timeout)
     warmup(timeout=timeout)

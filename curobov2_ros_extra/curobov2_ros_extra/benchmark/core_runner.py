@@ -129,6 +129,7 @@ def _reference_args(mesh: bool, use_cuda_graph: bool, use_dynamics: bool = False
         mesh=mesh,
         disable_cuda_graph=not use_cuda_graph,
         mass=mass,
+        enable_timeopt=True,
     )
 
 

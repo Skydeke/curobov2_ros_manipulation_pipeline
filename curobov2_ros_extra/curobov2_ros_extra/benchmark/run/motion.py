@@ -83,6 +83,11 @@ def cmd_ros(args) -> int:
         apply_mpinets_locks=not args.no_mpinets_locks,
         use_dynamics=args.use_dynamics,
         mass=args.mass,
+        # A standalone `ros` run must also put the server in the matching
+        # torque mode; otherwise the recorded Energy/Torque columns and the
+        # solver's own effort limits disagree with --use-dynamics.
+        server_dynamics=args.use_dynamics,
+        server_payload_mass=args.mass if args.use_dynamics else 0.0,
         # Whole-benchmark envelope: pin the server's plan-time max_attempts
         # to this run's own --max-attempts (default 100 = the page's budget),
         # so a standalone ROS leg retries exactly like every other leg.

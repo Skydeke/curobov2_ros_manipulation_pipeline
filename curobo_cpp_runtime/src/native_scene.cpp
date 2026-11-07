@@ -51,7 +51,7 @@ std::string object_name(const json::Value & object, std::size_t index)
   return name.empty() ? "object_" + std::to_string(index) : name;
 }
 
-void add_inline_mesh(
+curobo::robot::ObstacleHandle add_inline_mesh(
   curobo::robot::Scene & scene, const json::Value & object, const std::string & name,
   const curobo::robot::Pose & pose, const std::array<float, 3> & dims)
 {
@@ -102,7 +102,7 @@ void add_inline_mesh(
         static_cast<std::int32_t>(indices[i + 1].as_double()),
         static_cast<std::int32_t>(indices[i + 2].as_double())});
   }
-  scene.add_mesh(mesh);
+  return scene.add_mesh(mesh);
 }
 
 }  // namespace
@@ -123,6 +123,7 @@ std::int64_t NativeScene::set_objects_json(
   if (clear_first) {
     scene_.clear();
     names_.clear();
+    objects_.clear();
   }
 
   std::size_t index = 0;
@@ -134,6 +135,7 @@ std::int64_t NativeScene::set_objects_json(
     const int type = static_cast<int>(object.number_at("type"));
     const curobo::robot::Pose pose = to_pose(object.find("pose"), name);
     const std::array<float, 3> dims = to_dims(object.find("dims"));
+    curobo::robot::ObstacleHandle handle;
 
     switch (type) {
       case 0: {  // CUBOID
@@ -141,7 +143,7 @@ std::int64_t NativeScene::set_objects_json(
           cuboid.name = name;
           cuboid.pose = pose;
           cuboid.dimensions = dims;
-          scene_.add_cuboid(cuboid);
+          handle = scene_.add_cuboid(cuboid);
           break;
         }
       case 1: {  // SPHERE
@@ -149,7 +151,7 @@ std::int64_t NativeScene::set_objects_json(
           sphere.name = name;
           sphere.pose = pose;
           sphere.radius = dims[0];
-          scene_.add_sphere(sphere);
+          handle = scene_.add_sphere(sphere);
           break;
         }
       case 2: {  // CAPSULE
@@ -159,7 +161,7 @@ std::int64_t NativeScene::set_objects_json(
           capsule.base = {0.0F, 0.0F, 0.0F};
           capsule.tip = {0.0F, 0.0F, dims[1]};
           capsule.radius = dims[0];
-          scene_.add_capsule(capsule);
+          handle = scene_.add_capsule(capsule);
           break;
         }
       case 3: {  // CYLINDER
@@ -168,11 +170,11 @@ std::int64_t NativeScene::set_objects_json(
           cylinder.pose = pose;
           cylinder.radius = dims[0];
           cylinder.height = dims[1];
-          scene_.add_cylinder(cylinder);
+          handle = scene_.add_cylinder(cylinder);
           break;
         }
       case 4:  // MESH
-        add_inline_mesh(scene_, object, name, pose, dims);
+        handle = add_inline_mesh(scene_, object, name, pose, dims);
         break;
       default:
         throw std::runtime_error(
@@ -180,10 +182,26 @@ std::int64_t NativeScene::set_objects_json(
                 std::to_string(type));
     }
     names_.push_back(name);
+    SceneObjectRecord record;
+    record.type = type;
+    record.pose = pose;
+    record.dims = dims;
+    record.handle = handle;
+    objects_[name] = record;
   }
 
   ++version_;
   return version_;
+}
+
+bool NativeScene::set_object_enabled(const std::string & name, bool enabled)
+{
+  const auto it = objects_.find(name);
+  if (it == objects_.end() || !it->second.handle.valid()) {
+    return false;
+  }
+  scene_.set_obstacle_enabled(it->second.handle, enabled);
+  return true;
 }
 
 std::string NativeScene::get_objects_json() const

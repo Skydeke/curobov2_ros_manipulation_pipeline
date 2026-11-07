@@ -31,7 +31,6 @@ from rclpy.node import Node
 from curobov2_ros_interfaces.srv import (
     AddObject,
     FkBatch,
-    SetCollisionCache,
     WarmupFK,
 )
 from std_srvs.srv import Trigger
@@ -49,7 +48,6 @@ WARMUP_FK_SRV = f"{SERVER_NODE}/warmup_fk"
 FK_BATCH_SRV = f"{SERVER_NODE}/fk_batch"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
-SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 
 
 class RosCostRunner(Node):
@@ -61,16 +59,12 @@ class RosCostRunner(Node):
         self._fk_client = self.create_client(FkBatch, FK_BATCH_SRV)
         self._add_client = self.create_client(AddObject, ADD_OBJECT_SRV)
         self._clear_client = self.create_client(Trigger, REMOVE_ALL_OBJECTS_SRV)
-        self._cache_client = self.create_client(
-            SetCollisionCache, SET_COLLISION_CACHE_SRV
-        )
 
         for label, client in (
             ("warmup_fk", self._warmup_client),
             ("fk_batch", self._fk_client),
             ("add_object", self._add_client),
             ("remove_all_objects", self._clear_client),
-            ("set_collision_cache", self._cache_client),
         ):
             if not client.wait_for_service(timeout_sec=service_timeout):
                 self.get_logger().error(f"{label} service not available")
@@ -87,32 +81,6 @@ class RosCostRunner(Node):
                 f"{client.srv_name}: service call failed (timeout={timeout}s)"
             )
         return future.result()
-
-    def size_collision_cache(self, timeout: float = 120.0) -> None:
-        """Size the server's collision cache to the cost world (native parity).
-
-        Clears the world first: the server refuses a shrink below the
-        loaded scene, and empty fits every size. The cost world is pushed
-        back right after (see add_world).
-        """
-        self.clear_world(timeout=timeout)
-        request = SetCollisionCache.Request()
-        request.obb = COST_WORLD_CUBOIDS
-        request.mesh = 0
-        request.blox = 0  # no cameras in the benchmark: disable the voxel layer
-        self.get_logger().info(
-            f"Sizing solver collision cache to cost world "
-            f"(obb={request.obb}, mesh={request.mesh}, blox={request.blox})"
-        )
-        response = self._call(self._cache_client, request, timeout)
-        if not response.success:
-            raise RuntimeError(
-                f"set_collision_cache failed: {getattr(response, 'message', '')}"
-            )
-        self.get_logger().info(
-            f"Collision cache set: obb={response.obb_cache}, "
-            f"mesh={response.mesh_cache}, blox={response.blox_cache}"
-        )
 
     def clear_world(self, timeout: float = 30.0) -> None:
         response = self._call(self._clear_client, Trigger.Request(), timeout)
@@ -259,7 +227,6 @@ def run_cost_ros(
         order_ros_parity_setup(
             node,
             warmup=lambda *, timeout: node.warmup_fk(batch, timeout=timeout),
-            size_collision_cache=size_collision_cache,
             timeout=call_timeout,
         )
 

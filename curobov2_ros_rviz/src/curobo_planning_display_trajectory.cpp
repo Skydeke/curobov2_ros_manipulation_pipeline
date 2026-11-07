@@ -452,7 +452,13 @@ bool CuroboPlanningDisplay::consumeFk(uint64_t seq)
   // Trajectories may omit non-cspace joints (the gripper fingers). Seed the
   // client-side FK with the live state so an omitted jaw keeps its real
   // position instead of falling back to zero (closed).
-  const auto live_joints = currentJointPositions();
+  auto live_joints = currentJointPositions();
+  {
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    for (const auto & entry : last_planned_joints_) {
+      live_joints[entry.first] = entry.second;
+    }
+  }
   waypoints_.clear();
   waypoints_.reserve(points);
   for (size_t i = 0; i < points; ++i) {
@@ -493,6 +499,16 @@ bool CuroboPlanningDisplay::consumeFk(uint64_t seq)
     previous = waypoint.time_from_start;
   }
 
+  if (!fk_pending_msg_->joint_names.empty() && !fk_pending_msg_->points.empty()) {
+    const auto & last_point = fk_pending_msg_->points.back();
+    const std::size_t count = std::min(
+      fk_pending_msg_->joint_names.size(), last_point.positions.size());
+    std::lock_guard<std::mutex> lock(joint_state_mutex_);
+    for (std::size_t j = 0; j < count; ++j) {
+      last_planned_joints_[fk_pending_msg_->joint_names[j]] =
+        last_point.positions[j];
+    }
+  }
   anim_time_ = 0.0;
   current_state_ = 0;
   current_frac_ = 0.0;
@@ -507,8 +523,27 @@ void CuroboPlanningDisplay::mergeClientFk(
   const std::map<std::string, double> & joint_positions,
   std::map<std::string, Eigen::Isometry3d> & transforms) const
 {
+  // Expand URDF mimic joints (OpenArm finger_joint2 mirrors finger_joint1).
+  // The planner trajectory only names the primary jaw, so otherwise the ghost
+  // uses the live value for the mimic link and shows the wrong gripper state.
+  std::map<std::string, double> expanded = joint_positions;
+  if (urdf_model_) {
+    for (const auto & joint_entry : urdf_model_->joints_) {
+      const auto & joint = joint_entry.second;
+      if (!joint || !joint->mimic) {
+        continue;
+      }
+      const auto source = expanded.find(joint->mimic->joint_name);
+      if (source == expanded.end()) {
+        continue;
+      }
+      expanded[joint_entry.first] = joint->mimic->multiplier * source->second +
+        joint->mimic->offset;
+    }
+  }
+
   std::map<std::string, Eigen::Isometry3d> all;
-  if (!fk_engine_.computeFK(joint_positions, all) || all.empty()) {
+  if (!fk_engine_.computeFK(expanded, all) || all.empty()) {
     return;
   }
 

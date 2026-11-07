@@ -122,6 +122,22 @@ def run_ik_core(
         kin_state = solver.compute_kinematics(js)
         goal = kin_state.tool_poses.as_goal()
         solver.solve_pose(goal_tool_poses=goal)
+        # Discard one real batch too: the first solve of a new goal tensor can
+        # still trigger lazy kernel/JIT work that the warmup sample goal misses.
+        if goals_batches:
+            _probe = goals_batches[0]
+            _p = [[g["position_xyz"][0], g["position_xyz"][1],
+                   g["position_xyz"][2]] for g in _probe]
+            _q = [[g["quaternion_wxyz"][0], g["quaternion_wxyz"][1],
+                   g["quaternion_wxyz"][2], g["quaternion_wxyz"][3]]
+                  for g in _probe]
+            _pose = CuroboPose(
+                position=torch.tensor(_p, dtype=dtype, device=device),
+                quaternion=torch.tensor(_q, dtype=dtype, device=device),
+            )
+            solver.solve_pose(
+                goal_tool_poses=GoalToolPose.from_poses({tool_frame: _pose})
+            )
 
         for b_idx, goals in enumerate(goals_batches, start=1):
             positions = [

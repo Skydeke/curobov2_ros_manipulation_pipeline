@@ -61,6 +61,8 @@ void ConfigServices::rebuild_planner()
       << ",\"max_goalset\":" << node_->get_parameter("max_goalset").as_int()
       << ",\"obstacle_collision_mode\":\""
       << node_->get_parameter("obstacle_collision_mode").as_string() << "\""
+      << ",\"check_effort_limits\":"
+      << (node_->get_parameter("load_dynamics").as_bool() ? "true" : "false")
       << ",\"collision_cache\":{\"cuboid\":"
       << node_->get_parameter("collision_cache_cuboid").as_int()
       << ",\"mesh\":" << node_->get_parameter("collision_cache_mesh").as_int()

@@ -229,6 +229,11 @@ private:
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
   mutable std::mutex joint_state_mutex_;
   std::map<std::string, double> current_joints_;
+  // Last jaw values explicitly named by a planner trajectory. A later
+  // sub-trajectory may omit the passive gripper; using the last planned value
+  // keeps the ghost at the task's commanded state instead of the live state
+  // (which can still be moving through a gripper action).
+  std::map<std::string, double> last_planned_joints_;
   void onJointState(const sensor_msgs::msg::JointState::ConstSharedPtr & msg);
   std::map<std::string, double> currentJointPositions() const;
   std::set<std::string> activeChainJoints() const;

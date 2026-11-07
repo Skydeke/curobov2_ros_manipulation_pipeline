@@ -73,7 +73,6 @@ SERVER_NODE = "unified_planner"
 GENERATE_TRAJECTORY_SRV = f"{SERVER_NODE}/generate_trajectory"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
-SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 # Runtime torque-mode switch plumbing (both stock ROS2 services — no new
 # wire schema): the server's dynamics mode is baked into its robot_cfg at
 # solver build time, so flipping it = set_parameters + update_motion_gen_config.
@@ -372,7 +371,6 @@ __all__ = [
     'GENERATE_TRAJECTORY_SRV',
     'ADD_OBJECT_SRV',
     'REMOVE_ALL_OBJECTS_SRV',
-    'SET_COLLISION_CACHE_SRV',
     'GET_PARAMETERS_SRV',
     'SET_PARAMETERS_SRV',
     'UPDATE_MOTION_GEN_CONFIG_SRV',

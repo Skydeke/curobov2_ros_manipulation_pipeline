@@ -78,12 +78,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ros.add_argument("--call-timeout", type=float, default=120.0,
                        help="seconds per generate_trajectory call")
     p_ros.add_argument("--no-size-cache", action="store_true",
-                       help="DIAGNOSTIC: leave the server's default collision "
-                            "cache (cuboid=32, mesh=4 + voxel) in place instead "
-                            "of sizing it to the dataset (the residual "
-                            "padding inflates per-attempt solve vs native's "
-                            "exact {obb: n_cubes} — A/B with the default "
-                            "sized cache)")
+                       help="DEPRECATED/IGNORED: the server no longer exposes set_collision_cache; the cache is fixed at launch or in the native artifact")
     p_ros.add_argument("--use-dynamics", action="store_true",
                        help="record the run as the torque-limited variant "
                             "(server must be launched with the matching "
@@ -134,8 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--service-timeout", type=float, default=30.0)
     p_all.add_argument("--call-timeout", type=float, default=120.0)
     p_all.add_argument("--no-size-cache", action="store_true",
-                       help="DIAGNOSTIC: leave the server's default collision "
-                            "cache in place (see `ros --no-size-cache`)")
+                       help="DEPRECATED/IGNORED (see `ros --no-size-cache`)")
     _add_motion_lock_opt(p_all)
     _add_compare_opts(p_all)
     p_all.add_argument("--output", "-o", default=None)
@@ -190,8 +184,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_webpage.add_argument("--service-timeout", type=float, default=30.0)
     p_webpage.add_argument("--call-timeout", type=float, default=120.0)
     p_webpage.add_argument("--no-size-cache", action="store_true",
-                           help="DIAGNOSTIC: leave the server's default collision "
-                                "cache in place (see `ros --no-size-cache`)")
+                           help="DEPRECATED/IGNORED (see `ros --no-size-cache`)")
     _add_motion_lock_opt(p_webpage)
     p_webpage.add_argument("--output", "-o", default=None)
     p_webpage.set_defaults(func=cmd_webpage)

@@ -220,6 +220,62 @@ class MoveTo(_MotionBase):
         pass
 
 
+class _WaypointOptions:
+    """Shared waypoint solve-option setters (tolerances / tracking / passes)."""
+
+    def setTrackOrientation(self, enabled: bool = True) -> None:
+        """Track waypoint orientations (full pose) or positions only."""
+        self.params["track_orientation"] = bool(enabled)
+
+    def setPathTolerances(self, position: float, orientation: float) -> None:
+        """Tolerances for non-terminal waypoints: position (m), angle (rad)."""
+        self.params["path_position_tolerance"] = float(position)
+        self.params["path_orientation_tolerance"] = float(orientation)
+
+    def setFinalTolerances(self, position: float, orientation: float) -> None:
+        """Tolerances for the terminal waypoint: position (m), angle (rad)."""
+        self.params["final_position_tolerance"] = float(position)
+        self.params["final_orientation_tolerance"] = float(orientation)
+
+    def setTolerances(self, path_position: float, path_orientation: float,
+                      final_position: float, final_orientation: float) -> None:
+        """Set all four waypoint tolerances in one call."""
+        self.setPathTolerances(path_position, path_orientation)
+        self.setFinalTolerances(final_position, final_orientation)
+
+    def setOuterIterations(self, count: int) -> None:
+        """Outer solve/check passes issued by the waypoint solver (>= 1)."""
+        self.params["outer_iterations"] = int(count)
+
+    # MTC CartesianPath parity options. cuRobo waypoint planning follows full
+    # poses and does not consume step_size/precision; they are carried here so
+    # task code written against MTC's CartesianPath API stays valid.
+    def setStepSize(self, step_size: float) -> None:
+        self.params["step_size"] = float(step_size)
+
+    def setPrecision(self, precision: Any) -> None:
+        value = getattr(precision, "translational", precision)
+        try:
+            self.params["precision"] = float(value)
+        except (TypeError, ValueError):
+            pass
+
+    def setMaxCartesianSpeed(self, speed: float, link: str = "") -> None:
+        """Carry MTC's Cartesian speed cap (backend tracks poses)."""
+        self.params["max_cartesian_speed"] = float(speed)
+        if link:
+            self.params["cartesian_speed_limited_link"] = str(link)
+
+    def setCartesianSpeedLimitedLink(self, link: str) -> None:
+        self.params["cartesian_speed_limited_link"] = str(link)
+
+    def setJumpThreshold(self, *args) -> None:
+        """Deprecated MTC no-op; accepted for API parity."""
+
+    def setPathConstraints(self, constraints: Any) -> None:
+        """Stored for parity; cuRobo waypoint mode uses full pose tracking."""
+        self.path_constraints = constraints
+
 class MultiToolMoveTo(_MotionBase):
     """Simultaneous per-tool pose goals (bimanual move).
 
@@ -271,7 +327,7 @@ class MultiToolMoveTo(_MotionBase):
         self.setTools(tools)
 
 
-class MultiToolCartesianPath(MultiToolMoveTo):
+class MultiToolCartesianPath(_WaypointOptions, MultiToolMoveTo):
     """Straight-line simultaneous per-tool goals (multi-tool Cartesian move).
 
     Accepts any non-empty ``{frame, pose}`` list (N >= 1), exactly like
@@ -372,34 +428,6 @@ def _waypoint_tool_entries(tools) -> list:
             "MultiToolWaypoints needs the same number of waypoints per tool, "
             f"got {per_tool}")
     return out
-
-
-class _WaypointOptions:
-    """Shared waypoint solve-option setters (tolerances / tracking / passes)."""
-
-    def setTrackOrientation(self, enabled: bool = True) -> None:
-        """Track waypoint orientations (full pose) or positions only."""
-        self.params["track_orientation"] = bool(enabled)
-
-    def setPathTolerances(self, position: float, orientation: float) -> None:
-        """Tolerances for non-terminal waypoints: position (m), angle (rad)."""
-        self.params["path_position_tolerance"] = float(position)
-        self.params["path_orientation_tolerance"] = float(orientation)
-
-    def setFinalTolerances(self, position: float, orientation: float) -> None:
-        """Tolerances for the terminal waypoint: position (m), angle (rad)."""
-        self.params["final_position_tolerance"] = float(position)
-        self.params["final_orientation_tolerance"] = float(orientation)
-
-    def setTolerances(self, path_position: float, path_orientation: float,
-                      final_position: float, final_orientation: float) -> None:
-        """Set all four waypoint tolerances in one call."""
-        self.setPathTolerances(path_position, path_orientation)
-        self.setFinalTolerances(final_position, final_orientation)
-
-    def setOuterIterations(self, count: int) -> None:
-        """Outer solve/check passes issued by the waypoint solver (>= 1)."""
-        self.params["outer_iterations"] = int(count)
 
 
 class CartesianWaypoints(_WaypointOptions, _MotionBase):

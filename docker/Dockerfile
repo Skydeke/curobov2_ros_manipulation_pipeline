@@ -38,6 +38,7 @@ ARG COLCON_WORKERS=
 ENV ROS_DISTRO=${ROS_DISTRO}
 ENV ROS_WS=${ROS_WS}
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV PIP_NO_CACHE_DIR=1
 # /usr/local/cuda is the alternatives symlink that both the NVIDIA CUDA base
 # images and the cuda-toolkit-* packages create, so one set of ENVs serves a
 # base that ships CUDA and one where CUDA_TOOLKIT installs it. Re-prepending

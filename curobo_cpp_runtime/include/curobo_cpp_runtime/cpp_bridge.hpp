@@ -103,6 +103,9 @@ public:
   // ---- planning ----
   void motion_planner_build(
     curobo_runtime::RobotHandle handle, const std::string & cfg_json) override;
+  void update_link_inertial(
+    curobo_runtime::RobotHandle handle, const std::string & link_name,
+    double mass) override;
   curobo_runtime::PlanOutcome plan_pose(
     curobo_runtime::RobotHandle handle, const curobo_runtime::PlanRequest & request) override;
   curobo_runtime::PlanOutcome plan_cspace(

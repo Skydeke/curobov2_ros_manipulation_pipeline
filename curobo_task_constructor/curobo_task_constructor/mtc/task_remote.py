@@ -63,9 +63,9 @@ class _TaskRemoteMixin:
         with lock:
             # Bounded wait (MTC: 0.5s) - an execution backend that is not up
             # must fail the call, never hang the caller's thread.
-            if not client.wait_for_server(
-                    timeout_sec=rclpy.duration.Duration(
-                        seconds=EXECUTE_WAIT_SEC)):
+            # rclpy's ActionClient takes a float seconds, unlike rclcpp's
+            # Duration overload used by the C++ MTC.
+            if not client.wait_for_server(timeout_sec=EXECUTE_WAIT_SEC):
                 return MoveItErrorCode(MoveItErrorCode.FAILURE)
 
             goal_future = client.send_goal_async(goal)

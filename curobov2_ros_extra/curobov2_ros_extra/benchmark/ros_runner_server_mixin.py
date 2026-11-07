@@ -36,7 +36,6 @@ from sensor_msgs.msg import JointState as RosJointState
 from curobov2_ros_interfaces.msg import Goalset, SceneObject, TrajectoryGoal
 from curobov2_ros_interfaces.srv import (
     AddObject,
-    SetCollisionCache,
     SetJointLocks,
     SetObjects,
     TrajectoryGeneration,
@@ -49,7 +48,6 @@ from .compare import (
 )
 from .obstacle_convert import obstacles_dict_to_add_requests
 from .problems import (
-    collision_cache_sizes,
     filter_scenes,
     load_problems,
     mpinets_lock_for_scene,
@@ -73,7 +71,6 @@ SERVER_NODE = "unified_planner"
 GENERATE_TRAJECTORY_SRV = f"{SERVER_NODE}/generate_trajectory"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
-SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 # Runtime torque-mode switch plumbing (both stock ROS2 services — no new
 # wire schema): the server's dynamics mode is baked into its robot_cfg at
 # solver build time, so flipping it = set_parameters + update_motion_gen_config.
@@ -167,6 +164,11 @@ class _RosRunnerServerMixin:
         failed = [res.reason for res in set_resp.results if not res.successful]
         if failed:
             raise RuntimeError(f"set_parameters failed switching torque mode: {failed}")
+        if self._rebuild_client is None:
+            self.get_logger().warning(
+                "update_motion_gen_config service unavailable; torque mode "
+                "parameters were updated but no solver rebuild was requested")
+            return
         self._call(self._rebuild_client, Trigger.Request(), timeout=rebuild_timeout)
         self.get_logger().info("update_motion_gen_config rebuild complete")
 
@@ -315,48 +317,6 @@ class _RosRunnerServerMixin:
         )
 
     # ------------------------------------------------------------------
-    # collision cache
-    # ------------------------------------------------------------------
-
-    def size_collision_cache(self, problems, timeout: float = 120.0) -> None:
-        """Size the server's collision cache to the dataset (native parity). curobo's Warp collision kernels launch one thread per (robot sphere,
-        padded obstacle slot) per obstacle *type*, so an over-padded cache —
-        the server's former deployment default
-        ``{cuboid: 100, mesh: 100, voxel: ...}`` (the launch defaults are now
-        32/4 via ``collision_cache_cuboid`` / ``collision_cache_mesh``) —
-        makes every solver iteration run a far larger kernel grid than the
-        native leg's ``{obb: n_cubes}`` cache — the residual ~7x
-        single-attempt solve gap after the
-        ``obstacle_collision_mode:=cuboid`` fix. Sizing the cache to
-        the dataset's actual per-type counts (the same computation as the
-        native leg's ``check_problems``) and disabling the empty no-camera
-        voxel layer makes both legs collide through native-equivalent kernel
-        grids."""
-        # The server refuses a shrink below the loaded scene (it would
-        # leave the solvers blind), so the world goes first: empty fits
-        # every size, and the scene is pushed back right after the rebuild.
-        self.clear_world(timeout=timeout)
-        cuboid_slots, mesh_slots = collision_cache_sizes(problems)
-        request = SetCollisionCache.Request()
-        request.obb = cuboid_slots
-        request.mesh = mesh_slots
-        request.blox = 0  # no cameras in the benchmark: disable the voxel layer
-        self.get_logger().info(
-            f"Sizing solver collision cache to dataset needs "
-            f"(obb={request.obb}, mesh={request.mesh}, blox={request.blox}) — "
-            f"one synchronous solver rebuild, then native-sized kernel grids"
-        )
-        response = self._call(self._cache_client, request, timeout)
-        if not response.success:
-            raise RuntimeError(
-                f"set_collision_cache failed: {getattr(response, 'message', '')}"
-            )
-        self.get_logger().info(
-            f"Collision cache set: obb={response.obb_cache}, "
-            f"mesh={response.mesh_cache}, blox={response.blox_cache}"
-        )
-
-    # ------------------------------------------------------------------
     # world management
     # ------------------------------------------------------------------
 
@@ -385,7 +345,6 @@ __all__ = [
     'GENERATE_TRAJECTORY_SRV',
     'ADD_OBJECT_SRV',
     'REMOVE_ALL_OBJECTS_SRV',
-    'SET_COLLISION_CACHE_SRV',
     'GET_PARAMETERS_SRV',
     'SET_PARAMETERS_SRV',
     'UPDATE_MOTION_GEN_CONFIG_SRV',

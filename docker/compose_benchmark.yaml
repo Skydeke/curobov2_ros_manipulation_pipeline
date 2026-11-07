@@ -109,13 +109,13 @@
 # Run:  docker compose -f docker/compose_benchmark.yaml up
 #       docker compose -f docker/compose_benchmark.yaml exec curobo_benchmark \
 #         cat /tmp/benchmark_report.json
+# Python backend only: this stack runs the original cuRobo Python core + the
+# Python `curobo_trajectory_planner` server. The native C++ counterpart is
+# Benchmark/docker/compose_benchmark_cpp.yaml.
 services:
   curobo_server:
     container_name: curobo_benchmark_server
-    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:python-legacy
     runtime: nvidia
     network_mode: host
     ipc: host
@@ -127,11 +127,12 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       SETUPTOOLS_SCM_PRETEND_VERSION: 0.8.0
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /dev/shm:/dev/shm
-      - ..:/root/ros2_ws/src
+      - ..:/pipeline:ro
     command:
       - bash
       - -c
@@ -162,7 +163,7 @@ services:
 
   curobo_benchmark:
     container_name: curobo_benchmark
-    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:latest
+    image: ghcr.io/skydeke/curobov2_ros_manipulation_pipeline/curobov2_ros:python-legacy
     depends_on:
       curobo_server:
         condition: service_started
@@ -177,18 +178,18 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,video,utility,graphics
       ROS_DOMAIN_ID: $ROS_DOMAIN_ID
+      RMW_IMPLEMENTATION: rmw_fastrtps_cpp
       SETUPTOOLS_SCM_PRETEND_VERSION: 0.8.0
     volumes:
       - /tmp/.X11-unix:/tmp/.X11-unix
       - /dev/shm:/dev/shm
-      - ..:/root/ros2_ws/src
+      - ..:/pipeline:ro
     command:
       - bash
       - -c
       - |
         source /opt/ros/jazzy/setup.bash &&
         source /root/ros2_ws/install/setup.bash &&
-        export PYTHONPATH=/root/ros2_ws/src/curobov2_ros_extra:$${PYTHONPATH} &&
         echo "Waiting for /unified_planner/generate_trajectory..." &&
         for attempt in 1 2 3 4 5 6 7 8 9 10; do
           if ros2 service list --no-daemon 2>/dev/null | grep -q unified_planner/generate_trajectory; then
@@ -204,4 +205,4 @@ services:
           -o /tmp/benchmark_webpage.json;
         webpage_exit=$?;
         echo "Webpage exit code: $$webpage_exit" &&
-        tail -f /dev/null
+        exit $$webpage_exit

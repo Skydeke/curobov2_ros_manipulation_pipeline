@@ -261,12 +261,26 @@ def launch_setup(context, *args, **kwargs):
 
         # The planner itself (node name: unified_planner)
         Node(
-            package='curobov2_ros',
-            executable='curobo_trajectory_planner',
+            package=LaunchConfiguration('curobo_executable_package'),
+            executable=LaunchConfiguration('curobo_executable'),
             output='screen',
             parameters=[{
                 'robot': robot_name,
                 'robot_config_file': LaunchConfiguration('robot_config_file'),
+                # Native C++ runtime selection. The Python executable ignores
+                # these overrides; curobo_trajectory_planner_cpp reads them in
+                # its pre-node resolver (see curobo_cpp_runtime/README.md).
+                'curobo_runtime': LaunchConfiguration('curobo_runtime'),
+                'curobo_artifact_root': LaunchConfiguration('curobo_artifact_root'),
+                'curobo_artifact_sm': LaunchConfiguration('curobo_artifact_sm'),
+                'push_esdf_to_solvers': ParameterValue(
+                    LaunchConfiguration('push_esdf_to_solvers'), value_type=bool),
+                'max_batch_size': ParameterValue(
+                    LaunchConfiguration('max_batch_size'), value_type=int),
+                'warmup_ik_batch_size': ParameterValue(
+                    LaunchConfiguration('warmup_ik_batch_size'), value_type=int),
+                'warmup_fk_batch_size': ParameterValue(
+                    LaunchConfiguration('warmup_fk_batch_size'), value_type=int),
                 'camera_topic': camera_topics,
                 'camera_info_topic': camera_info_topics,
                 'camera_frame_rate_hz': [30.0],
@@ -496,6 +510,57 @@ def generate_launch_description():
         description='Path to the world configuration file (world config YAML)'
     )
 
+    # Runtime backend selector. `python` preserves the historical launch
+    # behaviour; `cpp` selects curobo_trajectory_planner_cpp and requires a
+    # matching exported artifact under curobo_artifact_root. `auto` lets the
+    # C++ resolver pick native when the artifact is valid.
+    declare_curobo_executable_package = DeclareLaunchArgument(
+        'curobo_executable_package',
+        default_value='curobov2_ros',
+        description='Package that installs the planner executable. The native '
+                    'C++ executable lives in curobo_cpp_runtime.'
+    )
+    declare_curobo_executable = DeclareLaunchArgument(
+        'curobo_executable',
+        default_value='curobo_trajectory_planner',
+        description='Planner executable: curobo_trajectory_planner (Python) or '
+                    'curobo_trajectory_planner_cpp (native C++ runtime)'
+    )
+    declare_curobo_runtime = DeclareLaunchArgument(
+        'curobo_runtime',
+        default_value='python',
+        description='Runtime backend for the C++ executable: python, cpp or auto'
+    )
+    declare_curobo_artifact_root = DeclareLaunchArgument(
+        'curobo_artifact_root',
+        default_value='/opt/curobo/artifacts',
+        description='Root of the exported native artifact bundles (robot/sm_XX)'
+    )
+    declare_curobo_artifact_sm = DeclareLaunchArgument(
+        'curobo_artifact_sm',
+        default_value='',
+        description='Artifact architecture directory, e.g. sm_89; empty = auto-detect'
+    )
+    declare_push_esdf_to_solvers = DeclareLaunchArgument(
+        'push_esdf_to_solvers',
+        default_value='true',
+        description='Forward the mapper ESDF into solver collision checks. Disable '
+                    'for the native benchmark, whose exported artifacts cover '
+                    'static cuboid worlds only.'
+    )
+    declare_max_batch_size = DeclareLaunchArgument(
+        'max_batch_size', default_value='1',
+        description='Maximum IK/FK batch size allocated by the solvers'
+    )
+    declare_warmup_ik_batch_size = DeclareLaunchArgument(
+        'warmup_ik_batch_size', default_value='1',
+        description='Batch size of the startup IK warmup (and the /ik_batch envelope)'
+    )
+    declare_warmup_fk_batch_size = DeclareLaunchArgument(
+        'warmup_fk_batch_size', default_value='1',
+        description='Batch size of the startup FK warmup (and the /fk_batch envelope)'
+    )
+
     return LaunchDescription([
         declare_robot,
         declare_urdf_path,
@@ -505,6 +570,15 @@ def generate_launch_description():
         declare_gui,
         declare_rviz_config,
         declare_world_file,
+        declare_curobo_executable_package,
+        declare_curobo_executable,
+        declare_curobo_runtime,
+        declare_curobo_artifact_root,
+        declare_curobo_artifact_sm,
+        declare_push_esdf_to_solvers,
+        declare_max_batch_size,
+        declare_warmup_ik_batch_size,
+        declare_warmup_fk_batch_size,
         # The defaults below MUST stay aligned with the declare_parameter() calls
         # in unified_planner_node.py: they are forwarded to the node and therefore
         # override its own defaults.

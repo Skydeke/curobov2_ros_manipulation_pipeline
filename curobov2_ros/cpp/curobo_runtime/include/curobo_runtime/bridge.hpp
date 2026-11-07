@@ -485,6 +485,10 @@ public:
   // PORT: config_wrapper_motion.set_motion_gen_config (build the shared
   // MotionPlanner from the frozen recipe; cfg_json carries seeds, cache, etc.).
   virtual void motion_planner_build(RobotHandle handle, const std::string & cfg_json) = 0;
+  // Update one link's inertial mass in the live planner model (payloads).
+  // Native bridge overrides; Python/other bridges may keep the default no-op.
+  virtual void update_link_inertial(
+    RobotHandle /*handle*/, const std::string & /*link_name*/, double /*mass*/) {}
   // PORT: single_planner._plan_trajectory -> MotionPlanner.plan_pose.
   virtual PlanOutcome plan_pose(RobotHandle handle, const PlanRequest & request) = 0;
   // PORT: joint_space_planner._plan_trajectory -> MotionPlanner.plan_cspace.

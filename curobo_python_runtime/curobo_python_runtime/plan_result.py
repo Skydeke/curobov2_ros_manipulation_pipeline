@@ -169,6 +169,29 @@ def _knot_motion_time(planner, result):
     """
     import math
 
+    # The native core leg reports the dense interpolated plan's duration
+    # (dt * (n - 1)), which includes the TimeOpt retiming. Prefer the same
+    # dense plan here; the knot-only fallback below remains for results that
+    # do not expose get_interpolated_plan().
+    try:
+        q_interp = result.get_interpolated_plan()
+        positions = q_interp.position
+        while positions.ndim > 2:
+            positions = positions[0]
+        n = int(positions.shape[0])
+        dt_interp = q_interp.dt
+        if hasattr(dt_interp, "detach"):
+            dt_interp = dt_interp.detach()
+        if hasattr(dt_interp, "flatten"):
+            flat = dt_interp.flatten()
+            dt_interp = flat[0] if len(flat) else None
+        if hasattr(dt_interp, "item"):
+            dt_interp = dt_interp.item()
+        if n > 1 and dt_interp is not None:
+            return float(dt_interp) * (n - 1)
+    except Exception:
+        pass
+
     try:
         from curobo._src.types.control_space import ControlSpace
 

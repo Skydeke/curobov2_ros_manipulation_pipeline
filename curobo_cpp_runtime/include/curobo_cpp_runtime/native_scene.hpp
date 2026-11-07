@@ -7,7 +7,9 @@
 #ifndef CUROBO_CPP_RUNTIME__NATIVE_SCENE_HPP_
 #define CUROBO_CPP_RUNTIME__NATIVE_SCENE_HPP_
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,16 @@
 
 namespace curobo_cpp_runtime
 {
+
+struct SceneObjectRecord
+{
+  int type{0};
+  curobo::robot::Pose pose{};
+  std::array<float, 3> dims{1.0F, 1.0F, 1.0F};
+  // Stable handle into NativeScene::scene(). Used to disable a grasped object
+  // while it is represented by the attachment model.
+  curobo::robot::ObstacleHandle handle{};
+};
 
 class NativeScene
 {
@@ -37,11 +49,22 @@ public:
 
   std::int64_t version() const {return version_;}
   const std::vector<std::string> & names() const {return names_;}
+  const std::map<std::string, SceneObjectRecord> & objects() const {return objects_;}
+  const SceneObjectRecord * object(const std::string & name) const
+  {
+    const auto it = objects_.find(name);
+    return it == objects_.end() ? nullptr : &it->second;
+  }
+
+  // Enable/disable one object in the live collision world without removing it
+  // from the scene list. Returns false when the name is unknown.
+  bool set_object_enabled(const std::string & name, bool enabled);
 
 private:
   curobo::robot::Scene scene_;
   std::int64_t version_{0};
   std::vector<std::string> names_;
+  std::map<std::string, SceneObjectRecord> objects_;
 };
 
 }  // namespace curobo_cpp_runtime

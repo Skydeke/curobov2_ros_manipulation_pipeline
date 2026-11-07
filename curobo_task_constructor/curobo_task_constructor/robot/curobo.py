@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from geometry_msgs.msg import Point, Pose as RosPose, Quaternion, Vector3
 from rclpy.action import ActionClient
+from rclpy.clock import Clock, ClockType
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
@@ -193,7 +194,7 @@ class CuroboServerInterface(_MsgMixin, _PlanClientMixin, _SceneClientMixin, Robo
         def _tick():
             if state["done"]:
                 return
-            for what, client in self._ready_services:
+            for _what, client in self._ready_services:
                 if not client.service_is_ready():
                     return
             if not self._exec_client.server_is_ready():
@@ -208,7 +209,12 @@ class CuroboServerInterface(_MsgMixin, _PlanClientMixin, _SceneClientMixin, Robo
             except Exception as exc:  # noqa: BLE001 - see _await repr notes
                 self._node.get_logger().error(f"readiness handler failed: {exc}")
 
-        state["timer"] = self._node.create_timer(period, _tick)
+        # Startup discovery is wall-clock work: with use_sim_time=true the
+        # default ROS timer does not tick until /clock arrives, which is exactly
+        # the state this watchdog exists to survive.
+        state["timer"] = self._node.create_timer(
+            period, _tick, clock=Clock(clock_type=ClockType.STEADY_TIME)
+        )
 
     # ------------------------------------------------------------------
     # state

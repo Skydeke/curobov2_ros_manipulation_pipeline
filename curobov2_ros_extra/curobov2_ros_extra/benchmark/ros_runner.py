@@ -36,7 +36,6 @@ from sensor_msgs.msg import JointState as RosJointState
 from curobov2_ros_interfaces.msg import Goalset, SceneObject, TrajectoryGoal
 from curobov2_ros_interfaces.srv import (
     AddObject,
-    SetCollisionCache,
     SetJointLocks,
     SetObjects,
     TrajectoryGeneration,
@@ -49,7 +48,6 @@ from .compare import (
 )
 from .obstacle_convert import obstacles_dict_to_add_requests
 from .problems import (
-    collision_cache_sizes,
     filter_scenes,
     load_problems,
     mpinets_lock_for_scene,
@@ -73,7 +71,6 @@ SERVER_NODE = "unified_planner"
 GENERATE_TRAJECTORY_SRV = f"{SERVER_NODE}/generate_trajectory"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
-SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 # Runtime torque-mode switch plumbing (both stock ROS2 services — no new
 # wire schema): the server's dynamics mode is baked into its robot_cfg at
 # solver build time, so flipping it = set_parameters + update_motion_gen_config.
@@ -111,28 +108,37 @@ class RosBenchmarkRunner(_RosRunnerServerMixin, _RosRunnerWorldMixin, Node):
         )
         self._add_client = self.create_client(AddObject, ADD_OBJECT_SRV)
         self._clear_client = self.create_client(Trigger, REMOVE_ALL_OBJECTS_SRV)
-        self._cache_client = self.create_client(
-            SetCollisionCache, SET_COLLISION_CACHE_SRV
-        )
         self._get_params_client = self.create_client(GetParameters, GET_PARAMETERS_SRV)
         self._params_client = self.create_client(SetParameters, SET_PARAMETERS_SRV)
         self._rebuild_client = self.create_client(Trigger, UPDATE_MOTION_GEN_CONFIG_SRV)
         self._lock_client = self.create_client(SetJointLocks, SET_JOINT_LOCKS_SRV)
 
-        for label, client in (
+        required = (
             ("generate_trajectory", self._traj_client),
             ("add_object", self._add_client),
             ("remove_all_objects", self._clear_client),
-            ("set_collision_cache", self._cache_client),
             ("get_parameters", self._get_params_client),
             ("set_parameters", self._params_client),
+        )
+        optional = (
             ("update_motion_gen_config", self._rebuild_client),
             ("set_joint_locks", self._lock_client),
-        ):
+        )
+        for label, client in required:
             if not client.wait_for_service(timeout_sec=service_timeout):
                 self.get_logger().error(f"{label} service not available")
                 raise RuntimeError(f"{label} service not available")
             self.get_logger().info(f"Connected to {client.srv_name}")
+        for label, client in optional:
+            if not client.wait_for_service(timeout_sec=min(service_timeout, 5.0)):
+                self.get_logger().warning(
+                    f"{label} service not available; benchmark will skip that step")
+                if label == "update_motion_gen_config":
+                    self._rebuild_client = None
+                else:
+                    self._lock_client = None
+            else:
+                self.get_logger().info(f"Connected to {client.srv_name}")
 
     # ------------------------------------------------------------------
     # service plumbing
@@ -224,32 +230,11 @@ def run_ros(
                 active_lock = lock
                 switched_locks = True
 
-        # Per-scene cache sizes (native parity, see above). Fires on scene
-        # changes with new counts only; returns True when it rebuilt.
-        active_cache: Optional[tuple] = None
-
+        # The live set_collision_cache service was removed from the server.
+        # The collision cache is fixed by the launch / artifact bundle, so the
+        # benchmark has nothing to resize here.
         def apply_cache(scene_key: str) -> bool:
-            nonlocal active_cache
-            if not size_collision_cache:
-                return False
-            need = collision_cache_sizes({scene_key: problems[scene_key]})
-            if need == active_cache:
-                return False
-            node.size_collision_cache({scene_key: problems[scene_key]},
-                                      timeout=call_timeout)
-            active_cache = need
-            return True
-
-        # Cache sizing happens per SCENE inside the loop (apply_cache): upstream
-        # builds one planner per dataset file with check_problems' exact OBB
-        # count, and a persistent server matches those kernel grids only by
-        # rebuilding for each scene's exact counts. Consecutive scenes with
-        # identical counts skip the rebuild.
-        if not size_collision_cache:
-            node.get_logger().warn(
-                "size_collision_cache=False: leaving the server's default "
-                "collision cache in place (padded kernel grids — diagnostic)"
-            )
+            return False
 
         # PORT of upstream motion_plan_benchmark: the per-problem world the
         # NATIVE leg builds is SceneCfg.create(obstacles).get_obb_world(). Convert

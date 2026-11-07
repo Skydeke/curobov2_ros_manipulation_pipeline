@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -156,6 +157,38 @@ double json_double(const json::Value & document, const std::string & key, double
 std::array<float, 7> pose_from_values(const float * values)
 {
   return {values[0], values[1], values[2], values[3], values[4], values[5], values[6]};
+}
+
+std::array<float, 7> pose_multiply(
+  const std::array<float, 7> & a, const std::array<float, 7> & b)
+{
+  // a and b are [x,y,z,qw,qx,qy,qz]; returns a * b.
+  const float aw = a[3], ax = a[4], ay = a[5], az = a[6];
+  const float bw = b[3], bx = b[4], by = b[5], bz = b[6];
+  const float w = aw * bw - ax * bx - ay * by - az * bz;
+  const float x = aw * bx + ax * bw + ay * bz - az * by;
+  const float y = aw * by - ax * bz + ay * bw + az * bx;
+  const float z = aw * bz + ax * by - ay * bx + az * bw;
+  const float tx = 2.0F * (ay * b[2] - az * b[1]);
+  const float ty = 2.0F * (az * b[0] - ax * b[2]);
+  const float tz = 2.0F * (ax * b[1] - ay * b[0]);
+  const float rx = b[0] + aw * tx + (ay * tz - az * ty);
+  const float ry = b[1] + aw * ty + (az * tx - ax * tz);
+  const float rz = b[2] + aw * tz + (ax * ty - ay * tx);
+  return {a[0] + rx, a[1] + ry, a[2] + rz, w, x, y, z};
+}
+
+std::array<float, 7> pose_inverse(const std::array<float, 7> & p)
+{
+  const float w = p[3], x = -p[4], y = -p[5], z = -p[6];
+  // inverse translation = rotate(-vector) by conjugate quaternion
+  const float tx = 2.0F * (y * p[2] - z * p[1]);
+  const float ty = 2.0F * (z * p[0] - x * p[2]);
+  const float tz = 2.0F * (x * p[1] - y * p[0]);
+  const float rx = -(p[0] + w * tx + (y * tz - z * ty));
+  const float ry = -(p[1] + w * ty + (z * tx - x * tz));
+  const float rz = -(p[2] + w * tz + (x * ty - y * tx));
+  return {rx, ry, rz, w, x, y, z};
 }
 
 void fill_pose_arrays(
@@ -423,6 +456,15 @@ struct CppBridge::Impl
   bool debug_cuda_graphs{false};
   std::string solve_mode;
   std::map<std::string, bool> link_collision;
+  std::set<std::string> attached_objects;
+  std::map<std::string, std::string> attach_links;
+  struct VisualAttachment
+  {
+    int tool_index{0};
+    std::array<float, 7> object_in_link{};
+    float radius{0.0F};
+  };
+  std::map<std::string, VisualAttachment> visual_attachments;
 
   struct PlannerSettings
   {
@@ -434,6 +476,7 @@ struct CppBridge::Impl
     int num_knots{16};
     int rrt_max_iterations{32};
     bool use_cuda_graph{true};
+    bool check_effort_limits{false};
     double collision_activation_distance{0.025};
     double interpolation_dt{0.025};
   } planner_settings;
@@ -640,9 +683,8 @@ struct CppBridge::Impl
       static_cast<float>(nx) * voxel,
       static_cast<float>(ny) * voxel,
       static_cast<float>(nz) * voxel};
-    // The Python integrator writes VoxelGrid.pose as the grid origin (min
-    // corner), not its center. The native collision kernel uses the same
-    // convention.
+    // curobo::robot::VoxelGrid.pose is the grid centre, which is exactly the
+    // AOT mapper origin. The ESDF array still starts at origin - extent/2.
     grid.pose.position = {
       mapper->view.origin[0],
       mapper->view.origin[1],
@@ -666,12 +708,91 @@ struct CppBridge::Impl
     mapper->voxel_added = true;
   }
 
+  void update_collision_esdf()
+  {
+    // The AOT ESDF's free/unknown cells are zero and its sign is unreliable,
+    // so feeding it directly would turn the whole box into an obstacle. Build
+    // a conservative collision field from the native mapper's observed
+    // surface voxels instead: surface = 0 m, free = 5 m. The collision kernel
+    // only needs the distance-to-obstacle; this is enough to reject paths
+    // through observed geometry without phantom contacts in unobserved space.
+    const int nx = mapper->view.esdf_shape[0];
+    const int ny = mapper->view.esdf_shape[1];
+    const int nz = mapper->view.esdf_shape[2];
+    const float voxel = mapper->view.esdf_voxel_size;
+    const std::size_t count =
+      static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
+      static_cast<std::size_t>(nz);
+    const double half_x = 0.5 * nx * voxel;
+    const double half_y = 0.5 * ny * voxel;
+    const double half_z = 0.5 * nz * voxel;
+    const double ox = mapper->view.origin[0] - half_x;
+    const double oy = mapper->view.origin[1] - half_y;
+    const double oz = mapper->view.origin[2] - half_z;
+
+    std::vector<__half> field(count, __float2half(5.0F));
+    const int capacity = 1000000;
+    DeviceBuffer centers;
+    DeviceBuffer pools;
+    DeviceBuffer counter;
+    centers.allocate(static_cast<std::size_t>(capacity) * 3 * sizeof(float));
+    pools.allocate(static_cast<std::size_t>(capacity) * sizeof(int32_t));
+    counter.allocate(sizeof(int32_t));
+    int required = 0;
+    int written = 0;
+    const int rc = curobo_mapper_extract_occupied(
+      mapper->runtime,
+      reinterpret_cast<std::uint64_t>(centers.get()),
+      reinterpret_cast<std::uint64_t>(pools.get()),
+      reinterpret_cast<std::uint64_t>(counter.get()),
+      capacity, 1, static_cast<float>(0.5 * voxel), 0, &required, &written);
+    if (rc == 0) {
+      int observed = 0;
+      cuda_check(
+        "esdf_refresh",
+        cudaMemcpy(&observed, counter.get(), sizeof(int32_t),
+          cudaMemcpyDeviceToHost));
+      const int take = std::min(observed, capacity);
+      std::vector<float> host_centers(static_cast<std::size_t>(take) * 3);
+      if (take > 0) {
+        cuda_check(
+          "esdf_refresh",
+          cudaMemcpy(host_centers.data(), centers.get(),
+            host_centers.size() * sizeof(float), cudaMemcpyDeviceToHost));
+      }
+      for (int i = 0; i < take; ++i) {
+        const double x = host_centers[static_cast<std::size_t>(i) * 3 + 0];
+        const double y = host_centers[static_cast<std::size_t>(i) * 3 + 1];
+        const double z = host_centers[static_cast<std::size_t>(i) * 3 + 2];
+        const int ix = static_cast<int>(std::floor((x - ox) / voxel));
+        const int iy = static_cast<int>(std::floor((y - oy) / voxel));
+        const int iz = static_cast<int>(std::floor((z - oz) / voxel));
+        if (ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz) {
+          field[(static_cast<std::size_t>(ix) * ny + iy) * nz + iz] =
+            __float2half(0.0F);
+        }
+      }
+    }
+    cuda_check(
+      "esdf_refresh",
+      cudaMemcpy(
+        reinterpret_cast<void *>(mapper->view.esdf_dist_field), field.data(),
+        field.size() * sizeof(__half), cudaMemcpyHostToDevice));
+  }
+
   void update_native_voxel_grid()
   {
+    // Voxel collision is enabled by default. The old env gate was only needed
+    // while the raw AOT ESDF was being used; update_collision_esdf() now
+    // builds a safe occupancy field from observed surfaces.
+    if (std::getenv("CUROBO_DISABLE_NATIVE_VOXEL_LAYER") != nullptr) {
+      return;
+    }
     ensure_native_voxel_grid();
     if (!mapper->voxel_added) {
       return;
     }
+    update_collision_esdf();
     scene->scene().update_voxel_grid_cuda(
       mapper->voxel_handle, mapper->view.esdf_dist_field,
       static_cast<std::size_t>(mapper->esdf_count));
@@ -732,6 +853,11 @@ struct CppBridge::Impl
     config.trajectory_optimization.trajectory_dt =
       static_cast<float>(planner_settings.interpolation_dt);
     config.trajectory_optimization.num_knots = planner_settings.num_knots;
+    config.trajectory_optimization.check_effort_limits =
+      planner_settings.check_effort_limits;
+    config.inverse_kinematics.check_effort_limits =
+      planner_settings.check_effort_limits;
+    config.rrt.check_effort_limits = planner_settings.check_effort_limits;
     config.use_cuda_graph = planner_settings.use_cuda_graph && !debug_cuda_graphs;
     config.rrt.device_ordinal = device_ordinal;
     config.rrt.max_iterations = std::max(32, planner_settings.rrt_max_iterations);
@@ -799,6 +925,8 @@ struct CppBridge::Impl
   }
 
   std::array<float, 7> fk_pose(const std::vector<float> & q, const char * method);
+  std::array<float, 7> tool_pose(
+    const std::vector<float> & q, int tool_index, const char * method);
   TensorF32 fk_tensor(const TensorF32 & q, const char * method);
   IkOutcome solve_ik(
     const TensorF32 & poses, const std::vector<std::string> & frames,
@@ -852,6 +980,49 @@ std::array<float, 7> CppBridge::Impl::fk_pose(
   pose[5] = r[2];
   pose[6] = r[3];
   return pose;
+}
+
+std::array<float, 7> CppBridge::Impl::tool_pose(
+  const std::vector<float> & q, int tool_index, const char * method)
+{
+  if (kinematics == nullptr) {
+    fail(method, "kinematics is not loaded");
+  }
+  const int tools = num_tools();
+  if (tool_index < 0 || tool_index >= tools) {
+    fail(method, "tool index is outside the artifact tools");
+  }
+  const int dof_count = dof();
+  std::vector<float> clamped = q;
+  for (int i = 0; i < std::min(dof_count, static_cast<int>(clamped.size())); ++i) {
+    clamped[static_cast<std::size_t>(i)] = std::clamp(
+      clamped[static_cast<std::size_t>(i)],
+      static_cast<float>(joint_lower[static_cast<std::size_t>(i)]),
+      static_cast<float>(joint_upper[static_cast<std::size_t>(i)]));
+  }
+  clamped.resize(static_cast<std::size_t>(dof_count), 0.0F);
+  DeviceBuffer input;
+  DeviceBuffer positions;
+  DeviceBuffer quaternions;
+  DeviceBuffer jacobians;
+  input.upload(clamped);
+  positions.allocate(static_cast<std::size_t>(tools) * 3 * sizeof(float));
+  quaternions.allocate(static_cast<std::size_t>(tools) * 4 * sizeof(float));
+  jacobians.allocate(
+    static_cast<std::size_t>(tools) * 6 * static_cast<std::size_t>(dof_count) *
+    sizeof(float));
+  kinematics->forward(
+    static_cast<const float *>(input.get()),
+    static_cast<float *>(positions.get()), static_cast<float *>(quaternions.get()),
+    static_cast<float *>(jacobians.get()), 1, 1, nullptr);
+  cuda_check(method, cudaDeviceSynchronize());
+  std::vector<float> p(static_cast<std::size_t>(tools) * 3);
+  std::vector<float> r(static_cast<std::size_t>(tools) * 4);
+  positions.download(p);
+  quaternions.download(r);
+  const std::size_t pi = static_cast<std::size_t>(tool_index) * 3;
+  const std::size_t ri = static_cast<std::size_t>(tool_index) * 4;
+  return {p[pi], p[pi + 1], p[pi + 2], r[ri], r[ri + 1], r[ri + 2], r[ri + 3]};
 }
 
 curobo_runtime::TensorF32 CppBridge::Impl::fk_tensor(
@@ -978,16 +1149,19 @@ curobo_runtime::IkOutcome CppBridge::Impl::solve_ik(
       const int destination_tool = tool_order[static_cast<std::size_t>(slot)];
       const std::size_t destination =
         (static_cast<std::size_t>(i) * tools + static_cast<std::size_t>(destination_tool)) *
-        static_cast<std::size_t>(num_goalset) * 7;
+        static_cast<std::size_t>(num_goalset);
       for (int g = 0; g < num_goalset; ++g) {
-        const std::size_t value = destination + static_cast<std::size_t>(g) * 7;
-        goal_positions[value + 0] = poses.data[source + 0];
-        goal_positions[value + 1] = poses.data[source + 1];
-        goal_positions[value + 2] = poses.data[source + 2];
-        goal_quaternions[value + 0] = poses.data[source + 3];
-        goal_quaternions[value + 1] = poses.data[source + 4];
-        goal_quaternions[value + 2] = poses.data[source + 5];
-        goal_quaternions[value + 3] = poses.data[source + 6];
+        // IkSolveRequest keeps positions and quaternions in two separate
+        // contiguous tensors: [batch, tool, goalset, 3] and [..., 4]. They are
+        // NOT interleaved 7-float rows.
+        const std::size_t value = destination + static_cast<std::size_t>(g);
+        goal_positions[value * 3 + 0] = poses.data[source + 0];
+        goal_positions[value * 3 + 1] = poses.data[source + 1];
+        goal_positions[value * 3 + 2] = poses.data[source + 2];
+        goal_quaternions[value * 4 + 0] = poses.data[source + 3];
+        goal_quaternions[value * 4 + 1] = poses.data[source + 4];
+        goal_quaternions[value * 4 + 2] = poses.data[source + 5];
+        goal_quaternions[value * 4 + 3] = poses.data[source + 6];
       }
     }
   }
@@ -1088,6 +1262,22 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_cspace_impl(
     fail("plan_cspace", "joint_target has " + std::to_string(request.joint_target.size()) +
       " values, expected " + std::to_string(dof_count));
   }
+  // Joint-state publishers carry float noise around hard limits (e.g. a
+  // joint whose lower bound is exactly 0 reports -1.7e-14). The RRT terminal
+  // check is strict (`value < lower`), so an otherwise valid home state was
+  // rejected before the search even started. Clamp to the artifact limits at
+  // the bridge boundary, where the wire values become planner values.
+  std::vector<float> start = request.start;
+  std::vector<float> goal = request.joint_target;
+  const int limit_count = std::min(
+    dof_count, static_cast<int>(std::min(joint_lower.size(), joint_upper.size())));
+  for (int i = 0; i < limit_count; ++i) {
+    const float lower = static_cast<float>(joint_lower[static_cast<std::size_t>(i)]);
+    const float upper = static_cast<float>(joint_upper[static_cast<std::size_t>(i)]);
+    start[static_cast<std::size_t>(i)] = std::clamp(start[static_cast<std::size_t>(i)], lower, upper);
+    goal[static_cast<std::size_t>(i)] = std::clamp(goal[static_cast<std::size_t>(i)], lower, upper);
+  }
+
   const auto info = planner->info();
   const int steps = info.trajectory_steps;
   const int knots = info.num_knots;
@@ -1107,8 +1297,8 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_cspace_impl(
   DeviceBuffer rrt_iterations_device;
   DeviceBuffer selected_seed_device;
 
-  start_device.upload(request.start);
-  goal_device.upload(request.joint_target);
+  start_device.upload(start);
+  goal_device.upload(goal);
   knots_device.allocate(static_cast<std::size_t>(knots) * dof_count * sizeof(float));
   position_device.allocate(static_cast<std::size_t>(steps) * dof_count * sizeof(float));
   velocity_device.allocate(static_cast<std::size_t>(steps) * dof_count * sizeof(float));
@@ -1143,30 +1333,6 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_cspace_impl(
   native.finetune_dt_scale = -1.0F;
   native.outer_iterations = std::max(1, request.outer_iterations);
 
-  static int goal_diag = 0;
-  if (goal_diag++ < 5) {
-    std::fprintf(stderr, "[plan] start=[");
-    for (float value : request.start) {
-      std::fprintf(stderr, "%.3f ", static_cast<double>(value));
-    }
-    std::fprintf(stderr, "] goal=[");
-    for (float value : request.joint_target) {
-      std::fprintf(stderr, "%.3f ", static_cast<double>(value));
-    }
-    std::fprintf(stderr, "]\n");
-    for (std::size_t i = 0; i < request.joint_target.size() &&
-      i < joint_lower.size() && i < joint_upper.size(); ++i)
-    {
-      if (request.joint_target[i] < joint_lower[i] ||
-        request.joint_target[i] > joint_upper[i])
-      {
-        std::fprintf(
-          stderr, "[plan] goal joint %zu out of bounds: %.3f not in [%.3f, %.3f]\n",
-          i, static_cast<double>(request.joint_target[i]),
-          joint_lower[i], joint_upper[i]);
-      }
-    }
-  }
   const auto start_time = std::chrono::steady_clock::now();
   planner->plan(native);
   cuda_check("plan_cspace", cudaDeviceSynchronize());
@@ -1184,15 +1350,6 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_cspace_impl(
   selected_seed_device.download(&selected_seed, sizeof(selected_seed));
   rrt_device.download(&used_rrt, sizeof(used_rrt));
   rrt_iterations_device.download(&rrt_iterations, sizeof(rrt_iterations));
-  static int plan_diag = 0;
-  if (plan_diag++ < 10) {
-    std::fprintf(
-      stderr,
-      "[plan] success=%u used_rrt=%u rrt_iters=%d rrt_calls=%d rrt_ms=%.1f\n",
-      static_cast<unsigned>(success), static_cast<unsigned>(used_rrt),
-      static_cast<int>(rrt_iterations), planner->last_rrt_calls(),
-      planner->last_rrt_time() * 1000.0);
-  }
 
   std::vector<float> position;
   std::vector<float> velocity;
@@ -1227,6 +1384,18 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_pose_impl(
     fail("plan_pose", "start has " + std::to_string(request.start.size()) +
       " values, expected " + std::to_string(dof_count));
   }
+  std::vector<float> start = request.start;
+  {
+    const int count = std::min(
+      static_cast<int>(start.size()),
+      static_cast<int>(std::min(joint_lower.size(), joint_upper.size())));
+    for (int i = 0; i < count; ++i) {
+      const float lower = static_cast<float>(joint_lower[static_cast<std::size_t>(i)]);
+      const float upper = static_cast<float>(joint_upper[static_cast<std::size_t>(i)]);
+      start[static_cast<std::size_t>(i)] =
+        std::clamp(start[static_cast<std::size_t>(i)], lower, upper);
+    }
+  }
   if (!request.trajectory_constraints.empty() ||
     !request.tool_trajectory_constraints.empty())
   {
@@ -1253,9 +1422,10 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_pose_impl(
       fail("plan_pose", "tool_poses must have shape [T,7]");
     }
     Candidate candidate;
-    candidate.poses.assign(
-      static_cast<std::size_t>(tools),
-      fk_pose(request.start, "plan_pose"));
+    candidate.poses.reserve(static_cast<std::size_t>(tools));
+    for (int tool = 0; tool < tools; ++tool) {
+      candidate.poses.push_back(tool_pose(start, tool, "plan_pose"));
+    }
     if (!request.tool_frames.empty() &&
       static_cast<int>(request.tool_frames.size()) != tool_count)
     {
@@ -1286,10 +1456,14 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_pose_impl(
     if (goal_count <= 0) {
       fail("plan_pose", "goalset must have shape [G,7]");
     }
-    const std::array<float, 7> held = fk_pose(request.start, "plan_pose");
+    std::vector<std::array<float, 7>> held;
+    held.reserve(static_cast<std::size_t>(tools));
+    for (int tool = 0; tool < tools; ++tool) {
+      held.push_back(tool_pose(start, tool, "plan_pose"));
+    }
     for (int g = 0; g < goal_count; ++g) {
       Candidate candidate;
-      candidate.poses.assign(static_cast<std::size_t>(tools), held);
+      candidate.poses = held;
       candidate.poses[0] = pose_from_values(
         request.goalset.data.data() + static_cast<std::size_t>(g) * 7);
       candidates.push_back(std::move(candidate));
@@ -1331,7 +1505,7 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_pose_impl(
     DeviceBuffer selected_seed_device;
     DeviceBuffer planning_attempts_device;
 
-    start_device.upload(request.start);
+    start_device.upload(start);
     goal_pos_device.upload(goal_positions);
     goal_quat_device.upload(goal_quaternions);
     knots_device.allocate(static_cast<std::size_t>(knots) * dof_count * sizeof(float));
@@ -1416,6 +1590,67 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_pose_impl(
     outcome.solver_time_s =
       std::chrono::duration<double>(end_time - start_time).count();
     outcome.motion_time_s = (steps > 0) ? static_cast<double>(steps - 1) * dt : 0.0;
+
+    // The native benchmark reports the TIME-OPTIMIZED executable trajectory,
+    // not the raw TrajOpt control points. plan_pose() leaves that trajectory
+    // in the planner; fetch it so ROS and native report the same motion time.
+    const auto timed = planner->timeopt_trajectory();
+    if (timed.sample_count != nullptr) {
+      int32_t timed_steps = 0;
+      float timed_dt = 0.0F;
+      float timed_duration = 0.0F;
+      cuda_check(
+        "timeopt/sample_count",
+        cudaMemcpy(
+          &timed_steps, timed.sample_count, sizeof(timed_steps),
+          cudaMemcpyDeviceToHost));
+      if (timed.dt != nullptr) {
+        cuda_check(
+          "timeopt/dt",
+          cudaMemcpy(&timed_dt, timed.dt, sizeof(timed_dt), cudaMemcpyDeviceToHost));
+      }
+      if (timed.duration != nullptr) {
+        cuda_check(
+          "timeopt/duration",
+          cudaMemcpy(
+            &timed_duration, timed.duration, sizeof(timed_duration),
+            cudaMemcpyDeviceToHost));
+      }
+      if (timed_steps > 0 && timed.position != nullptr &&
+        timed.velocity != nullptr && timed.acceleration != nullptr)
+      {
+        const std::size_t count =
+          static_cast<std::size_t>(timed_steps) * static_cast<std::size_t>(dof_count);
+        std::vector<float> timed_position(count);
+        std::vector<float> timed_velocity(count);
+        std::vector<float> timed_acceleration(count);
+        cuda_check(
+          "timeopt/position",
+          cudaMemcpy(
+            timed_position.data(), timed.position, count * sizeof(float),
+            cudaMemcpyDeviceToHost));
+        cuda_check(
+          "timeopt/velocity",
+          cudaMemcpy(
+            timed_velocity.data(), timed.velocity, count * sizeof(float),
+            cudaMemcpyDeviceToHost));
+        cuda_check(
+          "timeopt/acceleration",
+          cudaMemcpy(
+            timed_acceleration.data(), timed.acceleration, count * sizeof(float),
+            cudaMemcpyDeviceToHost));
+        PlanOutcome timed_outcome = make_outcome(
+          std::move(timed_position), std::move(timed_velocity),
+          std::move(timed_acceleration), dof_count, timed_steps, timed_dt,
+          joint_names);
+        outcome.positions = std::move(timed_outcome.positions);
+        outcome.velocity = std::move(timed_outcome.velocity);
+        outcome.acceleration = std::move(timed_outcome.acceleration);
+        outcome.motion_time_s =
+          timed_duration > 0.0F ? static_cast<double>(timed_duration) :
+          static_cast<double>(std::max(0, timed_steps - 1)) * timed_dt;
+      }
+    }
     outcome.position_error_mm = static_cast<double>(position_error) * 1000.0;
     outcome.candidates_generated = static_cast<std::uint32_t>(candidates.size());
     outcome.candidates_solved = 1;
@@ -1449,6 +1684,18 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_waypoints_impl(
     fail("plan_pose", "start has " + std::to_string(request.start.size()) +
       " values, expected " + std::to_string(dof_count));
   }
+  std::vector<float> start = request.start;
+  {
+    const int count = std::min(
+      static_cast<int>(start.size()),
+      static_cast<int>(std::min(joint_lower.size(), joint_upper.size())));
+    for (int i = 0; i < count; ++i) {
+      const float lower = static_cast<float>(joint_lower[static_cast<std::size_t>(i)]);
+      const float upper = static_cast<float>(joint_upper[static_cast<std::size_t>(i)]);
+      start[static_cast<std::size_t>(i)] =
+        std::clamp(start[static_cast<std::size_t>(i)], lower, upper);
+    }
+  }
   if (waypoints.count <= 0) {
     fail("plan_pose", "waypoint_count must be positive");
   }
@@ -1460,37 +1707,48 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_waypoints_impl(
   if (frames.empty()) {
     frames = request.tool_frames;
   }
-  if (!waypoints.multi_tool && tools > 1) {
-    fail("plan_pose",
-      "single-tool ordered waypoints cannot target a multi-tool artifact; "
-      "use tool_waypoints with one frame per tool");
-  }
+  int active_slot = 0;
   std::vector<int> tool_slots;
-  if (!frames.empty()) {
-    if (static_cast<int>(frames.size()) != tools) {
-      fail("plan_pose", "ordered waypoints require one frame per artifact tool (" +
-        std::to_string(tools) + "), got " + std::to_string(frames.size()));
+  if (!waypoints.multi_tool && tools > 1) {
+    // A single-tool ordered path on a multi-tool artifact is valid: the named
+    // tool follows the path and every other tool holds its current FK pose.
+    if (frames.size() > 1) {
+      fail("plan_pose", "single-tool ordered waypoints must name at most one frame");
     }
-    std::vector<bool> used(static_cast<std::size_t>(tools), false);
-    for (const auto & frame : frames) {
-      const auto it = std::find(tool_frames.begin(), tool_frames.end(), frame);
+    active_slot = 0;
+    if (!frames.empty()) {
+      const auto it = std::find(tool_frames.begin(), tool_frames.end(), frames[0]);
       if (it == tool_frames.end()) {
-        fail("plan_pose", "unknown waypoint tool frame '" + frame + "'");
+        fail("plan_pose", "unknown waypoint tool frame '" + frames[0] + "'");
       }
-      const int index = static_cast<int>(std::distance(tool_frames.begin(), it));
-      if (used[static_cast<std::size_t>(index)]) {
-        fail("plan_pose", "duplicate waypoint tool frame '" + frame + "'");
-      }
-      used[static_cast<std::size_t>(index)] = true;
-      tool_slots.push_back(index);
-    }
-  } else {
-    if (tools > 1 && !waypoints.multi_tool) {
-      fail("plan_pose",
-        "ordered waypoints on a multi-tool artifact need tool_waypoints and tool frames");
+      active_slot = static_cast<int>(std::distance(tool_frames.begin(), it));
     }
     for (int i = 0; i < tools; ++i) {
       tool_slots.push_back(i);
+    }
+  } else {
+    if (!frames.empty()) {
+      if (static_cast<int>(frames.size()) != tools) {
+        fail("plan_pose", "ordered waypoints require one frame per artifact tool (" +
+          std::to_string(tools) + "), got " + std::to_string(frames.size()));
+      }
+      std::vector<bool> used(static_cast<std::size_t>(tools), false);
+      for (const auto & frame : frames) {
+        const auto it = std::find(tool_frames.begin(), tool_frames.end(), frame);
+        if (it == tool_frames.end()) {
+          fail("plan_pose", "unknown waypoint tool frame '" + frame + "'");
+        }
+        const int index = static_cast<int>(std::distance(tool_frames.begin(), it));
+        if (used[static_cast<std::size_t>(index)]) {
+          fail("plan_pose", "duplicate waypoint tool frame '" + frame + "'");
+        }
+        used[static_cast<std::size_t>(index)] = true;
+        tool_slots.push_back(index);
+      }
+    } else {
+      for (int i = 0; i < tools; ++i) {
+        tool_slots.push_back(i);
+      }
     }
   }
 
@@ -1507,19 +1765,23 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_waypoints_impl(
       "), got " + std::to_string(values));
   }
 
-  const std::array<float, 7> held = fk_pose(request.start, "plan_pose");
+  std::vector<std::array<float, 7>> held_tools;
+  held_tools.reserve(static_cast<std::size_t>(tools));
+  for (int tool = 0; tool < tools; ++tool) {
+    held_tools.push_back(tool_pose(start, tool, "plan_pose"));
+  }
   std::vector<float> positions(
     static_cast<std::size_t>(waypoints.count) * tools * 3);
   std::vector<float> quaternions(
     static_cast<std::size_t>(waypoints.count) * tools * 4);
   for (int k = 0; k < waypoints.count; ++k) {
     for (int slot = 0; slot < tools; ++slot) {
-      std::array<float, 7> pose = held;
+      std::array<float, 7> pose = held_tools[static_cast<std::size_t>(slot)];
       if (waypoints.multi_tool) {
         const float * row = waypoints.poses.data.data() +
           (static_cast<std::size_t>(k) * tools + static_cast<std::size_t>(slot)) * 7;
         pose = pose_from_values(row);
-      } else {
+      } else if (slot == active_slot) {
         const float * row = waypoints.poses.data.data() +
           static_cast<std::size_t>(k) * 7;
         pose = pose_from_values(row);
@@ -1561,7 +1823,7 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_waypoints_impl(
   DeviceBuffer selected_seed_device;
   DeviceBuffer planning_attempts_device;
 
-  start_device.upload(request.start);
+  start_device.upload(start);
   waypoint_position_device.upload(positions);
   waypoint_quaternion_device.upload(quaternions);
   const std::size_t final_index =
@@ -1734,7 +1996,7 @@ curobo_runtime::RobotHandle CppBridge::init(const std::string & cfg)
     cuda_check("init", cudaSetDevice(impl_->device_ordinal));
     impl_->load_artifact();
     impl_->ensure_scene();
-    if (impl_->python_fallback) {
+    if (impl_->python_fallback && std::getenv("CUROBO_DISABLE_PY_FALLBACK") == nullptr) {
       impl_->python = std::make_unique<curobo_runtime::PyBridge>();
       impl_->python_handle = impl_->python->init(cfg);
     }
@@ -2120,6 +2382,11 @@ curobo_runtime::SceneVersion CppBridge::scene_set(
     impl_->mapper->voxel_added = false;
     impl_->update_native_voxel_grid();
   }
+  if (impl_->scene) {
+    for (const auto & name : impl_->attached_objects) {
+      impl_->scene->set_object_enabled(name, false);
+    }
+  }
   if (impl_->python) {
     impl_->python->scene_set(impl_->python_handle, objects_json, clear_first);
   }
@@ -2168,21 +2435,109 @@ void CppBridge::attach_object(
   curobo_runtime::RobotHandle, const std::string & name, const std::vector<float> & q)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  impl_->require_python("attach_object");
-  // Install into a live Python planner, not a scene that a later build would
-  // reset. The native planner is disabled from here on because it cannot see
-  // the attached payload.
-  impl_->ensure_python_planner("attach_object");
-  impl_->python->attach_object(impl_->python_handle, name, q);
-  impl_->mark_python_scene("attach_object");
+  impl_->require_initialized("attach_object");
+  if (name.empty()) {
+    return;
+  }
+  impl_->ensure_scene();
+  const SceneObjectRecord * record = impl_->scene->object(name);
+  if (record == nullptr) {
+    fail("attach_object", "unknown scene object '" + name + "'");
+  }
+  impl_->ensure_planner("attach_object");
+  // The artifact exposes one attachment slot per arm; choose the slot whose
+  // tool is closest to the object at the attach configuration. This mirrors
+  // the Python bridge's nearest-attach-link choice without a mesh fit.
+  const int tools = impl_->num_tools();
+  int best_tool = 0;
+  float best_distance = std::numeric_limits<float>::infinity();
+  std::vector<std::array<float, 7>> tool_poses;
+  tool_poses.reserve(static_cast<std::size_t>(tools));
+  for (int t = 0; t < tools; ++t) {
+    const auto pose = impl_->tool_pose(q, t, "attach_object");
+    tool_poses.push_back(pose);
+    const float dx = pose[0] - record->pose.position[0];
+    const float dy = pose[1] - record->pose.position[1];
+    const float dz = pose[2] - record->pose.position[2];
+    const float distance = dx * dx + dy * dy + dz * dz;
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_tool = t;
+    }
+  }
+  std::string link = best_tool == 0 ? "attached_object_left" :
+    (best_tool == 1 ? "attached_object_right" :
+    impl_->tool_frames[static_cast<std::size_t>(best_tool)]);
+  if (std::find(impl_->link_names.begin(), impl_->link_names.end(), link) ==
+    impl_->link_names.end())
+  {
+    link = impl_->tool_frames[static_cast<std::size_t>(best_tool)];
+  }
+
+  curobo::robot::SphereAttachment attachment;
+  attachment.link_name = link;
+  const auto tool_pose = tool_poses[static_cast<std::size_t>(best_tool)];
+  const std::array<float, 7> object_pose{
+    record->pose.position[0], record->pose.position[1], record->pose.position[2],
+    record->pose.quaternion[0], record->pose.quaternion[1],
+    record->pose.quaternion[2], record->pose.quaternion[3]};
+  const auto relative = pose_multiply(pose_inverse(tool_pose), object_pose);
+  attachment.object_in_link.position = {relative[0], relative[1], relative[2]};
+  attachment.object_in_link.quaternion = {
+    relative[3], relative[4], relative[5], relative[6]};
+  // One enclosing sphere is conservative and keeps the attachment within the
+  // per-link slot budget the artifact reserves for a grasp payload.
+  curobo::robot::CollisionSphere sphere;
+  sphere.center = {0.0F, 0.0F, 0.0F};
+  if (record->type == 1) {  // sphere
+    sphere.radius = std::max(0.005F, record->dims[0]);
+  } else {
+    // Inscribed sphere: never protrudes outside the object's own AABB, so it
+    // cannot dip through the support plane at the grasp pose.
+    sphere.radius = std::max(
+      0.005F, 0.5F * std::min(
+        record->dims[0], std::min(record->dims[1], record->dims[2])));
+  }
+  attachment.spheres.push_back(sphere);
+  if (impl_->scene) {
+    // The grasped obstacle stays in the scene list (so detach can restore it)
+    // but must not collide with the attachment model or the gripper at the
+    // start state. Python disables it on the solver's scene checker too.
+    impl_->scene->set_object_enabled(name, false);
+  }
+  impl_->planner->attach_object(attachment);
+  if (impl_->ik) {
+    impl_->ik->attach_object(attachment);
+  }
+  impl_->attached_objects.insert(name);
+  impl_->attach_links[name] = link;
+  impl_->visual_attachments[name] = Impl::VisualAttachment{
+    best_tool, relative, sphere.radius};
 }
 
 std::string CppBridge::detach_object(curobo_runtime::RobotHandle)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  impl_->require_python("detach_object");
-  impl_->mark_python_scene("detach_object");
-  return impl_->python->detach_object(impl_->python_handle);
+  if (impl_->attached_objects.empty()) {
+    return {};
+  }
+  impl_->ensure_planner("detach_object");
+  for (const auto & entry : impl_->attach_links) {
+    impl_->planner->detach_object(entry.second);
+    if (impl_->ik) {
+      impl_->ik->detach_object(entry.second);
+    }
+  }
+  if (impl_->scene) {
+    for (const auto & name : impl_->attached_objects) {
+      impl_->scene->set_object_enabled(name, true);
+    }
+  }
+  std::string detached = *impl_->attached_objects.begin();
+  impl_->attached_objects.clear();
+  impl_->attach_links.clear();
+  impl_->visual_attachments.clear();
+  return detached;
 }
 
 curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
@@ -2190,7 +2545,37 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_python("collision_spheres_with_attached");
-  return impl_->python->collision_spheres_with_attached(impl_->python_handle, q);
+  auto outcome = impl_->python->collision_spheres_with_attached(impl_->python_handle, q);
+  if (impl_->visual_attachments.empty() || impl_->kinematics == nullptr ||
+    static_cast<int>(q.size()) != impl_->dof() ||
+    outcome.spheres.shape.size() != 2 || outcome.spheres.shape[1] != 4)
+  {
+    return outcome;
+  }
+  const std::size_t base_rows = static_cast<std::size_t>(outcome.spheres.shape[0]);
+  for (const auto & entry : impl_->visual_attachments) {
+    const auto & attachment = entry.second;
+    const auto tool = impl_->tool_pose(q, attachment.tool_index, "collision_spheres");
+    const auto world = pose_multiply(tool, attachment.object_in_link);
+    outcome.spheres.data.push_back(world[0]);
+    outcome.spheres.data.push_back(world[1]);
+    outcome.spheres.data.push_back(world[2]);
+    outcome.spheres.data.push_back(attachment.radius);
+    outcome.attached.push_back(1);
+    if (outcome.attached_local.shape.size() == 2 &&
+      outcome.attached_local.shape[1] == 4)
+    {
+      outcome.attached_local.data.push_back(0.0F);
+      outcome.attached_local.data.push_back(0.0F);
+      outcome.attached_local.data.push_back(0.0F);
+      outcome.attached_local.data.push_back(0.0F);
+      outcome.attached_local.shape[0] =
+        static_cast<std::int64_t>(outcome.attached_local.shape[0] + 1);
+    }
+  }
+  outcome.spheres.shape[0] = static_cast<std::int64_t>(
+    base_rows + impl_->visual_attachments.size());
+  return outcome;
 }
 
 std::vector<std::string> CppBridge::tool_frames(curobo_runtime::RobotHandle)
@@ -2250,6 +2635,8 @@ void CppBridge::motion_planner_build(
         json_int(document, "max_goalset", impl_->planner_settings.max_goalset);
       impl_->planner_settings.use_cuda_graph =
         document.bool_at("use_cuda_graph", impl_->planner_settings.use_cuda_graph);
+      impl_->planner_settings.check_effort_limits =
+        document.bool_at("check_effort_limits", impl_->planner_settings.check_effort_limits);
       impl_->planner_settings.collision_activation_distance =
         json_double(
         document, "collision_activation_distance",
@@ -2279,11 +2666,54 @@ curobo_runtime::PlanOutcome CppBridge::plan_pose(
     impl_->ensure_python_planner("plan_pose");
     return impl_->python->plan_pose(impl_->python_handle, request);
   }
+  // Per-tool pose goals are not ordered waypoint paths. Route them straight to
+  // the pose planner; the waypoint extractor probes optional fields on the
+  // request and must not shadow a populated `tool_poses` goal.
+  if (!request.tool_poses.data.empty()) {
+    return impl_->plan_pose_impl(request);
+  }
+  // Ordered waypoint / Cartesian paths have a native implementation. Run it
+  // before the Python pose fallback: the Python path recompiles Torch graphs
+  // on its first waypoint request and can block the service for minutes.
   const OrderedWaypoints waypoints = extract_ordered_waypoints(request);
   if (waypoints.present) {
-    return impl_->plan_waypoints_impl(request, waypoints);
+    auto outcome = impl_->plan_waypoints_impl(request, waypoints);
+    if (!outcome.success && impl_->python) {
+      impl_->ensure_python_planner("plan_pose");
+      auto fallback = impl_->python->plan_pose(impl_->python_handle, request);
+      if (fallback.success) {
+        return fallback;
+      }
+    }
+    return outcome;
   }
-  return impl_->plan_pose_impl(request);
+  if (impl_->python) {
+    // The Python pose planner implements the passive-arm hold and the
+    // per-tool IK seeding that the native pose path does not yet match. Keep
+    // cspace native; use Python for pose in the hybrid bridge.
+    impl_->ensure_python_planner("plan_pose");
+    auto python_outcome = impl_->python->plan_pose(impl_->python_handle, request);
+    if (python_outcome.success) {
+      return python_outcome;
+    }
+  }
+  if (std::getenv("CUROBO_DEBUG_PLAN_POSE") != nullptr) {
+    std::fprintf(stderr, "[plan_pose] start=%zu tool_poses=%zu tools=%zu frames=%zu\n",
+      request.start.size(), request.tool_poses.data.size(),
+      static_cast<std::size_t>(impl_->num_tools()), request.tool_frames.size());
+  }
+  curobo_runtime::PlanOutcome outcome = impl_->plan_pose_impl(request);
+  if (!outcome.success && impl_->python) {
+    // The Python pose planner seeds/validates multi-tool IK differently from
+    // the native solver. Keep native cspace planning and use the Python pose
+    // solver only as the per-capability fallback when native returns no path.
+    impl_->ensure_python_planner("plan_pose");
+    auto fallback = impl_->python->plan_pose(impl_->python_handle, request);
+    if (fallback.success) {
+      return fallback;
+    }
+  }
+  return outcome;
 }
 
 curobo_runtime::PlanOutcome CppBridge::plan_cspace(
@@ -2309,6 +2739,18 @@ void CppBridge::reset_seed(curobo_runtime::RobotHandle)
   // MotionPlanner resets its RRT seed at the start of every plan call
   // (cpp_runtime/robot/src/motion_planner_runtime.cpp). There is no public
   // standalone reset to call here, so this is intentionally a no-op.
+}
+
+void CppBridge::update_link_inertial(
+  curobo_runtime::RobotHandle, const std::string & link_name, double mass)
+{
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->require_initialized("update_link_inertial");
+  impl_->ensure_planner("update_link_inertial");
+  curobo::robot::LinkInertialUpdate update;
+  update.link_name = link_name;
+  update.mass = static_cast<float>(mass);
+  impl_->planner->update_link_inertial(update);
 }
 
 void CppBridge::robot_model_rebuild_locks(
@@ -2339,6 +2781,11 @@ void CppBridge::configure_mapper(
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_initialized("configure_mapper");
+  // Headless benchmarks have no depth camera and explicitly do not want a
+  // perception voxel layer in the collision world.
+  if (std::getenv("CUROBO_DISABLE_NATIVE_MAPPER") != nullptr) {
+    return;
+  }
   impl_->ensure_scene();
 
   impl_->mapper_cfg_json = cfg_json;
@@ -2361,16 +2808,11 @@ void CppBridge::configure_mapper(
   if (curobo_mapper_get_device_view(state->runtime, &state->view) != 0) {
     fail("configure_mapper", curobo_mapper_last_error());
   }
-  std::fprintf(
-    stderr,
-    "[mapper] artifact origin=[%.3f %.3f %.3f] grid=[%d %d %d] esdf=[%d %d %d] vsize=%.3f evsize=%.3f max_blocks=%d\n",
-    static_cast<double>(state->view.origin[0]),
-    static_cast<double>(state->view.origin[1]),
-    static_cast<double>(state->view.origin[2]),
-    state->view.grid_shape[0], state->view.grid_shape[1], state->view.grid_shape[2],
-    state->view.esdf_shape[0], state->view.esdf_shape[1], state->view.esdf_shape[2],
-    static_cast<double>(state->view.voxel_size),
-    static_cast<double>(state->view.esdf_voxel_size), state->view.max_blocks);
+
+  // The AOT mapper artifact fixes the image shape. A camera whose resolution
+  // differs would integrate zero frames, so this is fatal rather than a
+  // warning: re-export the mapper for the deployed camera instead of silently
+  // running with no ESDF.
   int image_height = 0;
   int image_width = 0;
   if (curobo_mapper_config_int(state->runtime, "image_height", &image_height) != 0 ||
@@ -2381,11 +2823,6 @@ void CppBridge::configure_mapper(
   }
   state->image_height = image_height;
   state->image_width = image_width;
-
-  // The AOT mapper artifact fixes the image shape. A camera whose resolution
-  // differs would integrate zero frames, so this is fatal rather than a
-  // warning: re-export the mapper for the deployed camera instead of silently
-  // running with no ESDF.
   int requested_height = 0;
   int requested_width = 0;
   try {
@@ -2414,6 +2851,25 @@ void CppBridge::configure_mapper(
   state->camera_quaternions.allocate(4 * sizeof(float));
   std::vector<std::uint8_t> black(pixels * 3, 0);
   state->rgb.upload(black);
+  // The AOT artifact is exported from mapper.yaml, which does not carry the
+  // node's time-decay knob; it therefore defaults to 1.0 (never decay). Apply
+  // the live value here so stale observations fade exactly as they do in the
+  // Python mapper.
+  double decay_factor = 1.0;
+  double minimum_tsdf_weight = 0.1;
+  try {
+    const json::Value document = json::parse(cfg_json);
+    decay_factor = json_double(document, "decay_factor", decay_factor);
+    minimum_tsdf_weight = json_double(
+      document, "minimum_tsdf_weight", minimum_tsdf_weight);
+  } catch (const std::exception &) {
+  }
+  if (curobo_mapper_set_tsdf_runtime_parameters(
+      state->runtime, static_cast<float>(decay_factor),
+      static_cast<float>(minimum_tsdf_weight)) != 0)
+  {
+    fail("configure_mapper", curobo_mapper_last_error());
+  }
   impl_->mapper = std::move(state);
 }
 
@@ -2421,6 +2877,9 @@ void CppBridge::warmup_mapper(curobo_runtime::RobotHandle)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_initialized("warmup_mapper");
+  if (std::getenv("CUROBO_DISABLE_NATIVE_MAPPER") != nullptr) {
+    return;
+  }
   if (impl_->mapper == nullptr || !impl_->native_scene_valid) {
     impl_->ensure_python_mapper("warmup_mapper");
     impl_->mark_python_scene("warmup_mapper");
@@ -2439,6 +2898,9 @@ bool CppBridge::esdf_refresh(curobo_runtime::RobotHandle)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_initialized("esdf_refresh");
+  if (std::getenv("CUROBO_DISABLE_NATIVE_MAPPER") != nullptr) {
+    return true;
+  }
   if (impl_->mapper == nullptr || !impl_->native_scene_valid) {
     impl_->ensure_python_mapper("esdf_refresh");
     const bool updated = impl_->python->esdf_refresh(impl_->python_handle);
@@ -2450,13 +2912,12 @@ bool CppBridge::esdf_refresh(curobo_runtime::RobotHandle)
   {
     fail("esdf_refresh", curobo_mapper_last_error());
   }
+  // The mapper enqueues its ESDF kernels on the default stream while the
+  // planner replays CUDA graphs on a private non-blocking stream. Without this
+  // hand-off the first plan can capture/replay before the ESDF is complete,
+  // which showed up as RRT rejecting both terminal states.
+  cuda_check("esdf_refresh", cudaDeviceSynchronize());
   impl_->update_native_voxel_grid();
-  static int esdf_log_count = 0;
-  if (esdf_log_count++ < 5) {
-    int allocated = 0;
-    (void)curobo_mapper_num_allocated(impl_->mapper->runtime, 0, &allocated);
-    std::fprintf(stderr, "[mapper] esdf refresh: allocated=%d\n", allocated);
-  }
   return true;
 }
 
@@ -2477,9 +2938,19 @@ curobo_runtime::VoxelGrid CppBridge::voxel_grid(curobo_runtime::RobotHandle)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_initialized("voxel_grid");
+  if (std::getenv("CUROBO_DISABLE_NATIVE_MAPPER") != nullptr) {
+    return curobo_runtime::VoxelGrid{};
+  }
   if (impl_->mapper == nullptr || !impl_->native_scene_valid) {
     impl_->ensure_python_mapper("voxel_grid");
     return impl_->python->voxel_grid(impl_->python_handle);
+  }
+  if (impl_->python && std::getenv("CUROBO_PYTHON_VOXEL_GRID") != nullptr) {
+    impl_->ensure_python_mapper("voxel_grid");
+    auto python_grid = impl_->python->voxel_grid(impl_->python_handle);
+    if (python_grid.shape.size() == 3) {
+      return python_grid;
+    }
   }
   const int nx = impl_->mapper->view.esdf_shape[0];
   const int ny = impl_->mapper->view.esdf_shape[1];
@@ -2487,19 +2958,12 @@ curobo_runtime::VoxelGrid CppBridge::voxel_grid(curobo_runtime::RobotHandle)
   const std::size_t count =
     static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
     static_cast<std::size_t>(nz);
-  std::vector<__half> esdf(count);
-  cuda_check(
-    "voxel_grid",
-    cudaMemcpy(
-      esdf.data(),
-      reinterpret_cast<const void *>(impl_->mapper->view.esdf_dist_field),
-      count * sizeof(__half), cudaMemcpyDeviceToHost));
-  const float threshold = -0.5F * impl_->mapper->view.esdf_voxel_size;
   curobo_runtime::VoxelGrid grid;
   grid.shape = {nx, ny, nz};
   grid.resolution = impl_->mapper->view.esdf_voxel_size;
-  // The AOT mapper origin is the grid centre; nav2/ROS VoxelGrid uses the
-  // minimum corner (the same corner the mapper_workspace wireframe draws).
+  // The AOT mapper calls the grid centre `origin`; the ROS VoxelGrid message
+  // publishes the minimum corner so the dense reconstruction covers the whole
+  // box (the same convention the node uses for mapper_grid_center).
   const double half_x = 0.5 * nx * grid.resolution;
   const double half_y = 0.5 * ny * grid.resolution;
   const double half_z = 0.5 * nz * grid.resolution;
@@ -2508,8 +2972,127 @@ curobo_runtime::VoxelGrid CppBridge::voxel_grid(curobo_runtime::RobotHandle)
     impl_->mapper->view.origin[1] - half_y,
     impl_->mapper->view.origin[2] - half_z};
   grid.data.resize(count, 0);
-  for (std::size_t i = 0; i < count; ++i) {
-    grid.data[i] = __half2float(esdf[i]) <= threshold ? 1 : 0;
+  // The native AOT ESDF has no reliable sign and its unallocated cells are
+  // zero, so thresholding the ESDF painted the whole free/unknown box. Extract
+  // the observed TSDF surface band instead (surface_only=1 uses |TSDF| and is
+  // independent of the broken sign), which matches what the sensor saw.
+  const int capacity = 1000000;
+  DeviceBuffer centers;
+  DeviceBuffer pools;
+  DeviceBuffer counter;
+  centers.allocate(static_cast<std::size_t>(capacity) * 3 * sizeof(float));
+  pools.allocate(static_cast<std::size_t>(capacity) * sizeof(int32_t));
+  counter.allocate(sizeof(int32_t));
+  for (int attempt = 0; attempt < 2; ++attempt) {
+    // Attempt 0: solid occupied volume (Python parity). Attempt 1: observed
+    // surface band, used only if the AOT artifact's TSDF sign is inverted.
+    const int surface_only = attempt == 0 ? 0 : 1;
+    const float threshold = attempt == 0 ? 0.0F :
+      static_cast<float>(0.5 * grid.resolution);
+    int required = 0;
+    int written = 0;
+    const int rc = curobo_mapper_extract_occupied(
+      impl_->mapper->runtime,
+      reinterpret_cast<std::uint64_t>(centers.get()),
+      reinterpret_cast<std::uint64_t>(pools.get()),
+      reinterpret_cast<std::uint64_t>(counter.get()),
+      capacity, surface_only, threshold, 0, &required, &written);
+    if (rc != 0) {
+      break;
+    }
+    int count_host = 0;
+    cuda_check(
+      "voxel_grid",
+      cudaMemcpy(&count_host, counter.get(), sizeof(int32_t),
+        cudaMemcpyDeviceToHost));
+    if (count_host <= 0) {
+      continue;
+    }
+    const int take = std::min(count_host, capacity);
+    std::vector<float> center_host(static_cast<std::size_t>(take) * 3);
+    cuda_check(
+      "voxel_grid",
+      cudaMemcpy(center_host.data(), centers.get(),
+        center_host.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    for (int i = 0; i < take; ++i) {
+      const float x = center_host[static_cast<std::size_t>(i) * 3 + 0];
+      const float y = center_host[static_cast<std::size_t>(i) * 3 + 1];
+      const float z = center_host[static_cast<std::size_t>(i) * 3 + 2];
+      const int ix = static_cast<int>(std::floor((x - grid.origin[0]) / grid.resolution));
+      const int iy = static_cast<int>(std::floor((y - grid.origin[1]) / grid.resolution));
+      const int iz = static_cast<int>(std::floor((z - grid.origin[2]) / grid.resolution));
+      if (ix >= 0 && ix < nx && iy >= 0 && iy < ny && iz >= 0 && iz < nz) {
+        grid.data[(static_cast<std::size_t>(ix) * ny + iy) * nz + iz] = 1;
+      }
+    }
+    break;
+  }
+  // Python's voxel_grid also rasterizes the analytic scene primitives. Do the
+  // same here so the native map shows the table and grasp objects even when a
+  // face is not currently hit by the depth camera. Attached payloads are
+  // skipped: they live on the robot now, not at their old world pose.
+  if (impl_->scene) {
+    for (const auto & entry : impl_->scene->objects()) {
+      const std::string & name = entry.first;
+      if (impl_->attached_objects.count(name) != 0) {
+        continue;
+      }
+      const auto & record = entry.second;
+      const auto inv = pose_inverse({
+        record.pose.position[0], record.pose.position[1], record.pose.position[2],
+        record.pose.quaternion[0], record.pose.quaternion[1],
+        record.pose.quaternion[2], record.pose.quaternion[3]});
+      const double radius = (record.type == 1)
+        ? static_cast<double>(record.dims[0])
+        : std::sqrt(
+          static_cast<double>(record.dims[0] * record.dims[0]) +
+          static_cast<double>(record.dims[1] * record.dims[1]) +
+          static_cast<double>(record.dims[2] * record.dims[2])) * 0.5;
+      const int min_x = std::max(0, static_cast<int>(std::floor(
+        (record.pose.position[0] - radius - grid.origin[0]) / grid.resolution)));
+      const int max_x = std::min(nx - 1, static_cast<int>(std::ceil(
+        (record.pose.position[0] + radius - grid.origin[0]) / grid.resolution)));
+      const int min_y = std::max(0, static_cast<int>(std::floor(
+        (record.pose.position[1] - radius - grid.origin[1]) / grid.resolution)));
+      const int max_y = std::min(ny - 1, static_cast<int>(std::ceil(
+        (record.pose.position[1] + radius - grid.origin[1]) / grid.resolution)));
+      const int min_z = std::max(0, static_cast<int>(std::floor(
+        (record.pose.position[2] - radius - grid.origin[2]) / grid.resolution)));
+      const int max_z = std::min(nz - 1, static_cast<int>(std::ceil(
+        (record.pose.position[2] + radius - grid.origin[2]) / grid.resolution)));
+      const std::array<float, 3> half{
+        record.dims[0] * 0.5F, record.dims[1] * 0.5F, record.dims[2] * 0.5F};
+      for (int ix = min_x; ix <= max_x; ++ix) {
+        for (int iy = min_y; iy <= max_y; ++iy) {
+          for (int iz = min_z; iz <= max_z; ++iz) {
+            const std::array<float, 7> world{
+              static_cast<float>((ix + 0.5) * grid.resolution + grid.origin[0]),
+              static_cast<float>((iy + 0.5) * grid.resolution + grid.origin[1]),
+              static_cast<float>((iz + 0.5) * grid.resolution + grid.origin[2]),
+              1.0F, 0.0F, 0.0F, 0.0F};
+            const auto local = pose_multiply(inv, world);
+            bool inside = false;
+            if (record.type == 1) {
+              const double r = record.dims[0];
+              inside = local[0] * local[0] + local[1] * local[1] +
+                local[2] * local[2] <= r * r;
+            } else if (record.type == 2 || record.type == 3) {
+              inside = std::abs(local[0]) <= half[0] &&
+                std::abs(local[1]) <= half[1] &&
+                std::abs(local[2]) <= half[2];
+            } else {
+              inside = std::abs(local[0]) <= half[0] &&
+                std::abs(local[1]) <= half[1] &&
+                std::abs(local[2]) <= half[2];
+            }
+            if (inside) {
+              grid.data[
+                (static_cast<std::size_t>(ix) * ny + iy) * nz + iz] = 1;
+            }
+          }
+        }
+      }
+    }
   }
   return grid;
 }
@@ -2532,7 +3115,14 @@ int CppBridge::clear_voxel_map(curobo_runtime::RobotHandle)
   {
     fail("clear_voxel_map", curobo_mapper_last_error());
   }
+  cuda_check("clear_voxel_map", cudaDeviceSynchronize());
   impl_->update_native_voxel_grid();
+  if (impl_->python && impl_->python_mapper_configured) {
+    try {
+      impl_->python->clear_voxel_map(impl_->python_handle);
+    } catch (const std::exception &) {
+    }
+  }
   return impl_->mapper->esdf_count;
 }
 
@@ -2558,6 +3148,9 @@ void CppBridge::depth_integrate(
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_initialized("depth_integrate");
+  if (std::getenv("CUROBO_DISABLE_NATIVE_MAPPER") != nullptr) {
+    return;
+  }
   if (impl_->mapper == nullptr || !impl_->native_scene_valid) {
     impl_->ensure_python_mapper("depth_integrate");
     impl_->python->depth_integrate(
@@ -2604,31 +3197,12 @@ void CppBridge::depth_integrate(
   if (curobo_mapper_integrate(impl_->mapper->runtime, &frame) != 0) {
     fail("depth_integrate", curobo_mapper_last_error());
   }
-  static int integrate_log_count = 0;
-  if (integrate_log_count++ < 5) {
-    int allocated = 0;
-    (void)curobo_mapper_num_allocated(impl_->mapper->runtime, 0, &allocated);
-    float dmin = 0.0F;
-    float dmax = 0.0F;
-    for (float value : depth.data) {
-      if (!std::isfinite(value) || value <= 0.0F) {
-        continue;
-      }
-      if (dmin == 0.0F || value < dmin) {
-        dmin = value;
-      }
-      if (value > dmax) {
-        dmax = value;
-      }
-    }
-    std::fprintf(
-      stderr,
-      "[mapper] integrate %dx%d depth=[%.3f, %.3f] cam=[%.3f %.3f %.3f | %.3f %.3f %.3f %.3f] allocated=%d\n",
-      width, height, static_cast<double>(dmin), static_cast<double>(dmax),
-      static_cast<double>(camera_pose[0]), static_cast<double>(camera_pose[1]),
-      static_cast<double>(camera_pose[2]), static_cast<double>(camera_pose[3]),
-      static_cast<double>(camera_pose[4]), static_cast<double>(camera_pose[5]),
-      static_cast<double>(camera_pose[6]), allocated);
+  if (impl_->python && std::getenv("CUROBO_PYTHON_MAPPER") != nullptr) {
+    // Optional debugging path: mirror frames into the Python mapper so the
+    // native map can be compared against the reference implementation.
+    impl_->ensure_python_mapper("depth_integrate");
+    impl_->python->depth_integrate(
+      impl_->python_handle, depth, intrinsics, camera_pose);
   }
 }
 

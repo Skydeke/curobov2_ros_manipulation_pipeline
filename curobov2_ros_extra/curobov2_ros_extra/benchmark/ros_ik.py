@@ -30,7 +30,6 @@ from rclpy.node import Node
 from curobov2_ros_interfaces.srv import (
     AddObject,
     IkBatch,
-    SetCollisionCache,
     WarmupIK,
 )
 from std_srvs.srv import Trigger
@@ -51,7 +50,6 @@ WARMUP_IK_SRV = f"{SERVER_NODE}/warmup_ik"
 IK_BATCH_SRV = f"{SERVER_NODE}/ik_batch"
 ADD_OBJECT_SRV = f"{SERVER_NODE}/add_object"
 REMOVE_ALL_OBJECTS_SRV = f"{SERVER_NODE}/remove_all_objects"
-SET_COLLISION_CACHE_SRV = f"{SERVER_NODE}/set_collision_cache"
 
 
 class RosIkRunner(Node):
@@ -63,16 +61,12 @@ class RosIkRunner(Node):
         self._ik_client = self.create_client(IkBatch, IK_BATCH_SRV)
         self._add_client = self.create_client(AddObject, ADD_OBJECT_SRV)
         self._clear_client = self.create_client(Trigger, REMOVE_ALL_OBJECTS_SRV)
-        self._cache_client = self.create_client(
-            SetCollisionCache, SET_COLLISION_CACHE_SRV
-        )
 
         for label, client in (
             ("warmup_ik", self._warmup_client),
             ("ik_batch", self._ik_client),
             ("add_object", self._add_client),
             ("remove_all_objects", self._clear_client),
-            ("set_collision_cache", self._cache_client),
         ):
             if not client.wait_for_service(timeout_sec=service_timeout):
                 self.get_logger().error(f"{label} service not available")
@@ -89,30 +83,6 @@ class RosIkRunner(Node):
                 f"{client.srv_name}: service call failed (timeout={timeout}s)"
             )
         return future.result()
-
-    def size_collision_cache(self, timeout: float = 120.0) -> None:
-        """Size the server's collision cache to the IK world (native parity). Same rationale as ``ros_runner.size_collision_cache``: the IK solver's
-        Warp collision kernels launch one thread per (sphere, padded cache
-        slot), so an over-padded server cache (the 32/4 launch defaults)
-        inflates the kernel grid vs the native leg's ``{cuboid: 1}`` cache. The one synchronous solver rebuild (~25-37 s) is paid inside the call."""
-        self.clear_world(timeout=timeout)
-        request = SetCollisionCache.Request()
-        request.obb = IK_WORLD_CUBOIDS
-        request.mesh = 0
-        request.blox = 0  # no cameras in the benchmark: disable the voxel layer
-        self.get_logger().info(
-            f"Sizing solver collision cache to IK world "
-            f"(obb={request.obb}, mesh={request.mesh}, blox={request.blox})"
-        )
-        response = self._call(self._cache_client, request, timeout)
-        if not response.success:
-            raise RuntimeError(
-                f"set_collision_cache failed: {getattr(response, 'message', '')}"
-            )
-        self.get_logger().info(
-            f"Collision cache set: obb={response.obb_cache}, "
-            f"mesh={response.mesh_cache}, blox={response.blox_cache}"
-        )
 
     def clear_world(self, timeout: float = 30.0) -> None:
         response = self._call(self._clear_client, Trigger.Request(), timeout)
@@ -273,9 +243,15 @@ def run_ik_ros(
         order_ros_parity_setup(
             node,
             warmup=lambda *, timeout: node.warmup_ik(batch, timeout=timeout),
-            size_collision_cache=size_collision_cache,
             timeout=call_timeout,
         )
+
+        # Discard one full-size batch before timing: the first /ik_batch call
+        # after world registration can rebuild/capture the solver, exactly like
+        # the native leg's warmup solves. Keep it out of the reported ms/batch.
+        if goals_batches:
+            node.get_logger().info("IK warmup probe (discarded) ...")
+            node.solve_batch(goals_batches[0], 0, kin, timeout=call_timeout)
 
         results: List[Dict[str, Any]] = []
         for b_idx, goals in enumerate(goals_batches, start=1):

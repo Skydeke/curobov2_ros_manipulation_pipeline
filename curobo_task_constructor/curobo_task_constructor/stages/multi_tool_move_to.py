@@ -15,7 +15,7 @@ from __future__ import annotations
 from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.robot import GoalsetSpec
 from curobo_task_constructor.core.stage import PropagatingEitherWay, Solution
-from curobo_task_constructor.core.state import InterfaceState
+from curobo_task_constructor.core.state import InterfaceState, make_joint_state
 from curobo_task_constructor.stages._util import (
     PLANNER_KEYS,
     carry_missing_joints,
@@ -77,11 +77,13 @@ class MultiToolMoveTo(PropagatingEitherWay):
 
     def _goalset(self, state: InterfaceState) -> GoalsetSpec:
         tools = self._tools()
+        allowed = list(self.params.get("allowed_collisions") or [])
+        if state.scene is not None:
+            allowed.extend(state.scene.all_allowed_links())
         return GoalsetSpec(
             tool_frames=[frame for frame, _ in tools],
             tool_poses=[pose for _, pose in tools],
-            allowed_collisions=(state.scene.all_allowed_links()
-                                if state.scene is not None else []),
+            allowed_collisions=sorted(set(allowed)),
         )
 
     def _planner(self):
@@ -110,6 +112,7 @@ class MultiToolMoveTo(PropagatingEitherWay):
                            self.params, planner=self._planner(),
                            scene=state.scene)
         last_error = "multi_tool_move_to plan failed"
+        tried = []
         for _ in range(self._attempts()):
             try:
                 with self.robot.allowance_scope([req]):
@@ -121,16 +124,41 @@ class MultiToolMoveTo(PropagatingEitherWay):
                 last_error = result.message or "multi_tool_move_to plan failed"
                 continue
             self._note_plan_attempt()
+            # The server's last_state can contain the start-lock jaw values
+            # rather than the commanded ones. The returned trajectory is
+            # authoritative for every joint it names, so build the end state
+            # from its final point and only fall back to the previous state for
+            # joints the trajectory omits.
+            end_joints = result.last_state
+            trajectory = getattr(result, "trajectory", None) or []
+            if trajectory:
+                last = trajectory[-1]
+                names = list(getattr(last, "name", []) or [])
+                positions = list(getattr(last, "position", []) or [])
+                if names:
+                    present = set(names)
+                    previous = getattr(state.joint_state, "name", []) or []
+                    previous_positions = getattr(state.joint_state, "position", []) or []
+                    for name, value in zip(previous, previous_positions):
+                        if name not in present:
+                            names.append(name)
+                            positions.append(float(value))
+                    end_joints = make_joint_state(type(last), names, positions)
             end = state.clone(joint_state=carry_missing_joints(
-                state.joint_state, result.last_state))
+                state.joint_state, end_joints))
             sol = Solution(
                 state, end, trajectory=result.trajectory,
                 cost=cost_of(result, self.params), comment=self._comment(result),
                 response=result.raw, plan_request=req)
+            # Plan the requested number of times even after the first success;
+            # keep every candidate so the cheapest can be promoted downstream.
             self._consider(sol)
-            self._promote_forward(state, end, sol)
+            tried.append(sol)
+        if not tried:
+            self._fail(state, None, last_error)
             return
-        self._fail(state, None, last_error)
+        best = min(tried, key=lambda solution: solution.cost)
+        self._promote_forward(state, best.end, best)
 
     # ------------------------------------------------------------------
     # Backward
