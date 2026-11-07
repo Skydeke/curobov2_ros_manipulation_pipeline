@@ -258,22 +258,29 @@ class Merger(ParallelContainerBase):
         by_name = dict(zip(names, positions))
         scene = start.scene.copy() if start.scene is not None else None
         for sol in chain:
-            js = getattr(sol.end, "joint_state", None)
+            end_js = getattr(sol.end, "joint_state", None)
+            start_js = getattr(sol.start, "joint_state", None)
+            start_by_name = dict(zip(
+                getattr(start_js, "name", []) or [],
+                getattr(start_js, "position", []) or [],
+            ))
             for name, pos in zip(
-                getattr(js, "name", []) or [],
-                getattr(js, "position", []) or [],
+                getattr(end_js, "name", []) or [],
+                getattr(end_js, "position", []) or [],
             ):
                 value = float(pos)
+                # Parallel children start from the same incoming state. Only
+                # the joints THIS child changed belong to its contribution;
+                # copying its unchanged copy of the other arm's jaw would let
+                # the last child overwrite the first child's command.
+                start_value = start_by_name.get(name)
+                if start_value is not None and abs(value - float(start_value)) <= 1e-12:
+                    continue
                 if name not in by_name:
-                    # A child can ADD a joint the incoming state does not carry
-                    # (a GripperCommand adds its jaw to the state). Dropping it
-                    # here would hand the next motion leg a start pose without
-                    # the commanded jaw value, so the planner's collision model
-                    # would keep the previous (e.g. closed) finger geometry.
                     by_name[name] = value
                     names.append(name)
                     positions.append(value)
-                elif abs(value - float(by_name[name])) > 1e-12:
+                else:
                     by_name[name] = value
             src = getattr(sol.end, "scene", None)
             if src is None:

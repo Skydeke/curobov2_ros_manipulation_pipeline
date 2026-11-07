@@ -171,6 +171,24 @@ class _PlanClientMixin:
             raise
         self._session.note_planner_sent(key)
 
+    def set_link_collision(self, link_names, enabled: bool) -> None:
+        """Re-enable/disable collision spheres for an explicit link set.
+
+        The task orchestrator uses this at task boundaries (before a new pick
+        and before release) so an interrupted plan cannot leave the server's
+        gripper link masks disabled into the next task.
+        """
+        links = sorted({str(name) for name in (link_names or []) if str(name)})
+        if not links:
+            return
+        req = SetLinkCollision.Request()
+        req.link_names = list(links)
+        req.enabled = bool(enabled)
+        res = self._call(self._link_collision_client, req)
+        if not res.success:
+            raise RuntimeError(f"set_link_collision failed: {res.message}")
+        self._session.note_collision_sent(links, enabled)
+
     def _set_links_collision(self, requests: list, enabled: bool) -> None:
         """Enable/disable collision spheres for the goalsets' allowed links.
 
