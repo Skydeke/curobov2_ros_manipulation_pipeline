@@ -328,6 +328,18 @@ def launch_setup(context, *args, **kwargs):
                 # the parity benchmark's timing-attribution diagnostics).
                 'use_cuda_graph': ParameterValue(
                     LaunchConfiguration('use_cuda_graph'), value_type=bool),
+                # IK has its own graph switch: the node declares
+                # ik_use_cuda_graph (default false) separately from the motion
+                # solver's use_cuda_graph. Benchmark parity needs it enabled —
+                # the published C++ IK numbers are CUDA-graph timings.
+                'ik_use_cuda_graph': ParameterValue(
+                    LaunchConfiguration('ik_use_cuda_graph'), value_type=bool),
+                'num_ik_seeds': ParameterValue(
+                    LaunchConfiguration('num_ik_seeds'), value_type=int),
+                # Deployment default matches the node declaration. The IK
+                # benchmark legs flip this at runtime for the plain/cfree A/B.
+                'ik_collision_check': ParameterValue(
+                    LaunchConfiguration('ik_collision_check'), value_type=bool),
                 # How sphere/cylinder/capsule obstacles are converted for the
                 # solver-bound scenes: 'cuboid' (fast OBB approximation,
                 # default, matches native get_obb_world geometry) or 'mesh'
@@ -643,6 +655,22 @@ def generate_launch_description():
             description='Enable CUDA-graph capture for the solver rollouts. Diagnostic: '
                         'set :=false to isolate mid-plan graph re-capture cost (the parity '
                         'benchmark README \'timing attribution\' section)'
+        ),
+        DeclareLaunchArgument(
+            'ik_use_cuda_graph', default_value='false',
+            description='Enable CUDA-graph capture for the standalone IK solver. The '
+                        'node default is false (each new batch width recaptures); the '
+                        'published C++ IK benchmark runs with graphs enabled.'
+        ),
+        DeclareLaunchArgument(
+            'num_ik_seeds', default_value='32',
+            description='Number of IK seeds for the standalone IK solver '
+                        '(node default 32).'
+        ),
+        DeclareLaunchArgument(
+            'ik_collision_check', default_value='true',
+            description='Standalone IK collision mode (node default true). Benchmarks '
+                        'flip this at runtime for the plain/cfree comparison.'
         ),
         DeclareLaunchArgument(
             'obstacle_collision_mode', default_value='cuboid',

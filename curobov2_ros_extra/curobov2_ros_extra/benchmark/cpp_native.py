@@ -387,7 +387,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         # The C++ runtime benchmark exposes motion + IK; the FK/collision
         # `cost` suite has no native C++ benchmark command, so leave it out
         # rather than silently mixing a Python native leg into a C++ run.
-        ik_native=[row for rows in native_ik.values() for row in rows.get("cfree", [])],
+        # The ROS /ik_batch leg is Franka collision-free only (single-tool,
+        # cfree variant). Feed the matching native rows to the generic summary:
+        # flattening every robot's cfree rows here would compare Franka ROS
+        # 5.7 ms against a G1/Dual-UR10e-heavy 560 ms mean.
+        ik_native=[
+            row
+            for row in native_ik.get("franka", {}).get("cfree", [])
+        ],
         ik_ros=ros_ik,
         cost_native=native_cost,
         cost_ros=ros_cost,

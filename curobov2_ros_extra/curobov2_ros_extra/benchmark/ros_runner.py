@@ -219,7 +219,7 @@ def run_ros(
         active_lock = None
 
         def apply_lock(scene_key: str) -> None:
-            nonlocal active_lock, switched_locks
+            nonlocal active_lock, switched_locks, current_hash
             if lock_joint_names is None:
                 return
             lock = mpinets_lock_for_scene(scene_key, mpinets_scenes, dataset)
@@ -229,6 +229,10 @@ def run_ros(
                 )
                 active_lock = lock
                 switched_locks = True
+                # A native lock switch reloads the artifact bundle and its
+                # scene. Drop the world hash so the next problem re-pushes the
+                # world instead of trusting the previous scene's hash.
+                current_hash = None
 
         # The live set_collision_cache service was removed from the server.
         # The collision cache is fixed by the launch / artifact bundle, so the

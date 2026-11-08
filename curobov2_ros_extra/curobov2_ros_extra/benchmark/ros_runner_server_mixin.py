@@ -172,7 +172,7 @@ class _RosRunnerServerMixin:
         self._call(self._rebuild_client, Trigger.Request(), timeout=rebuild_timeout)
         self.get_logger().info("update_motion_gen_config rebuild complete")
 
-    def server_lock_joint_names(self, rebuild_timeout: float = 300.0) -> List[str]:
+    def server_lock_joint_names(self, rebuild_timeout: float = 300.0) -> Optional[List[str]]:
         """Return the joints the server's robot config locks at launch.
 
         Asks the server to drop any override and reload the robot YAML's own
@@ -181,7 +181,17 @@ class _RosRunnerServerMixin:
         names from the server instead of hardcoding the Franka's two fingers.
         Captured once per run; ``set_server_lock_joints`` then names those
         joints with one value each.
+
+        Returns ``None`` when the server has no ``set_joint_locks`` service
+        (the native C++ runtime), so the caller keeps the artifact's baked
+        locks instead of crashing on a null client.
         """
+        if self._lock_client is None:
+            self.get_logger().warning(
+                "set_joint_locks service unavailable; keeping the server's "
+                "launch-time gripper locks for every scene"
+            )
+            return None
         names = self.restore_server_lock_joints(rebuild_timeout=rebuild_timeout)
         if not names:
             raise RuntimeError(
@@ -193,6 +203,8 @@ class _RosRunnerServerMixin:
     def restore_server_lock_joints(self, rebuild_timeout: float = 300.0) -> List[str]:
         """Drop the server's lock override, reloading the robot YAML's values. The inverse of :meth:`set_server_lock_joints`, and the way a run hands
         the server back in its launch state. Idempotent server-side."""
+        if self._lock_client is None:
+            return []
         request = SetJointLocks.Request()
         request.restore = True
         response = self._call(self._lock_client, request, timeout=rebuild_timeout)

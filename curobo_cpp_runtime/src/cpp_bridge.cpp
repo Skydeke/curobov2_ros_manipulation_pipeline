@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -392,6 +393,9 @@ struct CppBridge::Impl
   std::string artifact_dir;
   std::string robot;
   std::string config_file;
+  // Bundle the bridge was initialized with ("restore" lock_joints target).
+  std::string home_artifact_dir;
+  std::string home_config_file;
   int device_ordinal{0};
   bool python_fallback{false};
 
@@ -644,8 +648,14 @@ struct CppBridge::Impl
         const int row = active_index[static_cast<std::size_t>(tool)];
         std::array<float, 7> goal = home_poses[static_cast<std::size_t>(tool)];
         if (row >= 0) {
+          // `batch_rows` means each source row is one independent IK goal, so
+          // the pose for a given batch item is row `b` — NOT the tool's slot in
+          // `active_frames` (always 0 for single-tool IK). Using the slot here
+          // solved the whole batch against the first goal, which made every
+          // result after g001 report a large pose error.
+          const int source_row = batch_rows ? b : row;
           for (std::size_t k = 0; k < 7; ++k) {
-            goal[k] = poses.data[static_cast<std::size_t>(row) * 7 + k];
+            goal[k] = poses.data[static_cast<std::size_t>(source_row) * 7 + k];
           }
         }
         const std::size_t offset =
@@ -773,6 +783,61 @@ struct CppBridge::Impl
         }
       }
     }
+    // An attached payload must not collide with its own observed voxels at
+    // the pick pose. The world cuboid is disabled on attach, but the depth
+    // mapper still has a surface copy of the object. Clear the payload AABB
+    // (in the field only; the RViz map keeps it) so retreat/home plans see
+    // the environment, not a ghost copy of the object inside the gripper.
+    for (const auto & name : attached_objects) {
+      const SceneObjectRecord * record = scene ? scene->object(name) : nullptr;
+      if (record == nullptr) {
+        continue;
+      }
+      const auto inv = pose_inverse({
+        record->pose.position[0], record->pose.position[1],
+        record->pose.position[2], record->pose.quaternion[0],
+        record->pose.quaternion[1], record->pose.quaternion[2],
+        record->pose.quaternion[3]});
+      const double radius = (record->type == 1)
+        ? static_cast<double>(record->dims[0])
+        : std::sqrt(
+          static_cast<double>(record->dims[0] * record->dims[0]) +
+          static_cast<double>(record->dims[1] * record->dims[1]) +
+          static_cast<double>(record->dims[2] * record->dims[2])) * 0.5;
+      const int min_x = std::max(0, static_cast<int>(std::floor(
+        (record->pose.position[0] - radius - ox) / voxel)));
+      const int max_x = std::min(nx - 1, static_cast<int>(std::ceil(
+        (record->pose.position[0] + radius - ox) / voxel)));
+      const int min_y = std::max(0, static_cast<int>(std::floor(
+        (record->pose.position[1] - radius - oy) / voxel)));
+      const int max_y = std::min(ny - 1, static_cast<int>(std::ceil(
+        (record->pose.position[1] + radius - oy) / voxel)));
+      const int min_z = std::max(0, static_cast<int>(std::floor(
+        (record->pose.position[2] - radius - oz) / voxel)));
+      const int max_z = std::min(nz - 1, static_cast<int>(std::ceil(
+        (record->pose.position[2] + radius - oz) / voxel)));
+      const std::array<float, 3> half{
+        record->dims[0] * 0.5F, record->dims[1] * 0.5F, record->dims[2] * 0.5F};
+      for (int ix = min_x; ix <= max_x; ++ix) {
+        for (int iy = min_y; iy <= max_y; ++iy) {
+          for (int iz = min_z; iz <= max_z; ++iz) {
+            const std::array<float, 7> world{
+              static_cast<float>((ix + 0.5) * voxel + ox),
+              static_cast<float>((iy + 0.5) * voxel + oy),
+              static_cast<float>((iz + 0.5) * voxel + oz),
+              1.0F, 0.0F, 0.0F, 0.0F};
+            const auto local = pose_multiply(inv, world);
+            if (std::abs(local[0]) <= half[0] &&
+              std::abs(local[1]) <= half[1] &&
+              std::abs(local[2]) <= half[2])
+            {
+              field[(static_cast<std::size_t>(ix) * ny + iy) * nz + iz] =
+                __float2half(5.0F);
+            }
+          }
+        }
+      }
+    }
     cuda_check(
       "esdf_refresh",
       cudaMemcpy(
@@ -782,12 +847,6 @@ struct CppBridge::Impl
 
   void update_native_voxel_grid()
   {
-    // Voxel collision is enabled by default. The old env gate was only needed
-    // while the raw AOT ESDF was being used; update_collision_esdf() now
-    // builds a safe occupancy field from observed surfaces.
-    if (std::getenv("CUROBO_DISABLE_NATIVE_VOXEL_LAYER") != nullptr) {
-      return;
-    }
     ensure_native_voxel_grid();
     if (!mapper->voxel_added) {
       return;
@@ -837,6 +896,100 @@ struct CppBridge::Impl
       fail("init", "artifact manifest names do not match cpp_runtime dimensions");
     }
     kinematics = std::move(kinematics_ptr);
+  }
+
+  std::map<std::string, double> lock_map() const
+  {
+    std::map<std::string, double> locks;
+    for (std::size_t i = 0;
+      i < locked_joint_names.size() && i < locked_positions.size(); ++i)
+    {
+      locks[locked_joint_names[i]] = locked_positions[i];
+    }
+    return locks;
+  }
+
+  struct LockedArtifact
+  {
+    std::string directory;
+    std::string config_file;
+  };
+
+  // Native artifacts bake lock_joints into the exported model, so a lock change
+  // means selecting the sibling bundle exported with those values (the
+  // benchmark ships one bundle per dataset: MB 0.04, MPINets 0.025). The
+  // generated manifest.json records lock_joints.pinned, so the bundle is
+  // identifiable without re-parsing the YAML.
+  std::optional<LockedArtifact> find_artifact_for_locks(
+    const std::map<std::string, double> & requested) const
+  {
+    const std::filesystem::path current(artifact_dir);
+    const std::string arch = current.filename().string();
+    const std::filesystem::path root = current.parent_path().parent_path();
+    if (arch.empty() || root.empty()) {
+      return std::nullopt;
+    }
+    std::error_code iter_error;
+    for (const auto & entry : std::filesystem::directory_iterator(root, iter_error)) {
+      if (iter_error) {
+        break;
+      }
+      if (!entry.is_directory()) {
+        continue;
+      }
+      const std::filesystem::path candidate = entry.path() / arch;
+      if (!std::filesystem::is_directory(candidate)) {
+        continue;
+      }
+      ArtifactBundle bundle_candidate;
+      try {
+        bundle_candidate = inspect_artifact_directory(candidate.string(), robot, "");
+      } catch (const std::exception &) {
+        continue;
+      }
+      if (!bundle_candidate.valid) {
+        continue;
+      }
+      std::map<std::string, double> locks;
+      for (std::size_t i = 0;
+        i < bundle_candidate.manifest.locked_joint_names.size() &&
+        i < bundle_candidate.manifest.locked_positions.size(); ++i)
+      {
+        locks[bundle_candidate.manifest.locked_joint_names[i]] =
+          bundle_candidate.manifest.locked_positions[i];
+      }
+      if (locks == requested) {
+        return LockedArtifact{
+          candidate.string(), bundle_candidate.manifest.curobo_config};
+      }
+    }
+    return std::nullopt;
+  }
+
+  void reload_artifact(const std::string & new_dir, const std::string & new_config)
+  {
+    // Everything native is per-artifact (kinematics, scene capacities, solver
+    // workspaces/graphs). Drop it and rebuild from the selected bundle; the
+    // caller (ConfigServices) rebuilds the planner afterwards and the ROS
+    // world is re-pushed by the next scenario.
+    mapper.reset();
+    mpc.reset();
+    planner.reset();
+    ik.reset();
+    kinematics.reset();
+    scene.reset();
+    python_planner_built = false;
+    motion_cfg_json.clear();
+    native_scene_valid = true;
+    attached_objects.clear();
+    attach_links.clear();
+    visual_attachments.clear();
+    artifact_dir = new_dir;
+    config_file = new_config;
+    init_error.clear();
+    load_artifact();
+    ensure_scene();
+    initialized = true;
   }
 
   void ensure_planner(const char * method)
@@ -1995,6 +2148,8 @@ curobo_runtime::RobotHandle CppBridge::init(const std::string & cfg)
     }
     cuda_check("init", cudaSetDevice(impl_->device_ordinal));
     impl_->load_artifact();
+    impl_->home_artifact_dir = impl_->artifact_dir;
+    impl_->home_config_file = impl_->config_file;
     impl_->ensure_scene();
     if (impl_->python_fallback && std::getenv("CUROBO_DISABLE_PY_FALLBACK") == nullptr) {
       impl_->python = std::make_unique<curobo_runtime::PyBridge>();
@@ -2672,48 +2827,18 @@ curobo_runtime::PlanOutcome CppBridge::plan_pose(
   if (!request.tool_poses.data.empty()) {
     return impl_->plan_pose_impl(request);
   }
-  // Ordered waypoint / Cartesian paths have a native implementation. Run it
-  // before the Python pose fallback: the Python path recompiles Torch graphs
-  // on its first waypoint request and can block the service for minutes.
+  // Ordered waypoint / Cartesian paths have a native implementation.
   const OrderedWaypoints waypoints = extract_ordered_waypoints(request);
   if (waypoints.present) {
-    auto outcome = impl_->plan_waypoints_impl(request, waypoints);
-    if (!outcome.success && impl_->python) {
-      impl_->ensure_python_planner("plan_pose");
-      auto fallback = impl_->python->plan_pose(impl_->python_handle, request);
-      if (fallback.success) {
-        return fallback;
-      }
-    }
-    return outcome;
+    // Native is the only ordered-waypoint path. Do not fall back to the
+    // Python planner here: its Torch/Dynamo recompile can block the service
+    // for minutes during a task.
+    return impl_->plan_waypoints_impl(request, waypoints);
   }
-  if (impl_->python) {
-    // The Python pose planner implements the passive-arm hold and the
-    // per-tool IK seeding that the native pose path does not yet match. Keep
-    // cspace native; use Python for pose in the hybrid bridge.
-    impl_->ensure_python_planner("plan_pose");
-    auto python_outcome = impl_->python->plan_pose(impl_->python_handle, request);
-    if (python_outcome.success) {
-      return python_outcome;
-    }
-  }
-  if (std::getenv("CUROBO_DEBUG_PLAN_POSE") != nullptr) {
-    std::fprintf(stderr, "[plan_pose] start=%zu tool_poses=%zu tools=%zu frames=%zu\n",
-      request.start.size(), request.tool_poses.data.size(),
-      static_cast<std::size_t>(impl_->num_tools()), request.tool_frames.size());
-  }
-  curobo_runtime::PlanOutcome outcome = impl_->plan_pose_impl(request);
-  if (!outcome.success && impl_->python) {
-    // The Python pose planner seeds/validates multi-tool IK differently from
-    // the native solver. Keep native cspace planning and use the Python pose
-    // solver only as the per-capability fallback when native returns no path.
-    impl_->ensure_python_planner("plan_pose");
-    auto fallback = impl_->python->plan_pose(impl_->python_handle, request);
-    if (fallback.success) {
-      return fallback;
-    }
-  }
-  return outcome;
+  // The native bridge implements this plan mode. Use it directly; the Python
+  // planner is only the fallback for a missing native artifact (handled at
+  // the top of this function), never a runtime recompile path.
+  return impl_->plan_pose_impl(request);
 }
 
 curobo_runtime::PlanOutcome CppBridge::plan_cspace(
@@ -2757,12 +2882,60 @@ void CppBridge::robot_model_rebuild_locks(
   curobo_runtime::RobotHandle, const std::string & lock_json)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  impl_->require_python("robot_model_rebuild_locks");
-  impl_->python->robot_model_rebuild_locks(impl_->python_handle, lock_json);
-  // Native artifacts resolve locked/mimic values at export time; the public
-  // cpp_runtime API has no in-place update. Keep native planning enabled and
-  // mirror the values into Python for the fallback path (upstream guidance:
-  // re-export if the native locked state itself must change).
+  impl_->require_initialized("robot_model_rebuild_locks");
+
+  std::map<std::string, double> requested;
+  if (!lock_json.empty() && lock_json != "{}") {
+    const json::Value document = json::parse(lock_json);
+    if (!document.is_object()) {
+      fail("robot_model_rebuild_locks", "lock_joints override must be a JSON object");
+    }
+    for (const auto & [name, value] : document.as_object()) {
+      if (!value.is_number()) {
+        fail("robot_model_rebuild_locks",
+          "lock_joints value for '" + name + "' is not a number");
+      }
+      requested[name] = value.as_double();
+    }
+  }
+
+  // Keep the Python fallback consistent when it is enabled. The native model
+  // itself is reloaded below.
+  if (impl_->python) {
+    impl_->python->robot_model_rebuild_locks(impl_->python_handle, lock_json);
+  }
+
+  // Empty override = restore the launch-time YAML locks. The home artifact was
+  // exported with exactly those values, so switch back to it (no-op when the
+  // bridge never left it).
+  if (requested.empty()) {
+    if (impl_->artifact_dir == impl_->home_artifact_dir) {
+      return;
+    }
+    impl_->reload_artifact(impl_->home_artifact_dir, impl_->home_config_file);
+    std::fprintf(
+      stderr, "[curobo_cpp_runtime] restored launch artifact '%s' for lock_joints {}\n",
+      impl_->home_artifact_dir.c_str());
+    return;
+  }
+
+  if (requested == impl_->lock_map()) {
+    return;
+  }
+
+  const auto selected = impl_->find_artifact_for_locks(requested);
+  if (!selected) {
+    std::ostringstream message;
+    message << "no pre-exported artifact bundle under '"
+            << std::filesystem::path(impl_->artifact_dir).parent_path().parent_path().string()
+            << "' matches lock_joints " << lock_json
+            << "; re-export the robot with those lock values";
+    fail("robot_model_rebuild_locks", message.str());
+  }
+  impl_->reload_artifact(selected->directory, selected->config_file);
+  std::fprintf(
+    stderr, "[curobo_cpp_runtime] reloaded native artifact '%s' for lock_joints %s\n",
+    selected->directory.c_str(), lock_json.c_str());
 }
 
 void CppBridge::robot_model_update_lock_joints(
@@ -2944,13 +3117,6 @@ curobo_runtime::VoxelGrid CppBridge::voxel_grid(curobo_runtime::RobotHandle)
   if (impl_->mapper == nullptr || !impl_->native_scene_valid) {
     impl_->ensure_python_mapper("voxel_grid");
     return impl_->python->voxel_grid(impl_->python_handle);
-  }
-  if (impl_->python && std::getenv("CUROBO_PYTHON_VOXEL_GRID") != nullptr) {
-    impl_->ensure_python_mapper("voxel_grid");
-    auto python_grid = impl_->python->voxel_grid(impl_->python_handle);
-    if (python_grid.shape.size() == 3) {
-      return python_grid;
-    }
   }
   const int nx = impl_->mapper->view.esdf_shape[0];
   const int ny = impl_->mapper->view.esdf_shape[1];
@@ -3196,13 +3362,6 @@ void CppBridge::depth_integrate(
   frame.stream = 0;
   if (curobo_mapper_integrate(impl_->mapper->runtime, &frame) != 0) {
     fail("depth_integrate", curobo_mapper_last_error());
-  }
-  if (impl_->python && std::getenv("CUROBO_PYTHON_MAPPER") != nullptr) {
-    // Optional debugging path: mirror frames into the Python mapper so the
-    // native map can be compared against the reference implementation.
-    impl_->ensure_python_mapper("depth_integrate");
-    impl_->python->depth_integrate(
-      impl_->python_handle, depth, intrinsics, camera_pose);
   }
 }
 

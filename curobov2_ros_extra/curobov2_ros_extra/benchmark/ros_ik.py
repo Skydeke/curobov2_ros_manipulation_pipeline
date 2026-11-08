@@ -264,6 +264,27 @@ def run_ik_ros(
             f"ROS IK leg done: {len(results)} goals, "
             f"{sum(1 for r in results if r['success'])} succeeded"
         )
+        # The server reports convergence per goal, but the returned joint states
+        # travel through the wire and are FK-checked here. A success row with a
+        # huge pose error is a protocol/ordering bug, not a difficult query
+        # (the solver tolerance is 5 mm / 0.05 rad), so fail loudly instead of
+        # publishing plausible-looking but wrong numbers.
+        bad = [
+            r for r in results
+            if r["success"] and (
+                (r.get("position_error_mm") or 0.0) > 50.0 or
+                (r.get("orientation_error_deg") or 0.0) > 10.0
+            )
+        ]
+        if bad:
+            raise RuntimeError(
+                f"{len(bad)}/{len(results)} successful IK rows have pose errors "
+                f"far above the solver tolerance (first: "
+                f"{bad[0]['problem_name']} "
+                f"{bad[0]['position_error_mm']:.1f} mm / "
+                f"{bad[0]['orientation_error_deg']:.1f} deg); the /ik_batch "
+                "response does not match the requested goal order"
+            )
         return results
     finally:
         if node is not None:

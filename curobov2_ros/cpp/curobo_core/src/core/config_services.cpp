@@ -20,14 +20,21 @@ ConfigServices::ConfigServices(
 : node_(node), bridge_(bridge), handle_(handle), joint_names_(joint_names)
 {
   const std::string name = node_->get_name();
-  // Native artifacts are immutable. The old live-reconfiguration services
-  // (set_workspace, update_motion_gen_config, set_collision_cache,
-  // set_joint_locks) rebuilt the Python planner/scene and cannot be honoured by
-  // CppBridge. Keep only read-only workspace introspection.
+  // Native artifacts are immutable, but a lock_joints change maps to another
+  // pre-exported artifact bundle (same robot/arch, different baked gripper
+  // geometry). The benchmark's per-dataset files are exactly that case, so
+  // /set_joint_locks stays available and the CppBridge reloads the matching
+  // bundle instead of silently keeping the launch artifact.
   get_workspace_srv_ = node_->create_service<curobov2_ros_interfaces::srv::GetWorkspace>(
     name + "/get_workspace",
     std::bind(
       &ConfigServices::handle_get_workspace, this,
+      std::placeholders::_1, std::placeholders::_2));
+  set_joint_locks_srv_ =
+    node_->create_service<curobov2_ros_interfaces::srv::SetJointLocks>(
+    name + "/set_joint_locks",
+    std::bind(
+      &ConfigServices::handle_set_joint_locks, this,
       std::placeholders::_1, std::placeholders::_2));
 
   // Seed the lock state from the model.

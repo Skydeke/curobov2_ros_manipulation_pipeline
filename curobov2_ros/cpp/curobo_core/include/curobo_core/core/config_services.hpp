@@ -89,6 +89,7 @@ private:
   std::function<void()> world_invalidate_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::GetWorkspace>::SharedPtr get_workspace_srv_;
+  rclcpp::Service<curobov2_ros_interfaces::srv::SetJointLocks>::SharedPtr set_joint_locks_srv_;
 };
 
 }  // namespace curobo_core
