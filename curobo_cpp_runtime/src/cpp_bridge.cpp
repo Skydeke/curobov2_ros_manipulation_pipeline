@@ -2620,12 +2620,32 @@ void CppBridge::attach_object(
       best_tool = t;
     }
   }
-  std::string link = best_tool == 0 ? "attached_object_left" :
-    (best_tool == 1 ? "attached_object_right" :
-    impl_->tool_frames[static_cast<std::size_t>(best_tool)]);
-  if (std::find(impl_->link_names.begin(), impl_->link_names.end(), link) ==
-    impl_->link_names.end())
-  {
+  // One-arm profiles reserve the payload link as `attached_object`; bimanual
+  // profiles use `attached_object_left/right`. Select one the artifact
+  // actually exposes before falling back to the tool frame (which has no
+  // collision-sphere slots and would make attach fail).
+  const auto has_link = [this](const std::string & candidate) {
+      return std::find(impl_->link_names.begin(), impl_->link_names.end(),
+               candidate) != impl_->link_names.end();
+    };
+  std::string link;
+  if (best_tool == 0) {
+    link = "attached_object_left";
+  } else if (best_tool == 1) {
+    link = "attached_object_right";
+  } else {
+    link = impl_->tool_frames[static_cast<std::size_t>(best_tool)];
+  }
+  if (!has_link(link)) {
+    for (const char * candidate : {"attached_object", "attached_object_left",
+             "attached_object_right"}) {
+      if (has_link(candidate)) {
+        link = candidate;
+        break;
+      }
+    }
+  }
+  if (!has_link(link)) {
     link = impl_->tool_frames[static_cast<std::size_t>(best_tool)];
   }
 
