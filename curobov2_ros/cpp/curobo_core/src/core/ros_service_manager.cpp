@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 
+#include <Eigen/Geometry>
 #include <std_srvs/srv/trigger.hpp>
 
 #include "curobo_core/core/robot_segmentation.hpp"
@@ -168,20 +169,26 @@ void RosServiceManager::init_services()
     name + "/voxel_grid_sparse", rclcpp::QoS(10).transient_local());
   scene_obstacle_pub_ =
     node_->create_publisher<visualization_msgs::msg::MarkerArray>(
-    name + "/scene_obstacles", 10);
+    name + "/scene_obstacles", rclcpp::QoS(10).transient_local());
   publish_scene_obstacles();
   // Re-publish the analytic scene markers periodically so RViz shows the real
   // cuboids/spheres/cylinders even though they are no longer rasterized into
-  // the voxel grid. The timer deliberately stays in the node's default
-  // (mutually exclusive) callback group: publish_scene_obstacles() reads the
-  // ObstacleManager maps that the scene services mutate, so it must not run
-  // concurrently with add/remove/set_objects.
+  // the voxel grid. The timer MUST NOT live in the node's default callback
+  // group: that group is mutually exclusive with every service callback, and a
+  // multi-second generate_trajectory call then starves this 5 Hz timer for the
+  // whole plan burst (the markers never appear). A dedicated group makes the
+  // timer independent of the long service callbacks; ObstacleManager serialises
+  // scene reads/writes/notifications internally, so the timer can safely read a
+  // snapshot while add/remove/set_objects runs.
   const double scene_rate = node_->has_parameter("scene_obstacle_publish_rate") ?
     node_->get_parameter("scene_obstacle_publish_rate").as_double() : 5.0;
   if (scene_rate > 0.0) {
+    scene_callback_group_ = node_->create_callback_group(
+      rclcpp::CallbackGroupType::Reentrant);
     scene_obstacle_timer_ = node_->create_wall_timer(
       std::chrono::duration<double>(1.0 / scene_rate),
-      std::bind(&RosServiceManager::publish_scene_obstacles, this));
+      std::bind(&RosServiceManager::publish_scene_obstacles, this),
+      scene_callback_group_);
   }
 
   // PORT: ros_service_manager.publish_collision_spheres (timer, gated).
@@ -678,32 +685,30 @@ void RosServiceManager::publish_sparse_voxel_grid_job()
   }
 }
 
-// PORT: ros_service_manager.publish_scene_obstacles
-void RosServiceManager::publish_scene_obstacles()
+// Build the exact-primitive MarkerArray consumed by the RViz planning display.
+// Kept free of node/GPU access so the mapping (type, dimensions, capsule offset)
+// can be unit tested without a running ROS graph.
+visualization_msgs::msg::MarkerArray RosServiceManager::scene_obstacle_markers(
+  const SceneView & view, const std::string & frame,
+  const builtin_interfaces::msg::Time & stamp)
 {
-  if (scene_obstacle_pub_ == nullptr ||
-    scene_obstacle_pub_->get_subscription_count() == 0)
-  {
-    return;
-  }
-  const SceneView view = obstacle_manager_->get_scene_objects();
   visualization_msgs::msg::MarkerArray array;
   visualization_msgs::msg::Marker clear;
+  clear.header.frame_id = frame;
+  clear.header.stamp = stamp;
   // Empty namespace on purpose: rviz's DELETEALL is namespace-scoped.
   clear.action = visualization_msgs::msg::Marker::DELETEALL;
   array.markers.push_back(clear);
 
-  const std::string frame = node_->has_parameter("base_link") ?
-    node_->get_parameter("base_link").as_string() : "base_link";
   int mid = 0;
   for (std::size_t i = 0; i < view.names.size(); ++i) {
     const int type = i < view.types.size() ? view.types[i] : CUBOID;
     if (type == MESH) {
-      continue;   // PORT: only cuboid/sphere/cylinder/capsule get markers here
+      continue;   // only cuboid/sphere/cylinder/capsule get analytic markers
     }
     visualization_msgs::msg::Marker marker;
     marker.header.frame_id = frame;
-    marker.header.stamp = node_->get_clock()->now();
+    marker.header.stamp = stamp;
     marker.ns = "scene_obstacles";
     marker.id = mid++;
     marker.type = (type == CUBOID) ? visualization_msgs::msg::Marker::CUBE :
@@ -724,9 +729,20 @@ void RosServiceManager::publish_scene_obstacles()
       marker.scale.y = dims[1];
       marker.scale.z = dims[2];
     } else {
-      const double d = 2.0 * dims[0];
-      marker.scale.x = marker.scale.y = d;
-      marker.scale.z = (type == SPHERE) ? d : dims[1];
+      // Sphere/Cylinder/Capsule all use dims[0] as the radius. A capsule is
+      // rendered as the equivalent cylinder, whose centre is halfway between
+      // the capsule's local base (z=0) and tip (z=dims[1]); putting it at the
+      // raw pose would shift it by half its length.
+      marker.scale.x = marker.scale.y = 2.0 * dims[0];
+      marker.scale.z = (type == SPHERE) ? (2.0 * dims[0]) : dims[1];
+      if (type == CAPSULE) {
+        Eigen::Quaterniond rotation(pose[3], pose[4], pose[5], pose[6]);
+        const Eigen::Vector3d offset =
+          rotation * Eigen::Vector3d(0.0, 0.0, 0.5 * dims[1]);
+        marker.pose.position.x += offset.x();
+        marker.pose.position.y += offset.y();
+        marker.pose.position.z += offset.z();
+      }
     }
     const bool attached = i < view.attached.size() && view.attached[i];
     if (attached) {
@@ -742,7 +758,23 @@ void RosServiceManager::publish_scene_obstacles()
     }
     array.markers.push_back(marker);
   }
-  scene_obstacle_pub_->publish(array);
+  return array;
+}
+
+// PORT: ros_service_manager.publish_scene_obstacles
+void RosServiceManager::publish_scene_obstacles()
+{
+  if (scene_obstacle_pub_ == nullptr) {
+    return;
+  }
+  // No subscription-count gate: publishing the (cheap) marker array keeps the
+  // transient-local cache fresh so an RViz that connects late immediately gets
+  // the current scene instead of waiting for the next mutation.
+  const SceneView view = obstacle_manager_->get_scene_objects();
+  const std::string frame = node_->has_parameter("base_link") ?
+    node_->get_parameter("base_link").as_string() : "base_link";
+  scene_obstacle_pub_->publish(
+    scene_obstacle_markers(view, frame, node_->get_clock()->now()));
 }
 
 // PORT: ros_service_manager.publish_collision_spheres

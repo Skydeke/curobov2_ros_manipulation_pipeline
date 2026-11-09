@@ -65,6 +65,7 @@ ObstacleManager::ObstacleManager(
 
 int ObstacleManager::bucket_count(const std::string & bucket) const
 {
+  std::lock_guard<std::mutex> lock(state_mutex_);
   auto it = bucket_counts_.find(bucket);
   return it == bucket_counts_.end() ? 0 : it->second;
 }
@@ -128,6 +129,7 @@ void ObstacleManager::clear_all()
 
 std::string ObstacleManager::scene_json() const
 {
+  std::lock_guard<std::mutex> lock(state_mutex_);
   std::ostringstream out;
   out << "[";
   bool first = true;
@@ -177,8 +179,17 @@ std::string ObstacleManager::scene_json() const
 // the ESDF freshness gate lives in should_refresh_world)
 void ObstacleManager::notify_world_changed()
 {
-  scene_version_ = bridge_->scene_set(handle_, scene_json(), true);
-  epoch_ += 1;
+  // Snapshot under the state lock, then do the (slow) bridge push without it:
+  // the marker timer and the viz lane must still be able to read the scene and
+  // the epoch while a mutation is being pushed.
+  const std::string objects_json = scene_json();
+  const curobo_runtime::SceneVersion version =
+    bridge_->scene_set(handle_, objects_json, true);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    scene_version_ = version;
+    epoch_ += 1;
+  }
   // PORT: obstacle_manager.set_world_update_callback ->
   // unified_planner_node.update_all_solvers_world(obstacle_manager.get_scene())
   // (node line ~1084): every scene MUTATION pushes the analytic world to the
@@ -214,21 +225,27 @@ void ObstacleManager::notify_world_changed()
 // PORT: obstacle_manager.add_object
 bool ObstacleManager::add_object(const SceneObjectSpec & spec, std::string & message)
 {
-  std::set<std::string> taken(order_.begin(), order_.end());
-  const std::string err = validate_spec(spec, taken);
-  if (!err.empty()) {
-    message = err;
-    return false;
+  // Serialise mutate -> push so two service callbacks cannot publish snapshots
+  // in the opposite order to their mutations.
+  std::lock_guard<std::mutex> mutation(mutation_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::set<std::string> taken(order_.begin(), order_.end());
+    const std::string err = validate_spec(spec, taken);
+    if (!err.empty()) {
+      message = err;
+      return false;
+    }
+    try {
+      append_spec(spec);
+    } catch (const std::exception & e) {
+      message = std::string("Failed to add obstacle: ") + e.what();
+      return false;
+    }
+    message = "Object '" + spec.name + "' added (" +
+      std::to_string(bucket_counts_["cuboid"]) + " cuboids, " +
+      std::to_string(bucket_counts_["mesh"]) + " meshes)";
   }
-  try {
-    append_spec(spec);
-  } catch (const std::exception & e) {
-    message = std::string("Failed to add obstacle: ") + e.what();
-    return false;
-  }
-  message = "Object '" + spec.name + "' added (" +
-    std::to_string(bucket_count("cuboid")) + " cuboids, " +
-    std::to_string(bucket_count("mesh")) + " meshes)";
   notify_world_changed();
   return true;
 }
@@ -237,32 +254,36 @@ bool ObstacleManager::add_object(const SceneObjectSpec & spec, std::string & mes
 bool ObstacleManager::set_objects(
   const std::vector<SceneObjectSpec> & specs, bool clear_first, std::string & message)
 {
-  std::set<std::string> taken;
-  if (!clear_first) {
-    taken.insert(order_.begin(), order_.end());
-  }
-  for (const auto & spec : specs) {
-    const std::string err = validate_spec(spec, taken);
-    if (!err.empty()) {
-      message = "Invalid object '" + spec.name + "': " + err;
-      return false;
-    }
-    taken.insert(spec.name);
-  }
-  try {
-    if (clear_first) {
-      clear_all();
+  std::lock_guard<std::mutex> mutation(mutation_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    std::set<std::string> taken;
+    if (!clear_first) {
+      taken.insert(order_.begin(), order_.end());
     }
     for (const auto & spec : specs) {
-      append_spec(spec);
+      const std::string err = validate_spec(spec, taken);
+      if (!err.empty()) {
+        message = "Invalid object '" + spec.name + "': " + err;
+        return false;
+      }
+      taken.insert(spec.name);
     }
-  } catch (const std::exception & e) {
-    message = std::string("Failed to set objects: ") + e.what();
-    return false;
+    try {
+      if (clear_first) {
+        clear_all();
+      }
+      for (const auto & spec : specs) {
+        append_spec(spec);
+      }
+    } catch (const std::exception & e) {
+      message = std::string("Failed to set objects: ") + e.what();
+      return false;
+    }
+    message = "Scene set to " + std::to_string(specs.size()) + " objects (" +
+      std::to_string(bucket_counts_["cuboid"]) + " cuboids, " +
+      std::to_string(bucket_counts_["mesh"]) + " meshes)";
   }
-  message = "Scene set to " + std::to_string(specs.size()) + " objects (" +
-    std::to_string(bucket_count("cuboid")) + " cuboids, " +
-    std::to_string(bucket_count("mesh")) + " meshes)";
   notify_world_changed();
   return true;
 }
@@ -270,19 +291,23 @@ bool ObstacleManager::set_objects(
 // PORT: obstacle_manager.remove_object
 bool ObstacleManager::remove_object(const std::string & name, std::string & message)
 {
-  auto it = objects_.find(name);
-  if (it == objects_.end()) {
-    message = "Object '" + name + "' not found";
-    return false;
+  std::lock_guard<std::mutex> mutation(mutation_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    auto it = objects_.find(name);
+    if (it == objects_.end()) {
+      message = "Object '" + name + "' not found";
+      return false;
+    }
+    const std::string bucket = bucket_of(it->second.type);
+    objects_.erase(it);
+    order_.erase(std::remove(order_.begin(), order_.end(), name), order_.end());
+    bucket_counts_[bucket] -= 1;
+    if (attached_names_.erase(name) > 0 && attached_name_ == name) {
+      attached_name_ = attached_names_.empty() ? std::string() : *attached_names_.rbegin();
+    }
+    message = "Object '" + name + "' removed from " + bucket + "s";
   }
-  const std::string bucket = bucket_of(it->second.type);
-  objects_.erase(it);
-  order_.erase(std::remove(order_.begin(), order_.end(), name), order_.end());
-  bucket_counts_[bucket] -= 1;
-  if (attached_names_.erase(name) > 0 && attached_name_ == name) {
-    attached_name_ = attached_names_.empty() ? std::string() : *attached_names_.rbegin();
-  }
-  message = "Object '" + name + "' removed from " + bucket + "s";
   notify_world_changed();
   return true;
 }
@@ -290,12 +315,16 @@ bool ObstacleManager::remove_object(const std::string & name, std::string & mess
 // PORT: obstacle_manager.remove_all_objects
 bool ObstacleManager::remove_all_objects(std::string & message)
 {
-  int total = 0;
-  for (const char * bucket : kBuckets) {
-    total += bucket_count(bucket);
+  std::lock_guard<std::mutex> mutation(mutation_mutex_);
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int total = 0;
+    for (const char * bucket : kBuckets) {
+      total += bucket_counts_[bucket];
+    }
+    clear_all();
+    message = "All " + std::to_string(total) + " obstacles removed";
   }
-  clear_all();
-  message = "All " + std::to_string(total) + " obstacles removed";
   notify_world_changed();
   return true;
 }
@@ -305,6 +334,7 @@ bool ObstacleManager::refresh_esdf()
 {
   const bool refreshed = bridge_->esdf_refresh(handle_);
   if (refreshed) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     perception_epoch_ += 1;
   }
   return refreshed;
@@ -328,6 +358,7 @@ double steady_now()
 // buffers (observed: heap corruption / malloc abort under the 10-minute soak).
 bool ObstacleManager::should_refresh_world(bool force) const
 {
+  std::lock_guard<std::mutex> lock(state_mutex_);
   if (last_pushed_epoch_ < 0) {
     return true;
   }
@@ -342,6 +373,7 @@ bool ObstacleManager::should_refresh_world(bool force) const
 
 void ObstacleManager::mark_world_pushed()
 {
+  std::lock_guard<std::mutex> lock(state_mutex_);
   last_pushed_epoch_ = epoch_;
   last_push_time_ = steady_now();
 }
@@ -401,6 +433,7 @@ std::vector<std::int32_t> ObstacleManager::occupied_indices(
 // PORT: obstacle_manager.get_obstacles
 std::string ObstacleManager::get_obstacles() const
 {
+  std::lock_guard<std::mutex> lock(state_mutex_);
   std::ostringstream out;
   for (const std::string & name : order_) {
     out << name << "\n";
@@ -411,6 +444,7 @@ std::string ObstacleManager::get_obstacles() const
 // PORT: obstacle_manager.get_scene_objects
 SceneView ObstacleManager::get_scene_objects() const
 {
+  std::lock_guard<std::mutex> lock(state_mutex_);
   SceneView view;
   for (const std::string & name : order_) {
     const SceneObjectSpec & spec = objects_.at(name);
@@ -424,7 +458,7 @@ SceneView ObstacleManager::get_scene_objects() const
     }
     view.colors.push_back(spec.color);
     view.mesh_file_paths.push_back(spec.type == MESH ? spec.mesh_file_path : "");
-    view.attached.push_back(is_attached(spec.name));
+    view.attached.push_back(attached_names_.find(spec.name) != attached_names_.end());
   }
   return view;
 }

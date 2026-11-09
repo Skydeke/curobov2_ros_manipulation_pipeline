@@ -17,6 +17,8 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
 
+#include <builtin_interfaces/msg/time.hpp>
+
 #include "curobo_runtime/gpu_lanes.hpp"
 #include "curobov2_ros_interfaces/msg/scene_object.hpp"
 #include "curobov2_ros_interfaces/msg/sparse_voxel_grid.hpp"
@@ -66,6 +68,11 @@ public:
   void publish_collision_spheres_job();
   // PORT: ros_service_manager.publish_scene_obstacles
   void publish_scene_obstacles();
+  // Build the exact-primitive MarkerArray published on <node>/scene_obstacles.
+  // Pure (no ROS node/GPU) so the type/scale/pose mapping is unit-testable.
+  static visualization_msgs::msg::MarkerArray scene_obstacle_markers(
+    const SceneView & view, const std::string & frame,
+    const builtin_interfaces::msg::Time & stamp);
   // PORT: ros_service_manager.publish_collision_spheres (timer; pose provider
   // is the node's current joint pose).
   void set_pose_provider(std::function<std::vector<float>()> provider)
@@ -163,6 +170,7 @@ private:
   rclcpp::Publisher<curobov2_ros_interfaces::msg::SparseVoxelGrid>::SharedPtr sparse_voxel_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr scene_obstacle_pub_;
   rclcpp::TimerBase::SharedPtr scene_obstacle_timer_;
+  rclcpp::CallbackGroup::SharedPtr scene_callback_group_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr collision_spheres_pub_;
   rclcpp::TimerBase::SharedPtr collision_spheres_timer_;
   std::function<std::vector<float>()> pose_provider_;

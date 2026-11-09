@@ -11,6 +11,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string>
 #include <vector>
@@ -84,7 +85,11 @@ public:
   // row-major [X][Y][Z]: (x*sy + y)*sz + z).
   static std::vector<std::int32_t> occupied_indices(const curobo_runtime::VoxelGrid & grid);
 
-  std::int64_t perception_epoch() const {return perception_epoch_;}
+  std::int64_t perception_epoch() const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return perception_epoch_;
+  }
 
   // PORT: unified_planner_node.should_refresh_world - ESDF freshness gate.
   // Analytic content is pushed eagerly at mutation time; this is purely about
@@ -95,12 +100,23 @@ public:
   // A push FAILED: the solvers may be blind to the current perception. Force the
   // next plan/servo refresh to rebuild and push again instead of treating a
   // blind solver as fresh (it must never plan through un-seen camera voxels).
-  void invalidate_world() {last_pushed_epoch_ = -1;}
+  void invalidate_world()
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    last_pushed_epoch_ = -1;
+  }
   // PORT: camera_depth_map_strategy's `node.perception_epoch += 1` on integrate.
-  void bump_perception_epoch() {epoch_ += 1;}
+  void bump_perception_epoch()
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    epoch_ += 1;
+  }
   // `esdf_refresh_min_interval` param (open-loop refresh throttle).
   void set_esdf_refresh_min_interval(double seconds)
-  {esdf_refresh_min_interval_ = seconds;}
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    esdf_refresh_min_interval_ = seconds;
+  }
 
   // PORT: obstacle_manager._validate_spec (public for testing / set_objects).
   std::string validate_spec(
@@ -109,27 +125,52 @@ public:
   // The analytic scene as the bridge payload (PORT: obstacle_manager.get_scene).
   std::string scene_json() const;
 
-  const std::vector<std::string> & obstacle_names() const {return order_;}
-  std::int64_t epoch() const {return epoch_;}
-  std::int64_t scene_version() const {return scene_version_;}
-  bool empty() const {return order_.empty();}
+  // Snapshots (returned by value) so callers never walk a container while a
+  // scene service is mutating it.
+  std::vector<std::string> obstacle_names() const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return order_;
+  }
+  std::int64_t epoch() const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return epoch_;
+  }
+  std::int64_t scene_version() const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return scene_version_;
+  }
+  bool empty() const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return order_.empty();
+  }
 
   // Attach bookkeeping (PORT: AttachmentServices / attached_name).
   // A bimanual robot holds one payload per arm, so track the SET of attached
   // names; attached_name() remains the last/primary name for legacy callers.
   void set_attached(const std::string & name)
   {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     attached_names_.insert(name);
     attached_name_ = name;
   }
   void clear_attached()
   {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     attached_names_.clear();
     attached_name_.clear();
   }
-  const std::string & attached_name() const {return attached_name_;}
+  std::string attached_name() const
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return attached_name_;
+  }
   bool is_attached(const std::string & name) const
   {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     return attached_names_.find(name) != attached_names_.end();
   }
 
@@ -142,6 +183,16 @@ private:
 
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
+  // state_mutex_ guards the containers/counters below. It is NEVER held across
+  // a bridge/GPU call: the timer that publishes scene markers reads a snapshot
+  // while a scene service may be pushing to the solver, and the viz lane holds
+  // the GPU barrier while reading epoch()/scene_version(). Holding this lock
+  // across the bridge call would invert that order and deadlock.
+  mutable std::mutex state_mutex_;
+  // mutation_mutex_ serialises the whole mutate -> scene_set -> world_push
+  // sequence so two service threads cannot push snapshots out of order (which
+  // would leave the solver with an older world than the last request).
+  std::mutex mutation_mutex_;
   std::vector<std::string> order_;                       // insertion order
   std::map<std::string, SceneObjectSpec> objects_;
   std::map<std::string, int> bucket_counts_;

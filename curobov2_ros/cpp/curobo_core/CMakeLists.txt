@@ -144,6 +144,9 @@ if(BUILD_TESTING)
   target_include_directories(test_voxel_grid PRIVATE test)
   target_link_libraries(test_voxel_grid curobo_core rclcpp::rclcpp)
 
+  ament_add_gtest(test_scene_obstacle_markers test/test_scene_obstacle_markers.cpp)
+  target_link_libraries(test_scene_obstacle_markers curobo_core rclcpp::rclcpp ${curobov2_ros_interfaces_TARGETS})
+
   ament_add_gtest(test_fk_services test/test_fk_services.cpp)
   target_link_libraries(test_fk_services curobo_core rclcpp::rclcpp ${curobov2_ros_interfaces_TARGETS})
 

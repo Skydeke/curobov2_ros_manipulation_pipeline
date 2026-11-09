@@ -38,6 +38,36 @@ TEST(ObstaclePerception, DenseVoxelGridShapeAndOccupiedIndices)
   EXPECT_EQ(indices[1], 2);
 }
 
+// Analytic scene primitives must never be OR-ed into the published voxel grid:
+// the solver collides with them analytically, and their voxel approximation is
+// the axis-aligned/thin box the voxel display used to show. This pins the C++
+// layer's pass-through (the bridge is the only producer, and it is
+// perception-only).
+TEST(ObstaclePerception, AnalyticPrimitivesDoNotEnterTheVoxelGrid)
+{
+  curobo_runtime::FakeBridge bridge;
+  curobo_runtime::VoxelGrid perception;
+  perception.shape = {2, 2, 2};
+  perception.resolution = 0.05;
+  perception.origin = {0.0, 0.0, 0.0};
+  perception.data = {1, 0, 0, 0, 0, 0, 0, 0};
+  bridge.set_voxel_grid(perception);
+
+  ObstacleManager manager(&bridge, 1);
+  curobo_core::SceneObjectSpec cube;
+  cube.type = curobo_core::CUBOID;
+  cube.name = "table";
+  cube.dims = {1.0, 1.0, 0.5};
+  std::string message;
+  ASSERT_TRUE(manager.add_object(cube, message));
+
+  const auto grid = manager.get_voxel_grid();
+  EXPECT_EQ(grid.data, perception.data);
+  const auto indices = ObstacleManager::occupied_indices(grid);
+  ASSERT_EQ(indices.size(), 1u);
+  EXPECT_EQ(indices.front(), 0);
+}
+
 TEST(ObstaclePerception, ClearCountsComeFromTheBridge)
 {
   curobo_runtime::FakeBridge bridge;
