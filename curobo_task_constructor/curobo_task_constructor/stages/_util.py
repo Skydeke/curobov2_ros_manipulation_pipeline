@@ -74,6 +74,38 @@ def joint_positions_in_cspace(robot, joint_state) -> list:
     return [by_name[n] for n in order if n in by_name]
 
 
+def cspace_joint_state(robot, joint_state):
+    """Project a joint state onto the planner's cspace, by name.
+
+    A task state legitimately carries MORE joints than the planner's cspace:
+    the commanded jaws (a ``GripperCommand`` writes them into the chain), the
+    base wheels, a PTU. That is what keeps the ghost preview and the next
+    stage's state complete. A *planning* start, however, must not hand those
+    extra joints to the solver: the wire resolves a named start by cspace name
+    but falls back to POSITIONAL when a cspace joint is missing, and a longer
+    vector then misaligns every DOF. KATE's ``open -> home`` recovery leg is
+    exactly this case (the gripper stage added two finger joints to a six-DOF
+    arm goal).
+
+    Returns ``joint_state`` unchanged when there is no canonical order or no
+    names to reorder; otherwise a state containing only the cspace joints that
+    are present, in cspace order.
+    """
+    names, positions = _joint_state_arrays(joint_state)
+    order = [str(n) for n in (getattr(robot, "_joint_order", None) or [])]
+    if not order or not names:
+        return joint_state
+    by_name = dict(zip(names, positions))
+    projected = [n for n in order if n in by_name]
+    if not projected or projected == names:
+        return joint_state
+    from curobo_task_constructor.core.state import make_joint_state
+    return make_joint_state(
+        type(joint_state) if joint_state is not None
+        else getattr(robot, "joint_state_cls", None),
+        projected, [by_name[n] for n in projected])
+
+
 def pose_from_params(cfg: dict, robot) -> object:
     """Build a Pose-like from a params dict ``{x,y,z,qx,qy,qz,qw}``."""
     p = cfg if isinstance(cfg, dict) else {}

@@ -15,11 +15,13 @@ from curobo_task_constructor.core.state import InterfaceState
 from curobo_task_constructor.stages._util import (
     carry_missing_joints,
     cost_of,
+    cspace_joint_state,
     full_request,
     goalset_for_scene,
     gripper_command_for_joint_goal,
     gripper_joint_names,
     joint_order,
+    joint_positions_in_cspace,
     measured_joint_state,
     merged_joint_state,
     pose_from_params,
@@ -231,9 +233,24 @@ class MoveTo(PropagatingEitherWay):
             return
         if pose_goals:
             goalset = goalset_for_scene(state.scene, poses=pose_goals)
+            # Pose goals keep the full task state: a TIAGo leg planned after a
+            # jaw command must carry the commanded finger value so the server
+            # fits the collision geometry in the state the task will be in.
+            start_joint_state = state.joint_state
         else:
             goalset = goalset_for_scene(state.scene, joint_positions=joint_goal)
-        req = full_request(self.robot, state.joint_state, [goalset], self.params,
+            # A joint-space goal is a cspace vector; the start must be one too.
+            # A preceding gripper command leaves the commanded jaws (and any
+            # other non-cspace joints) in the chain state, and handing those to
+            # a joint-space solve makes the wire resolve the start positionally
+            # against a longer vector. Fill any cspace joint the chain does not
+            # name from the measured reading, then project to cspace order.
+            start_joint_state = cspace_joint_state(
+                self.robot,
+                merged_joint_state(
+                    self.robot, state.joint_state,
+                    measured_joint_state(self.robot)))
+        req = full_request(self.robot, start_joint_state, [goalset], self.params,
                            scene=state.scene)
         # Every try is stored and published the moment it solves (like failed
         # tries fail live); only the cheapest is promoted downstream.
@@ -274,12 +291,12 @@ class MoveTo(PropagatingEitherWay):
         if command is not None:
             self._emit_gripper_command(state, command, write_start=True)
             return
+        targets = joint_positions_in_cspace(self.robot, state.joint_state)
+        if not targets:
+            targets = list(getattr(state.joint_state, "position", []) or [])
         req = full_request(
             self.robot, None,
-            [goalset_for_scene(
-                state.scene,
-                joint_positions=list(getattr(state.joint_state, "position", [])
-                                     or []))],
+            [goalset_for_scene(state.scene, joint_positions=targets)],
             self.params, scene=state.scene)
         from curobo_task_constructor.core.stage import Solution
         tried = []
