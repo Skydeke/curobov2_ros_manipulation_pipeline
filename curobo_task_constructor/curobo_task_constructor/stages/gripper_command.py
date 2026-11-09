@@ -2,13 +2,25 @@
 
 The stage carries a named gripper plus a target and no ``PlanRequest``; the
 executor sends it to that gripper's controller action. Direction is irrelevant.
+
+The propagated state is the CURRENT robot state merged with the commanded
+gripper joint(s): every joint the incoming state already names (the previous
+stage's arm pose) wins, every joint it does not name is filled from the live
+``/joint_states`` reading, and only the gripper joints are overwritten. That is
+what lets a one-stage "open the jaws" plan touch no arm joint while still
+chaining after an arm motion.
 """
 
 from __future__ import annotations
 
 from curobo_task_constructor.core.registry import register_stage
 from curobo_task_constructor.core.stage import PropagatingEitherWay, Solution
-from curobo_task_constructor.core.state import InterfaceState, make_joint_state
+from curobo_task_constructor.core.state import InterfaceState
+from curobo_task_constructor.stages._util import (
+    gripper_joint_names,
+    measured_joint_state,
+    merged_joint_state,
+)
 
 
 @register_stage("gripper_command")
@@ -34,33 +46,32 @@ class GripperCommand(PropagatingEitherWay):
 
     def _emit_command(self, state: InterfaceState, write_start: bool) -> None:
         cmd = self.command()
-        end = state.clone()
+        # Start from what the chain knows; fill only what it does not name
+        # from the measured reading. Preferring the incoming state is what
+        # makes a command after an arm leg sit on that leg's solved pose
+        # instead of the plan-time snapshot the measurement still holds.
+        measured = measured_joint_state(self.robot)
+        incoming = getattr(state, "joint_state", None)
+        base_joint_state = merged_joint_state(self.robot, incoming, measured)
         # Carry the commanded jaw value in the state itself: downstream motion
         # legs then plan (and preview) from the task's actual gripper state,
         # not from the planner's stale lock-joint value. The planner's cspace
         # ignores the extra joint; it is only there for the state chain, the
-        # solution's start/end snapshots and the ghost preview.
-        joint = cmd.get("joint")
-        if not joint:
-            resolver = getattr(self.robot, "gripper_joint", None)
-            if callable(resolver):
-                joint = resolver(cmd.get("gripper", ""))
-        if joint:
-            js = getattr(end, "joint_state", None)
-            names = list(getattr(js, "name", []) or [])
-            positions = list(getattr(js, "position", []) or [])
-            if joint in names:
-                index = names.index(joint)
-                if index < len(positions):
-                    positions[index] = float(cmd["position"])
-                else:
-                    positions.append(float(cmd["position"]))
-            else:
-                names.append(joint)
-                positions.append(float(cmd["position"]))
-            end = state.clone(joint_state=make_joint_state(
-                getattr(self.robot, "joint_state_cls", None), names, positions))
+        # solution's start/end snapshots and the ghost preview. Every joint
+        # the controller moves is updated (TIAGo has two fingers on one
+        # FollowJointTrajectory command).
+        joints = gripper_joint_names(
+            self.robot, cmd.get("gripper", ""), cmd.get("joint", ""))
+        end_joint_state = merged_joint_state(
+            self.robot, base_joint_state, measured,
+            overrides={name: cmd["position"] for name in joints})
+        end = state.clone(joint_state=end_joint_state)
         target = cmd["joint"] or cmd["gripper"]
+        # Container chaining is by InterfaceState IDENTITY (see
+        # SerialContainer._traces): the endpoint that came from the neighbour
+        # must stay the SAME object, so the merged state is only the newly
+        # written one. Forward: read ``state``, write ``end``. Backward: read
+        # ``state``, write the post-command ``end`` upstream.
         sol = Solution(
             start=end if write_start else state,
             end=state if write_start else end,

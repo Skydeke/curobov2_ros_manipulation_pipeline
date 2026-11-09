@@ -390,6 +390,10 @@ class _PlanClientMixin:
         finally:
             self._set_links_collision([request], True)
 
+    def gripper_controllers(self) -> dict:
+        """Descriptor-backed gripper-controller map (see RobotInterface)."""
+        return dict(self._grippers)
+
     def gripper_joint(self, gripper: str = "") -> str:
         cfg = (self._grippers.get(gripper)
                or self._grippers.get(self._default_gripper) or {})

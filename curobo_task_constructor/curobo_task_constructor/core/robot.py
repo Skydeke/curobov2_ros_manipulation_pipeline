@@ -255,6 +255,17 @@ class RobotInterface(ABC):
         """
         return ""
 
+    def gripper_controllers(self) -> dict:
+        """The descriptor's normalized ``gripper_controllers`` map.
+
+        ``{name: {type, name, action_ns, joints, command_joint, open, close,
+        ...}}``. Stages use it to learn every joint one command moves (a
+        parallel gripper has two fingers on one trajectory) and to recognise a
+        joint goal that belongs to a gripper controller rather than the
+        planner cspace. Default: none (offline mocks).
+        """
+        return {}
+
     def gripper_command(self, gripper: str = "", joint: str = "",
                         position: float = 0.0, effort: float = 0.0,
                         controller: str = "", action_ns: str = "",

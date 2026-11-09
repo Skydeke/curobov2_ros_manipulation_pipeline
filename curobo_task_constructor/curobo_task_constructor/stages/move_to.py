@@ -17,7 +17,11 @@ from curobo_task_constructor.stages._util import (
     cost_of,
     full_request,
     goalset_for_scene,
+    gripper_command_for_joint_goal,
+    gripper_joint_names,
     joint_order,
+    measured_joint_state,
+    merged_joint_state,
     pose_from_params,
 )
 
@@ -89,6 +93,76 @@ class MoveTo(PropagatingEitherWay):
             return [base[n] for n in (names or cfg.names) if n in base]
         return [float(p) for p in getattr(cfg, "positions", [])]
 
+    def _goal_joint_targets(self):
+        """The goal as a sparse/name-keyed joint dict, when it is one.
+
+        Only the two forms that can name non-cspace joints are relevant here:
+        ``{name: <config>}`` whose descriptor entry carries joint names, and
+        ``{joints: {j: v}}``. A flat list is a cspace vector and is planned
+        normally.
+        """
+        goal = self.params.get("goal") or {}
+        if "name" in goal:
+            try:
+                cfg = self.robot.get_named_joint_config(goal["name"])
+            except (KeyError, NotImplementedError):
+                return None
+            names = list(getattr(cfg, "names", None) or [])
+            positions = list(getattr(cfg, "positions", None) or [])
+            if not names:
+                return None
+            return {str(n): float(p) for n, p in zip(names, positions)}
+        joints = goal.get("joints")
+        if isinstance(joints, dict):
+            return {str(k): float(v) for k, v in joints.items()}
+        return None
+
+    def _gripper_command_goal(self):
+        """A command for a goal that names only gripper (non-cspace) joints.
+
+        TIAGo's fingers are locked out of the planner cspace (``lock_joints``)
+        and driven by the pal-gripper ``FollowJointTrajectory`` controller.
+        Planning a sparse ``{gripper_left_finger_joint: 0.045}`` goal projected
+        it away and produced an arm-only plan from the start pose to itself —
+        the arm was commanded for an action that should move only the jaws.
+        Robots whose cspace owns the fingers (KATE/Kortex) keep planning.
+        """
+        targets = self._goal_joint_targets()
+        if not targets:
+            return None
+        return gripper_command_for_joint_goal(self.robot, targets)
+
+    def _emit_gripper_command(self, state: InterfaceState, cmd: dict,
+                              write_start: bool) -> None:
+        """Emit a non-planned gripper segment (no PlanRequest)."""
+        from curobo_task_constructor.core.stage import Solution
+
+        measured = measured_joint_state(self.robot)
+        incoming = getattr(state, "joint_state", None)
+        base_joint_state = merged_joint_state(self.robot, incoming, measured)
+        joints = gripper_joint_names(
+            self.robot, cmd.get("gripper", ""), cmd.get("joint", ""))
+        end = state.clone(joint_state=merged_joint_state(
+            self.robot, base_joint_state, measured,
+            overrides={name: cmd["position"] for name in joints}))
+        target = cmd["joint"] or cmd["gripper"]
+        # Chaining is by InterfaceState identity: keep the incoming object on
+        # the read side (start forward / end backward) and publish only the
+        # merged post-command state.
+        sol = Solution(
+            start=end if write_start else state,
+            end=state if write_start else end,
+            trajectory=None,
+            cost=0.0,
+            comment=f"move_to -> gripper_command {target}={cmd['position']}",
+            gripper_command=cmd,
+        )
+        self._consider(sol)
+        if write_start:
+            self._promote_backward(sol.start, state, sol)
+        else:
+            self._promote_forward(state, sol.end, sol)
+
     def _goal_pose(self):
         goal = self.params.get("goal") or {}
         if "pose" in goal:
@@ -145,6 +219,10 @@ class MoveTo(PropagatingEitherWay):
         return result
 
     def compute_forward(self, state: InterfaceState) -> None:
+        command = self._gripper_command_goal()
+        if command is not None:
+            self._emit_gripper_command(state, command, write_start=False)
+            return
         joint_goal = self._goal_positions(state)
         pose_goals = [] if joint_goal is not None else self._goal_poses(state)
         if joint_goal is None and not pose_goals:
@@ -192,6 +270,10 @@ class MoveTo(PropagatingEitherWay):
         The trajectory's first waypoint becomes the start state; the Connect
         upstream of us solves the actual path to it.
         """
+        command = self._gripper_command_goal()
+        if command is not None:
+            self._emit_gripper_command(state, command, write_start=True)
+            return
         req = full_request(
             self.robot, None,
             [goalset_for_scene(

@@ -97,6 +97,216 @@ def goalset_for_scene(scene, *, poses=None, joint_positions=None) -> GoalsetSpec
     )
 
 
+def _joint_state_arrays(joint_state):
+    """(names, positions) of a JointState-like, parallel and floored."""
+    names = [str(n) for n in (getattr(joint_state, "name", None) or [])]
+    positions = [float(p) for p in
+                 (getattr(joint_state, "position", None) or [])]
+    if len(positions) < len(names):
+        names = names[: len(positions)]
+    return names, positions
+
+
+def measured_joint_state(robot):
+    """The robot's newest measured joint state, or None if unavailable.
+
+    A gripper-only stage may be planned without a ``current_state`` seed (a
+    one-stage "open the jaws" task, the RViz panel's stage preview, or a
+    chained task whose previous stage carries only its own group). The
+    measured reading is the only source for the joints that stage does not
+    name, so it must never be dropped just because the stage is instantaneous.
+    """
+    getter = getattr(robot, "get_current_joint_state", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:  # no cached reading yet / offline mock
+        return None
+
+
+def gripper_controllers(robot) -> dict:
+    """The descriptor's normalized ``gripper_controllers`` map, if exposed."""
+    getter = getattr(robot, "gripper_controllers", None)
+    if callable(getter):
+        try:
+            return dict(getter() or {})
+        except Exception:  # pragma: no cover - defensive adapter
+            return {}
+    return {}
+
+
+def gripper_joint_names(robot, gripper: str = "", joint: str = "") -> list:
+    """Every joint one gripper command moves, in descriptor order.
+
+    A parallel gripper (TIAGo's pal-gripper) has two finger joints driven by
+    one ``FollowJointTrajectory`` command; a single-joint ``GripperCommand``
+    has one. The task state must carry every commanded joint, otherwise the
+    next leg's preview (and a state-only consumer) still sees the other jaw
+    at its stale plan-time value.
+    """
+    cfgs = gripper_controllers(robot)
+    cfg = cfgs.get(gripper) if gripper else None
+    if cfg is None and cfgs:
+        cfg = cfgs.get(next(iter(cfgs)))
+    joints: list = []
+    if cfg:
+        joints = [str(j) for j in (cfg.get("joints") or []) if str(j)]
+        if not joints:
+            command_joint = str(cfg.get("command_joint") or "")
+            if command_joint:
+                joints = [command_joint]
+    if not joints and joint:
+        joints = [str(joint)]
+    elif joint and str(joint) not in joints:
+        # An explicit stage parameter still names a joint the state must carry.
+        joints.append(str(joint))
+    if not joints:
+        resolver = getattr(robot, "gripper_joint", None)
+        if callable(resolver):
+            try:
+                resolved = str(resolver(gripper) or "")
+            except Exception:
+                resolved = ""
+            if resolved:
+                joints = [resolved]
+    return joints
+
+
+def all_gripper_joints(robot) -> list:
+    """Union of every joint that any descriptor gripper controller moves."""
+    out: list = []
+    for cfg in gripper_controllers(robot).values():
+        joints = [str(j) for j in (cfg.get("joints") or []) if str(j)]
+        if not joints and cfg.get("command_joint"):
+            joints = [str(cfg["command_joint"])]
+        for name in joints:
+            if name not in out:
+                out.append(name)
+    resolver = getattr(robot, "gripper_joint", None)
+    if callable(resolver):
+        try:
+            resolved = str(resolver("") or "")
+        except Exception:
+            resolved = ""
+        if resolved and resolved not in out:
+            out.append(resolved)
+    return out
+
+
+def merged_joint_state(robot, primary, fallback=None, overrides=None):
+    """Merge joint states by NAME, primary wins, missing joints filled.
+
+    Order is the planner cspace, then the descriptor's gripper joints, then
+    whatever else ``primary``/``fallback`` carry. This gives a gripper-only
+    stage a full robot state (arm from the previous stage or the live
+    reading) without ever letting a stale live snapshot overwrite an arm
+    value the task chain already planned.
+    """
+    primary = primary if primary is not None else fallback
+    p_names, p_positions = _joint_state_arrays(primary)
+    f_names, f_positions = _joint_state_arrays(fallback)
+    override = {str(k): float(v) for k, v in (overrides or {}).items()}
+    if not p_names and not f_names and not override:
+        return primary
+
+    order: list = []
+
+    def add(name) -> None:
+        name = str(name)
+        if name and name not in order:
+            order.append(name)
+
+    for name in (getattr(robot, "_joint_order", None) or []):
+        add(name)
+    for name in all_gripper_joints(robot):
+        add(name)
+    for name in p_names:
+        add(name)
+    for name in f_names:
+        add(name)
+    for name in override:
+        add(name)
+
+    by_primary = dict(zip(p_names, p_positions))
+    by_fallback = dict(zip(f_names, f_positions))
+    names: list = []
+    positions: list = []
+    for name in order:
+        if name in override:
+            value = override[name]
+        elif name in by_primary:
+            value = by_primary[name]
+        elif name in by_fallback:
+            value = by_fallback[name]
+        else:
+            continue
+        names.append(name)
+        positions.append(float(value))
+    if not names:
+        return primary
+    if names == p_names and positions == p_positions:
+        return primary
+    from curobo_task_constructor.core.state import make_joint_state
+    cls = (type(primary) if primary is not None
+           else getattr(robot, "joint_state_cls", None))
+    return make_joint_state(cls, names, positions)
+
+
+def gripper_command_for_joint_goal(robot, targets):
+    """A gripper command for a joint goal the planner cspace does not own.
+
+    TIAGo's fingers are ``lock_joints``, not planning DOFs: a sparse goal like
+    ``{gripper_left_finger_joint: 0.045}`` cannot be a cuRobo trajectory. The
+    old path projected it onto the cspace, leaving an arm-only goal equal to
+    the start pose — a full-arm plan that did not move the jaws. When every
+    named joint belongs to a descriptor gripper (and none is a planning DOF),
+    route the goal to that gripper's controller instead. Robots whose cspace
+    DOES contain the jaws (KATE/Kortex) fall through to normal planning.
+    """
+    if not isinstance(targets, dict) or not targets:
+        return None
+    goal = {str(k): float(v) for k, v in targets.items()}
+    known = set(all_gripper_joints(robot))
+    cspace = set(str(n) for n in (getattr(robot, "_joint_order", None) or []))
+    if not known or not set(goal) <= known or set(goal) & cspace:
+        return None
+    values = list(goal.values())
+    if max(values) - min(values) > 1e-9:
+        # One GripperCommand position cannot express two different jaws.
+        return None
+
+    cfgs = gripper_controllers(robot)
+    key = ""
+    for name, cfg in cfgs.items():
+        cfg_joints = {str(j) for j in (cfg.get("joints") or [])}
+        if set(goal) <= cfg_joints:
+            key = name
+            break
+    if not key:
+        # No single controller owns every named joint. With exactly one entry
+        # that entry is still the intended controller (a sparse goal may name
+        # just the primary finger); with several, picking one silently would
+        # leave another arm's jaws uncommanded — let the caller plan instead.
+        if len(cfgs) != 1:
+            return None
+        key = next(iter(cfgs))
+    command_joint = ""
+    if key:
+        command_joint = str(cfgs[key].get("command_joint") or "")
+    if not command_joint:
+        command_joint = next(iter(goal))
+    return {
+        "gripper": key,
+        "joint": command_joint,
+        "position": float(values[0]),
+        "effort": 0.0,
+        "max_effort": 0.0,
+        "controller": "",
+        "action_ns": "",
+    }
+
+
 def carry_missing_joints(previous, planned):
     """Keep joints the planner's trajectory omits (e.g. gripper fingers).
 
