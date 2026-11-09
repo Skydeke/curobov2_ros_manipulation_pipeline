@@ -65,9 +65,6 @@ void UnifiedPlannerNode::declare_parameters() {
   declare_parameter<double>("robot_payload_mass", 0.0);
   declare_parameter<std::string>("obstacle_collision_mode", "cuboid");
   declare_parameter<double>("time_dilation_factor", 1.0);
-  declare_parameter<bool>("wait_for_trajectory_completion", true);
-  declare_parameter<double>("allowed_start_tolerance", 0.01);
-  declare_parameter<double>("post_execution_settle_timeout_s", 1.0);
   declare_parameter<double>("voxel_size", 0.05);
   declare_parameter<std::vector<double>>("mapper_extent_xyz", {2.0, 2.0, 2.0});
   declare_parameter<std::vector<double>>("mapper_grid_center", {0.0, 0.0, 0.0});
