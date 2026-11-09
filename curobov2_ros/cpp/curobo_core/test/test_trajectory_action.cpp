@@ -111,7 +111,9 @@ TEST_F(ActionTest, OpenLoopGoalWithoutTrajectoryIsRefusedWithTheSourceWording)
     "(replay_trajectory); re-planning during execute is not supported");
 }
 
-TEST_F(ActionTest, ReplayStreamsTheSuppliedTrajectoryThroughTheRobotContext)
+// MoveIt TrajectoryExecutionManager::validate() parity: a replay whose first
+// waypoint is not where the robot currently is must be refused, not driven.
+TEST_F(ActionTest, ReplayWhoseStartDeviatesFromTheCurrentStateIsRefused)
 {
   auto node = std::make_shared<rclcpp::Node>("unified_planner");
   curobo_runtime::FakeBridge bridge;
@@ -127,6 +129,42 @@ TEST_F(ActionTest, ReplayStreamsTheSuppliedTrajectoryThroughTheRobotContext)
   goal->replay = true;
   goal->replay_trajectory.joint_names = joints();
   for (double v : {0.1, 0.2}) {
+    trajectory_msgs::msg::JointTrajectoryPoint point;
+    point.positions.assign(7, v);
+    point.velocities.assign(7, 0.0);
+    goal->replay_trajectory.points.push_back(point);
+  }
+
+  auto goal_future = client->async_send_goal(*goal);
+  spin(node, goal_future);
+  auto handle = goal_future.get();
+  ASSERT_NE(handle, nullptr);
+
+  auto result_future = client->async_get_result(handle);
+  spin(node, result_future);
+  auto wrapped = result_future.get();
+  EXPECT_EQ(wrapped.code, rclcpp_action::ResultCode::ABORTED);
+  EXPECT_NE(
+    wrapped.result->result.message.find("start state does not match"),
+    std::string::npos);
+}
+
+TEST_F(ActionTest, ReplayStreamsTheSuppliedTrajectoryThroughTheRobotContext)
+{
+  auto node = std::make_shared<rclcpp::Node>("unified_planner");
+  curobo_runtime::FakeBridge bridge;
+  PlannerServices planners(node.get(), &bridge, 1, joints());
+  RobotContext context(node.get(), 0.001, joints(), "emulator", {}, std::vector<double>(7, 0.0));
+  TrajectoryActionServer server(node.get(), &planners, &context, joints());
+
+  auto client = rclcpp_action::create_client<SendTrajectory>(
+    node, "unified_planner/execute_trajectory");
+  ASSERT_TRUE(client->wait_for_action_server(5s));
+
+  auto goal = std::make_shared<SendTrajectory::Goal>();
+  goal->replay = true;
+  goal->replay_trajectory.joint_names = joints();
+  for (double v : {0.0, 0.2}) {
     trajectory_msgs::msg::JointTrajectoryPoint point;
     point.positions.assign(7, v);
     point.velocities.assign(7, 0.0);
@@ -170,7 +208,7 @@ TEST_F(ActionTest, ReplayProjectsTheLockedJointTailOntoTheActiveJoints)
   auto goal = std::make_shared<SendTrajectory::Goal>();
   goal->replay = true;
   goal->replay_trajectory.joint_names = full;
-  for (double v : {0.1, 0.2}) {
+  for (double v : {0.0, 0.2}) {
     trajectory_msgs::msg::JointTrajectoryPoint point;
     point.positions.assign(9, v);
     point.positions[7] = 99.0;  // locked columns must never reach the robot

@@ -6,11 +6,144 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
+#include <thread>
 
 #include <sensor_msgs/msg/joint_state.hpp>
 
 namespace curobo_core
 {
+
+namespace
+{
+
+constexpr double kTwoPi = 6.28318530717958647692;
+//: MoveIt's waitForRobotToStop() treats the robot as stopped after this many
+//: consecutive state samples show no motion (trajectory_execution_manager.cpp).
+constexpr int kNoMotionSamples = 3;
+constexpr auto kStatePollInterval = std::chrono::milliseconds(20);
+
+double shortest_angle(double value, double target)
+{
+  return std::remainder(value - target, kTwoPi);
+}
+
+//: Map the executed joint names onto the strategy's feedback vector. Empty
+//: when the feedback names do not cover the executed joints; callers then
+//: skip the check rather than guessing an order.
+std::vector<std::size_t> feedback_columns(
+  RobotContext * robot_context, const std::vector<std::string> & command_names)
+{
+  const std::vector<std::string> feedback_names = robot_context->get_joint_name();
+  std::vector<std::size_t> columns;
+  columns.reserve(command_names.size());
+  for (const auto & name : command_names) {
+    const auto it = std::find(feedback_names.begin(), feedback_names.end(), name);
+    if (it == feedback_names.end()) {
+      return {};
+    }
+    columns.push_back(static_cast<std::size_t>(it - feedback_names.begin()));
+  }
+  return columns;
+}
+
+// MoveIt TrajectoryExecutionManager::validate() equivalent: refuse a replay
+// whose first waypoint is not where the robot currently is. This is what
+// prevents the next segment from starting while the previous one is still
+// moving (the controller on its own does not enforce a start tolerance here).
+bool validate_start_state(
+  rclcpp::Node * node, RobotContext * robot_context,
+  const std::vector<std::string> & command_names,
+  const std::vector<double> & start_positions, double tolerance)
+{
+  if (tolerance <= 0.0 || start_positions.empty()) {
+    return true;
+  }
+  const std::vector<std::size_t> columns =
+    feedback_columns(robot_context, command_names);
+  if (columns.empty()) {
+    RCLCPP_WARN(
+      node->get_logger(),
+      "trajectory start check skipped: feedback does not name every executed joint");
+    return true;
+  }
+  const std::vector<double> current = robot_context->get_joint_pose();
+  double worst = 0.0;
+  std::size_t worst_index = 0;
+  for (std::size_t i = 0; i < columns.size() && i < start_positions.size(); ++i) {
+    const std::size_t column = columns[i];
+    if (column >= current.size()) {
+      continue;
+    }
+    const double error = std::abs(shortest_angle(current[column], start_positions[i]));
+    if (error > worst) {
+      worst = error;
+      worst_index = i;
+    }
+  }
+  if (worst > tolerance) {
+    const std::string joint =
+      worst_index < command_names.size() ? command_names[worst_index] : "?";
+    RCLCPP_ERROR(
+      node->get_logger(),
+      "Invalid trajectory: start point deviates from current robot state by "
+      "%.4f rad at joint '%s' (allowed %.4f); refusing to execute",
+      worst, joint.c_str(), tolerance);
+    return false;
+  }
+  return true;
+}
+
+// MoveIt TrajectoryExecutionManager::waitForRobotToStop() equivalent: after
+// the controller reports the path complete, wait until the MEASURED joints
+// show no motion for kNoMotionSamples consecutive samples (or the timeout
+// expires). MoveIt then relies on the next validate() to reject a segment
+// whose start does not match the settled state.
+void wait_for_robot_to_stop(
+  rclcpp::Node * node, RobotContext * robot_context,
+  const std::vector<std::string> & command_names,
+  double motion_tolerance, double timeout_s)
+{
+  if (timeout_s <= 0.0 || motion_tolerance <= 0.0) {
+    return;
+  }
+  const std::vector<std::size_t> columns =
+    feedback_columns(robot_context, command_names);
+  if (columns.empty()) {
+    return;
+  }
+  std::vector<double> previous = robot_context->get_joint_pose();
+  int no_motion = 0;
+  const auto deadline = std::chrono::steady_clock::now() +
+    std::chrono::duration<double>(timeout_s);
+  while (no_motion < kNoMotionSamples &&
+    std::chrono::steady_clock::now() < deadline)
+  {
+    std::this_thread::sleep_for(kStatePollInterval);
+    const std::vector<double> current = robot_context->get_joint_pose();
+    bool moved = false;
+    for (const std::size_t column : columns) {
+      if (column < current.size() && column < previous.size() &&
+        std::abs(shortest_angle(current[column], previous[column])) >
+        motion_tolerance)
+      {
+        moved = true;
+        break;
+      }
+    }
+    no_motion = moved ? 0 : no_motion + 1;
+    previous = current;
+  }
+  if (no_motion < kNoMotionSamples) {
+    RCLCPP_WARN(
+      node->get_logger(),
+      "robot still moving %.2f s after the controller reported completion; "
+      "the next trajectory's start check will reject it if the pose is too far off",
+      timeout_s);
+  }
+}
+
+}  // namespace
 
 TrajectoryActionServer::TrajectoryActionServer(
   rclcpp::Node * node, PlannerServices * planners, RobotContext * robot_context,
@@ -261,6 +394,23 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     // PORT: single_planner._stage_trajectory - project the replayed full-joint
     // plan onto the active (controller) joints before streaming it.
     project_active_joints(names, positions, velocities);
+    // MoveIt's pre-execution validate(): the segment must start where the
+    // robot actually is. This is the check that refuses a chained segment
+    // when the previous one has not settled, instead of letting the
+    // controller snap/jump to a stale start point.
+    const double start_tolerance =
+      node_->has_parameter("allowed_start_tolerance") ?
+      node_->get_parameter("allowed_start_tolerance").as_double() : 0.01;
+    if (!positions.empty() &&
+      !validate_start_state(
+        node_, robot_context_, names, positions.front(), start_tolerance))
+    {
+      result->result.success = false;
+      result->result.message = planner->get_planner_name() +
+        ": trajectory start state does not match the robot";
+      goal_handle->abort(result);
+      return;
+    }
     RCLCPP_INFO(
       node_->get_logger(), "Executing with %s (replayed %zu waypoints, no re-plan)",
       planner->get_planner_name().c_str(), n);
@@ -313,6 +463,23 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
         return;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    // MoveIt's post-execution waitForRobotToStop(). The controller result
+    // marks the stamped path complete, not a physically stopped arm. Wait for
+    // kNoMotionSamples consecutive feedback samples below the same tolerance
+    // MoveIt uses for its start validation. If the robot does not stop in
+    // time we still report the controller result; the next segment's start
+    // check is what refuses it.
+    const bool wait_for_completion =
+      node_->has_parameter("wait_for_trajectory_completion") ?
+      node_->get_parameter("wait_for_trajectory_completion").as_bool() : true;
+    const double stop_timeout =
+      node_->has_parameter("post_execution_settle_timeout_s") ?
+      node_->get_parameter("post_execution_settle_timeout_s").as_double() : 1.0;
+    if (wait_for_completion) {
+      wait_for_robot_to_stop(
+        node_, robot_context_, names, start_tolerance, stop_timeout);
     }
 
     result->result.success = true;
