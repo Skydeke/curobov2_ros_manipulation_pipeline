@@ -20,12 +20,11 @@ CameraStrategy::CameraStrategy(
 {
   // PORT: each strategy owns its own TF buffer/listener.
   tf_buffer_ = std::make_shared<tf2_ros::Buffer>(node_->get_clock());
-  // The buffer is filled by the node's executor thread, not the thread calling
-  // canTransform/lookupTransform. Without this flag tf2 refuses to honour a
-  // lookup timeout ("it will always timeout") and get_transform() throws on
-  // every frame -- which silently drops every depth frame.
+  // The camera callback blocks in lookupTransform. Spin the listener on its
+  // own thread so /tf and /tf_static cannot starve behind perception callbacks;
+  // a starved buffer silently drops every depth frame.
   tf_buffer_->setUsingDedicatedThread(true);
-  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, false);
+  tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_, node_, true);
   intrinsics_ = parse_intrinsics(intrinsics);
   static_pose_ = parse_extrinsics(extrinsics);
 
