@@ -187,7 +187,10 @@ std::optional<std::vector<double>> RobotContext::get_joint_pose_at(std::int64_t 
 std::vector<double> RobotContext::get_joint_velocity()
 {
   std::lock_guard<std::mutex> lk(strategy_lock_);
-  return std::vector<double>(joint_names_.size(), 0.0);
+  if (robot_strategy_ == nullptr) {
+    return std::vector<double>(joint_names_.size(), 0.0);
+  }
+  return robot_strategy_->get_joint_velocity();
 }
 
 // PORT: RobotContext.get_joint_name

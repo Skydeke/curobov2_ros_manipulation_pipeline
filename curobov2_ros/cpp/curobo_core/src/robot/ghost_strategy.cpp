@@ -28,14 +28,26 @@ void GhostStrategy::send_trajectrory()
     robot_state_ = RobotState::kRunning;
     msg.joint_names = joint_names_;
     const double stamp_dt = dilated_dt();
+    // Match the real strategy's re-timed feed-forward: velocity scales with
+    // the stamped step, acceleration with its square. Without this the RViz
+    // ghost keeps the nominal (too-fast) velocities while the real command is
+    // slowed down, so the preview and the robot disagree.
+    const double speed_scale = time_dilation_scale();
+    const double accel_scale = speed_scale * speed_scale;
     for (std::size_t i = 0; i < position_command_.size(); ++i) {
       trajectory_msgs::msg::JointTrajectoryPoint point;
       point.positions = position_command_[i];
       if (i < vel_command_.size()) {
         point.velocities = vel_command_[i];
+        for (double & v : point.velocities) {
+          v *= speed_scale;
+        }
       }
       if (i < accel_command_.size()) {
         point.accelerations = accel_command_[i];
+        for (double & a : point.accelerations) {
+          a *= accel_scale;
+        }
       }
       const double t = stamp_dt * static_cast<double>(i);
       point.time_from_start.sec = static_cast<std::int32_t>(t);

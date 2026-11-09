@@ -161,3 +161,41 @@ TEST(JointSpeed, ClampsAccelerationAgainstMeasuredVelocity)
   EXPECT_NEAR(clamped[0][0], max_dv, 1e-9);
   EXPECT_DOUBLE_EQ(clamped[0][1], 0.0);
 }
+
+// time_dilation_factor re-stamps the points but leaves the path positions
+// unchanged, so velocity feed-forward must scale by dt_ / dilated_dt().
+// Otherwise a slowed trajectory asks the controller for the nominal speed on
+// doubled timestamps and overshoots.
+TEST(JointSpeed, TimeDilationScalesVelocityFeedforward)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner_dilation");
+  node->declare_parameter("time_dilation_factor", 0.5);
+  curobo_core::JointSpeedStrategy strategy(
+    node.get(), 0.02, joints(),
+    {{"action_topic", "/j"}, {"max_joint_accel_dps", "45"}, {"accel_clamp_dt", "0.02"}});
+
+  sensor_msgs::msg::JointState state;
+  state.name = joints();
+  state.position.assign(7, 0.0);
+  state.velocity.assign(7, 0.0);
+  strategy.callback_joint_pose(state);
+
+  EXPECT_NEAR(strategy.time_dilation_scale(), 0.5, 1e-12);
+
+  // No clamp active: the published value is the plan's velocity * 0.5.
+  const auto scaled = strategy.clamp_velocities(
+    {{0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, 0.5);
+  ASSERT_EQ(scaled.size(), 1u);
+  EXPECT_NEAR(scaled[0][0], 0.025, 1e-12);
+
+  // The acceleration clamp uses the DILATED interval: max_accel * dt / 0.5.
+  const auto clamped = strategy.clamp_velocities(
+    {{10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, 0.5);
+  const double max_dv =
+    45.0 * 3.14159265358979323846 / 180.0 * 0.02 / 0.5;
+  ASSERT_EQ(clamped.size(), 1u);
+  EXPECT_NEAR(clamped[0][0], max_dv, 1e-9);
+}

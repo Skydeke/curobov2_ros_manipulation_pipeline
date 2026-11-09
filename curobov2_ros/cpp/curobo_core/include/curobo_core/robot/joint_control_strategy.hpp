@@ -53,6 +53,9 @@ public:
 
   // PORT: _dilated_dt (time_dilation_factor)
   double dilated_dt() const;
+  //: Feed-forward scale that keeps velocities/accelerations consistent with
+  //: the re-timed trajectory: dt_ / dilated_dt(). 1.0 when dilation is off.
+  double time_dilation_scale() const;
 
   // PORT: mark_execution_start / clear_execution_timer
   void mark_execution_start(
@@ -75,6 +78,12 @@ public:
   // Abstract contract (PORT: get_joint_pose / stop_robot / get_progression /
   // send_trajectrory).
   virtual std::vector<double> get_joint_pose() = 0;
+  //: Measured joint velocity in the strategy's joint order. Strategies whose
+  //: driver has no velocity feedback leave the base implementation (zeros).
+  virtual std::vector<double> get_joint_velocity()
+  {
+    return std::vector<double>(dof(), 0.0);
+  }
   virtual void stop_robot() = 0;
   virtual double get_progression() = 0;
   virtual void send_trajectrory() = 0;

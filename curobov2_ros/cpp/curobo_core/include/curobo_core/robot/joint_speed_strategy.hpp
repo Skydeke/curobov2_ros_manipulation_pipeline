@@ -33,7 +33,7 @@ public:
   void send_trajectrory() override;
   // PORT: JointSpeedStrategy.get_joint_pose / get_joint_velocity
   std::vector<double> get_joint_pose() override;
-  std::vector<double> get_joint_velocity();
+  std::vector<double> get_joint_velocity() override;
   // PORT: JointSpeedStrategy.stop_robot
   void stop_robot() override;
   // PORT: JointSpeedStrategy.get_progression
@@ -44,8 +44,10 @@ public:
   void callback_joint_pose(const sensor_msgs::msg::JointState & msg);
 
   // PORT: _clamp_velocities / _taper_terminal_velocity (exposed for tests)
+  // ``speed_scale`` is the time-dilation feed-forward scale (1.0 = nominal).
   std::vector<std::vector<double>> clamp_velocities(
-    const std::vector<std::vector<double>> & vel_list);
+    const std::vector<std::vector<double>> & vel_list,
+    double speed_scale = 1.0);
   std::vector<std::vector<double>> taper_terminal_velocity(
     std::vector<std::vector<double>> vel_clamped);
 
@@ -53,7 +55,9 @@ private:
   bool debug_csv_enabled();
   void debug_csv_init();
   void debug_csv_close();
-  void debug_csv_write(const std::vector<std::vector<double>> & vel_clamped);
+  void debug_csv_write(
+    const std::vector<std::vector<double>> & vel_clamped,
+    double speed_scale = 1.0);
 
   double max_accel_rad_s2_ = 0.0;
   double terminal_taper_dt_ = 0.6;

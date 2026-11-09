@@ -166,6 +166,21 @@ double JointCommandStrategy::dilated_dt() const
   return dt_ / factor;
 }
 
+// PORT: time-dilation feed-forward scale.
+// Re-timing stretches the stamped step to dt_ / factor but leaves the path
+// positions untouched. Velocity is dp/dt, so it must shrink/grow by the same
+// factor; acceleration is d2p/dt2, so it scales by factor^2. Without this,
+// slowing a trajectory leaves the controller a velocity feed-forward that is
+// too fast for the timestamps it was given, which shows up as overshoot.
+double JointCommandStrategy::time_dilation_scale() const
+{
+  const double stamp_dt = dilated_dt();
+  if (dt_ <= 0.0 || stamp_dt <= 0.0) {
+    return 1.0;
+  }
+  return dt_ / stamp_dt;
+}
+
 // PORT: JointCommandStrategy.mark_execution_start
 void JointCommandStrategy::mark_execution_start(
   int num_points, const std::vector<std::vector<double>> & positions)

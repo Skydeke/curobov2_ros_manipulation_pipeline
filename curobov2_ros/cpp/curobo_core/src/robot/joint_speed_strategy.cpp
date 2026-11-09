@@ -57,9 +57,14 @@ JointSpeedStrategy::JointSpeedStrategy(
 
 // PORT: JointSpeedStrategy._clamp_velocities
 std::vector<std::vector<double>> JointSpeedStrategy::clamp_velocities(
-  const std::vector<std::vector<double>> & vel_list)
+  const std::vector<std::vector<double>> & vel_list, double speed_scale)
 {
-  const double max_dv = max_accel_rad_s2_ * accel_clamp_dt_;
+  // The path positions are unchanged by re-timing, so the planned velocity
+  // feed-forward must be scaled by dt_ / dilated_dt(). The clamp then works in
+  // that same output domain: one point now spans dilated_dt(), so the allowed
+  // delta is max_accel * dilated_dt() = max_accel * accel_clamp_dt_ / scale.
+  const double scale = speed_scale > 0.0 ? speed_scale : 1.0;
+  const double max_dv = max_accel_rad_s2_ * accel_clamp_dt_ / scale;
   std::vector<std::vector<double>> clamped;
   std::vector<double> prev;
   {
@@ -71,7 +76,8 @@ std::vector<std::vector<double>> JointSpeedStrategy::clamp_velocities(
     row.reserve(v.size());
     for (std::size_t i = 0; i < v.size(); ++i) {
       const double p = i < prev.size() ? prev[i] : 0.0;
-      row.push_back(p + std::max(-max_dv, std::min(max_dv, v[i] - p)));
+      const double target = v[i] * scale;
+      row.push_back(p + std::max(-max_dv, std::min(max_dv, target - p)));
     }
     clamped.push_back(row);
     prev = row;
@@ -129,10 +135,22 @@ void JointSpeedStrategy::send_trajectrory()
     if (position_command_.empty()) {
       trajectory_progression_ = 1.0;
     }
-    auto vel_clamped = clamp_velocities(vel_command_);
+    const double speed_scale = time_dilation_scale();
+    auto vel_clamped = clamp_velocities(vel_command_, speed_scale);
     vel_clamped = taper_terminal_velocity(vel_clamped);
+    // Acceleration is d2p/dt2, so it follows the velocity scale squared.
+    // (Replay trajectories usually carry no acceleration feed-forward; this
+    // keeps the path correct when they do.)
+    const double accel_scale = speed_scale * speed_scale;
+    if (accel_scale != 1.0) {
+      for (auto & row : accel_command_) {
+        for (double & a : row) {
+          a *= accel_scale;
+        }
+      }
+    }
     if (!vel_command_.empty()) {
-      debug_csv_write(vel_clamped);
+      debug_csv_write(vel_clamped, speed_scale);
     }
     const double stamp_dt = dilated_dt();
     for (std::size_t i = 0; i < position_command_.size(); ++i) {
@@ -298,11 +316,13 @@ void JointSpeedStrategy::debug_csv_close()
 }
 
 void JointSpeedStrategy::debug_csv_write(
-  const std::vector<std::vector<double>> & vel_clamped)
+  const std::vector<std::vector<double>> & vel_clamped, double speed_scale)
 {
   if (!debug_csv_enabled()) {
     return;
   }
+  const double scale = speed_scale > 0.0 ? speed_scale : 1.0;
+  const double clamp_dt = accel_clamp_dt_ / scale;
   if (debug_csv_ == nullptr) {
     debug_csv_init();
   }
@@ -321,11 +341,13 @@ void JointSpeedStrategy::debug_csv_write(
     const double r = i < real.size() ? real[i] : 0.0;
     accel_p0 = std::max(accel_p0, std::abs(p0[i] - r));
   }
-  accel_p0 = accel_clamp_dt_ != 0.0 ? degrees(accel_p0 / accel_clamp_dt_) : 0.0;
+  accel_p0 = clamp_dt != 0.0 ? degrees(accel_p0 / clamp_dt) : 0.0;
   std::vector<std::string> clamp_active;
   double raw0_max = 0.0;
   for (std::size_t i = 0; i < p0.size(); ++i) {
-    const double u = i < raw0.size() ? raw0[i] : 0.0;
+    // Compare against the same feed-forward domain as the published values,
+    // otherwise time dilation alone would look like an active clamp.
+    const double u = (i < raw0.size() ? raw0[i] : 0.0) * scale;
     raw0_max = std::max(raw0_max, std::abs(u));
     if (std::abs(p0[i] - u) > 1e-9) {
       clamp_active.push_back(std::to_string(i));
@@ -338,7 +360,7 @@ void JointSpeedStrategy::debug_csv_write(
       d = std::max(d, std::abs(vel_clamped[i][j] - vel_clamped[i - 1][j]));
     }
     intra = std::max(intra,
-      accel_clamp_dt_ != 0.0 ? degrees(d / accel_clamp_dt_) : 0.0);
+      clamp_dt != 0.0 ? degrees(d / clamp_dt) : 0.0);
   }
   double real_max = 0.0, p0_max = 0.0;
   for (double v : real) {
