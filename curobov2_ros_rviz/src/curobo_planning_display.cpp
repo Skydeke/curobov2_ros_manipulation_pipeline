@@ -206,6 +206,15 @@ void CuroboPlanningDisplay::onInitialize()
     SLOT(updateCollisionTopic()));
   collision_topic_property_->initialize(context_->getRosNodeAbstraction());
 
+  scene_topic_property_ = new rviz_common::properties::RosTopicProperty(
+    "Scene Objects Topic", "/unified_planner/scene_obstacles",
+    "visualization_msgs/msg/MarkerArray",
+    "Analytic world obstacles (cuboids/spheres/cylinders) to display as exact "
+    "primitives. These are collision-checked analytically by the planner and "
+    "are not rasterized into the voxel grid.", this,
+    SLOT(updateSceneTopic()));
+  scene_topic_property_->initialize(context_->getRosNodeAbstraction());
+
   show_attached_property_ = new rviz_common::properties::BoolProperty(
     "Show Attached", true,
     "Show the grasped object's spheres (the 'attached_spheres' namespace).", this,
@@ -214,6 +223,10 @@ void CuroboPlanningDisplay::onInitialize()
     "Show Robot Collision Spheres", false,
     "Show the robot's own collision spheres ('collision_spheres' namespace).",
     this, SLOT(updateShowCollisionSpheres()));
+  show_scene_objects_property_ = new rviz_common::properties::BoolProperty(
+    "Show Scene Objects", true,
+    "Show the analytic world obstacles from the scene_obstacles MarkerArray.",
+    this, SLOT(updateShowSceneObjects()));
 
   auto ros_node_abstraction = context_->getRosNodeAbstraction().lock();
   if (ros_node_abstraction) {
@@ -253,10 +266,20 @@ void CuroboPlanningDisplay::onInitialize()
   }
 
   planner_node_ = planner_node_property_->getStdString();
+  // The Scene Objects topic was not present in older saved configs, so derive
+  // its default from the configured planner node instead of leaving it pinned
+  // to the generic /unified_planner name.
+  if (scene_topic_property_ && !planner_node_.empty()) {
+    const std::string current = scene_topic_property_->getStdString();
+    if (current.empty() || current == "/unified_planner/scene_obstacles") {
+      scene_topic_property_->setStdString("/" + planner_node_ + "/scene_obstacles");
+    }
+  }
   createFkClient();
   createTrajectoryPanel();
   updateTopic();
   updateCollisionTopic();
+  updateSceneTopic();
 
   if (!isEnabled()) {
     scene_node_->setVisible(false);
@@ -326,6 +349,18 @@ void CuroboPlanningDisplay::reset()
   live_spheres_.clear();
   playback_spheres_.clear();
   for (auto & sv : sphere_pool_) {
+    if (sv.node) {
+      sv.node->setVisible(false);
+    }
+  }
+  {
+    std::lock_guard<std::mutex> scene_lock(scene_mutex_);
+    scene_msg_new_.reset();
+  }
+  scene_got_message_ = false;
+  scene_active_count_ = 0;
+  live_scene_objects_.clear();
+  for (auto & sv : scene_pool_) {
     if (sv.node) {
       sv.node->setVisible(false);
     }

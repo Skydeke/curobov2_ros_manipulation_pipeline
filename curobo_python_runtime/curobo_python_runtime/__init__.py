@@ -57,7 +57,7 @@ from .motion_planner import _reset_scene_cuda_graphs, _warmup_cspace, _warmup_po
 from .plan_result import _as_2d_list, _flat_list, _knot_motion_time, _plan_outcome, _position_error_mm, _select_goal_index, _select_seed_index, considered_rows
 from .planning import collision_cache_bucket_counts, plan_cspace, plan_pose, render_plan_image, reset_seed, torch_synchronize
 from .mapper import MAPPER_DEFAULTS, _inspect_esdf, _mapper, clear_voxel_map, clear_voxel_region, configure_mapper, esdf_refresh, voxel_grid, warmup_mapper
-from .voxel import _collision_supported, _inside_shape, _obstacle_mode, _pose_matrix, _primitives_only_scene, _quat_to_matrix_wxyz, _rasterize_primitives_gpu, depth_integrate, lidar_integrate, robot_segment
+from .voxel import _collision_supported, _inside_shape, _obstacle_mode, _pose_matrix, _primitives_only_scene, _quat_to_matrix_wxyz, depth_integrate, lidar_integrate, robot_segment
 from .mpc import _MPPI_CSPACE_REGULARIZATION, _build_metrics_rollout_cfg, _build_mppi_optimizer_config, _build_mppi_transition_model, _mpc, _mpc_ensure_ik_solver, _mpc_goal_tool_pose, mpc_build, mpc_load_scene, mpc_reseed, mpc_setup
 from .mpc_step import _mpc_apply_goal, _mpc_js_to_dict, _mpc_state_from_dict, mpc_cost_breakdown, mpc_metrics, mpc_solve_goal_state, mpc_step, mpc_update_goal_pose, mpc_update_goal_state
 from .retarget import _retargeter, retarget_build, retarget_load_scene, retarget_reset, retarget_step
@@ -103,7 +103,6 @@ __all__ = [
     '_position_error_mm',
     '_primitives_only_scene',
     '_quat_to_matrix_wxyz',
-    '_rasterize_primitives_gpu',
     '_reapply_attached_disables',
     '_reset_scene_cuda_graphs',
     '_resolve_descriptor',

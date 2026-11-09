@@ -3193,73 +3193,12 @@ curobo_runtime::VoxelGrid CppBridge::voxel_grid(curobo_runtime::RobotHandle)
     }
     break;
   }
-  // Python's voxel_grid also rasterizes the analytic scene primitives. Do the
-  // same here so the native map shows the table and grasp objects even when a
-  // face is not currently hit by the depth camera. Attached payloads are
-  // skipped: they live on the robot now, not at their old world pose.
-  if (impl_->scene) {
-    for (const auto & entry : impl_->scene->objects()) {
-      const std::string & name = entry.first;
-      if (impl_->attached_objects.count(name) != 0) {
-        continue;
-      }
-      const auto & record = entry.second;
-      const auto inv = pose_inverse({
-        record.pose.position[0], record.pose.position[1], record.pose.position[2],
-        record.pose.quaternion[0], record.pose.quaternion[1],
-        record.pose.quaternion[2], record.pose.quaternion[3]});
-      const double radius = (record.type == 1)
-        ? static_cast<double>(record.dims[0])
-        : std::sqrt(
-          static_cast<double>(record.dims[0] * record.dims[0]) +
-          static_cast<double>(record.dims[1] * record.dims[1]) +
-          static_cast<double>(record.dims[2] * record.dims[2])) * 0.5;
-      const int min_x = std::max(0, static_cast<int>(std::floor(
-        (record.pose.position[0] - radius - grid.origin[0]) / grid.resolution)));
-      const int max_x = std::min(nx - 1, static_cast<int>(std::ceil(
-        (record.pose.position[0] + radius - grid.origin[0]) / grid.resolution)));
-      const int min_y = std::max(0, static_cast<int>(std::floor(
-        (record.pose.position[1] - radius - grid.origin[1]) / grid.resolution)));
-      const int max_y = std::min(ny - 1, static_cast<int>(std::ceil(
-        (record.pose.position[1] + radius - grid.origin[1]) / grid.resolution)));
-      const int min_z = std::max(0, static_cast<int>(std::floor(
-        (record.pose.position[2] - radius - grid.origin[2]) / grid.resolution)));
-      const int max_z = std::min(nz - 1, static_cast<int>(std::ceil(
-        (record.pose.position[2] + radius - grid.origin[2]) / grid.resolution)));
-      const std::array<float, 3> half{
-        record.dims[0] * 0.5F, record.dims[1] * 0.5F, record.dims[2] * 0.5F};
-      for (int ix = min_x; ix <= max_x; ++ix) {
-        for (int iy = min_y; iy <= max_y; ++iy) {
-          for (int iz = min_z; iz <= max_z; ++iz) {
-            const std::array<float, 7> world{
-              static_cast<float>((ix + 0.5) * grid.resolution + grid.origin[0]),
-              static_cast<float>((iy + 0.5) * grid.resolution + grid.origin[1]),
-              static_cast<float>((iz + 0.5) * grid.resolution + grid.origin[2]),
-              1.0F, 0.0F, 0.0F, 0.0F};
-            const auto local = pose_multiply(inv, world);
-            bool inside = false;
-            if (record.type == 1) {
-              const double r = record.dims[0];
-              inside = local[0] * local[0] + local[1] * local[1] +
-                local[2] * local[2] <= r * r;
-            } else if (record.type == 2 || record.type == 3) {
-              inside = std::abs(local[0]) <= half[0] &&
-                std::abs(local[1]) <= half[1] &&
-                std::abs(local[2]) <= half[2];
-            } else {
-              inside = std::abs(local[0]) <= half[0] &&
-                std::abs(local[1]) <= half[1] &&
-                std::abs(local[2]) <= half[2];
-            }
-            if (inside) {
-              grid.data[
-                (static_cast<std::size_t>(ix) * ny + iy) * nz + iz] = 1;
-            }
-          }
-        }
-      }
-    }
-  }
+  // World obstacles deliberately are NOT rasterized into this grid: the solver
+  // collides against them analytically (NativeScene keeps them as cuboids in
+  // the live Scene), while a voxel approximation of a rotated cuboid is
+  // axis-aligned/thin and misrepresents the real obstacle. Visualization is
+  // handled by the scene_obstacles MarkerArray, which renders the exact
+  // primitive instead. This grid therefore contains perception voxels only.
   return grid;
 }
 

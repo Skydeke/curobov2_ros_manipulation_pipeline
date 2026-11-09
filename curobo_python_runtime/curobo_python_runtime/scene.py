@@ -554,9 +554,9 @@ def attach_object(handle: int, name: str, q,
     am._disabled_num_envs = num_envs
     # PORT: attachment_services.attach - keep the grasped obstacle REGISTERED in
     # the solver scenes but disabled by name (re-armed after every world push via
-    # _reapply_attached_disables), then drop it from the voxel-map rasterization
-    # and clear its leftover depth voxels so the fitted spheres do not collide
-    # with the object's own copy.
+    # _reapply_attached_disables), then clear its leftover depth voxels from the
+    # perception map so the fitted spheres do not collide with the object's own
+    # copy.
     if not _clear_attached_voxels(handle, spec):
         # PORT: no mapper / non-cuboid - nothing to clear or refresh, but the
         # world must still be pushed ONCE so the exclusion reaches the solvers

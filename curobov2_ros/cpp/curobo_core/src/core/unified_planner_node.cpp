@@ -75,6 +75,10 @@ void UnifiedPlannerNode::declare_parameters() {
   declare_parameter<int>("mapper_image_width", 0);
   declare_parameter<int>("mapper_image_height", 0);
   declare_parameter<double>("sparse_voxel_publish_rate", 7.0);
+  // Rate for the analytic scene-obstacle MarkerArray (cuboids etc.). The
+  // planner collides with them analytically; markers are the display path
+  // because they are no longer rasterized into the sparse voxel grid.
+  declare_parameter<double>("scene_obstacle_publish_rate", 5.0);
   declare_parameter<bool>("publish_plan_debug_image", false);
   declare_parameter<bool>("publish_collision_spheres", true);
   declare_parameter<bool>("publish_workspace_visualisation", true);

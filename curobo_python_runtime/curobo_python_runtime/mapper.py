@@ -143,7 +143,12 @@ def clear_voxel_region(handle: int, bounds_min, bounds_max) -> int:
         torch.as_tensor(np.asarray(bounds_max, dtype=np.float32)))
     return int(cleared) if cleared is not None else 0
 def voxel_grid(handle: int) -> dict:
-    """PORT: obstacle_manager._compute_dense_voxel_grid - dense occupied grid."""
+    """PORT: obstacle_manager._compute_dense_voxel_grid - dense occupied grid.
+
+    Perception (mapper) voxels only. Analytic scene primitives are collision-
+    checked analytically and visualized as primitive markers, not rasterized
+    here; a voxel approximation of a rotated cuboid would be thin/misplaced.
+    """
     import numpy as np
 
     entry = _REGISTRY[handle]
@@ -175,12 +180,11 @@ def voxel_grid(handle: int) -> dict:
         grid = None
     if grid is None:
         grid = np.zeros(shape, dtype=np.uint8)
-    # Analytic primitives (AddObject obstacles) - GPU rasterization, exactly the
-    # method the oracle uses (same collision checker as the planner).
-    try:
-        _rasterize_primitives_gpu(entry, grid, origin, vsize)
-    except Exception as exc:
-        print(f"[curobo_python_runtime] primitive rasterization failed: {exc}", flush=True)
+    # Analytic primitives (AddObject obstacles) are intentionally NOT rasterized
+    # into this dense grid. The solvers collide with them analytically; a voxel
+    # approximation of a (possibly rotated) cuboid is axis-aligned/thin and
+    # misrepresents the real obstacle. They are visualized as primitive markers
+    # instead (see the scene_obstacles / collision_spheres marker topics).
     return {
         "shape": list(shape),
         "data": grid.reshape(-1),
@@ -220,4 +224,4 @@ def warmup_mapper(handle: int, iterations: int = 2) -> None:
         pass
 
 from .runtime import _REGISTRY
-from .voxel import _rasterize_primitives_gpu, depth_integrate
+from .voxel import depth_integrate

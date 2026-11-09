@@ -42,7 +42,7 @@ void AttachmentServices::attach(const std::string & object_name, const std::vect
   attached_name_ = object_name;
   if (obstacle_manager_ != nullptr) {
     // PORT: attachment_services.attach - exclude_obstacle() (the static copy is
-    // dropped from the voxel-map rasterization, still registered in the solver
+    // cleared from the perception voxel map, still registered in the solver
     // scenes so the name-based disable applies) + the epilogue push: the
     // reference pushes unconditionally (inside _clear_attached_voxels on the
     // ESDF path, in the fallback branch otherwise), so mark the ESDF gate here

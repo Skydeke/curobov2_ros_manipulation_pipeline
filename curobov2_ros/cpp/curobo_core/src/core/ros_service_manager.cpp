@@ -170,6 +170,19 @@ void RosServiceManager::init_services()
     node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     name + "/scene_obstacles", 10);
   publish_scene_obstacles();
+  // Re-publish the analytic scene markers periodically so RViz shows the real
+  // cuboids/spheres/cylinders even though they are no longer rasterized into
+  // the voxel grid. The timer deliberately stays in the node's default
+  // (mutually exclusive) callback group: publish_scene_obstacles() reads the
+  // ObstacleManager maps that the scene services mutate, so it must not run
+  // concurrently with add/remove/set_objects.
+  const double scene_rate = node_->has_parameter("scene_obstacle_publish_rate") ?
+    node_->get_parameter("scene_obstacle_publish_rate").as_double() : 5.0;
+  if (scene_rate > 0.0) {
+    scene_obstacle_timer_ = node_->create_wall_timer(
+      std::chrono::duration<double>(1.0 / scene_rate),
+      std::bind(&RosServiceManager::publish_scene_obstacles, this));
+  }
 
   // PORT: ros_service_manager.publish_collision_spheres (timer, gated).
   collision_spheres_pub_ =
@@ -388,9 +401,9 @@ void RosServiceManager::handle_get_voxel_grid(
   std::shared_ptr<curobov2_ros_interfaces::srv::GetVoxelGrid::Response> response)
 {
   try {
-    // PORT: ros_service_manager._gpu_guard - the dense grid rasterises analytic
-    // primitives on the GPU and then host-syncs; without the exclusive barrier
-    // it can launch into an in-flight CUDA-graph capture and invalidate it.
+    // PORT: ros_service_manager._gpu_guard - the dense grid extracts the
+    // perception TSDF on the GPU and then host-syncs; without the exclusive
+    // barrier it can launch into an in-flight CUDA-graph capture and invalidate it.
     auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
     const auto grid = obstacle_manager_->get_voxel_grid();
     auto & out = response->voxel_grid;
@@ -618,7 +631,7 @@ bool RosServiceManager::submit_viz_job(std::function<void()> job)
 void RosServiceManager::publish_sparse_voxel_grid()
 {
   if (sparse_voxel_pub_ == nullptr || sparse_voxel_pub_->get_subscription_count() == 0) {
-    return;   // nobody listening: skip the TSDF extract + primitive rasterize + D2H copy
+    return;   // nobody listening: skip the TSDF extract + D2H copy
   }
   if (!submit_viz_job([this]() {publish_sparse_voxel_grid_job();})) {
     RCLCPP_DEBUG_THROTTLE(
@@ -668,7 +681,9 @@ void RosServiceManager::publish_sparse_voxel_grid_job()
 // PORT: ros_service_manager.publish_scene_obstacles
 void RosServiceManager::publish_scene_obstacles()
 {
-  if (scene_obstacle_pub_ == nullptr) {
+  if (scene_obstacle_pub_ == nullptr ||
+    scene_obstacle_pub_->get_subscription_count() == 0)
+  {
     return;
   }
   const SceneView view = obstacle_manager_->get_scene_objects();

@@ -136,6 +136,8 @@ private Q_SLOTS:
   void updateCollisionTopic();
   void updateShowAttached();
   void updateShowCollisionSpheres();
+  void updateSceneTopic();
+  void updateShowSceneObjects();
   void updateGoalStateVisibility();
   void updateGoalStateAlpha();
   void updateTargetPose();
@@ -346,6 +348,37 @@ private:
   void applySpheres(const std::vector<SphereDatum> & data);
   void poseSpheres();
 
+  // --- World scene-object markers ---
+  // Analytic obstacles added through the scene services. They are no longer
+  // rasterized into the sparse voxel grid, so the display renders the exact
+  // primitive from the scene_obstacles MarkerArray instead.
+  struct SceneVisual
+  {
+    Ogre::SceneNode * node = nullptr;
+    std::shared_ptr<rviz_rendering::Shape> shape;
+    int marker_type = -1;
+  };
+  std::vector<SceneVisual> scene_pool_;
+  size_t scene_active_count_ = 0;
+  std::mutex scene_mutex_;
+  visualization_msgs::msg::MarkerArray::ConstSharedPtr scene_msg_new_;
+  bool scene_got_message_ = false;
+
+  struct SceneDatum
+  {
+    int type = 0;
+    Ogre::Vector3 local = Ogre::Vector3::ZERO;
+    Ogre::Quaternion orientation = Ogre::Quaternion::IDENTITY;
+    std::string frame;
+    float sx = 0.0f, sy = 0.0f, sz = 0.0f;
+    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.5f;
+  };
+  std::vector<SceneDatum> live_scene_objects_;
+  void syncSceneObjects();
+  void updateSceneObjectsVisibility();
+  void applySceneObjects(const std::vector<SceneDatum> & data);
+  void poseSceneObjects();
+
   // --- Targets ---
   struct ToolTarget
   {
@@ -445,15 +478,20 @@ private:
   rviz_common::properties::BoolProperty * loop_property_;
   rviz_common::properties::FloatProperty * speed_property_;
   rviz_common::properties::RosTopicProperty * collision_topic_property_;
+  rviz_common::properties::RosTopicProperty * scene_topic_property_;
   rviz_common::properties::BoolProperty * show_attached_property_;
   rviz_common::properties::BoolProperty * show_collision_spheres_property_;
+  rviz_common::properties::BoolProperty * show_scene_objects_property_;
 
   // --- Subscribers ---
   rclcpp::Subscription<std_msgs::msg::String>::SharedPtr robot_description_sub_;
   rclcpp::Subscription<trajectory_msgs::msg::JointTrajectory>::SharedPtr subscription_;
   rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr spheres_subscription_;
+  rclcpp::Subscription<visualization_msgs::msg::MarkerArray>::SharedPtr scene_subscription_;
   void onTrajectoryMessage(trajectory_msgs::msg::JointTrajectory::ConstSharedPtr msg);
   void onCollisionSpheresMessage(
+    visualization_msgs::msg::MarkerArray::ConstSharedPtr msg);
+  void onSceneObjectsMessage(
     visualization_msgs::msg::MarkerArray::ConstSharedPtr msg);
 };
 

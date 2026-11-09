@@ -281,6 +281,12 @@ void CuroboPlanningDisplay::setPlannerNode(const std::string & node)
       collision_topic_property_->setStdString("/" + wanted + "/collision_spheres");
     }
   }
+  if (scene_topic_property_ && !previous.empty()) {
+    const std::string current = scene_topic_property_->getStdString();
+    if (current.empty() || current == "/" + previous + "/scene_obstacles") {
+      scene_topic_property_->setStdString("/" + wanted + "/scene_obstacles");
+    }
+  }
 
   fk_base_link_.clear();
   createFkClient();
@@ -670,6 +676,20 @@ void CuroboPlanningDisplay::update(float wall_dt, float ros_dt)
       QString("No messages on '%1' yet.")
       .arg(QString::fromStdString(collision_topic_property_->getStdString())));
   }
+
+  syncSceneObjects();
+  if (!scene_got_message_ && scene_topic_property_ &&
+    !scene_topic_property_->getStdString().empty())
+  {
+    setStatus(
+      rviz_common::properties::StatusProperty::Warn, "Scene Objects",
+      QString("No messages on '%1' yet.")
+      .arg(QString::fromStdString(scene_topic_property_->getStdString())));
+  }
+  // Scene objects are static in the world but may be expressed in a moving
+  // frame (e.g. base_link with an odom fixed frame); re-pose every frame so
+  // they follow TF instead of only on the next 5 Hz marker update.
+  poseSceneObjects();
 
   // Targets work without a URDF.
   if (gizmo_client_) {

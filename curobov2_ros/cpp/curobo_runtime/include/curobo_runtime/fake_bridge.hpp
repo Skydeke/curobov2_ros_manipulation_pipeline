@@ -81,7 +81,7 @@ public:
   void prepare_solve_mode(RobotHandle handle, const std::string & mode) override;
   VoxelGrid voxel_grid(RobotHandle handle) override;
   // Test hook: install the grid voxel_grid() returns (parity tests replay a
-  // recorded oracle grid through the analytic rasterization).
+  // recorded oracle grid).
   void set_voxel_grid(const VoxelGrid & grid)
   {
     std::lock_guard<std::mutex> lk(mutex_);

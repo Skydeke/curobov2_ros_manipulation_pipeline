@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 // M4: the dense voxel grid round-trips through the C++ layer unchanged. The
-// ANALYTIC RASTERIZATION now lives in the bridge (curobo_python_runtime.voxel_grid ->
-// _compute_dense_voxel_grid, the oracle's own GPU method); its parity with the
-// recorded oracle is asserted by the m2_object_franka record/replay suite
-// (get_voxel_grid's data hash). This test pins the C++ side: the bridge grid is
-// passed through and ObstacleManager::occupied_indices reproduces the oracle's
-// 1000 cells (expected_voxel_grid.hpp; see its header for the hash).
+// grid is perception-only: analytic scene primitives are intentionally NOT
+// rasterized into it (they remain exact analytic collision objects and are
+// visualized as primitive markers). This test pins the C++ side: the bridge
+// grid is passed through and ObstacleManager::occupied_indices reproduces the
+// oracle's 1000 cells (expected_voxel_grid.hpp; see its header for the hash).
 #include <gtest/gtest.h>
 
 #include <cstdint>

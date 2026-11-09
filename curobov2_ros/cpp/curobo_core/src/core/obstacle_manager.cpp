@@ -346,10 +346,11 @@ void ObstacleManager::mark_world_pushed()
   last_push_time_ = steady_now();
 }
 
-// PORT: obstacle_manager.get_voxel_grid. The dense grid (mapper perception OR
-// the GPU-rasterized analytic primitives) is computed by the bridge
-// (curobo_python_runtime.voxel_grid -> _compute_dense_voxel_grid); the C++ layer only
-// shapes it into the response.
+// PORT: obstacle_manager.get_voxel_grid. The dense grid is computed by the
+// bridge (curobo_python_runtime.voxel_grid -> _compute_dense_voxel_grid) from
+// the perception TSDF/ESDF only; analytic scene primitives are deliberately not
+// rasterized into it (they stay exact analytic collision objects). The C++
+// layer only shapes it into the response.
 curobo_runtime::VoxelGrid ObstacleManager::get_voxel_grid()
 {
   return bridge_->voxel_grid(handle_);

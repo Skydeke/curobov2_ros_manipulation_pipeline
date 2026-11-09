@@ -530,8 +530,9 @@ public:
   // on a mode change. MUST be called while holding Runtime::barrier().exclusive()
   // (graph capture is process-global).
   virtual void prepare_solve_mode(RobotHandle handle, const std::string & mode) = 0;
-  // PORT: obstacle_manager.get_voxel_grid - dense occupied voxels (mapper +
-  // primitives), row-major uint8.
+  // PORT: obstacle_manager.get_voxel_grid - dense occupied perception voxels
+  // (mapper only; analytic scene primitives stay out of the grid), row-major
+  // uint8.
   virtual VoxelGrid voxel_grid(RobotHandle handle) = 0;
   // PORT: obstacle_manager.clear_dynamic_voxels - clear the TSDF over the full
   // mapper extent; returns the changed count.

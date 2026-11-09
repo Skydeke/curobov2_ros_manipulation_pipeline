@@ -162,6 +162,7 @@ private:
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr workspace_viz_pub_;
   rclcpp::Publisher<curobov2_ros_interfaces::msg::SparseVoxelGrid>::SharedPtr sparse_voxel_pub_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr scene_obstacle_pub_;
+  rclcpp::TimerBase::SharedPtr scene_obstacle_timer_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr collision_spheres_pub_;
   rclcpp::TimerBase::SharedPtr collision_spheres_timer_;
   std::function<std::vector<float>()> pose_provider_;
