@@ -72,6 +72,18 @@ class _ExecutorSerializationMixin:
             ],
             "sub_solution": sub_solutions,
             "sub_trajectories": self._chain_trajectory_dicts(sol),
+            # Internal provenance for solution_prefix_dict: scene-only leaves
+            # have no trajectory of their own, so their ops are folded into a
+            # neighbouring motion segment's before/after. Keeping the ops per
+            # GLOBAL leaf id lets a prefix selection re-materialize exactly the
+            # selected leaf's ops instead of the whole folded blob. ROS message
+            # conversion ignores this key.
+            "_scene_ops_by_leaf": {
+                str(self.register_solution(leaf)): _scene_ops_to_dict(
+                    list(getattr(leaf, "scene_ops", None) or []))
+                for leaf in self.flatten_leaves(sol)
+                if getattr(leaf, "scene_ops", None)
+            },
         }
 
     def _chain_trajectory_dicts(self, sol: Solution) -> list:

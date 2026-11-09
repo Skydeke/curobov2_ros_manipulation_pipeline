@@ -747,10 +747,11 @@ void TaskView::onSolutionSelectionChanged()
 void TaskView::onExecCurrentSolution()
 {
   // MTC TaskView::onExecCurrentSolution: drive the selected solution with
-  // no replanning — the full Solution message goes to ExecuteTaskSolution.
-  // Fire-and-forget after a 100ms server wait, exactly like MTC. (Blocking
-  // spin_until_future_complete like MTC would hang RViz's GUI thread, so
-  // the send stays async; observable flow is identical.)
+  // no replanning. The live/broadcast Solution payload is cached under
+  // EVERY sub-solution id and carries the whole task, so using it here
+  // would always replay every segment (the "Exec runs solution #0" bug).
+  // Fetch GetSolution for the selected id instead: the server returns the
+  // chain prefix ending at that solution (root -> complete task).
   auto* current = solutions_view_->currentItem();
   if (!current) {
     setStatus(tr("select a solution to execute"));
@@ -768,22 +769,26 @@ void TaskView::onExecCurrentSolution()
     setStatus(tr("only successful solutions execute"));
     return;
   }
-  auto sol = cachedSolution(tid, id);
+  pending_exec_id_ = static_cast<int>(id);
+  pending_exec_task_ = tid;
+  setStatus(tr("fetching solution #%1...").arg(id));
+  requestSolution(tid, id, /*for_exec=*/true);
+}
+
+void TaskView::sendExecuteGoal(uint32_t id, SolutionShared sol)
+{
   if (!sol) {
-    // Fetch first, execute on arrival (never block the GUI thread).
-    pending_exec_id_ = static_cast<int>(id);
-    pending_exec_task_ = tid;
-    setStatus(tr("fetching solution #%1...").arg(id));
-    requestSolution(tid, id);
+    setStatus(tr("could not fetch the selected solution"));
     return;
   }
-  if (!exec_client_->wait_for_action_server(std::chrono::milliseconds(100))) {
+  if (!exec_client_ ||
+      !exec_client_->wait_for_action_server(std::chrono::milliseconds(100))) {
     setStatus(tr("Failed to connect to the 'execute_task_solution' action server"));
     return;
   }
   ExecuteAction::Goal goal;
   goal.solution = *sol;
-  setStatus(tr("executing selected solution (no replanning)..."));
+  setStatus(tr("executing solution #%1 (no replanning)...").arg(id));
 
   rclcpp_action::Client<ExecuteAction>::SendGoalOptions options;
   options.goal_response_callback = [this](const GoalHandleExecute::SharedPtr& goal_handle) {
@@ -1188,15 +1193,6 @@ void TaskView::onSolutionMessage(SolutionShared msg, bool live)
   if (live)
     requestDisplay(qid, msg, /*lock=*/false);
   showSelectedSolution();
-  // A pending Exec fires once its solution arrives.
-  if (pending_exec_id_ >= 0 && pending_exec_task_ == qid) {
-    const int wanted = pending_exec_id_;
-    pending_exec_id_ = -1;
-    pending_exec_task_.clear();
-    auto* current = solutions_view_->currentItem();
-    if (current && current->data(0, Qt::UserRole).toInt() == wanted)
-      onExecCurrentSolution();
-  }
 }
 
 int TaskView::stageOkCount(const TaskData& data, uint32_t id) const
@@ -1655,18 +1651,30 @@ TaskView::SolutionShared TaskView::cachedSolution(const QString& task_id, uint32
   return nullptr;
 }
 
-void TaskView::requestSolution(const QString& task_id, uint32_t id)
+void TaskView::requestSolution(const QString& task_id, uint32_t id, bool for_exec)
 {
   auto it = tasks_.find(task_id);
   if (it == tasks_.end())
     return;
   TaskData& data = tasks_[task_id];
-  if (data.solutions.contains(id) || data.pending.contains(id))
-    return;
+  // Display fetches are cached/coalesced; an execution request must always
+  // hit the server, because GetSolution returns the chain prefix ending at
+  // the requested id while the cached broadcast payload is the whole task.
+  if (!for_exec) {
+    if (data.solutions.contains(id) || data.pending.contains(id))
+      return;
+  }
   ensureGetSolutionClient(task_id.toStdString());
-  if (!get_solution_client_ || !get_solution_client_->service_is_ready())
+  if (!get_solution_client_ || !get_solution_client_->service_is_ready()) {
+    if (for_exec) {
+      pending_exec_id_ = -1;
+      pending_exec_task_.clear();
+      setStatus(tr("no GetSolution service for task '%1'").arg(task_id));
+    }
     return;
-  data.pending.insert(id);
+  }
+  if (!for_exec)
+    data.pending.insert(id);
   auto request =
       std::make_shared<curobo_task_constructor_interfaces::srv::GetSolution::Request>();
   request->solution_id = id;
@@ -1675,7 +1683,7 @@ void TaskView::requestSolution(const QString& task_id, uint32_t id)
   // QPointer guard drops the reply if the panel closed meanwhile.
   auto client = get_solution_client_;
   QPointer<TaskView> guard(this);
-  std::thread([guard, client, request, task_id, id]() {
+  std::thread([guard, client, request, task_id, id, for_exec]() {
     bool delivered = false;
     try {
       auto future = client->async_send_request(request);
@@ -1687,10 +1695,10 @@ void TaskView::requestSolution(const QString& task_id, uint32_t id)
               curobo_task_constructor_interfaces::msg::Solution>(response->solution);
           QMetaObject::invokeMethod(
               guard.data(),
-              [guard, task_id, id, msg]() {
+              [guard, task_id, id, msg, for_exec]() {
                 if (!guard)
                   return;
-                guard->onSolutionReceived(task_id, id, msg);
+                guard->onSolutionReceived(task_id, id, msg, for_exec);
               },
               Qt::QueuedConnection);
         }
@@ -1702,10 +1710,16 @@ void TaskView::requestSolution(const QString& task_id, uint32_t id)
       // revisit retries instead of leaving the row blank forever.
       QMetaObject::invokeMethod(
           guard.data(),
-          [guard, task_id, id]() {
+          [guard, task_id, id, for_exec]() {
             if (!guard)
               return;
-            guard->clearPending(task_id, id);
+            if (for_exec) {
+              guard->pending_exec_id_ = -1;
+              guard->pending_exec_task_.clear();
+              guard->setStatus(TaskView::tr("failed to fetch the selected solution"));
+            } else {
+              guard->clearPending(task_id, id);
+            }
           },
           Qt::QueuedConnection);
     }
@@ -1734,20 +1748,28 @@ void TaskView::requestMissingSolutions(const QString& task_id, uint32_t stage_id
   }
 }
 
-void TaskView::onSolutionReceived(const QString& task_id, uint32_t id, SolutionShared msg)
+void TaskView::onSolutionReceived(const QString& task_id, uint32_t id, SolutionShared msg,
+                                  bool for_exec)
 {
   auto it = tasks_.find(task_id);
   if (it == tasks_.end() || !msg || msg->task_id != task_id.toStdString())
     return;
+  if (for_exec) {
+    // Execution payload comes straight from GetSolution: the server has
+    // already cut it to the chain prefix ending at the selected solution.
+    // Do not feed it into the display cache (which holds whole-task
+    // broadcast payloads for every row).
+    if (pending_exec_id_ == static_cast<int>(id) && pending_exec_task_ == task_id) {
+      pending_exec_id_ = -1;
+      pending_exec_task_.clear();
+      sendExecuteGoal(id, msg);
+    }
+    return;
+  }
   it.value().pending.remove(id);
   // Fetched payload (not a live broadcast): fill rows silently. If it is
   // the currently selected row, the selection path below displays it.
   onSolutionMessage(msg, /*live=*/false);
-  if (pending_exec_id_ == static_cast<int>(id) && pending_exec_task_ == task_id) {
-    pending_exec_id_ = -1;
-    pending_exec_task_.clear();
-    onExecCurrentSolution();
-  }
 }
 
 std::vector<sensor_msgs::msg::JointState> TaskView::currentWaypoints() const

@@ -226,12 +226,15 @@ private:
   void showSolutionPropertiesFor(QTreeWidgetItem* row);
 
   SolutionShared cachedSolution(const QString& task_id, uint32_t id) const;
-  void requestSolution(const QString& task_id, uint32_t id);
+  void requestSolution(const QString& task_id, uint32_t id,
+                       bool for_exec = false);
   void requestMissingSolutions(const QString& task_id, uint32_t stage_id);
   void onSolutionMessage(SolutionShared msg, bool live = true);
   void onTaskStatistics(
       curobo_task_constructor_interfaces::msg::TaskStatistics::ConstSharedPtr msg);
-  void onSolutionReceived(const QString& task_id, uint32_t id, SolutionShared msg);
+  void onSolutionReceived(const QString& task_id, uint32_t id, SolutionShared msg,
+                          bool for_exec = false);
+  void sendExecuteGoal(uint32_t id, SolutionShared sol);
   void clearPending(const QString& task_id, uint32_t id);
 
   std::vector<sensor_msgs::msg::JointState> currentWaypoints() const;

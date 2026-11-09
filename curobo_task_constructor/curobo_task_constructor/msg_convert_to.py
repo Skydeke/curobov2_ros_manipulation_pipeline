@@ -30,6 +30,13 @@ except Exception:  # pragma: no cover - exotic envs without yaml
 SCENE_CLEAR_ALL_ID = "__curobo_clear_all__"
 
 
+def _empty_scene_diff() -> dict:
+    """An all-empty scene_diff with the keys the executor understands."""
+    return {"added": [], "removed": [], "attached": None, "detached": None,
+            "attached_list": [], "detached_list": [],
+            "remove_all": False, "detach_all": False}
+
+
 # ----------------------------------------------------------------------
 # dict -> ROS messages
 # ----------------------------------------------------------------------
@@ -279,6 +286,175 @@ def sub_trajectory_to_msg(seg: dict, msg_cls=None):
     return msg
 
 
+def solution_prefix_dict(d: dict, solution_id) -> dict:
+    """Truncate a serialized solution tree to the prefix ending at ``solution_id``.
+
+    ``d`` is a full ``solution_to_dict`` payload whose ``sub_solution`` tree
+    and ``sub_trajectories`` list are both in chain order. Selecting an
+    intermediate stage solution must drive only the chain prefix up to that
+    solution, so this returns a copy whose solution tree is pruned to that
+    prefix and whose trajectories stop after the last motion leaf below the
+    selected node. Root selections (and ids absent from the tree) return the
+    payload unchanged, i.e. the full task.
+
+    Ids are the GLOBAL solution ids shared by StageStatistics, the Solution
+    payload and GetSolution; a per-stage ``solution_id`` would not be unique.
+    """
+    d = d or {}
+    subs = list(d.get("sub_solution", None) or [])
+    if not subs:
+        return d
+    ids = []
+    children: dict = {}
+    for sub in subs:
+        info = sub.get("info", None) or {}
+        sid = int(info.get("id", 0) or 0)
+        ids.append(sid)
+        children[sid] = [int(c) for c in (
+            sub.get("sub_solution_id", None) or [])]
+    root = ids[0]
+    try:
+        wanted = int(solution_id)
+    except (TypeError, ValueError):
+        return d
+    if wanted in (0, root) or wanted not in children:
+        return d
+
+    # DFS leaf order, exactly solution_to_dict's walk and flatten_leaves.
+    leaves: list = []
+
+    def walk(sid: int) -> None:
+        kids = children.get(sid) or []
+        if not kids:
+            leaves.append(sid)
+            return
+        for kid in kids:
+            walk(kid)
+
+    walk(root)
+    # The selected node's whole subtree lies inside its prefix.
+    descendants: set = set()
+    stack = [wanted]
+    while stack:
+        sid = stack.pop()
+        if sid in descendants:
+            continue
+        descendants.add(sid)
+        stack.extend(children.get(sid, []))
+    cutoff = None
+    for index, leaf_id in enumerate(leaves):
+        if leaf_id in descendants:
+            cutoff = index
+    if cutoff is None:
+        return d
+    kept_leaves = set(leaves[:cutoff + 1])
+    # Prune the solution tree to the nodes that contribute to the prefix.
+    kept_nodes: set = set()
+
+    def prune(sid: int) -> bool:
+        kids = children.get(sid) or []
+        kept_kids = [kid for kid in kids if prune(kid)]
+        if kids:
+            children[sid] = kept_kids
+        if sid in kept_leaves or kept_kids:
+            kept_nodes.add(sid)
+            return True
+        return False
+
+    prune(root)
+    out = dict(d)
+    out_subs = []
+    for sub in subs:
+        sid = int((sub.get("info", None) or {}).get("id", 0) or 0)
+        if sid not in kept_nodes:
+            continue
+        entry = dict(sub)
+        entry["sub_solution_id"] = [
+            int(c) for c in (sub.get("sub_solution_id", None) or [])
+            if int(c) in kept_nodes]
+        out_subs.append(entry)
+    out["sub_solution"] = out_subs
+    all_trajectories = list(d.get("sub_trajectories", None) or [])
+    kept_trajectories = [
+        seg for seg in all_trajectories
+        if int((seg.get("info", None) or {}).get("id", 0) or 0)
+        in kept_leaves]
+    out["sub_trajectories"] = kept_trajectories
+
+    # Scene-only leaves carry no trajectory: their ops are folded into the
+    # NEXT motion segment's "before" (or the LAST motion segment's "after" for
+    # trailing mutations). Re-materialize exactly the kept scene leaves after
+    # the last kept motion so selecting one does not lose its ops (between two
+    # motions) or drag in ops belonging to later stages (trailing mutations).
+    raw_ops = d.get("_scene_ops_by_leaf", None) or {}
+    ops_by_leaf: dict = {}
+    for key, value in raw_ops.items():
+        try:
+            ops_by_leaf[int(key)] = value or {}
+        except (TypeError, ValueError):
+            continue
+    if ops_by_leaf:
+        def _combine(leaf_ids) -> dict:
+            merged = None
+            for leaf_id in leaf_ids:
+                ops = ops_by_leaf.get(int(leaf_id), None)
+                if not ops:
+                    continue
+                merged = ops if merged is None else _merge_scene_diff(merged, ops)
+            return merged if merged is not None else _empty_scene_diff()
+
+        last_leaf_pos = 0
+        if kept_trajectories:
+            last_id = int(
+                (kept_trajectories[-1].get("info", None) or {}).get("id", 0) or 0)
+            try:
+                last_leaf_pos = leaves.index(last_id) + 1
+            except ValueError:
+                last_leaf_pos = 0
+        tail_ids = [
+            leaf_id for leaf_id in leaves[last_leaf_pos:cutoff + 1]
+            if leaf_id in kept_leaves and leaf_id in ops_by_leaf]
+        if kept_trajectories:
+            last = dict(kept_trajectories[-1])
+            diff = dict(last.get("scene_diff", None) or {})
+            diff["after"] = _combine(tail_ids)
+            last["scene_diff"] = diff
+            out["sub_trajectories"] = kept_trajectories[:-1] + [last]
+        elif tail_ids:
+            info: dict = {}
+            for sub in out["sub_solution"]:
+                if int((sub.get("info", None) or {}).get("id", 0) or 0) == wanted:
+                    info = dict(sub.get("info", None) or {})
+                    break
+            out["sub_trajectories"] = [{
+                # A scene-only prefix has no motion to drive; one zero-motion
+                # entry is enough to materialize the selected leaf's ops.
+                "info": info or {"id": 0, "cost": 0.0, "comment": "",
+                                 "stage_id": 0, "planner_id": ""},
+                "execution_info": {"controller_names": []},
+                "trajectory": {"joint_names": [], "points": [],
+                               "velocities": []},
+                "scene_diff": {"before": _empty_scene_diff(),
+                               "after": _combine(tail_ids)},
+                "replay_goal": None,
+            }]
+        return out
+
+    # Payloads without provenance (older cached messages): best effort. A
+    # selected motion leaf followed by further leaves cannot own the trailing
+    # "after" ops folded onto the last full segment, so drop them.
+    selected_is_motion = any(
+        int((seg.get("info", None) or {}).get("id", 0) or 0) == wanted
+        for seg in all_trajectories)
+    if selected_is_motion and cutoff < len(leaves) - 1 and out["sub_trajectories"]:
+        last = dict(out["sub_trajectories"][-1])
+        diff = dict(last.get("scene_diff", None) or {})
+        diff["after"] = {}
+        last["scene_diff"] = diff
+        out["sub_trajectories"][-1] = last
+    return out
+
+
 def solution_to_msg(d: dict, msg_cls=None):
     """solution_to_dict output -> Solution message (MTC ``Solution.toMsg``)."""
     if msg_cls is None:
@@ -355,6 +531,7 @@ __all__ = [
     'scene_diff_to_msg',
     '_merge_scene_diff',
     'sub_trajectory_to_msg',
+    'solution_prefix_dict',
     'solution_to_msg',
     '_dump_yaml',
     '_load_yaml',

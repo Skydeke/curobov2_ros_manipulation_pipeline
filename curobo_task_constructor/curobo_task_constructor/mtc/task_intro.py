@@ -35,17 +35,64 @@ class _TaskIntrospectionMixin:
         return ex.solutionFromId(solution_id) if ex is not None else None
 
     def _on_get_solution(self, request, response):
-        """Serve GetSolution (MTC ``Introspection::getSolution``)."""
+        """Serve GetSolution (MTC ``Introspection::getSolution``).
+
+        The returned payload is the CHAIN PREFIX ending at the requested
+        solution: selecting an intermediate stage row executes the stages up
+        to that row, never the whole task. The root solution still returns
+        the complete chain.
+        """
         obj = self._solution_from_id(getattr(request, "solution_id", 0))
         if obj is None:
             return response
         try:
             from curobo_task_constructor import msg_convert
             response.solution = msg_convert.solution_to_msg(
-                self._solution_dict(obj))
+                self._solution_prefix_dict(obj))
         except Exception:
             pass
         return response
+
+    def _solution_prefix_dict(self, obj: Any) -> Optional[dict]:
+        """solution dict for ``obj`` truncated to its chain prefix.
+
+        Stage solutions are leaves of a complete root chain, so serializing
+        the selected leaf alone would omit its predecessors; serializing the
+        whole plan would include its successors. Find the full root solution
+        containing ``obj``, serialize THAT (the ids then match the global
+        registry GetSolution is keyed on), and cut the chain after ``obj``.
+        A root selection, a failure, or an object outside every complete
+        chain keeps the plain ``_solution_dict`` payload.
+        """
+        from curobo_task_constructor.core.stage import Solution
+        if not isinstance(obj, Solution):
+            return self._solution_dict(obj)
+        ex = self._executor
+        if ex is None:
+            return self._solution_dict(obj)
+        root = self._root_solution_for(obj)
+        if root is None or root is obj:
+            return self._solution_dict(obj)
+        d = ex.solution_to_dict(root)
+        from curobo_task_constructor import msg_convert
+        return msg_convert.solution_prefix_dict(
+            d, self._register_solution(obj))
+
+    def _root_solution_for(self, obj: Any) -> Any:
+        """The complete ranked solution whose tree contains ``obj`` (identity)."""
+        if self._executor is None:
+            return None
+
+        def contains(node: Any) -> bool:
+            if node is obj:
+                return True
+            return any(contains(child)
+                       for child in (getattr(node, "children", None) or []))
+
+        for root in self._executor.rank():
+            if contains(root):
+                return root
+        return None
 
     def _solution_dict(self, obj: Any) -> Optional[dict]:
         """solution_to_dict-shaped dict for a solution or failure."""
