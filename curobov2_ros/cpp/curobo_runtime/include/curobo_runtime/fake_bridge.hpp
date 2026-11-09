@@ -111,10 +111,18 @@ public:
     RobotHandle handle, const ReactiveState & state, bool paced) override;
   bool mpc_update_goal_pose(
     RobotHandle handle, const std::array<double, 7> & goal_raw, bool run_ik) override;
+  bool mpc_update_goal_poses(
+    RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const TensorF32 & poses, bool run_ik,
+    const std::vector<float> & hold_q) override;
   void mpc_update_goal_state(RobotHandle handle, const std::vector<float> & q) override;
   void mpc_reseed(RobotHandle handle, const std::vector<float> & q) override;
   IkOutcome mpc_solve_goal_state(
     RobotHandle handle, const std::array<double, 7> & goal_raw,
+    const std::vector<float> & seed_q) override;
+  IkOutcome mpc_solve_goal_poses(
+    RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const TensorF32 & poses, const std::vector<float> & hold_q,
     const std::vector<float> & seed_q) override;
   void mpc_load_scene(RobotHandle handle, const std::string & scene_json) override;
   std::string mpc_metrics(RobotHandle handle) override;
@@ -145,6 +153,11 @@ public:
   int mpc_reseeds() const;
   int retarget_steps() const;
   std::string mpc_cfg() const;
+  // Multi-tool goal capture (bimanual MPC regression tests).
+  void set_tool_frames(const std::vector<std::string> & frames);
+  std::vector<std::string> mpc_goal_tool_frames() const;
+  std::vector<std::array<double, 7>> mpc_goal_tool_poses() const;
+  std::vector<float> mpc_goal_hold_q() const;
   // IK test hooks (the standalone IK solver build: num_seeds/flags are baked in,
   // so the port must forward what ConfigWrapperIK.build resolved).
   int ik_builds() const;
@@ -177,6 +190,10 @@ private:
   std::string mpc_cfg_;
   std::array<double, 7> mpc_goal_{0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0};
   bool mpc_goal_set_ = false;
+  std::vector<std::string> tool_frames_{"tool0"};
+  std::vector<std::string> mpc_goal_tool_frames_;
+  std::vector<std::array<double, 7>> mpc_goal_tool_poses_;
+  std::vector<float> mpc_goal_hold_q_;
   int mpc_builds_ = 0;
   int mpc_steps_ = 0;
   int mpc_paced_steps_ = 0;

@@ -255,23 +255,42 @@ class MpcViserNode(Node):
             self._set_status('Action server not available', ok=False)
             self.get_logger().error('execute_trajectory action server not available')
             return
-        pos, quat = self._current_goal()
-
         goal = SendTrajectory.Goal()
         start_js = JointState()
         start_js.header.stamp = self.get_clock().now().to_msg()
         start_js.name = list(self._joint_names)
         start_js.position = _start_positions(self._content, self._joint_names, self._js)
         goal.start_pose = start_js
-        p = Pose()
-        p.position.x = float(pos[0])
-        p.position.y = float(pos[1])
-        p.position.z = float(pos[2])
-        p.orientation.w = float(quat[0])
-        p.orientation.x = float(quat[1])
-        p.orientation.y = float(quat[2])
-        p.orientation.z = float(quat[3])
-        goal.goalsets = [Goalset(poses=[p])]
+
+        def _to_pose(pos, quat):
+            p = Pose()
+            p.position.x = float(pos[0])
+            p.position.y = float(pos[1])
+            p.position.z = float(pos[2])
+            p.orientation.w = float(quat[0])
+            p.orientation.x = float(quat[1])
+            p.orientation.y = float(quat[2])
+            p.orientation.z = float(quat[3])
+            return p
+
+        # One gizmo per configured tool frame. Send them together: the MPC
+        # server's bimanual path needs one pose per arm, not just the active
+        # gizmo (which used to leave the second OpenArm arm untargeted).
+        try:
+            frame_poses = self._viz.get_control_frame_pose()
+        except Exception:  # noqa: BLE001
+            frame_poses = None
+        gset = Goalset()
+        if frame_poses:
+            for frame, pose in frame_poses.items():
+                pos = pose.position.cpu().squeeze().numpy()
+                quat = pose.quaternion.cpu().squeeze().numpy()
+                gset.tool_frames.append(str(frame))
+                gset.tool_poses.append(_to_pose(pos, quat))
+        if not gset.tool_poses:
+            pos, quat = self._current_goal()
+            gset.poses = [_to_pose(pos, quat)]
+        goal.goalsets = [gset]
 
         self._set_status('Starting MPC...')
         self._servo_active = True

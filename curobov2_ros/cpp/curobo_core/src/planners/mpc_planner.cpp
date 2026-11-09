@@ -3,6 +3,7 @@
 #include "curobo_runtime/runtime.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <iomanip>
@@ -84,6 +85,15 @@ void MPCController::ensure_solver()
     bridge_->mpc_build(handle_, cfg.str());
   }
   built_ = true;
+  // The artifact owns the tool-frame order. Keep it so a single-pose goal is
+  // reported against the frame the bridge's FK actually uses, and so a
+  // bimanual model is never mistaken for a one-arm one.
+  try {
+    solver_tool_frames_ = bridge_->tool_frames(handle_);
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(
+      node_->get_logger(), "MPC: could not read the solver tool frames: %s", e.what());
+  }
 
   // PORT: command_interval is read by the servo loop; expose it on the base.
   command_interval_ = command_interval;
@@ -123,55 +133,103 @@ void MPCController::update_world(const std::string & scene_json)
 bool MPCController::setup_solver(
   const std::vector<float> & start_q, const ReactiveGoal & goal)
 {
-  if (!(goal.goalsets.size() == 1 && goal.goalsets[0].size() == 1)) {
+  // A reactive goal is exactly ONE goalset: either one legacy Cartesian pose
+  // or a simultaneous multi-tool goal (both OpenArm grasp frames). Candidate
+  // sets with several poses belong to the open-loop planners.
+  std::vector<std::string> frames;
+  std::vector<std::array<double, 7>> poses;
+  if (!goal.tool_poses.empty()) {
+    if (goal.goalsets.size() > 1) {
+      RCLCPP_ERROR(
+        node_->get_logger(),
+        "MPC multi-tool goal must be a single goalset (got %zu)", goal.goalsets.size());
+      return false;
+    }
+    frames = goal.tool_frames;
+    poses = goal.tool_poses;
+  } else if (goal.goalsets.size() == 1 && goal.goalsets[0].size() == 1) {
+    poses.push_back(goal.goalsets[0][0]);
+  } else {
     std::ostringstream sizes;
     for (const auto & g : goal.goalsets) {
       sizes << g.size() << ",";
     }
     RCLCPP_ERROR(
       node_->get_logger(),
-      "MPC requires exactly one goalset entry with a single pose (got %zu sets, "
-      "poses_per_set=[%s]) - candidate sets belong to the open-loop planners "
-      "(classic/joint space)",
+      "MPC requires exactly one goalset entry with a single pose or one "
+      "multi-tool goalset (got %zu sets, poses_per_set=[%s]) - candidate sets "
+      "belong to the open-loop planners (classic/joint space)",
       goal.goalsets.size(), sizes.str().c_str());
     return false;
   }
-  const auto & raw = goal.goalsets[0][0];
-  set_target(raw);
+  if (!frames.empty() && frames.size() != poses.size()) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "MPC: tool_frames and tool_poses must be parallel (got %zu frame(s), "
+      "%zu pose(s))", frames.size(), poses.size());
+    return false;
+  }
+  if (frames.empty() && poses.size() > 1) {
+    RCLCPP_ERROR(
+      node_->get_logger(),
+      "MPC: a %zu-pose goal needs one tool frame per pose", poses.size());
+    return false;
+  }
+
+  const auto target = target_pose_for_status(frames, poses);
+  set_target(target);
 
   const auto setup_outcome = bridge_->mpc_setup(handle_, start_q);
-  const bool applied = apply_goal(raw, start_q);
-  publish_goal_marker(raw, applied);
+  const bool applied = apply_goal_poses(frames, poses, start_q, start_q);
+  publish_goal_marker(poses, applied);
 
   if (debug_enabled() && setup_outcome.has_ee) {
     RCLCPP_DEBUG(
       node_->get_logger(),
-      "[MPC DIAG] setup: goal_xyz=[%.4f, %.4f, %.4f] start_EE_pos=[%.4f, %.4f, %.4f] "
-      "fk_err=%.4fm goal_applied=%d",
-      raw[0], raw[1], raw[2], setup_outcome.ee_position[0], setup_outcome.ee_position[1],
-      setup_outcome.ee_position[2], get_position_error(), static_cast<int>(applied));
+      "[MPC DIAG] setup: goals=%zu goal_xyz=[%.4f, %.4f, %.4f] "
+      "start_EE_pos=[%.4f, %.4f, %.4f] fk_err=%.4fm goal_applied=%d",
+      poses.size(), target[0], target[1], target[2], setup_outcome.ee_position[0],
+      setup_outcome.ee_position[1], setup_outcome.ee_position[2],
+      get_position_error(), static_cast<int>(applied));
   }
   return true;
 }
 
-// PORT: MPCController._apply_goal
-bool MPCController::apply_goal(
-  const std::array<double, 7> & raw, const std::vector<float> & seed_q)
+// PORT: MPCController._apply_goal (single pose or simultaneous multi-tool)
+bool MPCController::apply_goal_poses(
+  const std::vector<std::string> & tool_frames,
+  const std::vector<std::array<double, 7>> & tool_poses,
+  const std::vector<float> & hold_q, const std::vector<float> & seed_q)
 {
-  if (bridge_->mpc_update_goal_pose(handle_, raw, false)) {
+  if (tool_poses.empty()) {
+    return false;
+  }
+  curobo_runtime::TensorF32 poses;
+  poses.shape = {static_cast<std::int64_t>(tool_poses.size()), 7};
+  poses.data.reserve(tool_poses.size() * 7);
+  for (const auto & pose : tool_poses) {
+    for (double value : pose) {
+      poses.data.push_back(static_cast<float>(value));
+    }
+  }
+  if (bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q)) {
+    remember_active_goal(tool_frames, tool_poses);
     return true;
   }
-  const auto solved = bridge_->mpc_solve_goal_state(handle_, raw, seed_q);
+  const auto solved =
+    bridge_->mpc_solve_goal_poses(handle_, tool_frames, poses, hold_q, seed_q);
   if (solved.success) {
     std::vector<float> q(
       solved.positions.data.begin(), solved.positions.data.end());
-    bridge_->mpc_update_goal_pose(handle_, raw, false);
+    bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q);
     bridge_->mpc_update_goal_state(handle_, q);
+    remember_active_goal(tool_frames, tool_poses);
     RCLCPP_INFO(
       node_->get_logger(), "MPC: goal_state set via multi-seed IK (joint tracking on)");
     return true;
   }
-  bridge_->mpc_update_goal_pose(handle_, raw, false);
+  bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q);
+  remember_active_goal(tool_frames, tool_poses);
   RCLCPP_WARN(
     node_->get_logger(), "MPC: IK failed for goal pose - pose-only tracking (arm may not move)");
   return false;
@@ -179,10 +237,24 @@ bool MPCController::apply_goal(
 
 // PORT: MPCController._reseed_toward_goal
 void MPCController::reseed_toward_goal(
-  const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state)
+  const std::vector<std::string> & tool_frames,
+  const std::vector<std::array<double, 7>> & tool_poses,
+  const curobo_runtime::ReactiveState & state)
 {
+  if (tool_poses.empty()) {
+    return;
+  }
   try {
-    const auto solved = bridge_->mpc_solve_goal_state(handle_, raw, state.position);
+    curobo_runtime::TensorF32 poses;
+    poses.shape = {static_cast<std::int64_t>(tool_poses.size()), 7};
+    poses.data.reserve(tool_poses.size() * 7);
+    for (const auto & pose : tool_poses) {
+      for (double value : pose) {
+        poses.data.push_back(static_cast<float>(value));
+      }
+    }
+    const auto solved = bridge_->mpc_solve_goal_poses(
+      handle_, tool_frames, poses, state.position, state.position);
     if (solved.success) {
       std::vector<float> q(solved.positions.data.begin(), solved.positions.data.end());
       bridge_->mpc_reseed(handle_, q);
@@ -196,6 +268,34 @@ void MPCController::reseed_toward_goal(
       node_->get_logger(), *node_->get_clock(), 1000,
       "MPC: live retarget re-seed failed: %s", e.what());
   }
+}
+
+std::array<double, 7> MPCController::target_pose_for_status(
+  const std::vector<std::string> & tool_frames,
+  const std::vector<std::array<double, 7>> & tool_poses) const
+{
+  if (tool_poses.empty()) {
+    return {0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0};
+  }
+  // The bridge's FK reports the solver's FIRST tool frame. If the goal names
+  // that frame, report its error; otherwise the first goal pose is the best
+  // available signal (the goal still drives all named tools).
+  if (!solver_tool_frames_.empty() && !tool_frames.empty()) {
+    const auto it = std::find(
+      tool_frames.begin(), tool_frames.end(), solver_tool_frames_.front());
+    if (it != tool_frames.end()) {
+      return tool_poses[static_cast<std::size_t>(it - tool_frames.begin())];
+    }
+  }
+  return tool_poses.front();
+}
+
+void MPCController::remember_active_goal(
+  const std::vector<std::string> & tool_frames,
+  const std::vector<std::array<double, 7>> & tool_poses)
+{
+  active_goal_frames_ = tool_frames;
+  active_goal_poses_ = tool_poses;
 }
 
 // PORT: mpc_planner.MPCController._csv_write (mpc_diag, mpc_debug only).
@@ -341,41 +441,60 @@ curobo_runtime::MpcStepOutcome MPCController::step_paced_impl(
 bool MPCController::apply_live_goal(
   const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state)
 {
-  set_target(raw);
-  const bool applied = apply_goal(raw, state.position);
-  if (applied) {
-    reseed_toward_goal(raw, state);
+  // The live topic carries one pose. On a multi-tool robot it retargets the
+  // first/active tool while the other tools keep their commanded targets (or
+  // hold the live state when no multi-tool goal is active).
+  std::vector<std::string> frames = active_goal_frames_;
+  std::vector<std::array<double, 7>> poses = active_goal_poses_;
+  if (poses.empty()) {
+    poses.push_back(raw);
+  } else {
+    poses.front() = raw;
+    if (!frames.empty() && frames.size() != poses.size()) {
+      frames.clear();
+    }
   }
-  publish_goal_marker(raw, applied);
+  const auto target = target_pose_for_status(frames, poses);
+  set_target(target);
+  const bool applied = apply_goal_poses(frames, poses, state.position, state.position);
+  if (applied) {
+    reseed_toward_goal(frames, poses, state);
+  }
+  publish_goal_marker(poses, applied);
   return applied;
 }
 
 // PORT: MPCController._publish_goal_marker
-void MPCController::publish_goal_marker(const std::array<double, 7> & raw, bool applied)
+void MPCController::publish_goal_marker(
+  const std::vector<std::array<double, 7>> & tool_poses, bool applied)
 {
   if (goal_marker_pub_ == nullptr) {
     return;
   }
-  visualization_msgs::msg::Marker marker;
-  marker.header.frame_id = base_link_;
-  marker.header.stamp = node_->get_clock()->now();
-  marker.ns = "mpc_goal";
-  marker.id = 0;
-  marker.type = visualization_msgs::msg::Marker::SPHERE;
-  marker.action = visualization_msgs::msg::Marker::ADD;
-  marker.pose.position.x = raw[0];
-  marker.pose.position.y = raw[1];
-  marker.pose.position.z = raw[2];
-  marker.pose.orientation.w = raw[3];
-  marker.pose.orientation.x = raw[4];
-  marker.pose.orientation.y = raw[5];
-  marker.pose.orientation.z = raw[6];
-  marker.scale.x = marker.scale.y = marker.scale.z = 0.03;
-  marker.color.a = 1.0;
-  marker.color.r = 1.0;
-  marker.color.g = applied ? 0.0 : 0.5;
-  marker.color.b = 0.0;
-  goal_marker_pub_->publish(marker);
+  const auto now = node_->get_clock()->now();
+  for (std::size_t i = 0; i < tool_poses.size(); ++i) {
+    const auto & raw = tool_poses[i];
+    visualization_msgs::msg::Marker marker;
+    marker.header.frame_id = base_link_;
+    marker.header.stamp = now;
+    marker.ns = "mpc_goal";
+    marker.id = static_cast<std::int32_t>(i);
+    marker.type = visualization_msgs::msg::Marker::SPHERE;
+    marker.action = visualization_msgs::msg::Marker::ADD;
+    marker.pose.position.x = raw[0];
+    marker.pose.position.y = raw[1];
+    marker.pose.position.z = raw[2];
+    marker.pose.orientation.w = raw[3];
+    marker.pose.orientation.x = raw[4];
+    marker.pose.orientation.y = raw[5];
+    marker.pose.orientation.z = raw[6];
+    marker.scale.x = marker.scale.y = marker.scale.z = 0.03;
+    marker.color.a = 1.0;
+    marker.color.r = 1.0;
+    marker.color.g = applied ? 0.0 : 0.5;
+    marker.color.b = 0.0;
+    goal_marker_pub_->publish(marker);
+  }
 }
 
 // PORT: MPCController._publish_predicted_path (throttled to 10 Hz)

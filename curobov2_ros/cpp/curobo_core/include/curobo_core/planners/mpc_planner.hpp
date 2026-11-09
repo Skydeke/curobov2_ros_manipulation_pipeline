@@ -58,13 +58,27 @@ protected:
     const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state) override;
 
 private:
-  // PORT: MPCController._apply_goal
-  bool apply_goal(const std::array<double, 7> & raw, const std::vector<float> & seed_q);
+  // PORT: MPCController._apply_goal (single pose or simultaneous multi-tool)
+  bool apply_goal_poses(
+    const std::vector<std::string> & tool_frames,
+    const std::vector<std::array<double, 7>> & tool_poses,
+    const std::vector<float> & hold_q, const std::vector<float> & seed_q);
   // PORT: MPCController._reseed_toward_goal
   void reseed_toward_goal(
-    const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state);
-  // PORT: MPCController._publish_goal_marker
-  void publish_goal_marker(const std::array<double, 7> & raw, bool applied);
+    const std::vector<std::string> & tool_frames,
+    const std::vector<std::array<double, 7>> & tool_poses,
+    const curobo_runtime::ReactiveState & state);
+  // PORT: MPCController._publish_goal_marker (one marker per goal tool)
+  void publish_goal_marker(
+    const std::vector<std::array<double, 7>> & tool_poses, bool applied);
+  // The pose used for the scalar on-target signal: the goal for the solver's
+  // first tool frame (the one the bridge reports as `ee_position`).
+  std::array<double, 7> target_pose_for_status(
+    const std::vector<std::string> & tool_frames,
+    const std::vector<std::array<double, 7>> & tool_poses) const;
+  void remember_active_goal(
+    const std::vector<std::string> & tool_frames,
+    const std::vector<std::array<double, 7>> & tool_poses);
   // PORT: MPCController._publish_predicted_path
   void publish_predicted_path(const curobo_runtime::MpcStepOutcome & outcome);
   // PORT: MPCController._publish_costs (mpc_debug diagnostics)
@@ -78,6 +92,13 @@ private:
   std::string base_link_;
   double step_dt_ = 0.03;
   bool use_mppi_acceleration_ = true;
+  // The solver's configured tool frames (bridge/artifact order). The first is
+  // the frame whose EE position the bridge returns for the on-target signal.
+  std::vector<std::string> solver_tool_frames_;
+  // The most recently applied goal, so a single live-goal update can retarget
+  // one tool while retaining the other tools' commanded targets.
+  std::vector<std::string> active_goal_frames_;
+  std::vector<std::array<double, 7>> active_goal_poses_;
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr path_pub_;
   rclcpp::Publisher<curobov2_ros_interfaces::msg::MpcCosts>::SharedPtr cost_pub_;
   // PORT: MPCController._csv / _csv_t0 / _csv_t_prev / _csv_last_vlast.

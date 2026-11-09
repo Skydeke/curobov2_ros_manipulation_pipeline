@@ -20,10 +20,18 @@
 
 #include "curobov2_ros_interfaces/action/send_trajectory.hpp"
 #include "curobo_core/core/planner_services.hpp"
+#include "curobo_core/planners/reactive_controller.hpp"
 #include "curobo_core/robot/robot_context.hpp"
 
 namespace curobo_core
 {
+
+// Convert a SendTrajectory goal into the reactive controller's goal. This is
+// the one place that must not assume a single tool: a bimanual client sends
+// `goalset.tool_frames` + `goalset.tool_poses` (one pose per arm), and dropping
+// those fields used to leave MPC with zero or one wrong target.
+ReactiveGoal make_reactive_goal(
+  const curobov2_ros_interfaces::action::SendTrajectory::Goal & request);
 
 class TrajectoryActionServer
 {

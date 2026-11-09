@@ -108,13 +108,42 @@ PlannerResult ReactiveController::plan_reactive_impl(
   max_iterations_ = max_iterations;
 
   // The start configuration the reactive goal is anchored on: the caller's
-  // start_pose when present, else the robot's current pose.
+  // start_pose when present, else the robot's current pose. A start pose may
+  // carry every URDF joint (both arms + fingers + lift); the solver cspace is
+  // only the active joints, so resolve by NAME instead of forwarding the raw
+  // width (a 17-wide OpenArm joint_states message used to fail the bridge's
+  // dof check).
   std::vector<float> start_q;
-  if (!goal.start_pose_positions.empty()) {
+  std::vector<double> current;
+  const std::vector<std::string> active_names = (robot_context != nullptr) ?
+    robot_context->get_joint_name() : joint_names_;
+  if (robot_context != nullptr) {
+    current = robot_context->get_joint_pose();
+  }
+  const bool named_start = !goal.start_pose_names.empty() &&
+    goal.start_pose_names.size() == goal.start_pose_positions.size();
+  if (named_start && !active_names.empty()) {
+    start_q.assign(active_names.size(), 0.0f);
+    if (current.size() == active_names.size()) {
+      for (std::size_t i = 0; i < start_q.size(); ++i) {
+        start_q[i] = static_cast<float>(current[i]);
+      }
+    }
+    for (std::size_t i = 0; i < active_names.size(); ++i) {
+      const auto it = std::find(
+        goal.start_pose_names.begin(), goal.start_pose_names.end(), active_names[i]);
+      if (it != goal.start_pose_names.end()) {
+        const std::size_t source = static_cast<std::size_t>(
+          it - goal.start_pose_names.begin());
+        if (source < goal.start_pose_positions.size()) {
+          start_q[i] = static_cast<float>(goal.start_pose_positions[source]);
+        }
+      }
+    }
+  } else if (!goal.start_pose_positions.empty()) {
     start_q.assign(goal.start_pose_positions.begin(), goal.start_pose_positions.end());
-  } else if (robot_context != nullptr) {
-    const auto pose = robot_context->get_joint_pose();
-    start_q.assign(pose.begin(), pose.end());
+  } else if (!current.empty()) {
+    start_q.assign(current.begin(), current.end());
   }
 
   try {

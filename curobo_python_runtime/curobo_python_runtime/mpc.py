@@ -176,19 +176,82 @@ def _mpc(entry):
     if solver is None:
         raise ValueError("MPC solver not built; call mpc_build first")
     return solver
-def _mpc_goal_tool_pose(solver, raw):
-    """PORT: reactive_controller._set_target."""
-    from curobo.types import GoalToolPose, Pose
+def _mpc_held_tool_poses(entry, solver, hold_q=None):
+    """FK for every solver tool frame at ``hold_q`` (or the setup start).
+
+    A Cartesian MPC goal must name every configured tool frame. For a single
+    arm on a bimanual robot the unnamed tool is anchored at its CURRENT pose,
+    not at a copy of another tool's target.
+    """
     import numpy as np
     import torch
+    from curobo.types import JointState
 
+    if hold_q is None or len(hold_q) == 0:
+        hold_q = entry.get("mpc_start")
+    if hold_q is None or len(hold_q) == 0:
+        return None
     device = torch.device("cuda", torch.cuda.current_device())
+    q = torch.tensor(
+        np.asarray(hold_q, dtype=np.float32).reshape(1, -1),
+        dtype=torch.float32, device=device)
+    state = JointState.from_position(q[:, :solver.action_dim], joint_names=solver.joint_names)
+    kin = solver.compute_kinematics(state)
+    return kin.tool_poses.to_dict()
+
+
+def _mpc_goal_tool_pose(solver, raw, held_poses=None):
+    """PORT: reactive_controller._set_target.
+
+    ``held_poses`` (a {frame: Pose} map from ``_mpc_held_tool_poses``) fills
+    every configured tool frame; without it only the first frame is addressed,
+    which is all a single-tool robot needs.
+    """
+    from curobo.types import GoalToolPose, Pose
+
     pose = Pose.from_list(list(raw))
+    pose_dict = dict(held_poses) if held_poses else {}
+    pose_dict[solver.tool_frames[0]] = pose
+    ordered = list(solver.tool_frames) if held_poses else None
     return GoalToolPose.from_poses(
-        {solver.tool_frames[0]: pose},
-        ordered_tool_frames=solver.tool_frames,
+        pose_dict,
+        ordered_tool_frames=ordered,
         num_goalset=1,
     )
+
+
+def _mpc_goal_tool_poses(solver, tool_frames, poses, held_poses=None):
+    """Build one GoalToolPose from parallel per-tool (frame, 7-vector) goals."""
+    import numpy as np
+    import torch
+    from curobo.types import GoalToolPose, Pose
+
+    rows = np.asarray(poses, dtype=np.float32).reshape(-1, 7)
+    frames = [str(frame) for frame in (tool_frames or [])]
+    if not frames:
+        if rows.shape[0] != 1:
+            raise ValueError("a multi-pose MPC goal needs one tool frame per pose")
+        frames = [solver.tool_frames[0]]
+    if len(frames) != rows.shape[0]:
+        raise ValueError(
+            f"tool_frames/poses length mismatch: {len(frames)} frame(s), "
+            f"{rows.shape[0]} pose(s)")
+    pose_dict = dict(held_poses) if held_poses else {}
+    device = torch.device("cuda", torch.cuda.current_device())
+    for frame, row in zip(frames, rows):
+        pose_dict[frame] = Pose(
+            position=torch.tensor(row[0:3], dtype=torch.float32,
+                                  device=device).reshape(1, 3),
+            quaternion=torch.tensor(row[3:7], dtype=torch.float32,
+                                    device=device).reshape(1, 4),
+        )
+    return GoalToolPose.from_poses(
+        pose_dict,
+        ordered_tool_frames=list(solver.tool_frames),
+        num_goalset=1,
+    )
+
+
 def _mpc_ensure_ik_solver(entry):
     """PORT: mpc_planner.MPCController._ensure_ik_solver."""
     ik = entry.get("mpc_ik_solver")
@@ -226,6 +289,8 @@ def mpc_setup(handle: int, start_q):
         dtype=torch.float32, device=device)
     start_state = JointState.from_position(start, joint_names=solver.joint_names)
     solver.setup(start_state)
+    # Kept so single-tool goals can anchor the other tools at the phase start.
+    entry["mpc_start"] = list(start_q)
 
     ee_position = None
     try:
@@ -248,6 +313,9 @@ def mpc_reseed(handle: int, q) -> None:
         np.asarray(q, dtype=np.float32).reshape(1, -1), dtype=torch.float32, device=device)
     solver.update_seed_trajectory_from_goal_state(
         JointState.from_position(sol, joint_names=solver.joint_names))
+    entry["mpc_start"] = list(q)
+
+
 def mpc_load_scene(handle: int, scene_json: str) -> None:
     """PORT: mpc_planner.MPCController.update_world."""
     import json

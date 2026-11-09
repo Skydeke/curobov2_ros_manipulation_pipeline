@@ -170,6 +170,37 @@ void TrajectoryActionServer::execute(const std::shared_ptr<GoalHandle> goal_hand
   goal_active_ = false;
 }
 
+ReactiveGoal make_reactive_goal(
+  const curobov2_ros_interfaces::action::SendTrajectory::Goal & request)
+{
+  ReactiveGoal goal;
+  for (const auto & goalset : request.goal.goalsets) {
+    std::vector<std::array<double, 7>> poses;
+    for (const auto & pose : goalset.poses) {
+      poses.push_back(
+        {pose.position.x, pose.position.y, pose.position.z,
+          pose.orientation.w, pose.orientation.x, pose.orientation.y,
+          pose.orientation.z});
+    }
+    goal.goalsets.push_back(std::move(poses));
+  }
+  // Multi-tool goals are carried by tool_frames + tool_poses (the bimanual
+  // OpenArm path). Legacy clients only fill `poses`.
+  if (!request.goal.goalsets.empty()) {
+    const auto & first = request.goal.goalsets.front();
+    goal.tool_frames.assign(first.tool_frames.begin(), first.tool_frames.end());
+    for (const auto & pose : first.tool_poses) {
+      goal.tool_poses.push_back(
+        {pose.position.x, pose.position.y, pose.position.z,
+          pose.orientation.w, pose.orientation.x, pose.orientation.y,
+          pose.orientation.z});
+    }
+  }
+  goal.start_pose_names = request.goal.start_pose.name;
+  goal.start_pose_positions = request.goal.start_pose.position;
+  return goal;
+}
+
 // PORT: _execute_goal + _execute_replay
 void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> goal_handle)
 {
@@ -295,19 +326,7 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
   // signal (on_target), never a stop condition.
   auto * reactive = dynamic_cast<ReactiveController *>(planner);
   if (reactive != nullptr) {
-    ReactiveGoal goal;
-    for (const auto & goalset : request->goal.goalsets) {
-      std::vector<std::array<double, 7>> poses;
-      for (const auto & pose : goalset.poses) {
-        poses.push_back(
-          {pose.position.x, pose.position.y, pose.position.z,
-            pose.orientation.w, pose.orientation.x, pose.orientation.y,
-            pose.orientation.z});
-      }
-      goal.goalsets.push_back(std::move(poses));
-    }
-    goal.start_pose_names = request->goal.start_pose.name;
-    goal.start_pose_positions = request->goal.start_pose.position;
+    const ReactiveGoal goal = make_reactive_goal(*request);
 
     const double convergence = node_->has_parameter("convergence_threshold") ?
       node_->get_parameter("convergence_threshold").as_double() : 0.01;

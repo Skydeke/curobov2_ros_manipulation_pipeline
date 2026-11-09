@@ -465,7 +465,34 @@ SphereSetOutcome FakeBridge::collision_spheres_with_attached(
 
 std::vector<std::string> FakeBridge::tool_frames(RobotHandle)
 {
-  return {"tool0"};
+  std::lock_guard<std::mutex> lk(mutex_);
+  return tool_frames_;
+}
+
+void FakeBridge::set_tool_frames(const std::vector<std::string> & frames)
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  if (!frames.empty()) {
+    tool_frames_ = frames;
+  }
+}
+
+std::vector<std::string> FakeBridge::mpc_goal_tool_frames() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return mpc_goal_tool_frames_;
+}
+
+std::vector<std::array<double, 7>> FakeBridge::mpc_goal_tool_poses() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return mpc_goal_tool_poses_;
+}
+
+std::vector<float> FakeBridge::mpc_goal_hold_q() const
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  return mpc_goal_hold_q_;
 }
 
 LinkCollisionOutcome FakeBridge::set_link_collision(
@@ -598,6 +625,34 @@ bool FakeBridge::mpc_update_goal_pose(
   std::lock_guard<std::mutex> lk(mutex_);
   mpc_goal_ = goal_raw;
   mpc_goal_set_ = true;
+  mpc_goal_tool_frames_.clear();
+  mpc_goal_tool_poses_.clear();
+  mpc_goal_hold_q_.clear();
+  return true;
+}
+
+bool FakeBridge::mpc_update_goal_poses(
+  RobotHandle, const std::vector<std::string> & tool_frames,
+  const TensorF32 & poses, bool, const std::vector<float> & hold_q)
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  mpc_goal_tool_frames_ = tool_frames;
+  mpc_goal_tool_poses_.clear();
+  const std::size_t rows = poses.shape.size() == 2 ?
+    static_cast<std::size_t>(poses.shape[0]) : 0;
+  for (std::size_t row = 0; row < rows; ++row) {
+    std::array<double, 7> pose{};
+    for (std::size_t col = 0; col < 7; ++col) {
+      const std::size_t idx = row * 7 + col;
+      pose[col] = idx < poses.data.size() ? poses.data[idx] : 0.0;
+    }
+    mpc_goal_tool_poses_.push_back(pose);
+  }
+  mpc_goal_hold_q_ = hold_q;
+  if (!mpc_goal_tool_poses_.empty()) {
+    mpc_goal_ = mpc_goal_tool_poses_.front();
+  }
+  mpc_goal_set_ = !mpc_goal_tool_poses_.empty();
   return true;
 }
 
@@ -611,6 +666,18 @@ void FakeBridge::mpc_reseed(RobotHandle, const std::vector<float> &)
 
 IkOutcome FakeBridge::mpc_solve_goal_state(
   RobotHandle, const std::array<double, 7> &, const std::vector<float> & seed_q)
+{
+  IkOutcome out;
+  out.success = true;
+  out.positions.shape = {1, 1, static_cast<std::int64_t>(seed_q.size())};
+  out.positions.data = seed_q;
+  out.valid = {1};
+  return out;
+}
+
+IkOutcome FakeBridge::mpc_solve_goal_poses(
+  RobotHandle, const std::vector<std::string> &, const TensorF32 &,
+  const std::vector<float> &, const std::vector<float> & seed_q)
 {
   IkOutcome out;
   out.success = true;

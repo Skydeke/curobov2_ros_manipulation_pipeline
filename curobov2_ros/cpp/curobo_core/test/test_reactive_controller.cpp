@@ -91,6 +91,102 @@ TEST(ReactiveController, RejectsMultiPoseGoalset)
   EXPECT_FALSE(mpc.is_goal_active());
 }
 
+// Bimanual MPC: one goalset with one pose PER TOOL must reach the solver as a
+// simultaneous multi-tool goal. The old path required exactly one pose and
+// silently dropped `goalset.tool_frames` / `tool_poses`.
+TEST(ReactiveController, AcceptsBimanualMultiToolGoal)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner");
+  curobo_runtime::FakeBridge bridge;
+  bridge.set_tool_frames({"openarm_left_grasp_frame", "openarm_right_grasp_frame"});
+  RobotContext robot_context(
+    node.get(), 0.025, joint_names(), "emulator", {},
+    std::vector<double>(7, 0.0));
+  MPCController mpc(&bridge, 7, joint_names(), node.get());
+
+  ReactiveGoal goal;
+  goal.tool_frames = {"openarm_left_grasp_frame", "openarm_right_grasp_frame"};
+  goal.tool_poses = {
+    {0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0},
+    {0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0}};
+  goal.start_pose_positions = std::vector<double>(7, 0.0);
+
+  const auto plan_result = mpc.plan_reactive(goal, 0.01, 1000, &robot_context);
+  ASSERT_TRUE(plan_result.success) << plan_result.message;
+  EXPECT_EQ(
+    bridge.mpc_goal_tool_frames(),
+    (std::vector<std::string>{
+      "openarm_left_grasp_frame", "openarm_right_grasp_frame"}));
+  const auto poses = bridge.mpc_goal_tool_poses();
+  ASSERT_EQ(poses.size(), 2u);
+  EXPECT_NEAR(poses[0][0], 0.1, 1e-6);
+  EXPECT_NEAR(poses[1][0], 0.4, 1e-6);
+  // The unnamed/held tools use the request start, not a foreign tool target.
+  EXPECT_EQ(bridge.mpc_goal_hold_q(), std::vector<float>(7, 0.0f));
+}
+
+// A legacy single-pose goal on a two-tool robot still works; the second tool
+// is held at the phase start by the bridge.
+TEST(ReactiveController, SinglePoseGoalOnBimanualPassesHoldState)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner");
+  curobo_runtime::FakeBridge bridge;
+  bridge.set_tool_frames({"openarm_left_grasp_frame", "openarm_right_grasp_frame"});
+  RobotContext robot_context(
+    node.get(), 0.025, joint_names(), "emulator", {},
+    std::vector<double>(7, 0.0));
+  MPCController mpc(&bridge, 7, joint_names(), node.get());
+
+  ReactiveGoal goal;
+  goal.goalsets = {{{0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0}}};
+  goal.start_pose_positions = std::vector<double>(7, 0.0);
+
+  const auto plan_result = mpc.plan_reactive(goal, 0.01, 1000, &robot_context);
+  ASSERT_TRUE(plan_result.success) << plan_result.message;
+  EXPECT_TRUE(bridge.mpc_goal_tool_frames().empty());
+  const auto poses = bridge.mpc_goal_tool_poses();
+  ASSERT_EQ(poses.size(), 1u);
+  EXPECT_NEAR(poses[0][0], 0.1, 1e-6);
+  EXPECT_EQ(bridge.mpc_goal_hold_q(), std::vector<float>(7, 0.0f));
+}
+
+// A named start pose from /joint_states carries every URDF joint (both arms +
+// fingers). The reactive setup must project it onto the active cspace by name,
+// not forward the raw width to the solver.
+TEST(ReactiveController, StartPoseIsProjectedOntoTheActiveJointsByName)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner");
+  curobo_runtime::FakeBridge bridge;
+  RobotContext robot_context(
+    node.get(), 0.025, joint_names(), "emulator", {},
+    std::vector<double>(7, 0.0));
+  MPCController mpc(&bridge, 7, joint_names(), node.get());
+
+  ReactiveGoal goal;
+  goal.goalsets = {{{0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0}}};
+  goal.start_pose_names = {
+    "panda_joint2", "panda_finger_joint1", "panda_joint1", "panda_joint3",
+    "panda_joint4", "panda_joint5", "panda_joint6", "panda_joint7"};
+  goal.start_pose_positions = {0.2, 0.5, 0.1, 0.3, 0.4, 0.5, 0.6, 0.7};
+
+  const auto plan_result = mpc.plan_reactive(goal, 0.01, 1000, &robot_context);
+  ASSERT_TRUE(plan_result.success) << plan_result.message;
+  const auto hold = bridge.mpc_goal_hold_q();
+  ASSERT_EQ(hold.size(), 7u);
+  EXPECT_FLOAT_EQ(hold[0], 0.1f);
+  EXPECT_FLOAT_EQ(hold[1], 0.2f);
+  EXPECT_FLOAT_EQ(hold[6], 0.7f);
+}
+
 // PORT: ReactiveController.execute -> _execute_paced when a command interval is set
 TEST(ReactiveController, PacedLoopUsesStepPaced)
 {

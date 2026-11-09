@@ -110,10 +110,18 @@ public:
     RobotHandle handle, const ReactiveState & state, bool paced) override;
   bool mpc_update_goal_pose(
     RobotHandle handle, const std::array<double, 7> & goal_raw, bool run_ik) override;
+  bool mpc_update_goal_poses(
+    RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const TensorF32 & poses, bool run_ik,
+    const std::vector<float> & hold_q) override;
   void mpc_update_goal_state(RobotHandle handle, const std::vector<float> & q) override;
   void mpc_reseed(RobotHandle handle, const std::vector<float> & q) override;
   IkOutcome mpc_solve_goal_state(
     RobotHandle handle, const std::array<double, 7> & goal_raw,
+    const std::vector<float> & seed_q) override;
+  IkOutcome mpc_solve_goal_poses(
+    RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const TensorF32 & poses, const std::vector<float> & hold_q,
     const std::vector<float> & seed_q) override;
   void mpc_load_scene(RobotHandle handle, const std::string & scene_json) override;
   std::string mpc_metrics(RobotHandle handle) override;

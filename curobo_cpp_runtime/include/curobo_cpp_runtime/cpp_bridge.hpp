@@ -151,12 +151,20 @@ public:
   bool mpc_update_goal_pose(
     curobo_runtime::RobotHandle handle, const std::array<double, 7> & goal_raw,
     bool run_ik) override;
+  bool mpc_update_goal_poses(
+    curobo_runtime::RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const curobo_runtime::TensorF32 & poses, bool run_ik,
+    const std::vector<float> & hold_q) override;
   void mpc_update_goal_state(
     curobo_runtime::RobotHandle handle, const std::vector<float> & q) override;
   void mpc_reseed(
     curobo_runtime::RobotHandle handle, const std::vector<float> & q) override;
   curobo_runtime::IkOutcome mpc_solve_goal_state(
     curobo_runtime::RobotHandle handle, const std::array<double, 7> & goal_raw,
+    const std::vector<float> & seed_q) override;
+  curobo_runtime::IkOutcome mpc_solve_goal_poses(
+    curobo_runtime::RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const curobo_runtime::TensorF32 & poses, const std::vector<float> & hold_q,
     const std::vector<float> & seed_q) override;
   void mpc_load_scene(
     curobo_runtime::RobotHandle handle, const std::string & scene_json) override;

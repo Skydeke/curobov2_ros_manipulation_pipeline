@@ -277,12 +277,8 @@ void PlanningTab::on_generateAndSend_clicked() {
                   "start MPC tracking");
       return;
     }
-    if (target_display_->getEnabledTools().size() > 1) {
-      RCLCPP_WARN(node_->get_logger(),
-                  "MPC tracks a single tool frame; check exactly one entry in "
-                  "the Planning tab's Target tools list");
-      return;
-    }
+    // MPC accepts one goal per enabled tool: a bimanual robot starts with both
+    // grasp frames and tracks the first tool with the live mpc_goal stream.
     RCLCPP_INFO(node_->get_logger(), "Starting MPC tracking");
     startMpc();
     return;
@@ -368,17 +364,17 @@ void PlanningTab::sendMpcGoal() {
 
   // start_pose intentionally left EMPTY so the server resolves the start state
 
-  curobov2_ros_interfaces::msg::Goalset gset;
-  geometry_msgs::msg::Pose base_pose;
-  if (target_display_->poseInBase(target_display_->getPose(), base_pose)) {
-    gset.poses.push_back(base_pose);
-    gset.frame_id = "";
-  } else {
-    // Base transform not available yet: let the server resolve the fixed frame.
-    gset.poses.push_back(target_display_->getPose());
-    gset.frame_id = goalFrame();
+  // Use the same goal shape as the open-loop path: one goalset carrying
+  // tool_frames + tool_poses for every enabled target tool. A bimanual robot
+  // therefore starts MPC with BOTH arm targets instead of the active gizmo
+  // only (the old code silently dropped the second arm).
+  auto goalsets = buildGoalsets();
+  if (goalsets.empty()) {
+    RCLCPP_WARN(node_->get_logger(), "No MPC goal target available");
+    mpc_starting_ = false;
+    return;
   }
-  goal.goal.goalsets.push_back(gset);
+  goal.goal.goalsets = goalsets;
 
   auto send_goal_options = rclcpp_action::Client<
       curobov2_ros_interfaces::action::SendTrajectory>::SendGoalOptions();

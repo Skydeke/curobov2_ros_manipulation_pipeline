@@ -1184,6 +1184,21 @@ bool PyBridge::mpc_update_goal_pose(
   }
 }
 
+// PORT: mpc_planner.MPCController._apply_goal (multi-tool Cartesian branch)
+bool PyBridge::mpc_update_goal_poses(
+  RobotHandle handle, const std::vector<std::string> & tool_frames,
+  const TensorF32 & poses, bool run_ik, const std::vector<float> & hold_q)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    return bridge_module().attr("mpc_update_goal_poses")(
+      handle, py::cast(tool_frames), tensor_to_array(poses), run_ik,
+      flat_f32(hold_q)).cast<bool>();
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("programming", e.what());
+  }
+}
+
 // PORT: mpc_planner.MPCController._apply_goal (joint branch)
 void PyBridge::mpc_update_goal_state(RobotHandle handle, const std::vector<float> & q)
 {
@@ -1215,6 +1230,30 @@ IkOutcome PyBridge::mpc_solve_goal_state(
   try {
     py::object result = bridge_module().attr("mpc_solve_goal_state")(
       handle, std::vector<double>(goal_raw.begin(), goal_raw.end()), flat_f32(seed_q));
+    IkOutcome out;
+    out.success = result.attr("__getitem__")("success").cast<bool>();
+    py::object sol = result.attr("__getitem__")("solution");
+    if (!sol.is_none()) {
+      out.positions = array_to_tensor(sol);
+      out.valid = {1};
+    }
+    return out;
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("programming", e.what());
+  }
+}
+
+// PORT: mpc_planner.MPCController._solve_goal_state (multi-tool variant)
+IkOutcome PyBridge::mpc_solve_goal_poses(
+  RobotHandle handle, const std::vector<std::string> & tool_frames,
+  const TensorF32 & poses, const std::vector<float> & hold_q,
+  const std::vector<float> & seed_q)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    py::object result = bridge_module().attr("mpc_solve_goal_poses")(
+      handle, py::cast(tool_frames), tensor_to_array(poses),
+      flat_f32(hold_q), flat_f32(seed_q));
     IkOutcome out;
     out.success = result.attr("__getitem__")("success").cast<bool>();
     py::object sol = result.attr("__getitem__")("solution");

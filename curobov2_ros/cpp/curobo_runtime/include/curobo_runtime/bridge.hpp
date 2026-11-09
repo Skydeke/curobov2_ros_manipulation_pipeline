@@ -576,8 +576,18 @@ public:
   virtual MpcStepOutcome mpc_step(
     RobotHandle handle, const ReactiveState & state, bool paced) = 0;
   // PORT: mpc_planner._apply_goal -> solver.update_goal_tool_poses(goal, run_ik).
+  // Legacy single-tool entry point (the target is the solver's first tool).
   virtual bool mpc_update_goal_pose(
     RobotHandle handle, const std::array<double, 7> & goal_raw, bool run_ik) = 0;
+  // Multi-tool Cartesian goal: `tool_frames` and the rows of `poses` ([N,7])
+  // are parallel. An empty frame name selects the solver's first tool. Tools
+  // not named here hold the FK pose of `hold_q` (empty -> the `mpc_setup`
+  // start state), so a single-arm goal never drags the other arm to a foreign
+  // pose. This is the bimanual path (OpenArm has two grasp frames).
+  virtual bool mpc_update_goal_poses(
+    RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const TensorF32 & poses, bool run_ik,
+    const std::vector<float> & hold_q) = 0;
   // PORT: mpc_planner._apply_goal joint branch (update_goal_state + enable
   // joint position tracking).
   virtual void mpc_update_goal_state(RobotHandle handle, const std::vector<float> & q) = 0;
@@ -586,6 +596,13 @@ public:
   // PORT: mpc_planner._solve_goal_state -> multi-seed IK for the goal pose.
   virtual IkOutcome mpc_solve_goal_state(
     RobotHandle handle, const std::array<double, 7> & goal_raw,
+    const std::vector<float> & seed_q) = 0;
+  // Multi-tool variant of the IK anchor used by the reseed/fallback path.
+  // Poses are [N,7] parallel to `tool_frames`; unnamed tools are anchored at
+  // the FK pose of `hold_q` (empty -> the mpc_setup start state).
+  virtual IkOutcome mpc_solve_goal_poses(
+    RobotHandle handle, const std::vector<std::string> & tool_frames,
+    const TensorF32 & poses, const std::vector<float> & hold_q,
     const std::vector<float> & seed_q) = 0;
   // PORT: mpc_planner.update_world -> scene_collision_checker.load_collision_model.
   virtual void mpc_load_scene(RobotHandle handle, const std::string & scene_json) = 0;

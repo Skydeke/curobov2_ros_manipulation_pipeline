@@ -8,8 +8,13 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-def mpc_solve_goal_state(handle: int, goal_raw, seed_q):
-    """PORT: mpc_planner.MPCController._solve_goal_state (multi-seed IK anchor)."""
+def mpc_solve_goal_poses(handle: int, tool_frames, poses, hold_q, seed_q):
+    """PORT: mpc_planner.MPCController._solve_goal_state (multi-tool IK anchor).
+
+    ``poses`` is [N,7] parallel to ``tool_frames``; unnamed tools are anchored
+    at the FK pose of ``hold_q`` so a single-arm goal never pulls the other arm
+    toward a foreign pose.
+    """
     import numpy as np
     import torch
     from curobo.types import GoalToolPose, JointState, Pose
@@ -19,12 +24,25 @@ def mpc_solve_goal_state(handle: int, goal_raw, seed_q):
     device = torch.device("cuda", torch.cuda.current_device())
     try:
         ik = _mpc_ensure_ik_solver(entry)
-        raw = list(goal_raw)
-        pose = Pose(
-            position=torch.tensor([raw[0:3]], dtype=torch.float32, device=device),
-            quaternion=torch.tensor([raw[3:7]], dtype=torch.float32, device=device),
-        )
-        goal = GoalToolPose.from_poses({ik.kinematics.tool_frames[0]: pose})
+        rows = np.asarray(poses, dtype=np.float32).reshape(-1, 7)
+        frames = [str(frame) for frame in (tool_frames or [])]
+        if not frames:
+            if rows.shape[0] != 1:
+                raise ValueError("a multi-pose MPC goal needs one tool frame per pose")
+            frames = [solver.tool_frames[0]]
+        if len(frames) != rows.shape[0]:
+            raise ValueError("tool_frames/poses length mismatch")
+        held = _mpc_held_tool_poses(entry, solver, hold_q) or {}
+        pose_dict = dict(held)
+        for frame, row in zip(frames, rows):
+            pose_dict[frame] = Pose(
+                position=torch.tensor(row[0:3], dtype=torch.float32,
+                                      device=device).reshape(1, 3),
+                quaternion=torch.tensor(row[3:7], dtype=torch.float32,
+                                        device=device).reshape(1, 4),
+            )
+        goal = GoalToolPose.from_poses(
+            pose_dict, ordered_tool_frames=list(ik.kinematics.tool_frames))
         seed_state = None
         seed = np.asarray(seed_q, dtype=np.float32).reshape(1, -1)
         if seed.size:
@@ -39,6 +57,16 @@ def mpc_solve_goal_state(handle: int, goal_raw, seed_q):
         return {"success": True, "solution": sol.detach().cpu().numpy().astype(np.float32)}
     except Exception:
         return {"success": False, "solution": None}
+
+
+def mpc_solve_goal_state(handle: int, goal_raw, seed_q):
+    """PORT: mpc_planner.MPCController._solve_goal_state (single-tool form)."""
+    import numpy as np
+
+    return mpc_solve_goal_poses(
+        handle, [], np.asarray([goal_raw], dtype=np.float32), seed_q, seed_q)
+
+
 def _mpc_apply_goal(entry, solver, goal, raw, seed_q):
     """PORT: mpc_planner.MPCController._apply_goal."""
     if solver.update_goal_tool_poses(goal, run_ik=False):
@@ -60,12 +88,36 @@ def _mpc_apply_goal(entry, solver, goal, raw, seed_q):
         return True
     solver.update_goal_tool_poses(goal, run_ik=False)
     return False
+
+
+def mpc_update_goal_poses(handle: int, tool_frames, poses, run_ik: bool,
+                          hold_q) -> bool:
+    """PORT: mpc_planner.MPCController._apply_goal (multi-tool Cartesian)."""
+    import numpy as np
+
+    entry = _REGISTRY[handle]
+    solver = _mpc(entry)
+    rows = np.asarray(poses, dtype=np.float32).reshape(-1, 7)
+    frames = [str(frame) for frame in (tool_frames or [])]
+    held = _mpc_held_tool_poses(entry, solver, hold_q)
+    if held is None and len(solver.tool_frames) > 1:
+        # Without a hold state we cannot address the unnamed tools; keep the
+        # old single-tool behaviour only for a one-tool robot.
+        raise ValueError("multi-tool MPC goal needs a hold state")
+    goal = _mpc_goal_tool_poses(solver, frames, rows, held)
+    entry["mpc_goal"] = rows[0].tolist()
+    applied = bool(solver.update_goal_tool_poses(goal, run_ik=bool(run_ik)))
+    entry["mpc_goal_applied"] = applied
+    return applied
+
+
 def mpc_update_goal_pose(handle: int, goal_raw, run_ik: bool) -> bool:
     """PORT: mpc_planner.MPCController._apply_goal -> update_goal_tool_poses."""
     entry = _REGISTRY[handle]
     solver = _mpc(entry)
     raw = list(goal_raw)
-    goal = _mpc_goal_tool_pose(solver, raw)
+    held = _mpc_held_tool_poses(entry, solver)
+    goal = _mpc_goal_tool_pose(solver, raw, held)
     entry["mpc_goal"] = raw
     applied = bool(solver.update_goal_tool_poses(goal, run_ik=bool(run_ik)))
     entry["mpc_goal_applied"] = applied
@@ -250,4 +302,10 @@ def mpc_metrics(handle: int) -> str:
 
 from .runtime import _REGISTRY
 from .ik import ik
-from .mpc import _mpc, _mpc_ensure_ik_solver, _mpc_goal_tool_pose
+from .mpc import (
+    _mpc,
+    _mpc_ensure_ik_solver,
+    _mpc_goal_tool_pose,
+    _mpc_goal_tool_poses,
+    _mpc_held_tool_poses,
+)

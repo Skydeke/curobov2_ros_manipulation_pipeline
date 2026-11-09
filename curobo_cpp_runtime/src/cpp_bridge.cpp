@@ -211,15 +211,6 @@ void fill_pose_arrays(
   }
 }
 
-std::array<float, 7> pose_from_list(const std::array<double, 7> & raw)
-{
-  std::array<float, 7> pose{};
-  for (std::size_t i = 0; i < pose.size(); ++i) {
-    pose[i] = static_cast<float>(raw[i]);
-  }
-  return pose;
-}
-
 // -- PlanRequest waypoint-field access -------------------------------------
 //
 // The waypoint fields are added to curobo_runtime::PlanRequest by the Python
@@ -3462,22 +3453,89 @@ curobo_runtime::MpcStepOutcome CppBridge::mpc_step(
 }
 
 bool CppBridge::mpc_update_goal_pose(
-  curobo_runtime::RobotHandle, const std::array<double, 7> & goal_raw, bool)
+  curobo_runtime::RobotHandle handle, const std::array<double, 7> & goal_raw, bool run_ik)
+{
+  // Legacy single-tool form: the target is the solver's first tool. Route it
+  // through the multi-tool implementation so the OTHER tools hold their own
+  // FK pose (the old code copied tool 0's pose to every tool, which dragged a
+  // bimanual robot's passive arm onto the active arm's target).
+  curobo_runtime::TensorF32 poses;
+  poses.shape = {1, 7};
+  poses.data = {
+    static_cast<float>(goal_raw[0]), static_cast<float>(goal_raw[1]),
+    static_cast<float>(goal_raw[2]), static_cast<float>(goal_raw[3]),
+    static_cast<float>(goal_raw[4]), static_cast<float>(goal_raw[5]),
+    static_cast<float>(goal_raw[6])};
+  return mpc_update_goal_poses(handle, {}, poses, run_ik, {});
+}
+
+bool CppBridge::mpc_update_goal_poses(
+  curobo_runtime::RobotHandle, const std::vector<std::string> & tool_frames,
+  const curobo_runtime::TensorF32 & poses, bool,
+  const std::vector<float> & hold_q)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
-  impl_->require_initialized("mpc_update_goal_pose");
-  auto & mpc = impl_->ensure_mpc("mpc_update_goal_pose");
+  impl_->require_initialized("mpc_update_goal_poses");
+  auto & mpc = impl_->ensure_mpc("mpc_update_goal_poses");
   if (impl_->mpc_start.empty()) {
-    fail("mpc_update_goal_pose", "mpc_setup must be called before applying a goal");
+    fail("mpc_update_goal_poses", "mpc_setup must be called before applying a goal");
+  }
+  if (poses.shape.size() != 2 || poses.shape[1] != 7) {
+    fail("mpc_update_goal_poses", "goal poses must have shape [N,7]");
   }
   const int tools = impl_->num_tools();
-  const auto goal = pose_from_list(goal_raw);
-  const auto held = impl_->fk_pose(impl_->mpc_start, "mpc_update_goal_pose");
+  if (tools <= 0) {
+    fail("mpc_update_goal_poses", "artifact has no tool frames");
+  }
+  const int rows = static_cast<int>(poses.shape[0]);
+  if (rows <= 0) {
+    fail("mpc_update_goal_poses", "empty goal pose list");
+  }
+  if (!tool_frames.empty() && static_cast<int>(tool_frames.size()) != rows) {
+    fail("mpc_update_goal_poses",
+      "tool_frames and goal poses must be parallel (got " +
+      std::to_string(tool_frames.size()) + " frame(s), " + std::to_string(rows) +
+      " pose(s))");
+  }
+  if (tool_frames.empty() && rows != 1) {
+    fail("mpc_update_goal_poses",
+      "a " + std::to_string(rows) + "-pose goal needs one tool frame per pose");
+  }
+  const std::vector<float> & phase_q =
+    hold_q.empty() ? impl_->mpc_start : hold_q;
+  if (static_cast<int>(phase_q.size()) != impl_->dof()) {
+    fail("mpc_update_goal_poses", "hold state size does not match the artifact dof");
+  }
+  // Every tool starts at its pose for the phase state; the named goals then
+  // override their own slot. An unnamed tool therefore HOLDs where it is
+  // instead of being dragged to another tool's target.
+  std::vector<std::array<float, 7>> poses_by_tool =
+    impl_->tool_poses_for_q(phase_q);
+  std::vector<bool> assigned(static_cast<std::size_t>(tools), false);
+  for (int row = 0; row < rows; ++row) {
+    int tool_index = 0;
+    if (!tool_frames.empty() && !tool_frames[static_cast<std::size_t>(row)].empty()) {
+      const auto it = std::find(
+        impl_->tool_frames.begin(), impl_->tool_frames.end(),
+        tool_frames[static_cast<std::size_t>(row)]);
+      if (it == impl_->tool_frames.end()) {
+        fail("mpc_update_goal_poses",
+          "unknown tool frame '" + tool_frames[static_cast<std::size_t>(row)] + "'");
+      }
+      tool_index = static_cast<int>(std::distance(impl_->tool_frames.begin(), it));
+    }
+    if (assigned[static_cast<std::size_t>(tool_index)]) {
+      fail("mpc_update_goal_poses", "duplicate tool frame in the goal");
+    }
+    assigned[static_cast<std::size_t>(tool_index)] = true;
+    for (std::size_t k = 0; k < 7; ++k) {
+      poses_by_tool[static_cast<std::size_t>(tool_index)][k] =
+        poses.data[static_cast<std::size_t>(row) * 7 + k];
+    }
+  }
   std::vector<float> positions;
   std::vector<float> quaternions;
-  std::vector<std::array<float, 7>> poses(static_cast<std::size_t>(tools), held);
-  poses[0] = goal;
-  fill_pose_arrays(poses, positions, quaternions);
+  fill_pose_arrays(poses_by_tool, positions, quaternions);
 
   const auto info = impl_->planner->info();
   const int knots = info.num_knots;
@@ -3485,7 +3543,7 @@ bool CppBridge::mpc_update_goal_pose(
   for (int k = 0; k < knots; ++k) {
     for (int j = 0; j < impl_->dof(); ++j) {
       seed[static_cast<std::size_t>(k * impl_->dof() + j)] =
-        impl_->mpc_start[static_cast<std::size_t>(j)];
+        phase_q[static_cast<std::size_t>(j)];
     }
   }
   DeviceBuffer position_device;
@@ -3500,8 +3558,8 @@ bool CppBridge::mpc_update_goal_pose(
     static_cast<const float *>(position_device.get()),
     static_cast<const float *>(quaternion_device.get()),
     static_cast<const float *>(seed_device.get()), config);
-  cuda_check("mpc_update_goal_pose", cudaDeviceSynchronize());
-  impl_->mpc_goal_pose = goal;
+  cuda_check("mpc_update_goal_poses", cudaDeviceSynchronize());
+  impl_->mpc_goal_pose = poses_by_tool.front();
   impl_->mpc_has_goal_pose = true;
   impl_->mpc_has_goal_state = false;
   return true;
@@ -3574,15 +3632,9 @@ void CppBridge::mpc_reseed(
 }
 
 curobo_runtime::IkOutcome CppBridge::mpc_solve_goal_state(
-  curobo_runtime::RobotHandle, const std::array<double, 7> & goal_raw,
+  curobo_runtime::RobotHandle handle, const std::array<double, 7> & goal_raw,
   const std::vector<float> & seed_q)
 {
-  std::lock_guard<std::mutex> lock(impl_->mutex);
-  const int tools = impl_->num_tools();
-  if (tools > 1) {
-    fail("mpc_solve_goal_state",
-      "cpp_runtime MPC goal IK requires one target per tool frame");
-  }
   TensorF32 poses;
   poses.shape = {1, 7};
   poses.data = {
@@ -3590,7 +3642,81 @@ curobo_runtime::IkOutcome CppBridge::mpc_solve_goal_state(
     static_cast<float>(goal_raw[2]), static_cast<float>(goal_raw[3]),
     static_cast<float>(goal_raw[4]), static_cast<float>(goal_raw[5]),
     static_cast<float>(goal_raw[6])};
-  return impl_->solve_ik(poses, {}, &seed_q, 1, "mpc_solve_goal_state");
+  // A single-tool anchor on a multi-tool robot: the other tools hold the FK
+  // pose of the seed state, not a foreign tool's target.
+  return mpc_solve_goal_poses(handle, {}, poses, seed_q, seed_q);
+}
+
+curobo_runtime::IkOutcome CppBridge::mpc_solve_goal_poses(
+  curobo_runtime::RobotHandle, const std::vector<std::string> & tool_frames,
+  const curobo_runtime::TensorF32 & poses, const std::vector<float> & hold_q,
+  const std::vector<float> & seed_q)
+{
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->require_initialized("mpc_solve_goal_poses");
+  const int tools = impl_->num_tools();
+  if (tools <= 0) {
+    fail("mpc_solve_goal_poses", "artifact has no tool frames");
+  }
+  const int dof_count = impl_->dof();
+  if (poses.shape.size() != 2 || poses.shape[1] != 7) {
+    fail("mpc_solve_goal_poses", "goal poses must have shape [N,7]");
+  }
+  const int rows = static_cast<int>(poses.shape[0]);
+  if (rows <= 0) {
+    fail("mpc_solve_goal_poses", "empty goal pose list");
+  }
+  if (!tool_frames.empty() && static_cast<int>(tool_frames.size()) != rows) {
+    fail("mpc_solve_goal_poses",
+      "tool_frames and goal poses must be parallel (got " +
+      std::to_string(tool_frames.size()) + " frame(s), " + std::to_string(rows) +
+      " pose(s))");
+  }
+  if (tool_frames.empty() && rows != 1) {
+    fail("mpc_solve_goal_poses",
+      "a " + std::to_string(rows) + "-pose goal needs one tool frame per pose");
+  }
+  const std::vector<float> & phase_q =
+    hold_q.empty() ? impl_->mpc_start : hold_q;
+  if (static_cast<int>(phase_q.size()) != dof_count) {
+    fail("mpc_solve_goal_poses", "hold state size does not match the artifact dof");
+  }
+  std::vector<std::array<float, 7>> poses_by_tool =
+    impl_->tool_poses_for_q(phase_q);
+  std::vector<bool> assigned(static_cast<std::size_t>(tools), false);
+  for (int row = 0; row < rows; ++row) {
+    int tool_index = 0;
+    if (!tool_frames.empty() && !tool_frames[static_cast<std::size_t>(row)].empty()) {
+      const auto it = std::find(
+        impl_->tool_frames.begin(), impl_->tool_frames.end(),
+        tool_frames[static_cast<std::size_t>(row)]);
+      if (it == impl_->tool_frames.end()) {
+        fail("mpc_solve_goal_poses",
+          "unknown tool frame '" + tool_frames[static_cast<std::size_t>(row)] + "'");
+      }
+      tool_index = static_cast<int>(std::distance(impl_->tool_frames.begin(), it));
+    }
+    if (assigned[static_cast<std::size_t>(tool_index)]) {
+      fail("mpc_solve_goal_poses", "duplicate tool frame in the goal");
+    }
+    assigned[static_cast<std::size_t>(tool_index)] = true;
+    for (std::size_t k = 0; k < 7; ++k) {
+      poses_by_tool[static_cast<std::size_t>(tool_index)][k] =
+        poses.data[static_cast<std::size_t>(row) * 7 + k];
+    }
+  }
+  // solve_ik takes one fully-populated goal per artifact tool frame.
+  TensorF32 full;
+  full.shape = {1, tools, 7};
+  full.data.resize(static_cast<std::size_t>(tools) * 7);
+  for (int tool = 0; tool < tools; ++tool) {
+    for (std::size_t k = 0; k < 7; ++k) {
+      full.data[static_cast<std::size_t>(tool) * 7 + k] =
+        poses_by_tool[static_cast<std::size_t>(tool)][k];
+    }
+  }
+  return impl_->solve_ik(
+    full, {}, seed_q.empty() ? nullptr : &seed_q, 1, "mpc_solve_goal_poses");
 }
 
 void CppBridge::mpc_load_scene(

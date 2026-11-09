@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include <geometry_msgs/msg/pose.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <trajectory_msgs/msg/joint_trajectory.hpp>
@@ -52,6 +53,34 @@ void spin(rclcpp::Node::SharedPtr node, FutureT & future)
   rclcpp::spin_until_future_complete(node, future, 10s);
 }
 }  // namespace
+
+// The action -> ReactiveGoal conversion must preserve BOTH bimanual target
+// tools. Dropping tool_frames/tool_poses made an MPC goal look empty (or
+// single-arm) and the bimanual robot never received the second arm's target.
+TEST_F(ActionTest, MultiToolGoalKeepsEveryToolPose)
+{
+  SendTrajectory::Goal goal;
+  auto & goalset = goal.goal.goalsets.emplace_back();
+  goalset.tool_frames = {"openarm_left_grasp_frame", "openarm_right_grasp_frame"};
+  geometry_msgs::msg::Pose left;
+  left.position.x = 0.1;
+  left.orientation.w = 1.0;
+  geometry_msgs::msg::Pose right;
+  right.position.x = 0.4;
+  right.orientation.w = 1.0;
+  goalset.tool_poses = {left, right};
+  // The RViz client also writes a legacy fallback pose into `poses`; it must
+  // not override the explicit multi-tool targets.
+  goalset.poses = {left};
+
+  const auto reactive = curobo_core::make_reactive_goal(goal);
+  ASSERT_EQ(reactive.tool_frames.size(), 2u);
+  ASSERT_EQ(reactive.tool_poses.size(), 2u);
+  EXPECT_EQ(reactive.tool_frames[0], "openarm_left_grasp_frame");
+  EXPECT_EQ(reactive.tool_frames[1], "openarm_right_grasp_frame");
+  EXPECT_DOUBLE_EQ(reactive.tool_poses[0][0], 0.1);
+  EXPECT_DOUBLE_EQ(reactive.tool_poses[1][0], 0.4);
+}
 
 TEST_F(ActionTest, OpenLoopGoalWithoutTrajectoryIsRefusedWithTheSourceWording)
 {
