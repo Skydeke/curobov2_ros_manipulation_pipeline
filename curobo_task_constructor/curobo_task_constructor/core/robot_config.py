@@ -125,6 +125,27 @@ def canonical_joint_order(robot_config_path: str) -> Optional[list]:
         _resolve_config_path(desc.get("curobo_config")))
     if order:
         return order
+    # Fallback order from the named configs. Exclude every joint owned by a
+    # gripper controller: a descriptor may legitimately carry gripper named
+    # poses (``open``/``close``) for the UI and for direct MoveTo goals, but
+    # those jaws are not planning DOFs and must never enter the cspace order.
+    gripper_joints = set()
+    gripper_sections = [desc.get("gripper_controllers") or {}]
+    legacy = desc.get("gripper_controller")
+    if isinstance(legacy, dict):
+        gripper_sections.append({"default": legacy})
+    for section in gripper_sections:
+        if not isinstance(section, dict):
+            continue
+        for cfg in section.values():
+            if not isinstance(cfg, dict):
+                continue
+            for name in (cfg.get("joints") or []):
+                gripper_joints.add(str(name))
+            if cfg.get("command_joint"):
+                gripper_joints.add(str(cfg["command_joint"]))
+            if cfg.get("joint"):
+                gripper_joints.add(str(cfg["joint"]))
     order = []
     seen = set()
     for value in (desc.get("named_joint_configs") or {}).values():
@@ -132,9 +153,10 @@ def canonical_joint_order(robot_config_path: str) -> Optional[list]:
         # names — the adapter cannot order those, matching get_named_joint_configs)
         if isinstance(value, dict):
             for name in value:
-                if name not in seen:
-                    seen.add(name)
-                    order.append(name)
+                if name in gripper_joints or name in seen:
+                    continue
+                seen.add(name)
+                order.append(name)
     return order or None
 
 

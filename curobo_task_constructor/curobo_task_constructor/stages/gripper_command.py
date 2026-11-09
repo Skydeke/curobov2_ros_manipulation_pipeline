@@ -62,6 +62,10 @@ class GripperCommand(PropagatingEitherWay):
         # FollowJointTrajectory command).
         joints = gripper_joint_names(
             self.robot, cmd.get("gripper", ""), cmd.get("joint", ""))
+        if joints:
+            # The display consumer cannot resolve a descriptor, so carry every
+            # jaw the controller moves (TIAGo's pal-gripper has two fingers).
+            cmd["joints"] = {name: cmd["position"] for name in joints}
         end_joint_state = merged_joint_state(
             self.robot, base_joint_state, measured,
             overrides={name: cmd["position"] for name in joints})

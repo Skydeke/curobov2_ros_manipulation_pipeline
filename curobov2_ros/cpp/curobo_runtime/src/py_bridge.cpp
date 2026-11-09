@@ -837,6 +837,24 @@ void PyBridge::robot_model_update_lock_joints(
   }
 }
 
+std::vector<float> PyBridge::robot_model_fixed_transforms(RobotHandle handle)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    py::object result =
+      bridge_module().attr("robot_model_fixed_transforms")(handle);
+    const std::string raw = result.cast<std::string>();
+    if (raw.size() % sizeof(float) != 0) {
+      throw BridgeError("config", "fixed_transforms byte length is not float32");
+    }
+    std::vector<float> out(raw.size() / sizeof(float));
+    std::memcpy(out.data(), raw.data(), raw.size());
+    return out;
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("config", e.what());
+  }
+}
+
 // PORT: obstacle_manager._build_mapper
 void PyBridge::configure_mapper(RobotHandle handle, const std::string & cfg_json)
 {

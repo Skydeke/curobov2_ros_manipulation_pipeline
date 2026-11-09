@@ -254,6 +254,55 @@ def test_gripper_stage_after_arm_motion_uses_the_previous_stage_state():
 
 
 # ---------------------------------------------------------------------------
+# the display carries every commanded jaw into the following motion
+# ---------------------------------------------------------------------------
+
+
+def test_solution_message_folds_all_gripper_joints_into_motion_points():
+    """TIAGo's pal-gripper has two fingers, but the command names only one.
+
+    The trajectory display must show both jaws open during the pre-grasp and
+    closed after the close, not leave the second finger at the start value.
+    """
+    from curobo_task_constructor.msg_convert_to import _carry_gripper_state
+
+    open_cmd = {
+        "joint": LEFT,
+        "position": 0.045,
+        "joints": {LEFT: 0.045, RIGHT: 0.045},
+    }
+    close_cmd = {
+        "joint": LEFT,
+        "position": 0.0,
+        "joints": {LEFT: 0.0, RIGHT: 0.0},
+    }
+    segments = [
+        {"replay_goal": {"gripper_command": open_cmd},
+         "gripper_state": {"name": [LEFT, RIGHT], "position": [0.045, 0.045]},
+         "trajectory": {"joint_names": [], "points": [], "velocities": []}},
+        {"replay_goal": {"start_pose": {}},
+         "trajectory": {"joint_names": ["arm_1_joint"],
+                        "points": [[0.1], [0.2]], "velocities": []}},
+        {"replay_goal": {"gripper_command": close_cmd},
+         "gripper_state": {"name": [LEFT, RIGHT], "position": [0.0, 0.0]},
+         "trajectory": {"joint_names": [], "points": [], "velocities": []}},
+        {"replay_goal": {"start_pose": {}},
+         "trajectory": {"joint_names": ["arm_1_joint"],
+                        "points": [[0.2], [0.3]], "velocities": []}},
+    ]
+    out = _carry_gripper_state(
+        segments, ["arm_1_joint", LEFT, RIGHT], [0.0, 0.0, 0.0])
+    pre = out[1]["trajectory"]
+    retreat = out[3]["trajectory"]
+    assert pre["joint_names"][-2:] == [LEFT, RIGHT]
+    assert [p[-2:] for p in pre["points"]] == [[0.045, 0.045]] * 2
+    assert [p[-2:] for p in retreat["points"]] == [[0.0, 0.0]] * 2
+    # The command segment itself updates the display at that chain position.
+    assert out[0]["trajectory"]["joint_names"] == [LEFT, RIGHT]
+    assert out[0]["trajectory"]["points"] == [[0.045, 0.045]]
+
+
+# ---------------------------------------------------------------------------
 # a bare gripper command fills missing joints from the measured state
 # ---------------------------------------------------------------------------
 

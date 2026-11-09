@@ -144,6 +144,8 @@ class MoveTo(PropagatingEitherWay):
         base_joint_state = merged_joint_state(self.robot, incoming, measured)
         joints = gripper_joint_names(
             self.robot, cmd.get("gripper", ""), cmd.get("joint", ""))
+        if joints:
+            cmd["joints"] = {name: cmd["position"] for name in joints}
         end = state.clone(joint_state=merged_joint_state(
             self.robot, base_joint_state, measured,
             overrides={name: cmd["position"] for name in joints}))

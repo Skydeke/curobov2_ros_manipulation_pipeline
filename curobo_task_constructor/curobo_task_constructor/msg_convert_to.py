@@ -455,6 +455,90 @@ def solution_prefix_dict(d: dict, solution_id) -> dict:
     return out
 
 
+def _carry_gripper_state(segments, start_names, start_positions):
+    """Fold commanded jaw values into the display trajectories.
+
+    The planner cspace is arm-only, so a motion sub-trajectory does not name the
+    gripper fingers. The cuRobo RViz trajectory display therefore keeps
+    whatever jaw value it saw last, which is wrong as soon as a task opens or
+    closes the gripper mid-chain. ``_leaf_gripper_dict`` now carries the
+    post-command ``gripper_state``; use it to append the jaw columns to every
+    arm trajectory (constant for that leg) and to give each command segment a
+    one-point trajectory that updates the display when it happens.
+
+    This is display-only: execution uses ``replay_goal``/``trajectory`` and
+    skips a segment carrying ``gripper_command`` before it reads the trajectory.
+    """
+    segments = [dict(seg) if isinstance(seg, dict) else seg
+                for seg in (segments or [])]
+    # Joints that any gripper command in this solution moves. Read them from
+    # the command itself, never from the full end state (that also names every
+    # arm joint, which must not be folded into the display's jaw columns).
+    gripper_joints = set()
+    for seg in segments:
+        if not isinstance(seg, dict):
+            continue
+        replay_goal = seg.get("replay_goal", None) or {}
+        cmd = replay_goal.get("gripper_command", None) if isinstance(
+            replay_goal, dict) else None
+        if not isinstance(cmd, dict):
+            continue
+        joints = cmd.get("joints", None)
+        if isinstance(joints, dict):
+            gripper_joints.update(str(n) for n in joints)
+        elif cmd.get("joint"):
+            gripper_joints.add(str(cmd["joint"]))
+    if not gripper_joints:
+        return segments
+
+    carry = {}
+    for name, position in zip(start_names or [], start_positions or []):
+        if str(name) in gripper_joints:
+            carry[str(name)] = float(position)
+
+    out = []
+    for seg in segments:
+        if not isinstance(seg, dict):
+            out.append(seg)
+            continue
+        state = seg.get("gripper_state", None) or {}
+        for name, position in zip(state.get("name", None) or [],
+                                  state.get("position", None) or []):
+            name = str(name)
+            if name in gripper_joints:
+                carry[name] = float(position)
+        traj = dict(seg.get("trajectory", None) or {})
+        names = [str(n) for n in (traj.get("joint_names", None) or [])]
+        points = [list(pt) if pt is not None else [] for pt in
+                  (traj.get("points", None) or [])]
+        is_command = bool((seg.get("replay_goal", None) or {}).get(
+            "gripper_command", None)) if isinstance(
+                seg.get("replay_goal", None), dict) else False
+        if is_command:
+            # One-point segment at the post-command jaw state. The display
+            # consumes the last point and uses it for the following motion.
+            names = sorted(carry)
+            points = [[carry[name] for name in names]] if names else []
+            traj["velocities"] = []
+        elif points and names:
+            extra = [name for name in carry if name not in names]
+            if extra:
+                names.extend(extra)
+                for point in points:
+                    point.extend(carry[name] for name in extra)
+                vels = traj.get("velocities", None) or []
+                # Keep the optional velocity columns aligned when present.
+                for i, vel in enumerate(vels):
+                    if isinstance(vel, list) and len(vel) == len(names) - len(extra):
+                        vels[i] = list(vel) + [0.0] * len(extra)
+                traj["velocities"] = vels
+        traj["joint_names"] = names
+        traj["points"] = points
+        seg["trajectory"] = traj
+        out.append(seg)
+    return out
+
+
 def solution_to_msg(d: dict, msg_cls=None):
     """solution_to_dict output -> Solution message (MTC ``Solution.toMsg``)."""
     if msg_cls is None:
@@ -492,7 +576,8 @@ def solution_to_msg(d: dict, msg_cls=None):
             # uint32[]: a never-emitted child carries solution_id -1.
             entry.sub_solution_id.append(_uint32(child_id))
         msg.sub_solution.append(entry)
-    for seg in (d.get("sub_trajectories", None) or []):
+    for seg in _carry_gripper_state(
+            d.get("sub_trajectories", None), start_names, start_positions):
         msg.sub_trajectory.append(sub_trajectory_to_msg(seg))
     return msg
 

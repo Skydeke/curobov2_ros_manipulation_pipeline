@@ -167,6 +167,13 @@ class _ExecutorSerializationMixin:
             "scene_diff": {"before": _scene_ops_to_dict([]),
                            "after": _scene_ops_to_dict([])},
             "replay_goal": {"gripper_command": cmd},
+            # Display-only: the post-command state carries every jaw the
+            # controller moves (TIAGo's two fingers, OpenArm's left/right).
+            # The solution message folds this into the following motion
+            # trajectories so RViz shows the jaws in the state the task will
+            # actually be in at that point. Execution ignores this key.
+            "gripper_state": _joint_state_to_dict(
+                getattr(getattr(leaf, "end", None), "joint_state", None)),
         }
 
     def _leaf_trajectory_dict(self, leaf: Solution) -> dict:

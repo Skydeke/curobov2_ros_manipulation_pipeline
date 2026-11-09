@@ -82,6 +82,7 @@ public:
   void robot_model_rebuild_locks(RobotHandle handle, const std::string & lock_json) override;
   void robot_model_update_lock_joints(
     RobotHandle handle, const std::string & lock_json) override;
+  std::vector<float> robot_model_fixed_transforms(RobotHandle handle);
   void configure_mapper(RobotHandle handle, const std::string & cfg_json) override;
   void warmup_mapper(RobotHandle handle) override;
   bool esdf_refresh(RobotHandle handle) override;

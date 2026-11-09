@@ -47,7 +47,7 @@ _configure_torch_compile()
 
 from .runtime import _GLOBAL_FLAGS, _LANES, _NEXT_HANDLE, _REGISTRY, bind_lane, init, lane_names, registered_handles, set_global_flags, shutdown
 from .robot_model import _detect_asset_root, _resolve_uri, _robot_kinematics_block, _translate_xrdf, robot_model_build
-from .robot_introspection import _resolve_descriptor, collision_spheres_with_attached, robot_description, robot_model_rebuild_locks, robot_model_update_lock_joints, robot_spheres, tool_frames
+from .robot_introspection import _resolve_descriptor, collision_spheres_with_attached, robot_description, robot_model_fixed_transforms, robot_model_rebuild_locks, robot_model_update_lock_joints, robot_spheres, tool_frames
 from .kinematics import fk, joint_limits, link_poses
 from .ik import _build_ik_solver, _ik_solver, ik, ik_config, ik_multi
 from .collision import _link_of_factory, _rot_from_quat_wxyz, _sphere_snapshot, collision_attribution, collision_distance, validate
@@ -168,6 +168,7 @@ __all__ = [
     'retarget_step',
     'robot_description',
     'robot_model_build',
+    'robot_model_fixed_transforms',
     'robot_model_rebuild_locks',
     'robot_model_update_lock_joints',
     'robot_segment',

@@ -173,6 +173,11 @@ struct GripperCommandStep
 {
   std::string joint;
   double position = 0.0;
+  // Every joint the command drives (TIAGo's pal-gripper has two fingers on one
+  // FollowJointTrajectory command). ``joints``/``positions`` are parallel; the
+  // single ``joint``/``position`` pair is the legacy fallback.
+  std::vector<std::string> joints;
+  std::vector<double> positions;
   bool valid = false;
 };
 
@@ -193,15 +198,34 @@ GripperCommandStep parseGripperCommand(const std::string& text)
     const YAML::Node cmd = root["gripper_command"];
     if (!cmd || !cmd.IsMap())
       return out;
-    const YAML::Node joint = cmd["joint"];
-    if (!joint || !joint.IsScalar())
-      return out;
-    out.joint = joint.as<std::string>();
-    if (out.joint.empty())
-      return out;
-    const YAML::Node position = cmd["position"];
-    if (position && position.IsScalar())
-      out.position = position.as<double>();
+    const YAML::Node joints = cmd["joints"];
+    if (joints && joints.IsMap())
+    {
+      for (auto it = joints.begin(); it != joints.end(); ++it)
+      {
+        const std::string name = it->first.as<std::string>();
+        if (name.empty())
+          continue;
+        out.joints.push_back(name);
+        out.positions.push_back(it->second.as<double>());
+      }
+    }
+    if (out.joints.empty())
+    {
+      const YAML::Node joint = cmd["joint"];
+      if (!joint || !joint.IsScalar())
+        return out;
+      out.joint = joint.as<std::string>();
+      if (out.joint.empty())
+        return out;
+      const YAML::Node position = cmd["position"];
+      if (position && position.IsScalar())
+        out.position = position.as<double>();
+      out.joints.push_back(out.joint);
+      out.positions.push_back(out.position);
+    }
+    out.joint = out.joints.front();
+    out.position = out.positions.front();
     out.valid = true;
   }
   catch (const std::exception&)
@@ -1799,10 +1823,13 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(
   std::vector<std::string> commanded_joints;
   for (const auto& sub : sol->sub_trajectory) {
     const GripperCommandStep cmd = parseGripperCommand(sub.replay_goal_yaml);
-    if (cmd.valid &&
-        std::find(commanded_joints.begin(), commanded_joints.end(), cmd.joint) ==
-            commanded_joints.end()) {
-      commanded_joints.push_back(cmd.joint);
+    if (!cmd.valid)
+      continue;
+    for (const auto& joint : cmd.joints) {
+      if (std::find(commanded_joints.begin(), commanded_joints.end(), joint) ==
+          commanded_joints.end()) {
+        commanded_joints.push_back(joint);
+      }
     }
   }
 
@@ -1862,8 +1889,8 @@ std::vector<sensor_msgs::msg::JointState> TaskView::waypointsOf(
       OwnedWaypoint owned;
       owned.solution_id = sub.info.id;
       owned.command = true;
-      owned.wp.name = {cmd.joint};
-      owned.wp.position = {cmd.position};
+      owned.wp.name = cmd.joints;
+      owned.wp.position = cmd.positions;
       appendUnique(std::move(owned));
     }
   }

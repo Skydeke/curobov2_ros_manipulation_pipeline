@@ -97,6 +97,27 @@ def robot_model_update_lock_joints(handle: int, lock_json: str) -> None:
             continue
         updated.add(id(config))
         target.update_lock_joints(values)
+def robot_model_fixed_transforms(handle: int) -> bytes:
+    """Return the current robot fixed-transform tensor as raw float32 bytes.
+
+    The native C++ planner owns device copies of the same per-link fixed
+    transforms. ``robot_model_update_lock_joints`` updates the Python model;
+    this getter lets the C++ bridge upload the resulting tensor into every
+    live native robot stage so ``lock_joints: {joint: null}`` follows the
+    current/configured joint state there too.
+    """
+    import numpy as np
+
+    entry = _REGISTRY[handle]
+    planner = entry.get("motion_planner")
+    kin = getattr(planner, "kinematics", None) if planner is not None else None
+    if kin is None:
+        kin = entry["kin"]
+    tensor = kin.config.kinematics_config.fixed_transforms
+    array = tensor.detach().cpu().contiguous().numpy().astype(np.float32)
+    return array.tobytes()
+
+
 def tool_frames(handle: int):
     """The kinematics model's tool frames (kin.tool_frames)."""
     return list(_REGISTRY[handle]["kin"].tool_frames)

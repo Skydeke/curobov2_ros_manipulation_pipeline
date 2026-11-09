@@ -2955,6 +2955,16 @@ void CppBridge::robot_model_update_lock_joints(
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_python("robot_model_update_lock_joints");
   impl_->python->robot_model_update_lock_joints(impl_->python_handle, lock_json);
+  // Native stages bake unpinned lock joints into their per-link transforms.
+  // The Python model has just recomputed the same tensor; upload it into every
+  // live native stage (IK, RRT, TrajOpt, rollout) so `lock_joints: {j: null}`
+  // tracks the current/configured state in the C++ backend too.
+  const std::vector<float> transforms =
+    impl_->python->robot_model_fixed_transforms(impl_->python_handle);
+  if (!transforms.empty()) {
+    curobo_robot_runtime::update_artifact_fixed_transforms(
+      impl_->artifact_dir, impl_->device_ordinal, transforms);
+  }
   // See robot_model_rebuild_locks: the native model is frozen at export. Do not
   // invalidate the native scene solely for a lock update; that would force
   // every OpenArm finger update onto the Python planner.
