@@ -28,6 +28,12 @@ double shortest_angle(double value, double target)
   return std::remainder(value - target, kTwoPi);
 }
 
+double duration_seconds(const builtin_interfaces::msg::Duration & duration)
+{
+  return static_cast<double>(duration.sec) +
+         static_cast<double>(duration.nanosec) * 1e-9;
+}
+
 //: Map the executed joint names onto the strategy's feedback vector. Empty
 //: when the feedback names do not cover the executed joints; callers then
 //: skip the check rather than guessing an order.
@@ -143,7 +149,66 @@ void wait_for_robot_to_stop(
   }
 }
 
+double median(std::vector<double> values)
+{
+  if (values.empty()) {
+    return std::nan("");
+  }
+  const std::size_t mid = values.size() / 2;
+  std::nth_element(values.begin(), values.begin() + mid, values.end());
+  double result = values[mid];
+  if (values.size() % 2 == 0) {
+    std::nth_element(values.begin(), values.begin() + mid - 1, values.end());
+    result = 0.5 * (result + values[mid - 1]);
+  }
+  return result;
+}
+
 }  // namespace
+
+// Least-squares estimate of the uniform interval dt from
+//   p[i] - p[i-1] ~ 0.5 * (v[i] + v[i-1]) * dt
+// (trapezoidal integration, exact for constant acceleration). One candidate
+// per step and joint, then the median so a few near-zero-velocity samples or a
+// curvature change cannot bias the result.
+std::optional<double> estimate_replay_dt(
+  const std::vector<std::vector<double>> & positions,
+  const std::vector<std::vector<double>> & velocities)
+{
+  if (positions.size() < 2 || velocities.size() != positions.size()) {
+    return std::nullopt;
+  }
+  std::vector<double> candidates;
+  candidates.reserve(positions.size() - 1);
+  for (std::size_t i = 1; i < positions.size(); ++i) {
+    if (positions[i].size() != positions[i - 1].size() ||
+      velocities[i].size() != velocities[i - 1].size())
+    {
+      continue;
+    }
+    double numerator = 0.0;
+    double denominator = 0.0;
+    const std::size_t n = std::min(positions[i].size(), velocities[i].size());
+    for (std::size_t j = 0; j < n; ++j) {
+      const double v_average =
+        0.5 * (velocities[i][j] + velocities[i - 1][j]);
+      // Ignore the standstill samples at the ends: their dp is float noise.
+      if (std::abs(v_average) < 1.0e-3) {
+        continue;
+      }
+      numerator += (positions[i][j] - positions[i - 1][j]) * v_average;
+      denominator += v_average * v_average;
+    }
+    if (denominator > 1.0e-9) {
+      candidates.push_back(numerator / denominator);
+    }
+  }
+  const double estimate = median(std::move(candidates));
+  if (!std::isfinite(estimate) || estimate <= 1.0e-5 || estimate > 10.0) {
+    return std::nullopt;
+  }
+  return estimate;
+}
 
 TrajectoryActionServer::TrajectoryActionServer(
   rclcpp::Node * node, PlannerServices * planners, RobotContext * robot_context,
@@ -394,6 +459,63 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     // PORT: single_planner._stage_trajectory - project the replayed full-joint
     // plan onto the active (controller) joints before streaming it.
     project_active_joints(names, positions, velocities);
+    // The plan's own sample interval. A native cuRobo plan is sampled on the
+    // TIME-OPTIMIZED grid (~13 ms for a short joint move), not at the node's
+    // 25 ms interpolation_dt. Its velocity feed-forward is consistent with the
+    // former; re-stamping it at 25 ms asks the controller for ~2x the planned
+    // speed and it overshoots the endpoint (most visible on a continuous
+    // joint). Honour the replay's own timestamps when the client supplied
+    // them (the RViz/Joints tab builds them from result.dt), otherwise
+    // recover the interval from positions + velocities (the task-constructor
+    // replay path carries no stamps).
+    double replay_dt = 0.0;
+    if (n >= 2) {
+      bool have_times = true;
+      double previous = -1.0;
+      double first = 0.0;
+      double last = 0.0;
+      for (std::size_t i = 0; i < msg.points.size(); ++i) {
+        const double t = duration_seconds(msg.points[i].time_from_start);
+        if (i == 0) {
+          first = t;
+        }
+        if (t < previous - 1e-9) {
+          have_times = false;
+          break;
+        }
+        previous = t;
+        last = t;
+      }
+      if (have_times && last > first) {
+        const double average = (last - first) / static_cast<double>(n - 1);
+        // Only a uniform grid can be represented by a single interval.
+        bool uniform = average > 0.0;
+        previous = first;
+        for (std::size_t i = 1; uniform && i < msg.points.size(); ++i) {
+          const double t = duration_seconds(msg.points[i].time_from_start);
+          uniform = std::abs((t - previous) - average) <= 1e-6 + 1e-3 * average;
+          previous = t;
+        }
+        if (uniform) {
+          replay_dt = average;
+        }
+      }
+    }
+    if (!(replay_dt > 0.0)) {
+      const auto estimated = estimate_replay_dt(positions, velocities);
+      if (estimated.has_value()) {
+        replay_dt = *estimated;
+        RCLCPP_INFO(
+          node_->get_logger(),
+          "Replay carries no timestamps; inferred sample interval %.6f s from "
+          "its velocity feed-forward", replay_dt);
+      }
+    }
+    if (replay_dt > 0.0) {
+      RCLCPP_INFO(
+        node_->get_logger(), "Replaying trajectory at its plan sample interval %.6f s",
+        replay_dt);
+    }
     // MoveIt's pre-execution validate(): the segment must start where the
     // robot actually is. This is the check that refuses a chained segment
     // when the previous one has not settled, instead of letting the
@@ -422,9 +544,9 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     // PORT: single_planner "Trajectory sent to robot context for visualization".
     RCLCPP_INFO(node_->get_logger(), "Trajectory sent to robot context for visualization");
     robot_context_->set_ghost_command(
-      ghost_names, ghost_velocities, {}, ghost_positions);
+      ghost_names, ghost_velocities, {}, ghost_positions, replay_dt);
     const int epoch = robot_context_->set_command(
-      names, velocities, {}, positions, /*feed_ghost=*/false);
+      names, velocities, {}, positions, /*feed_ghost=*/false, replay_dt);
     if (!robot_context_->send_trajectrory(epoch)) {
       result->result.success = false;
       result->result.message = "Execution failed";

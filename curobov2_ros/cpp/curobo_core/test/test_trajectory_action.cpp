@@ -54,6 +54,33 @@ void spin(rclcpp::Node::SharedPtr node, FutureT & future)
 }
 }  // namespace
 
+// The task-constructor replay path carries no time_from_start stamps. The
+// receiver must recover the plan's own interval from the internally consistent
+// positions + velocity feed-forward instead of assuming interpolation_dt: a
+// 13 ms native plan stamped at 25 ms asks for ~2x the planned speed.
+TEST_F(ActionTest, ReplaySampleIntervalIsRecoveredFromVelocityFeedforward)
+{
+  const double expected_dt = 0.013;
+  std::vector<std::vector<double>> positions;
+  std::vector<std::vector<double>> velocities;
+  // Two joints with constant acceleration over a uniform 13 ms grid.
+  const double accel_a = 0.8;
+  const double accel_b = -0.35;
+  for (int i = 0; i < 40; ++i) {
+    const double t = expected_dt * i;
+    positions.push_back({0.5 * accel_a * t * t, 0.5 * accel_b * t * t});
+    velocities.push_back({accel_a * t, accel_b * t});
+  }
+  const auto dt = curobo_core::estimate_replay_dt(positions, velocities);
+  ASSERT_TRUE(dt.has_value());
+  EXPECT_NEAR(*dt, expected_dt, 1e-9);
+
+  // No usable velocity -> caller keeps its configured interpolation_dt.
+  positions = {{0.0}, {0.1}};
+  velocities = {{0.0}, {0.0}};
+  EXPECT_FALSE(curobo_core::estimate_replay_dt(positions, velocities).has_value());
+}
+
 // The action -> ReactiveGoal conversion must preserve BOTH bimanual target
 // tools. Dropping tool_frames/tool_poses made an MPC goal look empty (or
 // single-arm) and the bimanual robot never received the second arm's target.

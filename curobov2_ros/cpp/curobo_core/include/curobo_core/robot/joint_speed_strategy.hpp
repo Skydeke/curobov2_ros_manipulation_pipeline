@@ -62,6 +62,9 @@ private:
   double max_accel_rad_s2_ = 0.0;
   double terminal_taper_dt_ = 0.6;
   double accel_clamp_dt_ = 0.0;
+  //: True when the descriptor pinned accel_clamp_dt. Otherwise the clamp uses
+  //: the plan's own sample interval (a replay can be much faster than dt_).
+  bool accel_clamp_dt_configured_ = false;
 
   std::vector<double> joint_pose_;
   std::vector<double> joint_velocity_;

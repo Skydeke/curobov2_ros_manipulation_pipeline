@@ -32,6 +32,7 @@ JointSpeedStrategy::JointSpeedStrategy(
     };
   max_accel_rad_s2_ = num("max_joint_accel_dps", 45.0) * kPi / 180.0;
   terminal_taper_dt_ = num("terminal_taper_dt", 0.6);
+  accel_clamp_dt_configured_ = params_.find("accel_clamp_dt") != params_.end();
   accel_clamp_dt_ = num("accel_clamp_dt", dt_);
 
   auto state = params_.find("state_topic");
@@ -60,11 +61,15 @@ std::vector<std::vector<double>> JointSpeedStrategy::clamp_velocities(
   const std::vector<std::vector<double>> & vel_list, double speed_scale)
 {
   // The path positions are unchanged by re-timing, so the planned velocity
-  // feed-forward must be scaled by dt_ / dilated_dt(). The clamp then works in
-  // that same output domain: one point now spans dilated_dt(), so the allowed
-  // delta is max_accel * dilated_dt() = max_accel * accel_clamp_dt_ / scale.
+  // feed-forward must be scaled by plan_dt / dilated_dt. The clamp then works
+  // in that same output domain: one point now spans dilated_dt(), so the
+  // allowed delta is max_accel * dilated_dt = max_accel * clamp_dt / scale.
+  // The clamp window is the plan's own sample interval unless the descriptor
+  // pinned accel_clamp_dt: a replay sampled at 13 ms must not be allowed a
+  // 25 ms worth of velocity change.
   const double scale = speed_scale > 0.0 ? speed_scale : 1.0;
-  const double max_dv = max_accel_rad_s2_ * accel_clamp_dt_ / scale;
+  const double clamp_dt = accel_clamp_dt_configured_ ? accel_clamp_dt_ : plan_dt();
+  const double max_dv = max_accel_rad_s2_ * clamp_dt / scale;
   std::vector<std::vector<double>> clamped;
   std::vector<double> prev;
   {
@@ -322,7 +327,8 @@ void JointSpeedStrategy::debug_csv_write(
     return;
   }
   const double scale = speed_scale > 0.0 ? speed_scale : 1.0;
-  const double clamp_dt = accel_clamp_dt_ / scale;
+  const double clamp_dt =
+    (accel_clamp_dt_configured_ ? accel_clamp_dt_ : plan_dt()) / scale;
   if (debug_csv_ == nullptr) {
     debug_csv_init();
   }

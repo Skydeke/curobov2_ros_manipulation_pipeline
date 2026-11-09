@@ -75,7 +75,9 @@ public:
   // RobotContext so GhostStrategy publishes it on <node>/trajectory for
   // preview. This is what makes the Joints tab's compute-only "Plan" visible
   // in RViz; it never executes the trajectory.
-  void stage_preview(const std::vector<sensor_msgs::msg::JointState> & trajectory);
+  void stage_preview(
+    const std::vector<sensor_msgs::msg::JointState> & trajectory,
+    double plan_dt = 0.0);
 
   void set_robot_context(RobotContext * robot_context) {robot_context_ = robot_context;}
 

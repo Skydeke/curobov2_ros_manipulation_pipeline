@@ -127,13 +127,21 @@ int JointCommandStrategy::set_command(
   const std::vector<std::string> & joint_names,
   const std::vector<std::vector<double>> & vel_command,
   const std::vector<std::vector<double>> & accel_command,
-  const std::vector<std::vector<double>> & position_command)
+  const std::vector<std::vector<double>> & position_command,
+  double plan_dt)
 {
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
   position_command_ = position_command;
   vel_command_ = vel_command;
   accel_command_ = accel_command;
   joint_names_ = joint_names;
+  // A non-positive value means "no override": the plan was sampled at the
+  // strategy's own interpolation_dt. Anything else (including a stale override
+  // from the previous replay) is replaced, so a plain joint command cannot
+  // inherit the previous plan's faster timing.
+  trajectory_dt_.store(
+    (std::isfinite(plan_dt) && plan_dt > 0.0) ? plan_dt : 0.0,
+    std::memory_order_relaxed);
   buffer_epoch_ += 1;
   return buffer_epoch_;
 }
@@ -161,13 +169,21 @@ double JointCommandStrategy::dilated_dt() const
     factor = node_->get_parameter("time_dilation_factor").as_double();
   }
   if (factor <= 0.0) {
-    return dt_;
+    return plan_dt();
   }
-  return dt_ / factor;
+  return plan_dt() / factor;
+}
+
+// Sample interval of the current command buffer: the replay's plan dt when the
+// caller supplied one, otherwise this strategy's configured interpolation_dt.
+double JointCommandStrategy::plan_dt() const
+{
+  const double override_dt = trajectory_dt_.load(std::memory_order_relaxed);
+  return override_dt > 0.0 ? override_dt : dt_;
 }
 
 // PORT: time-dilation feed-forward scale.
-// Re-timing stretches the stamped step to dt_ / factor but leaves the path
+// Re-timing stretches the stamped step to plan_dt / factor but leaves the path
 // positions untouched. Velocity is dp/dt, so it must shrink/grow by the same
 // factor; acceleration is d2p/dt2, so it scales by factor^2. Without this,
 // slowing a trajectory leaves the controller a velocity feed-forward that is
@@ -175,10 +191,10 @@ double JointCommandStrategy::dilated_dt() const
 double JointCommandStrategy::time_dilation_scale() const
 {
   const double stamp_dt = dilated_dt();
-  if (dt_ <= 0.0 || stamp_dt <= 0.0) {
+  if (plan_dt() <= 0.0 || stamp_dt <= 0.0) {
     return 1.0;
   }
-  return dt_ / stamp_dt;
+  return plan_dt() / stamp_dt;
 }
 
 // PORT: JointCommandStrategy.mark_execution_start

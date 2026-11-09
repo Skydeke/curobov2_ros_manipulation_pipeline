@@ -727,7 +727,7 @@ void apply_start_locks(
 // is rendered for preview (GhostStrategy) and can be streamed later; it does
 // not execute anything.
 void PlannerServices::stage_preview(
-  const std::vector<sensor_msgs::msg::JointState> & trajectory)
+  const std::vector<sensor_msgs::msg::JointState> & trajectory, double plan_dt)
 {
   if (robot_context_ == nullptr || trajectory.empty()) {
     return;
@@ -764,7 +764,7 @@ void PlannerServices::stage_preview(
   }
 
   try {
-    robot_context_->set_command(names, velocity, acceleration, position);
+    robot_context_->set_command(names, velocity, acceleration, position, true, plan_dt);
     RCLCPP_INFO(
       node_->get_logger(), "Trajectory sent to robot context for visualization");
   } catch (const std::exception & e) {
@@ -1143,7 +1143,24 @@ void PlannerServices::fill_result(
     }
     out.trajectory.push_back(js);
   }
-  out.dt = 0.025;
+  // The native planner samples the TIME-OPTIMIZED executable trajectory on a
+  // uniform grid whose interval is generally NOT interpolation_dt: a short
+  // joint move can be sampled at ~13 ms while a long one is ~28 ms. The
+  // velocity/acceleration feed-forward is consistent with THAT interval, so
+  // report it instead of the old hardcoded 25 ms. A consumer that re-stamps
+  // the points at 25 ms would otherwise ask for up to 2x the planned speed.
+  const double fallback_dt =
+    node_->has_parameter("interpolation_dt") ?
+    node_->get_parameter("interpolation_dt").as_double() : 0.025;
+  double sample_dt = fallback_dt;
+  if (rows > 1 && std::isfinite(outcome.motion_time_s) && outcome.motion_time_s > 0.0) {
+    const double candidate =
+      outcome.motion_time_s / static_cast<double>(rows - 1);
+    if (std::isfinite(candidate) && candidate > 1.0e-5 && candidate < 10.0) {
+      sample_dt = candidate;
+    }
+  }
+  out.dt = sample_dt;
   out.success = true;
   out.message = result.message;
   // PORT: unified_planner_node "Planning succeeded: {message} (trajectory: N
@@ -1180,7 +1197,7 @@ void PlannerServices::fill_result(
   // PORT: single_planner.plan() -> _stage_trajectory (preview buffer) and
   // _publish_plan_image (once per new plan).
   apply_start_locks(out.trajectory, resolved_goal.start_pose, joint_names_);
-  stage_preview(out.trajectory);
+  stage_preview(out.trajectory, out.dt);
   publish_plan_image(outcome);
   out.stats.solver_time_s = outcome.solver_time_s;
   out.stats.position_error_mm = outcome.position_error_mm;

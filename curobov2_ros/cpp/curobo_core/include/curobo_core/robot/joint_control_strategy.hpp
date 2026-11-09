@@ -39,11 +39,17 @@ public:
   virtual ~JointCommandStrategy() = default;
 
   // PORT: set_command - defensive copies, returns the new buffer epoch.
+  // ``plan_dt`` is the sample interval the plan's velocity/acceleration
+  // feed-forward was computed for. 0 (the default) keeps the strategy's own
+  // interpolation_dt. A native cuRobo plan is sampled at the TIME-OPTIMIZED
+  // interval, which is generally not interpolation_dt (short moves are much
+  // faster), so execution must stamp the replay with the plan's interval.
   int set_command(
     const std::vector<std::string> & joint_names,
     const std::vector<std::vector<double>> & vel_command,
     const std::vector<std::vector<double>> & accel_command,
-    const std::vector<std::vector<double>> & position_command);
+    const std::vector<std::vector<double>> & position_command,
+    double plan_dt = 0.0);
 
   // PORT: get_joint_name
   std::vector<std::string> get_joint_name();
@@ -53,8 +59,12 @@ public:
 
   // PORT: _dilated_dt (time_dilation_factor)
   double dilated_dt() const;
+  //: Sample interval the current command buffer was planned at: the replay's
+  //: plan_dt when supplied, otherwise the strategy's interpolation_dt.
+  double plan_dt() const;
   //: Feed-forward scale that keeps velocities/accelerations consistent with
-  //: the re-timed trajectory: dt_ / dilated_dt(). 1.0 when dilation is off.
+  //: the re-timed trajectory: plan_dt / dilated_dt(). Equals the dilation
+  //: factor (1.0 when dilation is off).
   double time_dilation_scale() const;
 
   // PORT: mark_execution_start / clear_execution_timer
@@ -122,6 +132,9 @@ protected:
   std::vector<std::vector<double>> position_command_;
   std::vector<std::vector<double>> vel_command_;
   std::vector<std::vector<double>> accel_command_;
+  //: Plan sample interval override (0 = use dt_). Atomic because send_as_action
+  //: reads the derived durations just after the buffer lock is released.
+  std::atomic<double> trajectory_dt_{0.0};
   std::size_t command_index_ = 0;
   double trajectory_progression_ = 0.0;
   RobotState robot_state_ = RobotState::kIdle;

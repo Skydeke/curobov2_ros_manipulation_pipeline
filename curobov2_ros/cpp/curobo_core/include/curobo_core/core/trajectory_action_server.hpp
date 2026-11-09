@@ -11,6 +11,7 @@
 #include <atomic>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -32,6 +33,17 @@ namespace curobo_core
 // those fields used to leave MPC with zero or one wrong target.
 ReactiveGoal make_reactive_goal(
   const curobov2_ros_interfaces::action::SendTrajectory::Goal & request);
+
+// Estimate the uniform sample interval of a replay that carries no
+// time_from_start (the task-constructor path). The plan's positions and
+// velocity feed-forward are internally consistent with their own interval, so
+// a least-squares fit of dp ~ v_avg * dt over the trajectory recovers it. This
+// is what stops the executor from stamping a 13 ms native plan at 25 ms, which
+// asks the controller for roughly twice the planned speed. Returns nullopt
+// when the trajectory has no usable velocity feed-forward.
+std::optional<double> estimate_replay_dt(
+  const std::vector<std::vector<double>> & positions,
+  const std::vector<std::vector<double>> & velocities);
 
 class TrajectoryActionServer
 {

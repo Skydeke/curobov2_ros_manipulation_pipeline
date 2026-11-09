@@ -162,8 +162,76 @@ TEST(JointSpeed, ClampsAccelerationAgainstMeasuredVelocity)
   EXPECT_DOUBLE_EQ(clamped[0][1], 0.0);
 }
 
+// A native plan is sampled at the TIME-OPTIMIZED interval, not at the node's
+// interpolation_dt. Execution must stamp it with the plan's own interval or a
+// short joint move is streamed at up to twice its planned speed.
+TEST(JointSpeed, ReplayPlanDtOverridesTheInterpolationDt)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner_plan_dt");
+  node->declare_parameter("time_dilation_factor", 1.0);
+  curobo_core::JointSpeedStrategy strategy(
+    node.get(), 0.025, joints(),
+    {{"action_topic", "/j"}, {"max_joint_accel_dps", "300"}, {"accel_clamp_dt", "0.025"}});
+
+  sensor_msgs::msg::JointState state;
+  state.name = joints();
+  state.position.assign(7, 0.0);
+  state.velocity.assign(7, 0.0);
+  strategy.callback_joint_pose(state);
+
+  // No override -> the strategy's interpolation_dt.
+  EXPECT_NEAR(strategy.plan_dt(), 0.025, 1e-12);
+  EXPECT_NEAR(strategy.dilated_dt(), 0.025, 1e-12);
+
+  // A plan sampled at 13 ms keeps 13 ms, and dilation is still off at 1.0.
+  const int epoch = strategy.set_command(
+    joints(), {{0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, {}, {}, 0.013);
+  EXPECT_GT(epoch, 0);
+  EXPECT_NEAR(strategy.plan_dt(), 0.013, 1e-12);
+  EXPECT_NEAR(strategy.dilated_dt(), 0.013, 1e-12);
+  EXPECT_NEAR(strategy.time_dilation_scale(), 1.0, 1e-12);
+
+  // Dilation composes with the plan interval: it stretches the stamp, not the
+  // plan, so the feed-forward scale is still exactly the factor (not applied
+  // twice and not based on the strategy's interpolation_dt).
+  node->set_parameter(rclcpp::Parameter("time_dilation_factor", 0.5));
+  EXPECT_NEAR(strategy.plan_dt(), 0.013, 1e-12);
+  EXPECT_NEAR(strategy.dilated_dt(), 0.026, 1e-12);
+  EXPECT_NEAR(strategy.time_dilation_scale(), 0.5, 1e-12);
+}
+
+// The acceleration clamp follows the plan's interval when the descriptor did
+// not pin accel_clamp_dt: a 13 ms replay must not be allowed 25 ms worth of
+// velocity change.
+TEST(JointSpeed, AccelerationClampUsesThePlanIntervalWhenNotPinned)
+{
+  if (!rclcpp::ok()) {
+    rclcpp::init(0, nullptr);
+  }
+  auto node = std::make_shared<rclcpp::Node>("unified_planner_plan_dt_clamp");
+  node->declare_parameter("time_dilation_factor", 1.0);
+  curobo_core::JointSpeedStrategy strategy(
+    node.get(), 0.025, joints(), {{"action_topic", "/j"}, {"max_joint_accel_dps", "45"}});
+
+  sensor_msgs::msg::JointState state;
+  state.name = joints();
+  state.position.assign(7, 0.0);
+  state.velocity.assign(7, 0.0);
+  strategy.callback_joint_pose(state);
+
+  strategy.set_command(joints(), {}, {}, {}, 0.013);
+  const auto clamped = strategy.clamp_velocities(
+    {{10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, 1.0);
+  const double max_dv = 45.0 * 3.14159265358979323846 / 180.0 * 0.013;
+  ASSERT_EQ(clamped.size(), 1u);
+  EXPECT_NEAR(clamped[0][0], max_dv, 1e-9);
+}
+
 // time_dilation_factor re-stamps the points but leaves the path positions
-// unchanged, so velocity feed-forward must scale by dt_ / dilated_dt().
+// unchanged, so velocity feed-forward must scale by plan_dt / dilated_dt.
 // Otherwise a slowed trajectory asks the controller for the nominal speed on
 // doubled timestamps and overshoots.
 TEST(JointSpeed, TimeDilationScalesVelocityFeedforward)
