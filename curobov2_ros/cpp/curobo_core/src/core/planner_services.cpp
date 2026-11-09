@@ -1332,6 +1332,11 @@ void PlannerServices::handle_generate_trajectory(
   }
   on_plan_lane(
     lane_plan_, [&]() {fill_result(planner, request->request, response->response);});
+  // Surface the same failure diagnostics at the service's top level. Clients
+  // that only look at the outer response still get the start/goal collision
+  // attribution when a plan they expected to succeed failed.
+  response->start_state_collisions = response->response.start_state_collisions;
+  response->end_state_collisions = response->response.end_state_collisions;
 }
 
 // PORT: unified_planner_node.trajectory_generation_batch_callback + _rollup_stats

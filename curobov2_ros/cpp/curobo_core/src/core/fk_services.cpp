@@ -260,10 +260,12 @@ void FKServices::handle_fk(
 {
   if (!initialized_) {
     RCLCPP_ERROR(node_->get_logger(), "FK not initialized. Call warmup_fk first.");
+    response->error_msg.data = "FK not initialized. Call warmup_fk first.";
     return;
   }
   if (request->joint_states.empty()) {
     RCLCPP_ERROR(node_->get_logger(), "FK: no joint states provided");
+    response->error_msg.data = "FK: no joint states provided";
     return;
   }
   const auto qs = joint_rows(request->joint_states, *this);
@@ -285,9 +287,11 @@ void FKServices::handle_fk(
       node_->get_logger(), *node_->get_clock(), 5000,
       "FK failed, returning failure (GPU fault?): %s", exc.what());
     handle_gpu_fault(node_, "running FK", exc.what());
+    response->error_msg.data = std::string("FK failed: ") + exc.what();
     return;
   }
   if (!ok) {
+    response->error_msg.data = "FK solve failed";
     return;
   }
   for (const auto & one : poses) {

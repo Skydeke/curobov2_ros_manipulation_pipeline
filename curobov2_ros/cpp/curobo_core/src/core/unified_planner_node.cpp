@@ -355,23 +355,11 @@ void UnifiedPlannerNode::setup() {
                 get_parameter("planner_type").as_string().c_str());
 
     // PORT: ObstacleManager._build_mapper (node mapper_* parameters). The cfg
-    // itself is built by configure_mapper_from_params() (below) so that the
-    // `set_workspace` service can rebuild it from the CURRENT parameters rather
-    // than a cfg baked once at startup.
+    // is built from the current parameters by configure_mapper_from_params().
   }
 
   config_services_ =
       std::make_unique<ConfigServices>(this, bridge_, handle_, &joint_names_);
-  // `set_workspace` changes mapper_extent_xyz/mapper_grid_center: the Mapper
-  // grid must be rebuilt to the new box and the marker redrawn, so hand the
-  // node's own rebuild + the marker publisher to the service.
-  config_services_->set_mapper_reconfigure(
-      [this]() { configure_mapper_from_params(); });
-  config_services_->set_workspace_republish([this]() {
-    if (ros_service_manager_) {
-      ros_service_manager_->publish_mapper_workspace();
-    }
-  });
   config_services_->set_integration_frame_provider(
       [this]() { return integration_frame(); });
   obstacle_manager_ = std::make_unique<ObstacleManager>(bridge_, handle_);

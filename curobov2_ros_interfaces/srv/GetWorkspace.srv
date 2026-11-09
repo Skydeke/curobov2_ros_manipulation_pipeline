@@ -14,8 +14,8 @@
 #
 # READ-ONLY AND CHEAP
 #   Touches no solver and rebuilds nothing (it reads the values in force), so it
-#   is safe to poll. A size change (SetWorkspace) is NOT cheap: it rebuilds the
-#   Mapper and every solver, like set_collision_cache.
+#   is safe to poll. Changing the configured size is NOT cheap: it rebuilds the
+#   Mapper and every solver.
 
 # --- Request (empty: pure query) ---
 ---

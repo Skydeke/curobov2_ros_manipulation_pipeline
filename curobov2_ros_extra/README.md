@@ -300,7 +300,7 @@ benchmark leg additionally **sizes the server's collision cache to the
 dataset's actual per-type obstacle counts** — the same computation as native's
 `check_problems` (max over scenes of `get_obb_world().get_cache_dict()["obb"]`,
 i.e. cuboids + converted sphere/cylinder/capsule) — and disables the empty
-no-camera voxel layer (`blox=0`) via `SetCollisionCache` before the timed
+no-camera voxel layer (`blox=0`) in the server configuration before the timed
 run. One synchronous solver rebuild (~25-37 s) is paid once at startup; after
 it the server runs native-equivalent kernel grids (`{obb: 16}` for the demo
 dataset, mesh off, voxel off). `curobo_benchmark ros --no-size-cache` keeps
@@ -370,7 +370,7 @@ retry/seed caps:
   launch one thread per (sphere, padded obstacle slot) per type, and even the
   server's lean 32/4 defaults (`collision_cache_cuboid` /
   `collision_cache_mesh`) pad grids larger than native's exact `{obb: n_cubes}`
-  (plus the empty no-camera voxel layer). `SetCollisionCache` sets
+  (plus the empty no-camera voxel layer). The cache configuration sets
   `obb=cuboids+converted` (the same count as native's `check_problems`),
   `mesh=0` for the demo dataset, `blox=0` (no cameras — no voxel layer).
   `curobo_benchmark ros --no-size-cache` keeps the padded default for A/B.
@@ -654,7 +654,7 @@ within `--position-tolerance-mm` / `--orientation-tolerance-deg` (defaults
 Both ROS legs size the server's collision cache to their synthetic world
 (cuboid=1 for IK, cuboid=2 for cost, mesh/voxel off) before the timed runs,
 so the server's collision kernels match the native side. The setup order is
-`remove_all_objects` → `SetCollisionCache` → `add_object` → `warmup_ik` /
+`remove_all_objects` → configure the sized cache → `add_object` → `warmup_ik` /
 `warmup_fk`: cuRobo requires the registered scene to never hold more cuboids
 than the active cache capacity — a cache change rebuilds every solver from
 the then-current scene (raising if it exceeds the new cap), and an add raises

@@ -21,12 +21,5 @@ TrajectoryResult result          # success / message / trajectory / stats / coll
 string state              # PLANNING | EXECUTING | TRACKING | ON_TARGET | FAILED
 float32 step_progression  # open-loop progress [0..1]
 float64 position_error    # current Cartesian error (m), reactive
-float64 position_error_x  # signed per-axis component of position_error (m)
-float64 position_error_y
-float64 position_error_z
 bool on_target            # reactive servoing flag
 sensor_msgs/JointState joint_command
-float64 orientation_error # rad between tool and goal orientation, FK-measured
-int32 hold_count          # consecutive in-tolerance steps below convergence threshold
-float64 controller_position_error     # instantaneous (controller's own estimate)
-float64 controller_orientation_error

@@ -29,25 +29,6 @@ environment:
   allowable_exit_codes: [0, -2, -9]
 
 tests:
-  - name: "01 set collision cache"
-    service: "/unified_planner/set_collision_cache"
-    type: curobov2_ros_interfaces/srv/SetCollisionCache
-    # timeout=90: obb/mesh actually change here, triggering a synchronous
-    # solver rebuild+warmup (see rebuild_solvers_for_cache_change). ~25s on an
-    # idle Orin, ~37s once the SoC throttles under sustained GPU load.
-    timeout: 90.0
-    data:
-      obb: 136
-      mesh: 1
-      blox: -1
-    # v2: the response echoes the per-type cache values we just set
-    # (cuboid=obb, mesh=mesh, voxel=blox).
-    expect:
-      success: True
-      obb_cache: 136
-      mesh_cache: 1
-      blox_cache: 1
-
   - name: "02 reload MotionGen with new cache"
     service: "/unified_planner/update_motion_gen_config"
     type: std_srvs/srv/Trigger

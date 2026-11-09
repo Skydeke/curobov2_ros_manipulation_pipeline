@@ -1,9 +1,10 @@
 # TrajectoryGeneration.srv — DRY single surface.  Core schema is embedded
-# (TrajectoryGoal → TrajectoryResult), not mirrored by hand.  Additional
-# ROS-level fields (start_state_collisions / StateCollisions) preserved so
-# failures carry the structured scene diagnostics the node always populates.
+# (TrajectoryGoal → TrajectoryResult), not mirrored by hand.  The two
+# StateCollisions fields carry the plan's start/goal diagnostics on the
+# top-level response too, so a failed plan remains introspectable without
+# digging into the nested result.
 TrajectoryGoal request    # start_pose + goalsets
 ---
 TrajectoryResult response # success / message / trajectory / stats / collisions
-StateCollisions start_state_collisions   # collision diagnostics (populated on failure)
-StateCollisions end_state_collisions     # collision diagnostics (populated on failure)
+StateCollisions start_state_collisions   # collision diagnostics (also on failure)
+StateCollisions end_state_collisions     # collision diagnostics (also on failure)

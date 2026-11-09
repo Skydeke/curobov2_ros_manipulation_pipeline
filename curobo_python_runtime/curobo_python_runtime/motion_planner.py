@@ -322,8 +322,8 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
     # PORT: obstacle_manager reads obstacle_collision_mode at startup.
     entry["obstacle_collision_mode"] = str(
         cfg.get("obstacle_collision_mode") or "cuboid")
-    # PORT: obstacle_manager.collision_cache["voxel"] is None - SetCollisionCache
-    # blox=0 builds the solvers with NO voxel storage. A scene carrying an ESDF
+    # PORT: obstacle_manager.collision_cache["voxel"] is None - a disabled
+    # voxel layer builds the solvers with NO voxel storage. A scene carrying an ESDF
     # layer then raises inside update_world ("Cannot load 1 voxel grids, max
     # cache size is 0"), so world_push degrades to primitives-only exactly like
     # unified_planner_node.update_all_solvers_world does.
@@ -332,8 +332,8 @@ def motion_planner_build(handle: int, cfg_json: str) -> None:
     entry["voxel_cache_disabled"] = _disabled
     if _disabled:
         print(
-            "[curobo_python_runtime] voxel collision cache disabled (SetCollisionCache "
-            "blox=0): solvers see analytic primitives ONLY, no camera obstacles",
+            "[curobo_python_runtime] voxel collision cache disabled (voxel layers=0): "
+            "solvers see analytic primitives ONLY, no camera obstacles",
             flush=True)
     planner.warmup()
     # `MotionPlanner.warmup()` only records the POSE (plan_pose) graphs. The

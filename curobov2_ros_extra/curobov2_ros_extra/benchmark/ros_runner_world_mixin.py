@@ -36,7 +36,6 @@ from sensor_msgs.msg import JointState as RosJointState
 from curobov2_ros_interfaces.msg import Goalset, SceneObject, TrajectoryGoal
 from curobov2_ros_interfaces.srv import (
     AddObject,
-    SetCollisionCache,
     SetJointLocks,
     SetObjects,
     TrajectoryGeneration,
