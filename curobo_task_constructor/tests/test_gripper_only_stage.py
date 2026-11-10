@@ -362,3 +362,9 @@ def test_tiago_descriptor_represents_open_as_a_gripper_trajectory():
     assert cfg["open"] > cfg["close"]
     # The descriptor's open value is what the task graph commands.
     assert descriptor["gripper_controllers"]["gripper"]["open"] == 0.045
+
+    # The same limits are exposed as named joint configs, so a MoveTo by name
+    # goes through the gripper-command path above instead of an arm plan.
+    named = descriptor["named_joint_configs"]
+    assert named["open"] == {LEFT: 0.045, RIGHT: 0.045}
+    assert named["close"] == {LEFT: 0.0, RIGHT: 0.0}

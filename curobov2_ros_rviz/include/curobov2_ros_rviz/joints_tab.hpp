@@ -83,7 +83,11 @@ namespace curobov2_ros_rviz
 ///    these sends the descriptor's open/close position to the controller action
 ///    directly (MoveIt's simple-controller-manager semantics) instead of
 ///    editing the target. That is what keeps open/close working even when the
-///    gripper is not in the planning space.
+///    gripper is not in the planning space. A descriptor also carries
+///    `open`/`close` in `named_joint_configs` (so the task constructor can
+///    resolve them by name); those named configs are skipped here because the
+///    synthesized entry is the one that can drive the controller, and showing
+///    both would put two identical "open" rows in the combo.
 ///
 /// A locked joint is pinned OUT of the cspace, so it has no row here and cannot
 /// be planned — the panel says so explicitly rather than silently dropping it

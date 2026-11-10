@@ -17,6 +17,7 @@
 #include <QLabel>
 #include <QPointF>
 #include <QPushButton>
+#include <QSet>
 #include <QStringList>
 #include <QTimer>
 #include <QTreeWidget>
@@ -470,6 +471,24 @@ void JointsTab::refreshJointInfo()
           locked << QString::fromStdString(n);
         }
 
+        // Every joint any descriptor gripper owns. A descriptor may carry its
+        // own `open`/`close` entries in named_joint_configs (they are what the
+        // task constructor resolves by name), but those joints are not planning
+        // DOFs. The synthesized gripper entries below already expose the same
+        // action with the controller type/effort/timeout, so a named config
+        // that moves ONLY gripper joints is dropped here: one `open`/`close`
+        // per gripper in the combo, and it is the one that can actually drive
+        // the controller.
+        QSet<QString> gripper_owned;
+        for (const auto & gripper : result->grippers) {
+          for (const auto & joint : gripper.joints) {
+            gripper_owned.insert(QString::fromStdString(joint));
+          }
+          if (!gripper.command_joint.empty()) {
+            gripper_owned.insert(QString::fromStdString(gripper.command_joint));
+          }
+        }
+
         // Arm poses: the descriptor's named_joint_configs, already grouped by
         // the server (a pose names its joints; it need not cover the cspace).
         for (const auto & cfg : result->named_joint_configs) {
@@ -483,7 +502,16 @@ void JointsTab::refreshJointInfo()
                 QString::fromStdString(cfg.joint_names[i]),
                 cfg.positions[i]));
           }
-          if (!pose.name.isEmpty() && !pose.joints.isEmpty()) {
+          bool only_gripper_joints = !pose.joints.isEmpty();
+          for (const auto & joint : pose.joints) {
+            if (!gripper_owned.contains(joint.first)) {
+              only_gripper_joints = false;
+              break;
+            }
+          }
+          if (!pose.name.isEmpty() && !pose.joints.isEmpty() &&
+            !only_gripper_joints)
+          {
             poses.append(pose);
           }
         }
