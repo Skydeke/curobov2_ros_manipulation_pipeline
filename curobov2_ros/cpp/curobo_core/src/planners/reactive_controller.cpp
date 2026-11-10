@@ -451,8 +451,7 @@ bool ReactiveController::execute_immediate(const ReactiveExecutionContext & ctx)
         step_times_.push_back(now() - step_t0);
       }
       compute_position_error(outcome);
-      send_command(
-        ctx.robot_context, outcome.action, current_state.position, interval);
+      send_command(ctx.robot_context, outcome.action, current_state.position);
 
       curobo_runtime::ReactiveState predicted = state_from_action(outcome.action);
       close_state_loop(ctx.robot_context, predicted);
@@ -550,7 +549,8 @@ bool ReactiveController::execute_paced(const ReactiveExecutionContext & ctx, dou
         step_times_.push_back(now() - step_t0);
       }
       compute_position_error(outcome);
-      send_command(ctx.robot_context, outcome.action, current_state.position);
+      send_command(
+        ctx.robot_context, outcome.action, current_state.position, interval);
       if (ctx.feedback) {
         ctx.feedback(
           is_on_target() ? "ON_TARGET" : "TRACKING", step_progression(),
