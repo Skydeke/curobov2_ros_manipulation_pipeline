@@ -31,6 +31,7 @@ class QComboBox;
 class QCheckBox;
 class QLabel;
 class QPushButton;
+class QShowEvent;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -159,6 +160,14 @@ public:
   /// to the scene objects, because "the gripper is pinned" and "the gripper is
   /// closed" look identical in the joint tree and are not the same problem.
   QStringList lockedJoints() const { return locked_; }
+
+protected:
+  /// Populate the tab as soon as it is actually shown. The 2 s cspace poll is
+  /// deliberately visibility-gated, and the one-shot fetch in initialize() may
+  /// race the planner's get_joint_info service coming up. Without this, a panel
+  /// whose Joints tab was hidden at startup stays with an empty (disabled)
+  /// Named pose combo until the next poll tick.
+  void showEvent(QShowEvent * event) override;
 
 private Q_SLOTS:
   void onJointState(const sensor_msgs::msg::JointState::ConstSharedPtr msg);

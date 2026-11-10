@@ -468,15 +468,21 @@ void PlannerServices::wrap_full_turn_targets(curobo_runtime::PlanRequest & reque
     double best = target;
     double best_dist = std::numeric_limits<double>::infinity();
     for (int k = -2; k <= 2; ++k) {
-      double cand = target + static_cast<double>(k) * kTwoPi;
+      const double cand = target + static_cast<double>(k) * kTwoPi;
       if (cand < lo - kRangeTolerance || cand > hi + kRangeTolerance) {
         continue;  // equivalent genuinely outside the reported range
       }
-      cand = std::clamp(cand, inner_lo, inner_hi);
+      // Measure the DISTANCE to the unclamped equivalent, then clamp only the
+      // selected value. Clamping before the distance makes a candidate just
+      // outside the range (e.g. target 0 on a start of pi: k=+1 is 6.2832,
+      // clamped to 6.279) look ~0.004 rad closer than the in-range k=0. That
+      // wrongly picks the OTHER half-turn (3.14 -> 6.279 instead of 3.14 -> 0)
+      // and the arm sweeps through itself.
+      const double clamped = std::clamp(cand, inner_lo, inner_hi);
       const double dist = std::abs(cand - start);
       if (dist < best_dist) {
         best_dist = dist;
-        best = cand;
+        best = clamped;
       }
     }
     // A target typed straight onto an end stop (the Joints tab slider's limit)

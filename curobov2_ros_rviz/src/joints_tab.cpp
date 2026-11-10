@@ -18,6 +18,7 @@
 #include <QPointF>
 #include <QPushButton>
 #include <QSet>
+#include <QShowEvent>
 #include <QStringList>
 #include <QTimer>
 #include <QTreeWidget>
@@ -367,6 +368,18 @@ void JointsTab::initialize(rclcpp::Node::SharedPtr node)
     }
   });
   info_timer->start(2000);
+}
+
+void JointsTab::showEvent(QShowEvent * event)
+{
+  QWidget::showEvent(event);
+  // The 2 s cspace poll is visibility-gated, and the initial fetch in
+  // initialize() can run before the planner's get_joint_info service is up.
+  // Fetch immediately when the tab is first shown so the Named pose combo does
+  // not stay empty/disabled until the next poll tick.
+  if (initialized_) {
+    refreshJointInfo();
+  }
 }
 
 void JointsTab::setPlannerNode(const QString & planner_node)
