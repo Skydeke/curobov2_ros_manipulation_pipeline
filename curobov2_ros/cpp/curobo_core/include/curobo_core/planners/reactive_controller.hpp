@@ -172,7 +172,9 @@ private:
     RobotContext * robot_context, curobo_runtime::ReactiveState & state) const;
   // PORT: ReactiveController._send_command
   void send_command(
-    RobotContext * robot_context, const curobo_runtime::ReactiveAction & action);
+    RobotContext * robot_context, const curobo_runtime::ReactiveAction & action,
+    const std::vector<float> & current_position = {},
+    double plan_dt = 0.0);
   // PORT: ReactiveController._init_robot_at_start
   void init_robot_at_start(
     RobotContext * robot_context, const std::vector<float> & start_q);

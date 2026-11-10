@@ -251,7 +251,8 @@ void ReactiveController::close_state_loop(
 
 // PORT: ReactiveController._send_command
 void ReactiveController::send_command(
-  RobotContext * robot_context, const curobo_runtime::ReactiveAction & action)
+  RobotContext * robot_context, const curobo_runtime::ReactiveAction & action,
+  const std::vector<float> & current_position, double plan_dt)
 {
   const bool window = action.position.shape.size() == 2 && action.position.shape[0] > 1;
   const std::int64_t rows = action.position.shape.empty() ? 0 : action.position.shape[0];
@@ -277,8 +278,26 @@ void ReactiveController::send_command(
     velocity.push_back(std::move(v));
     acceleration.push_back(std::move(a));
   }
+  // The native MPC exposes only the next action (a single [dof] row), while
+  // the Python paced path returns the optimized action sequence. A one-point
+  // trajectory is stamped at t=0, so a FollowJointTrajectory controller
+  // reports "Goal reached" before moving. For a paced command, turn the row
+  // into a two-point window [current, action] over the command interval; the
+  // controller then actually interpolates the step.
+  if (rows == 1 && !current_position.empty() &&
+    static_cast<std::int64_t>(current_position.size()) == cols)
+  {
+    std::vector<double> current(cols, 0.0);
+    for (std::int64_t c = 0; c < cols; ++c) {
+      current[static_cast<std::size_t>(c)] =
+        static_cast<double>(current_position[static_cast<std::size_t>(c)]);
+    }
+    position.insert(position.begin(), std::move(current));
+    velocity.insert(velocity.begin(), std::vector<double>(cols, 0.0));
+    acceleration.insert(acceleration.begin(), std::vector<double>(cols, 0.0));
+  }
   (void)window;
-  robot_context->set_and_send_command({}, velocity, acceleration, position);
+  robot_context->set_and_send_command({}, velocity, acceleration, position, plan_dt);
 }
 
 // PORT: ReactiveController._init_robot_at_start
@@ -432,7 +451,8 @@ bool ReactiveController::execute_immediate(const ReactiveExecutionContext & ctx)
         step_times_.push_back(now() - step_t0);
       }
       compute_position_error(outcome);
-      send_command(ctx.robot_context, outcome.action);
+      send_command(
+        ctx.robot_context, outcome.action, current_state.position, interval);
 
       curobo_runtime::ReactiveState predicted = state_from_action(outcome.action);
       close_state_loop(ctx.robot_context, predicted);
@@ -530,7 +550,7 @@ bool ReactiveController::execute_paced(const ReactiveExecutionContext & ctx, dou
         step_times_.push_back(now() - step_t0);
       }
       compute_position_error(outcome);
-      send_command(ctx.robot_context, outcome.action);
+      send_command(ctx.robot_context, outcome.action, current_state.position);
       if (ctx.feedback) {
         ctx.feedback(
           is_on_target() ? "ON_TARGET" : "TRACKING", step_progression(),

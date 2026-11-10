@@ -23,6 +23,41 @@ double duration_seconds(const builtin_interfaces::msg::Duration & duration)
          static_cast<double>(duration.nanosec) * 1e-9;
 }
 
+/// Remove full-turn jumps between consecutive waypoints.
+///
+/// A continuous joint can be planned as 3.0 -> -3.0 (the same short 0.28 rad
+/// move as 3.0 -> 3.28). A FollowJointTrajectory controller interpolates the
+/// raw numbers, so the 3.0 -> -3.0 form takes the long way around and the
+/// executed motion differs from the plan. Shift each point by whole turns to
+/// the equivalent nearest the previous point. Non-continuous joints cannot
+/// legitimately move more than pi between adjacent samples, so the same rule
+/// is safe for them.
+void unwrap_full_turns(std::vector<std::vector<double>> & positions)
+{
+  if (positions.size() < 2) {
+    return;
+  }
+  constexpr double kPi = 3.14159265358979323846;
+  constexpr double kTwoPi = 2.0 * kPi;
+  const std::size_t dof = positions.front().size();
+  for (std::size_t j = 0; j < dof; ++j) {
+    for (std::size_t i = 1; i < positions.size(); ++i) {
+      if (j >= positions[i].size() || j >= positions[i - 1].size()) {
+        continue;
+      }
+      double delta = positions[i][j] - positions[i - 1][j];
+      while (delta > kPi) {
+        positions[i][j] -= kTwoPi;
+        delta -= kTwoPi;
+      }
+      while (delta < -kPi) {
+        positions[i][j] += kTwoPi;
+        delta += kTwoPi;
+      }
+    }
+  }
+}
+
 double median(std::vector<double> values)
 {
   if (values.empty()) {
@@ -328,11 +363,16 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     // chain. project_active_joints() below strips those columns for the
     // controller, so feed the ghost first from the unprojected copy.
     const std::vector<std::string> ghost_names = names;
-    const std::vector<std::vector<double>> ghost_positions = positions;
+    std::vector<std::vector<double>> ghost_positions = positions;
     const std::vector<std::vector<double>> ghost_velocities = velocities;
     // PORT: single_planner._stage_trajectory - project the replayed full-joint
     // plan onto the active (controller) joints before streaming it.
     project_active_joints(names, positions, velocities);
+    // Keep both the ghost and the controller on the continuous full-turn
+    // branch; otherwise a continuous joint looks like a 2*pi jump and the
+    // controller interpolates the long way while the plan showed the short one.
+    unwrap_full_turns(ghost_positions);
+    unwrap_full_turns(positions);
     // The plan's own sample interval. A native cuRobo plan is sampled on the
     // TIME-OPTIMIZED grid (~13 ms for a short joint move), not at the node's
     // 25 ms interpolation_dt. Its velocity feed-forward is consistent with the
