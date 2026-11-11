@@ -309,6 +309,9 @@ RobotDescriptionOutcome PyBridge::robot_description(
       result.attr("__getitem__")("home_names").cast<std::vector<std::string>>();
     out.home_positions =
       result.attr("__getitem__")("home_positions").cast<std::vector<double>>();
+    out.continuous_joint_names =
+      result.attr("__getitem__")("continuous_joint_names")
+      .cast<std::vector<std::string>>();
     out.named_config_names =
       result.attr("__getitem__")("named_config_names").cast<std::vector<std::string>>();
     out.named_config_joint_names =
@@ -640,6 +643,8 @@ JointLimitsOutcome PyBridge::joint_limits(RobotHandle handle){
     outcome.positions = array_to_tensor(result.attr("__getitem__")("positions"));
     outcome.joint_names =
       result.attr("__getitem__")("joint_names").cast<std::vector<std::string>>();
+    outcome.continuous =
+      result.attr("__getitem__")("continuous").cast<std::vector<std::uint8_t>>();
     outcome.locked_joint_names =
       result.attr("__getitem__")("locked_joint_names").cast<std::vector<std::string>>();
     outcome.locked_positions =

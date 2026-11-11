@@ -436,6 +436,9 @@ struct CppBridge::Impl
   std::vector<std::string> link_names;
   std::vector<double> joint_lower;
   std::vector<double> joint_upper;
+  //: Range-width fallback for continuous joints (the artifact does not record
+  //: the URDF joint type). Their limits are a coordinate window, never a stop.
+  std::vector<std::uint8_t> joint_continuous;
   std::vector<std::string> locked_joint_names;
   std::vector<double> locked_positions;
   std::vector<std::string> unpinned_lock_joint_names;
@@ -865,6 +868,15 @@ struct CppBridge::Impl
     link_names = manifest.link_names;
     joint_lower = manifest.joint_lower;
     joint_upper = manifest.joint_upper;
+    constexpr double kTwoPi = 6.283185307179586;
+    joint_continuous.assign(joint_names.size(), 0);
+    for (std::size_t i = 0; i < joint_names.size() &&
+      i < joint_lower.size() && i < joint_upper.size(); ++i)
+    {
+      joint_continuous[i] =
+        (std::isfinite(joint_lower[i]) && std::isfinite(joint_upper[i]) &&
+        (joint_upper[i] - joint_lower[i]) >= (kTwoPi - 1e-6)) ? 1 : 0;
+    }
     locked_joint_names = manifest.locked_joint_names;
     locked_positions = manifest.locked_positions;
     unpinned_lock_joint_names = manifest.unpinned_lock_joint_names;
@@ -1139,6 +1151,13 @@ std::array<float, 7> CppBridge::Impl::tool_pose(
   const int dof_count = dof();
   std::vector<float> clamped = q;
   for (int i = 0; i < std::min(dof_count, static_cast<int>(clamped.size())); ++i) {
+    // A continuous joint's limits are a chart, not a stop: clamping an
+    // unwrapped value (e.g. 6.5) would compute FK of a different pose.
+    if (static_cast<std::size_t>(i) < joint_continuous.size() &&
+      joint_continuous[static_cast<std::size_t>(i)] != 0)
+    {
+      continue;
+    }
     clamped[static_cast<std::size_t>(i)] = std::clamp(
       clamped[static_cast<std::size_t>(i)],
       static_cast<float>(joint_lower[static_cast<std::size_t>(i)]),
@@ -1416,6 +1435,11 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_cspace_impl(
   const int limit_count = std::min(
     dof_count, static_cast<int>(std::min(joint_lower.size(), joint_upper.size())));
   for (int i = 0; i < limit_count; ++i) {
+    if (static_cast<std::size_t>(i) < joint_continuous.size() &&
+      joint_continuous[static_cast<std::size_t>(i)] != 0)
+    {
+      continue;  // the ROS layer already placed it inside the chart window
+    }
     const float lower = static_cast<float>(joint_lower[static_cast<std::size_t>(i)]);
     const float upper = static_cast<float>(joint_upper[static_cast<std::size_t>(i)]);
     start[static_cast<std::size_t>(i)] = std::clamp(start[static_cast<std::size_t>(i)], lower, upper);
@@ -1534,6 +1558,11 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_pose_impl(
       static_cast<int>(start.size()),
       static_cast<int>(std::min(joint_lower.size(), joint_upper.size())));
     for (int i = 0; i < count; ++i) {
+      if (static_cast<std::size_t>(i) < joint_continuous.size() &&
+        joint_continuous[static_cast<std::size_t>(i)] != 0)
+      {
+        continue;
+      }
       const float lower = static_cast<float>(joint_lower[static_cast<std::size_t>(i)]);
       const float upper = static_cast<float>(joint_upper[static_cast<std::size_t>(i)]);
       start[static_cast<std::size_t>(i)] =
@@ -1834,6 +1863,11 @@ curobo_runtime::PlanOutcome CppBridge::Impl::plan_waypoints_impl(
       static_cast<int>(start.size()),
       static_cast<int>(std::min(joint_lower.size(), joint_upper.size())));
     for (int i = 0; i < count; ++i) {
+      if (static_cast<std::size_t>(i) < joint_continuous.size() &&
+        joint_continuous[static_cast<std::size_t>(i)] != 0)
+      {
+        continue;
+      }
       const float lower = static_cast<float>(joint_lower[static_cast<std::size_t>(i)]);
       const float upper = static_cast<float>(joint_upper[static_cast<std::size_t>(i)]);
       start[static_cast<std::size_t>(i)] =
@@ -2565,11 +2599,21 @@ curobo_runtime::JointLimitsOutcome CppBridge::joint_limits(curobo_runtime::Robot
   outcome.joint_names = impl_->joint_names;
   outcome.positions.shape = {2, impl_->dof()};
   outcome.positions.data.resize(static_cast<std::size_t>(2 * impl_->dof()));
+  constexpr double kTwoPi = 6.283185307179586;
+  outcome.continuous.resize(static_cast<std::size_t>(impl_->dof()), 0);
   for (int i = 0; i < impl_->dof(); ++i) {
+    const double lower = impl_->joint_lower[static_cast<std::size_t>(i)];
+    const double upper = impl_->joint_upper[static_cast<std::size_t>(i)];
     outcome.positions.data[static_cast<std::size_t>(i)] =
-      static_cast<float>(impl_->joint_lower[static_cast<std::size_t>(i)]);
+      static_cast<float>(lower);
     outcome.positions.data[static_cast<std::size_t>(impl_->dof() + i)] =
-      static_cast<float>(impl_->joint_upper[static_cast<std::size_t>(i)]);
+      static_cast<float>(upper);
+    // The artifact does not record the URDF joint type; a full-turn range is
+    // the only available fallback. The ROS layer overlays the descriptor's
+    // explicit continuous_joints override on top of this mask.
+    outcome.continuous[static_cast<std::size_t>(i)] =
+      (std::isfinite(lower) && std::isfinite(upper) &&
+      (upper - lower) >= (kTwoPi - 1e-6)) ? 1 : 0;
   }
   outcome.locked_joint_names = impl_->locked_joint_names;
   outcome.locked_positions = impl_->locked_positions;

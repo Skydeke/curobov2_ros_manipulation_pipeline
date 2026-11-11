@@ -17,9 +17,15 @@ def joint_limits(handle: int):
     limits = kin.get_joint_limits()
     positions = limits.position.detach().cpu().numpy().astype(np.float32)  # [2, dof]
     locked = entry.get("lock_joints", {})
+    names = list(limits.joint_names)
+    # A continuous joint is periodic. The descriptor override and the URDF joint
+    # type are authoritative; the +/-2*pi limits are only its coordinate window.
+    continuous_names = set(entry.get("continuous_joint_names", []))
+    continuous_names.update(entry.get("urdf_continuous_joint_names", []))
     return {
         "positions": positions,
-        "joint_names": list(limits.joint_names),
+        "joint_names": names,
+        "continuous": [1 if name in continuous_names else 0 for name in names],
         "locked_joint_names": list(locked.keys()),
         "locked_positions": [float(v) for v in locked.values()],
         # lock_joints written {joint: null}: out of the cspace but not pinned.

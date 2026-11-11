@@ -102,6 +102,31 @@ def _robot_kinematics_block(data: dict) -> dict:
         block = robot_cfg.get("kinematics")
         return block if isinstance(block, dict) else robot_cfg
     return data
+def _urdf_continuous_joint_names(urdf_path: str) -> list:
+    """Joint names declared ``type="continuous"`` in a URDF.
+
+    cuRobo's parser rewrites those to revolute joints with a fake
+    [-2*pi, 2*pi] limit and drops the type, so the only authoritative source
+    left at runtime is the URDF itself. A descriptor's explicit
+    ``continuous_joints`` list is merged on top (vendors such as UR model
+    continuous joints as revolute +/-2*pi).
+    """
+    import os
+    import xml.etree.ElementTree as ET
+
+    if not urdf_path or not os.path.isfile(urdf_path):
+        return []
+    try:
+        root = ET.parse(urdf_path).getroot()
+    except Exception:
+        return []
+    return [
+        str(joint.get("name"))
+        for joint in root.findall("joint")
+        if joint.get("type") == "continuous" and joint.get("name")
+    ]
+
+
 def robot_model_build(handle: int, cfg_json: str) -> None:
     """Build the shared Kinematics from the robot YAML (PORT: RobotModelManager.__init__)."""
     import hashlib
@@ -212,6 +237,17 @@ def robot_model_build(handle: int, cfg_json: str) -> None:
         entry["seg_mask_margin"] = float(cfg["seg_mask_margin"])
     # The robot YAML's own lock_joints (PORT: RobotModelManager.config_lock_joints).
     entry["resolved_config"] = resolved
+    # Continuous joints: the URDF type plus the descriptor's explicit override
+    # (passed by the node in `continuous_joints`). The range width alone is NOT
+    # authoritative; a bounded 4*pi revolute joint would be misclassified.
+    _kin_for_urdf = _robot_kinematics_block(data)
+    _urdf_path = cfg.get("urdf_path") or _kin_for_urdf.get("urdf_path") or ""
+    _urdf_path = _resolve_uri(
+        _urdf_path, os.path.dirname(os.path.abspath(robot_config_file)))
+    entry["urdf_continuous_joint_names"] = _urdf_continuous_joint_names(_urdf_path)
+    entry["continuous_joint_names"] = [
+        str(name) for name in (cfg.get("continuous_joints") or [])
+    ]
     # PORT: the lock_joints map, structure-aware (robot_cfg.kinematics.* or the
     # kinematics keys at the document root).
     _root_kin = _robot_kinematics_block(data)

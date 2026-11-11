@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -61,6 +62,10 @@ public:
   // PORT: node.lane_reactive - handed to the reactive planners at build.
   void set_reactive_lane(curobo_runtime::GpuLane * lane) {reactive_lane_ = lane;}
 
+  //: Continuous joints for the reactive (MPC/retarget) planners. Applied to
+  //: planners already built and to every planner built later.
+  void set_continuous_joint_names(std::vector<std::string> names);
+
 private:
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
@@ -70,6 +75,7 @@ private:
   TrajectoryPlanner * current_ = nullptr;
   std::string current_type_;
   curobo_runtime::GpuLane * reactive_lane_ = nullptr;
+  std::vector<std::string> continuous_joint_names_;
 };
 
 }  // namespace curobo_core

@@ -246,6 +246,12 @@ def robot_description(robot_arg: str, robot_config_file: str):
         "strategy_params": {str(k): str(v) for k, v in params.items()},
         "home_names": [str(k) for k in home.keys()],
         "home_positions": [float(v) for v in home.values()],
+        # Explicit override for vendors that model a continuous joint as a
+        # bounded +/-2*pi revolute. The URDF `continuous` type is still honoured
+        # separately, so this only has to list joints the URDF gets wrong.
+        "continuous_joint_names": [
+            str(j) for j in (data.get("continuous_joints") or [])
+        ],
         "named_config_names": named_config_names,
         "named_config_joint_names": named_config_joint_names,
         "named_config_positions": named_config_positions,

@@ -110,6 +110,11 @@ public:
     /// a bar and is not editable, which is how a joint the model reports no
     /// bound for is left as plain text instead of getting a fake 0..1 range.
     VariableBoundsRole = Qt::UserRole + 1,
+    /// bool: the joint is continuous. The bounds are a display window, not a
+    /// physical stop, so a target must NOT be clamped/wrapped to a different
+    /// 2*pi branch. The planner takes the shortest path from the measured
+    /// branch; the value sent is the user's raw intent.
+    ContinuousRole = Qt::UserRole + 2,
   };
 
   explicit ProgressBarDelegate(int editable_column, QObject * parent = nullptr);

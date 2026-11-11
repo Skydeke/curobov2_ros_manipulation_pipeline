@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -69,7 +70,11 @@ public:
   {start_lock_callback_ = std::move(callback);}
 
   // PORT: single_planner._publish_plan_image (latched, once per new plan).
-  void publish_plan_image(const curobo_runtime::PlanOutcome & outcome);
+  // `window_shift` makes the plotted positions the executed ones (the whole
+  // trajectory unshifted by the constant continuous-joint chart shift).
+  void publish_plan_image(
+    const curobo_runtime::PlanOutcome & outcome,
+    const std::vector<double> & window_shift = {});
 
   // PORT: single_planner._stage_trajectory - feed a successful plan to the
   // RobotContext so GhostStrategy publishes it on <node>/trajectory for
@@ -80,6 +85,14 @@ public:
     double plan_dt = 0.0);
 
   void set_robot_context(RobotContext * robot_context) {robot_context_ = robot_context;}
+
+  //: Continuous joints for the ACTIVE cspace. The descriptor's explicit list
+  //: plus the model's own joint-type mask; set once by the node before use.
+  void set_continuous_joint_names(std::vector<std::string> names)
+  {
+    continuous_joint_names_ = std::move(names);
+    manager_.set_continuous_joint_names(continuous_joint_names_);
+  }
 
 private:
   void handle_set_planner(
@@ -111,16 +124,17 @@ private:
   // set, stops the process instead of limping. Returns true when a fault was seen.
   bool handle_gpu_fault(const std::string & context, const std::string & message);
 
-  // Continuous-joint target normalisation. A joint whose reported position
-  // range spans a full turn (>= 2*pi) is continuous; cuRobo plans in the
-  // NUMERIC joint space and never wraps, so a joint-space target written as
-  // the "other" turn — in range but ~2*pi away from the start (e.g. -4.55
-  // instead of +1.73) — asks for a full sweep the solver usually cannot find,
-  // and a value just outside the range (e.g. 6.36) is rejected outright. Snap
-  // each such target to the in-range full-turn equivalent NEAREST the start,
-  // so a negative / un-wrapped target plans exactly like its wrapped twin
-  // (the requested and snapped values are the same physical configuration).
-  void wrap_full_turn_targets(curobo_runtime::PlanRequest & request) const;
+  // Continuous-joint chart preparation. cuRobo plans in R^n and never wraps,
+  // so a continuous joint is a circle seen through a finite window. For every
+  // continuous joint:
+  //   * lift the (measured) start to the requested branch,
+  //   * choose a joint-space target by SHORTEST PATH: start + wrap_pi(target-start),
+  //   * shift both by ONE common 2*pi multiple so the whole segment fits the
+  //     window,
+  //   * record that shift in `request.window_shift` so fill_result can subtract
+  //     it from every planned point (a constant shift preserves the path).
+  // Bounded joints are never touched. Fails closed if a window is too narrow.
+  bool prepare_continuous_joints(curobo_runtime::PlanRequest & request) const;
 
   // PORT: joint_order.resolve_start_pose (name reorder, positional fallback).
   std::vector<float> resolve_start(
@@ -139,6 +153,7 @@ private:
   curobo_runtime::IBridge * bridge_;
   curobo_runtime::RobotHandle handle_;
   std::vector<std::string> joint_names_;
+  std::vector<std::string> continuous_joint_names_;
   ObstacleManager * obstacle_manager_;
   // PORT: single_planner._debug_img_pub (transient_local depth-1).
   rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr plan_image_pub_;
