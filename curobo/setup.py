@@ -19,18 +19,18 @@ from setuptools import find_namespace_packages, setup
 
 package_name = "curobo"
 
-# This package is the ONLY installer of the cuRobo python library: `colcon build`
-# ships the importable tree, its CUDA kernel sources, its pybind sources and its
-# runtime content (robot assets, YAML configs) via `package_data` below. Nothing
-# pip-installs `curobo/curobo/` any more, so there is no second, divergent copy
-# on sys.path and no setuptools-scm version to guess at inside the image.
+# `colcon build` ships the importable tree, its CUDA kernel sources, its pybind
+# sources and its runtime content (robot assets, YAML configs) via
+# `package_data` below. The Dockerfile also installs the vendored upstream
+# project editable so pip resolves its declared dependencies; both paths point
+# at curobo/curobo/curobo, so there is no divergent copy on sys.path.
 #
 # `version` is pinned here rather than derived from git. The vendored tree is a
 # nested git submodule, so `COPY` into the image brings no .git and
-# setuptools-scm has nothing to read -- which is what the
-# SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=... hack in the Dockerfile
-# used to paper over. A static version is honest: the ROS package version and the
-# vendored upstream version are then visible side by side in this file and in
+# setuptools-scm has nothing to read; the Dockerfile sets
+# SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO for the upstream editable
+# install. A static version is honest: the ROS package version and the vendored
+# upstream version are then visible side by side in this file and in
 # .gitmodules' pinned commit, instead of one being inferred from the other.
 version = "4.3.0"
 

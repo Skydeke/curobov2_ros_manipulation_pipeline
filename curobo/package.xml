@@ -15,9 +15,9 @@
        workspace, and with its own idea of the warp-lang version, which is what
        forced the "Rosdep fucks up warp-lang version" fixup in the Dockerfile.
 
-       requirements.txt, next to this file, is now the single source of truth.
-       The Dockerfile COPYs it and pip-installs it in its own early layer, so
-       dependency downloads are cached across source-only rebuilds. -->
+       curobo/pyproject.toml in the vendored upstream checkout is the source of
+       truth. The Dockerfile installs that project editable, which resolves its
+       declared dependencies without duplicating the list here. -->
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
