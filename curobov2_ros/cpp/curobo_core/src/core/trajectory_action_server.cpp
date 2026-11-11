@@ -3,6 +3,7 @@
 #include "curobo_core/core/trajectory_action_server.hpp"
 
 #include "curobo_core/planners/reactive_controller.hpp"
+#include "curobo_core/robot/continuous_joints.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -21,41 +22,6 @@ double duration_seconds(const builtin_interfaces::msg::Duration & duration)
 {
   return static_cast<double>(duration.sec) +
          static_cast<double>(duration.nanosec) * 1e-9;
-}
-
-/// Remove full-turn jumps between consecutive waypoints.
-///
-/// A continuous joint can be planned as 3.0 -> -3.0 (the same short 0.28 rad
-/// move as 3.0 -> 3.28). A FollowJointTrajectory controller interpolates the
-/// raw numbers, so the 3.0 -> -3.0 form takes the long way around and the
-/// executed motion differs from the plan. Shift each point by whole turns to
-/// the equivalent nearest the previous point. Non-continuous joints cannot
-/// legitimately move more than pi between adjacent samples, so the same rule
-/// is safe for them.
-void unwrap_full_turns(std::vector<std::vector<double>> & positions)
-{
-  if (positions.size() < 2) {
-    return;
-  }
-  constexpr double kPi = 3.14159265358979323846;
-  constexpr double kTwoPi = 2.0 * kPi;
-  const std::size_t dof = positions.front().size();
-  for (std::size_t j = 0; j < dof; ++j) {
-    for (std::size_t i = 1; i < positions.size(); ++i) {
-      if (j >= positions[i].size() || j >= positions[i - 1].size()) {
-        continue;
-      }
-      double delta = positions[i][j] - positions[i - 1][j];
-      while (delta > kPi) {
-        positions[i][j] -= kTwoPi;
-        delta -= kTwoPi;
-      }
-      while (delta < -kPi) {
-        positions[i][j] += kTwoPi;
-        delta += kTwoPi;
-      }
-    }
-  }
 }
 
 double median(std::vector<double> values)
@@ -368,11 +334,38 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
     // PORT: single_planner._stage_trajectory - project the replayed full-joint
     // plan onto the active (controller) joints before streaming it.
     project_active_joints(names, positions, velocities);
-    // Keep both the ghost and the controller on the continuous full-turn
-    // branch; otherwise a continuous joint looks like a 2*pi jump and the
-    // controller interpolates the long way while the plan showed the short one.
-    unwrap_full_turns(ghost_positions);
-    unwrap_full_turns(positions);
+    // Anchor the WHOLE replay to the measured 2*pi branch. A per-point unwrap
+    // changes the validated path and leaves velocity feed-forward inconsistent;
+    // a constant whole-trajectory shift does not (FK is 2*pi-periodic). A
+    // replay that does not start at the measured pose, or that contains a
+    // genuine > pi step on a continuous joint, is rejected instead of repaired.
+    const std::vector<double> measured =
+      robot_context_ != nullptr ? robot_context_->get_joint_pose() : std::vector<double>{};
+    const std::vector<std::string> measured_names =
+      robot_context_ != nullptr ? robot_context_->get_joint_name() : joint_names_;
+    if (!continuous_joint_names_.empty()) {
+      // MoveIt's start-state acceptance rule: a replay whose first point is not
+      // the measured physical pose (within this tolerance) is refused.
+      const double start_tolerance =
+        node_->has_parameter("start_state_max_bounds_error") ?
+        node_->get_parameter("start_state_max_bounds_error").as_double() : 0.1;
+      const auto ghost_branch = align_trajectory_to_measured(
+        ghost_names, ghost_positions, measured_names, measured,
+        continuous_joint_names_, start_tolerance);
+      const auto controller_branch = align_trajectory_to_measured(
+        names, positions, measured_names, measured, continuous_joint_names_,
+        start_tolerance);
+      const auto & branch = ghost_branch.ok ? controller_branch : ghost_branch;
+      if (!branch.ok) {
+        result->result.success = false;
+        result->result.message =
+          std::string("Refusing to replay trajectory: ") + branch.error;
+        RCLCPP_ERROR(
+          node_->get_logger(), "%s", result->result.message.c_str());
+        goal_handle->abort(result);
+        return;
+      }
+    }
     // The plan's own sample interval. A native cuRobo plan is sampled on the
     // TIME-OPTIMIZED grid (~13 ms for a short joint move), not at the node's
     // 25 ms interpolation_dt. Its velocity feed-forward is consistent with the

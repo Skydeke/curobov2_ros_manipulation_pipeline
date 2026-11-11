@@ -15,14 +15,16 @@ namespace curobo_core
 RobotContext::RobotContext(
   rclcpp::Node * node, double dt, std::vector<std::string> joint_names,
   std::string strategy_key, std::map<std::string, std::string> strategy_params,
-  std::vector<double> default_home)
+  std::vector<double> default_home, std::vector<std::string> continuous_joint_names)
 : node_(node), dt_(dt), joint_names_(std::move(joint_names)),
-  strategy_params_(std::move(strategy_params)), default_home_(std::move(default_home))
+  strategy_params_(std::move(strategy_params)), default_home_(std::move(default_home)),
+  continuous_joint_names_(std::move(continuous_joint_names))
 {
   select_strategy(strategy_key);
   // PORT: self.ghost_strategy = GhostStrategy(node, self.dt, self.description)
   ghost_strategy_ = std::make_unique<GhostStrategy>(
     node_, dt_, joint_names_, strategy_params_);
+  ghost_strategy_->set_continuous_joint_names(continuous_joint_names_);
   // PORT: "Control strategy initialized: {name} (robot: {description.name})"
   RCLCPP_INFO(
     node_->get_logger(), "Control strategy initialized: %s",
@@ -59,6 +61,7 @@ void RobotContext::select_strategy(const std::string & key)
     return;
   }
   robot_strategy_ = std::move(strategy);
+  robot_strategy_->set_continuous_joint_names(continuous_joint_names_);
   if (joint_state_callback_) {
     // Re-apply on a strategy switch: the new strategy forwards its joint state
     // to the node so unpinned lock joints keep feeding the collision model.
@@ -67,6 +70,7 @@ void RobotContext::select_strategy(const std::string & key)
   current_strategy_name_ = key;
   ghost_strategy_ = std::make_unique<GhostStrategy>(
     node_, dt_, joint_names_, strategy_params_);
+  ghost_strategy_->set_continuous_joint_names(continuous_joint_names_);
 }
 
 // PORT: the node's hook for unpinned lock joints (lock_joints: {joint: null}).

@@ -67,6 +67,11 @@ void JointPoseStrategy::send_trajectrory()
 // PORT: JointPoseStrategy.get_joint_pose
 std::vector<double> JointPoseStrategy::get_joint_pose()
 {
+  // Measured pose on the continuous-joint unwrapped branch (same physical pose).
+  std::vector<double> pose = measured_pose();
+  if (!pose.empty()) {
+    return pose;
+  }
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
   return joint_pose_;
 }
@@ -153,6 +158,10 @@ void JointPoseStrategy::callback_joint_pose(const sensor_msgs::msg::JointState &
       static_cast<std::int64_t>(msg.header.stamp.sec) * 1000000000 +
       static_cast<std::int64_t>(msg.header.stamp.nanosec),
       feedback);
+  } else {
+    // No timestamp means no buffer entry, but the live measured pose must
+    // still advance on the unwrapped continuous branch.
+    track_measured(feedback);
   }
 }
 

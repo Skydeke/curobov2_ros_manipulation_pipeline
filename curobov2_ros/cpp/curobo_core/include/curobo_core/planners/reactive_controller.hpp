@@ -98,6 +98,12 @@ public:
   const std::vector<double> & step_times() const {return step_times_;}
   bool is_on_target() const {return last_position_error_ < convergence_threshold_;}
 
+  // Continuous joints: an MPC action is lifted to the measured branch before it
+  // is turned into a command window. A step larger than the configured bound is
+  // held, never silently re-routed the short way.
+  void set_continuous_joint_names(std::vector<std::string> names)
+  {continuous_joint_names_ = std::move(names);}
+
   // PORT: ReactiveController.set_live_goal / _take_live_goal
   void set_live_goal(const std::array<double, 7> & raw);
   std::optional<std::array<double, 7>> take_live_goal();
@@ -146,6 +152,7 @@ protected:
   }
 
   rclcpp::Node * node_;
+  std::vector<std::string> continuous_joint_names_;
   bool is_goal_active_ = false;
   double convergence_threshold_ = 0.01;
   int max_iterations_ = 1000;

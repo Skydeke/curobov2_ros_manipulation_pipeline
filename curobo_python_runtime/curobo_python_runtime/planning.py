@@ -124,7 +124,30 @@ def _clamp_to_limits(entry, positions):
         return positions
     lo, hi = limits[0], limits[1]
     eps = np.minimum(1e-6, 0.25 * np.maximum(hi - lo, 1e-9))
-    return np.clip(positions, lo + eps, hi - eps).astype(positions.dtype)
+    out = np.array(positions, dtype=positions.dtype, copy=True)
+    names = list(entry.get("joint_names", entry["kin"].joint_names))
+    continuous_names = set(entry.get("continuous_joint_names", []))
+    continuous_names.update(entry.get("urdf_continuous_joint_names", []))
+    two_pi = 2.0 * np.pi
+    for j, name in enumerate(names):
+        if j >= out.shape[-1]:
+            break
+        if name not in continuous_names:
+            out[..., j] = np.clip(out[..., j], lo[j] + eps[j], hi[j] - eps[j])
+            continue
+        # A continuous joint is periodic: the finite limits are a coordinate
+        # window, not a physical stop. Move the value into the window by whole
+        # turns (identical physical pose) instead of clipping the start/goal.
+        window_lo = float(lo[j]) + float(eps[j])
+        window_hi = float(hi[j]) - float(eps[j])
+        if window_hi - window_lo <= 0.0:
+            continue
+        center = 0.5 * (window_lo + window_hi)
+        values = out[..., j]
+        values = values + two_pi * np.round((center - values) / two_pi)
+        values = np.clip(values, window_lo, window_hi)
+        out[..., j] = values.astype(out.dtype, copy=False)
+    return out
 
 
 def plan_cspace(handle: int, req) -> dict:

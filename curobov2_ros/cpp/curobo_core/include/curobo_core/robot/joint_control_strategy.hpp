@@ -16,12 +16,15 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+
+#include "curobo_core/robot/continuous_joints.hpp"
 
 namespace curobo_core
 {
@@ -101,6 +104,16 @@ public:
   const std::vector<std::string> & joint_names() const {return joint_names_;}
   std::size_t dof() const {return joint_names_.size();}
 
+  // Continuous joints are periodic. Keep the measured state on a continuous
+  // phase-unwrapped branch so planning/MPC never see a spurious 2*pi jump; the
+  // FK/collision result is identical because rotations are 2*pi-periodic.
+  void set_continuous_joint_names(std::vector<std::string> names)
+  {
+    std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+    continuous_joint_names_ = std::move(names);
+    configure_continuous_tracker();
+  }
+
   // PORT: forwards the raw joint-state message before it is reduced to the cspace
   // pose. Unpinned lock joints (`lock_joints: {joint: null}`) appear in the
   // message but not in joint_names(), so this is how the node learns their value
@@ -110,10 +123,39 @@ public:
   {joint_state_callback_ = std::move(callback);}
 
 protected:
+  // (Re)configure the phase tracker for the current name list. Caller holds
+  // buffer_lock_.
+  void configure_continuous_tracker()
+  {
+    continuous_tracker_.configure(joint_names_, continuous_joint_names_);
+    tracker_joint_names_ = joint_names_;
+    unwrapped_pose_.clear();
+  }
+
   // Called from the strategy's joint-state subscription, before the cspace remap.
   void notify_joint_state(const sensor_msgs::msg::JointState & msg)
   {
     if (joint_state_callback_) {joint_state_callback_(msg);}
+  }
+
+  //: Phase-unwrap `raw` against the previous sample. Callers store the result
+  //: both as the live measured pose and in the timestamped feedback buffer.
+  const std::vector<double> & track_measured(const std::vector<double> & raw)
+  {
+    std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+    if (tracker_joint_names_ != joint_names_) {
+      configure_continuous_tracker();
+    }
+    unwrapped_pose_ = continuous_tracker_.unwrap(raw);
+    return unwrapped_pose_;
+  }
+
+  //: Unwrapped live pose when a joint state has been seen, otherwise empty (the
+  //: concrete strategy then falls back to its own raw pose storage).
+  std::vector<double> measured_pose() const
+  {
+    std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+    return unwrapped_pose_;
   }
   // PORT: _send_as_action / _get_progression / _cancel_action /
   // _ensure_action_client (the FollowJointTrajectory execution path).
@@ -146,6 +188,12 @@ protected:
   std::optional<std::vector<std::vector<double>>> exec_positions_;
 
   std::deque<std::pair<std::int64_t, std::vector<double>>> feedback_buffer_;
+
+  std::vector<std::string> continuous_joint_names_;
+  ContinuousJointTracker continuous_tracker_;
+  std::vector<std::string> tracker_joint_names_;
+  //: Latest measured pose on the unwrapped branch, parallel to joint_names_.
+  std::vector<double> unwrapped_pose_;
 
   std::string action_topic_;
   using FollowJT = control_msgs::action::FollowJointTrajectory;

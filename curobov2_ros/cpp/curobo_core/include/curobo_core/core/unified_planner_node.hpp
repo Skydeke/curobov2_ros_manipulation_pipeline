@@ -143,6 +143,9 @@ private:
   std::unique_ptr<ConfigServices> config_services_;
   std::unique_ptr<PlannerServices> planner_services_;
   std::unique_ptr<ReachabilityServices> reachability_services_;
+  // Descriptor override + model joint type; drives the planner chart, the
+  // unwrapped measured state and replay branch anchoring.
+  std::vector<std::string> continuous_joint_names_;
   std::unique_ptr<RobotContext> robot_context_;
   std::unique_ptr<TrajectoryActionServer> action_server_;
   // Perception (M4): the mapper cameras, the lidar feeds and the depth-map

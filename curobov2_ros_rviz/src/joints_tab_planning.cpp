@@ -101,36 +101,21 @@ double targetOf(const QTreeWidgetItem * item)
 /// Writes a row's target and repaints it. EVERY write in this file goes through
 /// here, so the clamp to the joint's own limits cannot be bypassed by one path.
 ///
-/// A CONTINUOUS joint (reported range is a full turn or wider) is periodic, so
-/// a value written as the "other" turn — e.g. the descriptor's
-/// laundry_check_gripper j5 = 6.3641, just past the 6.28 top — is not out of
-/// range, it is the SAME pose as 6.3641 - 2*pi = 0.0809. Clamping it to 6.28
-/// (what a plain std::clamp does) silently plans a different configuration;
-/// wrapping it to the in-range full-turn equivalent keeps the pose exact.
+/// A CONTINUOUS joint is periodic. Its reported bounds are a DISPLAY WINDOW,
+/// not a physical stop, so the target must be the user's raw intent: rewriting
+/// 6.3641 to 0.0809 (or clamping it to 6.28) changes the value the planner is
+/// asked for. The planner interprets the target as a pose and takes the
+/// shortest 2*pi-equivalent path from the measured branch; multi-turn motion
+/// needs explicit waypoints. Bounded joints keep the ordinary clamp.
 void setTarget(QTreeWidgetItem * item, double value)
 {
   if (hasBounds(item)) {
     const QPointF limits = boundsOf(item);
     const double lo = limits.x();
     const double hi = limits.y();
-    constexpr double kTwoPi = 6.283185307179586;
-    if (hi - lo >= kTwoPi - 1e-6) {
-      // Continuous: pick the in-range 2*pi-equivalent nearest the raw value.
-      double best = value;
-      double best_dist = std::numeric_limits<double>::infinity();
-      for (int k = -2; k <= 2; ++k) {
-        const double cand = value + static_cast<double>(k) * kTwoPi;
-        if (cand < lo - 1e-9 || cand > hi + 1e-9) {
-          continue;
-        }
-        const double dist = std::fabs(cand - value);
-        if (dist < best_dist) {
-          best_dist = dist;
-          best = cand;
-        }
-      }
-      value = best;
-    } else {
+    const bool continuous =
+      item->data(COL_TARGET, ProgressBarDelegate::ContinuousRole).toBool();
+    if (!continuous) {
       value = std::clamp(value, lo, hi);
     }
   }

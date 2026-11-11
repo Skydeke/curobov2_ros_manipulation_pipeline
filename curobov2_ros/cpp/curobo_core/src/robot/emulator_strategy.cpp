@@ -170,6 +170,10 @@ void EmulatorStrategy::execute_trajectory(
 // PORT: EmulatorStrategy.get_joint_pose
 std::vector<double> EmulatorStrategy::get_joint_pose()
 {
+  std::vector<double> pose = measured_pose();
+  if (!pose.empty()) {
+    return pose;
+  }
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
   return current_joint_positions_;
 }
