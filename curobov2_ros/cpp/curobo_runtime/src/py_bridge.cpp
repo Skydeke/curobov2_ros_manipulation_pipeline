@@ -1050,6 +1050,26 @@ SphereSetOutcome PyBridge::collision_spheres_with_attached(
       PyErr_Clear();
       out.attach_frame.clear();
     }
+    // Exact-model diagnostics. Optional so an older pure-Python server still
+    // works: the publisher then falls back to its historical colouring.
+    const auto optional_tensor = [&result](const char * key) {
+        try {
+          return array_to_tensor(result.attr("__getitem__")(key));
+        } catch (const py::error_already_set &) {
+          PyErr_Clear();
+          return TensorF32{};
+        }
+      };
+    out.self_padding = optional_tensor("self_padding");
+    out.self_distance = optional_tensor("self_distance");
+    out.world_distance = optional_tensor("world_distance");
+    try {
+      out.link_names =
+        result.attr("__getitem__")("link_names").cast<std::vector<std::string>>();
+    } catch (const py::error_already_set &) {
+      PyErr_Clear();
+      out.link_names.clear();
+    }
     return out;
   } catch (const py::error_already_set & e) {
     throw BridgeError("programming", e.what());

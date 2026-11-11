@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <chrono>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -802,38 +803,53 @@ void RosServiceManager::publish_collision_spheres_job()
     if (q.empty()) {
       return;
     }
-    {
-      const auto now = std::chrono::steady_clock::now();
-      const std::int64_t epoch = obstacle_manager_->epoch();
-      const std::int64_t sv = obstacle_manager_->scene_version();
-      bool same = epoch == viz_sphere_epoch_ && sv == viz_sphere_scene_version_ &&
-        q.size() == viz_sphere_q_.size() && (now - viz_sphere_t_) < std::chrono::seconds(2);
-      for (std::size_t i = 0; same && i < q.size(); ++i) {
-        same = std::abs(q[i] - viz_sphere_q_[i]) < 1e-4f;
-      }
-      if (same) {
-        return;   // robot and world unchanged: spheres + distances would be identical
-      }
-      viz_sphere_epoch_ = epoch;
-      viz_sphere_scene_version_ = sv;
-      viz_sphere_q_ = q;
-      viz_sphere_t_ = now;
-    }
+    // No change-detection cache here. The model can change without the joint
+    // pose changing (link enable/disable, unpinned lock joints, attach/detach),
+    // and the visualizer must never show a stale collision model. The bridge
+    // returns the exact per-sphere diagnostics in the same call, so the cost is
+    // the FK + one scene query + the self-collision pair kernel (measured at
+    // ~0.4 ms for TIAGo on an RTX 4060), not a reason to cache.
     const auto sphere_set = bridge_->collision_spheres_with_attached(handle_, q);
     const auto & spheres = sphere_set.spheres;
     if (spheres.shape.size() != 2 || spheres.shape[1] != 4) {
       return;
     }
-    // Per-sphere scene distance for the collision colouring; absent -> all green.
-    std::vector<float> distances;
-    try {
-      curobo_runtime::TensorF32 q_tensor;
-      q_tensor.shape = {1, static_cast<std::int64_t>(q.size())};
-      q_tensor.data = q;
-      distances = bridge_->collision_distance(handle_, q_tensor);
-    } catch (const std::exception &) {
-      distances.clear();
+    // Signed per-sphere clearances from the SAME kinematics instance that
+    // produced the spheres: > 0 is penetration. Fall back to the standalone
+    // distance service only for an older bridge that does not report them.
+    curobo_runtime::TensorF32 world_tensor = sphere_set.world_distance;
+    if (world_tensor.shape.empty() || world_tensor.data.size() !=
+      static_cast<std::size_t>(spheres.shape[0]))
+    {
+      try {
+        curobo_runtime::TensorF32 q_tensor;
+        q_tensor.shape = {1, static_cast<std::int64_t>(q.size())};
+        q_tensor.data = q;
+        const auto distances = bridge_->collision_distance(handle_, q_tensor);
+        world_tensor.shape = {spheres.shape[0], 1};
+        world_tensor.data.assign(distances.begin(), distances.end());
+      } catch (const std::exception &) {
+        world_tensor = curobo_runtime::TensorF32{};
+      }
     }
+    const auto per_sphere = [](const curobo_runtime::TensorF32 & tensor,
+        std::int64_t row, float fallback)
+      {
+        if (tensor.shape.size() == 2 && tensor.shape[1] == 1 &&
+          row >= 0 && static_cast<std::size_t>(row) < tensor.data.size())
+        {
+          return tensor.data[static_cast<std::size_t>(row)];
+        }
+        return fallback;
+      };
+    const auto link_of = [&sphere_set](std::int64_t row) {
+        if (row >= 0 &&
+          static_cast<std::size_t>(row) < sphere_set.link_names.size())
+        {
+          return sphere_set.link_names[static_cast<std::size_t>(row)];
+        }
+        return std::string();
+      };
 
     visualization_msgs::msg::MarkerArray array;
     visualization_msgs::msg::Marker clear;
@@ -850,18 +866,39 @@ void RosServiceManager::publish_collision_spheres_job()
       sphere_set.attached_local.shape.size() == 2 &&
       sphere_set.attached_local.shape[1] == 4 &&
       sphere_set.attached_local.shape[0] == spheres.shape[0];
+    const double near_clearance = node_->has_parameter("collision_activation_distance") ?
+      node_->get_parameter("collision_activation_distance").as_double() : 0.005;
     const std::int64_t n = spheres.shape[0];
+    std::string colliding_details;
     for (std::int64_t i = 0; i < n; ++i) {
       const std::size_t base = static_cast<std::size_t>(i) * 4;
       const float radius = spheres.data[base + 3];
       if (radius <= 0.0f) {
         continue;   // disabled sphere (radius -100)
       }
+      const bool attached = static_cast<std::size_t>(i) < sphere_set.attached.size() &&
+        sphere_set.attached[static_cast<std::size_t>(i)] != 0;
+      const float world_d = per_sphere(world_tensor, i, std::numeric_limits<float>::quiet_NaN());
+      const float self_d = per_sphere(
+        sphere_set.self_distance, i, -std::numeric_limits<float>::infinity());
+      const bool world_colliding = std::isfinite(world_d) && world_d > 0.0f;
+      const bool self_colliding = std::isfinite(self_d) && self_d > 0.0f;
+      const bool colliding = world_colliding || self_colliding;
+      const float clearance = std::min(
+        std::isfinite(world_d) ? world_d : std::numeric_limits<float>::infinity(),
+        std::isfinite(self_d) ? self_d : std::numeric_limits<float>::infinity());
+      if (colliding) {
+        if (!colliding_details.empty()) {
+          colliding_details += "; ";
+        }
+        colliding_details += (link_of(i).empty() ? "sphere#" + std::to_string(i) : link_of(i));
+        colliding_details += " (self " + std::to_string(self_d) +
+          " m, world " + std::to_string(world_d) + " m)";
+      }
+
       visualization_msgs::msg::Marker marker;
       // PORT: the attached-object spheres carry their own namespace so a
       // consumer can show the grasped object separately.
-      const bool attached = static_cast<std::size_t>(i) < sphere_set.attached.size() &&
-        sphere_set.attached[static_cast<std::size_t>(i)] != 0;
       const bool link_relative = attached && has_attached_local &&
         sphere_set.attached_local.data[base + 3] > 0.0f;
       marker.header.frame_id = link_relative ? sphere_set.attach_frame : frame;
@@ -878,31 +915,27 @@ void RosServiceManager::publish_collision_spheres_job()
       marker.pose.orientation.w = 1.0;
       marker.scale.x = marker.scale.y = marker.scale.z = radius * 2.0;
       marker.color.a = 0.5;
-      const bool colliding = static_cast<std::size_t>(i) < distances.size() &&
-        distances[static_cast<std::size_t>(i)] < 0.0f;
       if (colliding) {
-        marker.color.r = 1.0;   // colliding = red
+        marker.color.r = 1.0;   // exact model says collision (padding included)
+        marker.color.g = 0.05;
       } else if (attached) {
         marker.color.b = 1.0;   // attached object, not colliding = blue
+      } else if (clearance < near_clearance) {
+        marker.color.r = 1.0;   // within the planner's activation margin
+        marker.color.g = 0.45;
       } else {
         marker.color.g = 1.0;   // collision-free = green
       }
       array.markers.push_back(marker);
     }
-    // PORT: the Python names the offending link + obstacle(s); the attribution
-    // pass is not ported, so report the colliding sphere indices only.
-    if (std::any_of(distances.begin(), distances.end(),
-        [](float d) {return d < 0.0f;}))
-    {
-      std::string indices;
-      for (std::size_t i = 0; i < distances.size(); ++i) {
-        if (distances[i] < 0.0f) {
-          indices += (indices.empty() ? "" : ", ") + std::to_string(i);
-        }
-      }
-      RCLCPP_DEBUG_THROTTLE(
-        node_->get_logger(), *node_->get_clock(), 5000,
-        "collision_spheres: sphere(s) in collision (indices: %s)", indices.c_str());
+    // Surface WHAT is in collision, not just an index. This is the same
+    // per-sphere model the planner optimizes, so a red sphere in RViz and this
+    // line explain a rejected state without a separate attribution pass.
+    if (!colliding_details.empty()) {
+      RCLCPP_WARN_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "collision_spheres: exact model reports contact: %s",
+        colliding_details.c_str());
     }
     collision_spheres_pub_->publish(array);
   } catch (const std::exception & e) {

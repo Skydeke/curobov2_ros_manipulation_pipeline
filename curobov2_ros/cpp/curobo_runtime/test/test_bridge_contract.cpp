@@ -98,3 +98,18 @@ TEST(BridgeContract, SceneSetVersionsAndClearFlag)
   EXPECT_EQ(bridge.scene_version(), 2);
   EXPECT_EQ(bridge.scene_get(1), R"([{"name":"cube2"}])");
 }
+
+TEST(BridgeContract, CollisionSphereDiagnosticsAreRowAligned)
+{
+  FakeBridge bridge;
+  const auto spheres = bridge.collision_spheres_with_attached(1, {0.25f});
+  ASSERT_EQ(spheres.spheres.shape, (std::vector<std::int64_t>{2, 4}));
+  ASSERT_EQ(spheres.self_padding.shape, (std::vector<std::int64_t>{2, 1}));
+  ASSERT_EQ(spheres.self_distance.shape, (std::vector<std::int64_t>{2, 1}));
+  ASSERT_EQ(spheres.world_distance.shape, (std::vector<std::int64_t>{2, 1}));
+  ASSERT_EQ(spheres.link_names.size(), 2u);
+  EXPECT_EQ(spheres.link_names[0], "tool0");
+  EXPECT_FLOAT_EQ(spheres.self_padding.data[0], 0.02f);
+  EXPECT_FLOAT_EQ(spheres.self_distance.data[0], -0.01f);
+  EXPECT_FLOAT_EQ(spheres.world_distance.data[0], 0.03f);
+}

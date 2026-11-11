@@ -184,7 +184,6 @@ collision_cache_bucket_counts
 render_plan_image
 attach_object
 detach_object
-collision_spheres_with_attached
 robot_model_rebuild_locks
 robot_model_update_lock_joints
 configure_mapper

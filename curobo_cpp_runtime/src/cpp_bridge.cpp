@@ -446,6 +446,16 @@ struct CppBridge::Impl
   std::unique_ptr<curobo::robot::InverseKinematics> ik;
   std::unique_ptr<curobo::robot::MpcController> mpc;
 
+  // Native collision-sphere model copied from the artifact's IK manifest. This
+  // is the exact sphere list / pair list / padding the native solvers use; the
+  // Python fallback is only consulted when an older artifact lacks it.
+  bool native_sphere_model_ready{false};
+  curobo::robot::SphereModel native_sphere_model;
+  std::map<std::string, std::vector<int>> native_sphere_slots;
+  std::vector<std::string> native_sphere_link_names;
+  DeviceBuffer native_sphere_q;
+  DeviceBuffer native_sphere_output;
+
   std::vector<std::string> lanes;
   bool cuda_graph_reset{true};
   bool debug_cuda_graphs{false};
@@ -887,6 +897,32 @@ struct CppBridge::Impl
       fail("init", "artifact manifest names do not match cpp_runtime dimensions");
     }
     kinematics = std::move(kinematics_ptr);
+    try {
+      auto sphere_model = kinematics->sphere_model();
+      if (sphere_model.num_spheres > 0 &&
+        sphere_model.link_spheres.size() ==
+        static_cast<std::size_t>(sphere_model.num_spheres) * 4 &&
+        sphere_model.link_sphere_map.size() ==
+        static_cast<std::size_t>(sphere_model.num_spheres))
+      {
+        native_sphere_link_names.assign(
+          static_cast<std::size_t>(sphere_model.num_spheres), std::string());
+        for (int i = 0; i < sphere_model.num_spheres; ++i) {
+          const int link_index = sphere_model.link_sphere_map[static_cast<std::size_t>(i)];
+          if (link_index >= 0 && static_cast<std::size_t>(link_index) < link_names.size()) {
+            native_sphere_link_names[static_cast<std::size_t>(i)] =
+              link_names[static_cast<std::size_t>(link_index)];
+            native_sphere_slots[link_names[static_cast<std::size_t>(link_index)]].push_back(i);
+          }
+        }
+        native_sphere_model = std::move(sphere_model);
+        native_sphere_model_ready = true;
+      }
+    } catch (const std::exception &) {
+      // Artifact predates the native sphere API; the Python fallback still
+      // provides the RViz model.
+      native_sphere_model_ready = false;
+    }
   }
 
   std::map<std::string, double> lock_map() const
@@ -969,6 +1005,10 @@ struct CppBridge::Impl
     ik.reset();
     kinematics.reset();
     scene.reset();
+    native_sphere_model_ready = false;
+    native_sphere_model = curobo::robot::SphereModel{};
+    native_sphere_slots.clear();
+    native_sphere_link_names.clear();
     python_planner_built = false;
     motion_cfg_json.clear();
     native_scene_valid = true;
@@ -2730,6 +2770,150 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
   curobo_runtime::RobotHandle, const std::vector<float> & q)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
+  // Preferred path: the artifact's own sphere model + the fused sphere-FK
+  // kernel. This is the same data the native collision costs consume, and it
+  // includes the reserved attachment slots, so no Python model or appended row
+  // is involved.
+  if (impl_->native_sphere_model_ready && impl_->kinematics != nullptr &&
+    static_cast<int>(q.size()) == impl_->dof())
+  {
+    const auto & model = impl_->native_sphere_model;
+    const std::size_t n = static_cast<std::size_t>(model.num_spheres);
+    impl_->native_sphere_q.upload(q.data(), q.size() * sizeof(float));
+    const std::size_t sphere_bytes = n * 4 * sizeof(float);
+    if (impl_->native_sphere_output.bytes() < sphere_bytes) {
+      impl_->native_sphere_output.allocate(sphere_bytes);
+    }
+    impl_->kinematics->forward_spheres(
+      static_cast<const float *>(impl_->native_sphere_q.get()),
+      static_cast<float *>(impl_->native_sphere_output.get()), 1, 1, nullptr);
+    cuda_check("collision_spheres", cudaDeviceSynchronize());
+
+    curobo_runtime::SphereSetOutcome outcome;
+    outcome.spheres.shape = {static_cast<std::int64_t>(n), 4};
+    outcome.spheres.data.resize(n * 4);
+    impl_->native_sphere_output.download(
+      outcome.spheres.data.data(), sphere_bytes);
+    outcome.self_padding.shape = {static_cast<std::int64_t>(n), 1};
+    outcome.self_padding.data = model.self_collision_padding;
+    if (outcome.self_padding.data.size() != n) {
+      outcome.self_padding.data.assign(n, 0.0F);
+    }
+    outcome.self_distance.shape = {static_cast<std::int64_t>(n), 1};
+    outcome.self_distance.data.assign(
+      n, -std::numeric_limits<float>::infinity());
+    outcome.link_names = impl_->native_sphere_link_names;
+    outcome.attached.assign(n, 0);
+
+    // Disabled links are stored as radius -100 by cuRobo. Mirror the bridge's
+    // link_collision map so a toggled link disappears from RViz immediately.
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto & link = outcome.link_names[i];
+      const auto state = impl_->link_collision.find(link);
+      if (state != impl_->link_collision.end() && !state->second) {
+        outcome.spheres.data[i * 4 + 3] = -100.0F;
+      }
+    }
+
+    // Native attach writes into the attach link's reserved sphere slots. Mirror
+    // the same slots here: the pair list already contains them, so the payload
+    // participates in the exact self-collision query instead of being appended
+    // as an extra collider outside the model.
+    std::set<int> used_slots;
+    for (const auto & entry : impl_->visual_attachments) {
+      const auto link_it = impl_->attach_links.find(entry.first);
+      if (link_it == impl_->attach_links.end()) {
+        continue;
+      }
+      const auto slots_it = impl_->native_sphere_slots.find(link_it->second);
+      if (slots_it == impl_->native_sphere_slots.end()) {
+        continue;
+      }
+      int slot = -1;
+      for (const int candidate : slots_it->second) {
+        if (used_slots.insert(candidate).second) {
+          slot = candidate;
+          break;
+        }
+      }
+      if (slot < 0) {
+        continue;
+      }
+      const auto & attachment = entry.second;
+      const auto tool = impl_->tool_pose(q, attachment.tool_index, "collision_spheres");
+      const auto world = pose_multiply(tool, attachment.object_in_link);
+      const std::size_t base = static_cast<std::size_t>(slot) * 4;
+      outcome.spheres.data[base + 0] = world[0];
+      outcome.spheres.data[base + 1] = world[1];
+      outcome.spheres.data[base + 2] = world[2];
+      outcome.spheres.data[base + 3] = attachment.radius;
+      outcome.attached[static_cast<std::size_t>(slot)] = 1;
+    }
+
+    // Exact self-collision pair distances, same tensors as the native kernel.
+    const auto & pairs = model.self_collision_pairs;
+    const auto & padding = outcome.self_padding.data;
+    if (pairs.size() >= 2 && padding.size() == n) {
+      for (std::size_t p = 0; p + 1 < pairs.size(); p += 2) {
+        const int a = pairs[p];
+        const int b = pairs[p + 1];
+        if (a < 0 || b < 0 || static_cast<std::size_t>(a) >= n ||
+          static_cast<std::size_t>(b) >= n)
+        {
+          continue;
+        }
+        const auto ia = static_cast<std::size_t>(a);
+        const auto ib = static_cast<std::size_t>(b);
+        const float radius_a = outcome.spheres.data[ia * 4 + 3];
+        const float radius_b = outcome.spheres.data[ib * 4 + 3];
+        if (radius_a < 0.0F || radius_b < 0.0F) {
+          continue;
+        }
+        const float dx = outcome.spheres.data[ia * 4 + 0] -
+          outcome.spheres.data[ib * 4 + 0];
+        const float dy = outcome.spheres.data[ia * 4 + 1] -
+          outcome.spheres.data[ib * 4 + 1];
+        const float dz = outcome.spheres.data[ia * 4 + 2] -
+          outcome.spheres.data[ib * 4 + 2];
+        const float centre = std::sqrt(dx * dx + dy * dy + dz * dz);
+        const float penetration =
+          (radius_a + padding[ia]) + (radius_b + padding[ib]) - centre;
+        outcome.self_distance.data[ia] =
+          std::max(outcome.self_distance.data[ia], penetration);
+        outcome.self_distance.data[ib] =
+          std::max(outcome.self_distance.data[ib], penetration);
+      }
+    }
+
+    // World distance has no public native query yet; keep the Python bridge's
+    // scene query when it is available, and leave the array empty otherwise.
+    if (impl_->python) {
+      try {
+        curobo_runtime::TensorF32 q_tensor;
+        q_tensor.shape = {1, static_cast<std::int64_t>(q.size())};
+        q_tensor.data = q;
+        const auto distances =
+          impl_->python->collision_distance(impl_->python_handle, q_tensor);
+        if (distances.size() == n) {
+          outcome.world_distance.shape = {static_cast<std::int64_t>(n), 1};
+          outcome.world_distance.data = distances;
+          // The Python diagnostic scene still contains the attached object's
+          // world copy (native attach disables it only in the native scene).
+          // Do not report the payload as penetrating itself.
+          for (const int slot : used_slots) {
+            if (slot >= 0 && static_cast<std::size_t>(slot) < n) {
+              outcome.world_distance.data[static_cast<std::size_t>(slot)] =
+                std::numeric_limits<float>::quiet_NaN();
+            }
+          }
+        }
+      } catch (const std::exception &) {
+        outcome.world_distance = curobo_runtime::TensorF32{};
+      }
+    }
+    return outcome;
+  }
+
   impl_->require_python("collision_spheres_with_attached");
   auto outcome = impl_->python->collision_spheres_with_attached(impl_->python_handle, q);
   if (impl_->visual_attachments.empty() || impl_->kinematics == nullptr ||
@@ -2739,6 +2923,18 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
     return outcome;
   }
   const std::size_t base_rows = static_cast<std::size_t>(outcome.spheres.shape[0]);
+  // The native attachment is not known to the embedded Python robot model, so
+  // its sphere is appended here. Extend the exact-model diagnostic arrays with
+  // it as well; otherwise their row count would no longer match `spheres` and
+  // the RViz publisher would silently drop all colouring.
+  const auto has_per_row = [base_rows](const TensorF32 & tensor) {
+      return tensor.shape.size() == 2 && tensor.shape[1] == 1 &&
+             tensor.data.size() == base_rows;
+    };
+  const bool has_padding = has_per_row(outcome.self_padding);
+  const bool has_self_distance = has_per_row(outcome.self_distance);
+  const bool has_world_distance = has_per_row(outcome.world_distance);
+  const bool has_link_names = outcome.link_names.size() == base_rows;
   for (const auto & entry : impl_->visual_attachments) {
     const auto & attachment = entry.second;
     const auto tool = impl_->tool_pose(q, attachment.tool_index, "collision_spheres");
@@ -2748,6 +2944,25 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
     outcome.spheres.data.push_back(world[2]);
     outcome.spheres.data.push_back(attachment.radius);
     outcome.attached.push_back(1);
+    if (has_padding) {
+      outcome.self_padding.data.push_back(0.0F);
+    }
+    if (has_self_distance) {
+      // Not a member of the embedded model's pair list: no self constraint.
+      outcome.self_distance.data.push_back(
+        -std::numeric_limits<float>::infinity());
+    }
+    if (has_world_distance) {
+      // The world copy is disabled while attached; the diagnostic scene may
+      // still contain it. Leave this row explicitly unknown rather than
+      // reporting the payload as penetrating itself.
+      outcome.world_distance.data.push_back(std::numeric_limits<float>::quiet_NaN());
+    }
+    if (has_link_names) {
+      const auto link = impl_->attach_links.find(entry.first);
+      outcome.link_names.push_back(
+        link == impl_->attach_links.end() ? std::string() : link->second);
+    }
     if (outcome.attached_local.shape.size() == 2 &&
       outcome.attached_local.shape[1] == 4)
     {
@@ -2758,6 +2973,18 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
       outcome.attached_local.shape[0] =
         static_cast<std::int64_t>(outcome.attached_local.shape[0] + 1);
     }
+  }
+  if (has_padding) {
+    outcome.self_padding.shape[0] = static_cast<std::int64_t>(
+      base_rows + impl_->visual_attachments.size());
+  }
+  if (has_self_distance) {
+    outcome.self_distance.shape[0] = static_cast<std::int64_t>(
+      base_rows + impl_->visual_attachments.size());
+  }
+  if (has_world_distance) {
+    outcome.world_distance.shape[0] = static_cast<std::int64_t>(
+      base_rows + impl_->visual_attachments.size());
   }
   outcome.spheres.shape[0] = static_cast<std::int64_t>(
     base_rows + impl_->visual_attachments.size());

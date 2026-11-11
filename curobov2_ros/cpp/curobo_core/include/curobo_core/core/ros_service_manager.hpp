@@ -161,10 +161,6 @@ private:
   // heartbeat so late joiners and unbumped mutations still get refreshed.
   std::int64_t viz_voxel_epoch_ = -1;
   std::chrono::steady_clock::time_point viz_voxel_t_{};
-  std::int64_t viz_sphere_epoch_ = -1;
-  std::int64_t viz_sphere_scene_version_ = -1;
-  std::vector<float> viz_sphere_q_;
-  std::chrono::steady_clock::time_point viz_sphere_t_{};
   bool workspace_viz_enabled_ = true;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr workspace_viz_pub_;
   rclcpp::Publisher<curobov2_ros_interfaces::msg::SparseVoxelGrid>::SharedPtr sparse_voxel_pub_;

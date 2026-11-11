@@ -190,6 +190,26 @@ struct SphereSetOutcome
   // nothing is attached or the parent link is unknown.
   TensorF32 attached_local;                   // [S, 4] (cx, cy, cz, radius)
   std::string attach_frame;                   // URDF link (e.g. *end_effector)
+
+  // Diagnostics from the SAME kinematics instance that produced `spheres`, so
+  // the RViz view reflects the exact collision model the solver uses instead of
+  // a re-derived approximation. All arrays are row-aligned with `spheres`.
+  //
+  // `self_padding` is cuRobo's per-sphere self-collision radius buffer. The
+  // solver adds it to the sphere radius before its pair kernel runs, so a
+  // clearance computed from `spheres` alone is not the clearance the planner
+  // enforces.
+  TensorF32 self_padding;                     // [S, 1] metres
+  // Signed self-collision penetration per sphere: > 0 = collision, <= 0 =
+  // separation. This is the worst pair in
+  // `self_collision_config.collision_pairs` (the exact kernel pair list),
+  // including `self_padding`. -inf means the sphere participates in no pair.
+  TensorF32 self_distance;                    // [S, 1] metres
+  // Signed world clearance per sphere against the live scene: > 0 =
+  // penetration. Empty when the bridge cannot query the scene.
+  TensorF32 world_distance;                   // [S, 1] metres
+  // URDF link that owns each sphere (empty if the bridge does not report it).
+  std::vector<std::string> link_names;        // [S]
 };
 
 // PORT: collision_distance._attributed_collisions - one world contact: a robot
