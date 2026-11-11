@@ -348,10 +348,17 @@ void CuroboPlanningDisplay::reset()
   sphere_active_count_ = 0;
   live_spheres_.clear();
   playback_spheres_.clear();
+  attached_spheres_.clear();
   for (auto & sv : sphere_pool_) {
     if (sv.node) {
       sv.node->setVisible(false);
     }
+  }
+  if (robot_sphere_mesh_) {
+    robot_sphere_mesh_->clear();
+  }
+  if (robot_sphere_node_) {
+    robot_sphere_node_->setVisible(false);
   }
   {
     std::lock_guard<std::mutex> scene_lock(scene_mutex_);
