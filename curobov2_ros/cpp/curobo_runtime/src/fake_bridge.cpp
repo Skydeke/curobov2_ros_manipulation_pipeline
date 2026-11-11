@@ -2,6 +2,7 @@
 #include "curobo_runtime/fake_bridge.hpp"
 
 #include <cmath>
+#include <limits>
 #include <string>
 
 namespace curobo_runtime
@@ -460,6 +461,15 @@ SphereSetOutcome FakeBridge::collision_spheres_with_attached(
   out.attached = {0, 1};
   out.attached_local = out.spheres;
   out.attach_frame = "tool0";
+  // Exact-model diagnostics: one near-but-clear robot sphere and one attached
+  // sphere with no self-pair. Fixed values keep the marker mapping testable.
+  out.self_padding.shape = {2, 1};
+  out.self_padding.data = {0.02f, 0.0f};
+  out.self_distance.shape = {2, 1};
+  out.self_distance.data = {-0.01f, -std::numeric_limits<float>::infinity()};
+  out.world_distance.shape = {2, 1};
+  out.world_distance.data = {0.03f, -0.5f};
+  out.link_names = {"tool0", "attached_object"};
   return out;
 }
 

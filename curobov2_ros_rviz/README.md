@@ -216,10 +216,13 @@ robots.
   through `fk_batch`; links the server omits are filled from the URDF.
 - **Sphere overlays** — the server's `<planner>/collision_spheres`
   MarkerArray. `attached_spheres` (the grasped object, blue) is controlled by
-  `Show Attached`; `collision_spheres` (the robot's own spheres, green/red) by
-  `Show Robot Collision Spheres`. In the task constructor the same server
-  namespaces apply, so an attached object stays in the ghost gripper while
-  playback follows the solution.
+  `Show Attached`; `collision_spheres` (the robot's own spheres) by
+  `Show Robot Collision Spheres`. Colours come from the solver's exact model:
+  red = the padded self-collision pair list or the live scene reports contact,
+  amber = within the planner's activation margin, green = clear. The spheres
+  therefore turn red even when the drawn (unpadded) surfaces look separated.
+  In the task constructor the same server namespaces apply, so an attached
+  object stays in the ghost gripper while playback follows the solution.
 
 The old separate `TargetDisplay` and `CuroboTrajectoryDisplay` plugins are
 gone; use `curobov2_ros_rviz/CuroboPlanningDisplay`.

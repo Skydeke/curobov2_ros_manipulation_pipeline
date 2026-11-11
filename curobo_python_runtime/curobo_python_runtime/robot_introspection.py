@@ -261,47 +261,155 @@ def robot_description(robot_arg: str, robot_config_file: str):
         "gripper_max_efforts": gripper_max_efforts,
         "gripper_time_from_start": gripper_time_from_start,
     }
+def _self_collision_pair_cost(entry: dict, sc, spheres):
+    """Cache one store_pair_distance SelfCollisionCost per collision config.
+
+    The pair buffer keeps the exact kernel pair list and sphere padding, so the
+    visualizer does not re-derive a collision model of its own. It is keyed by
+    the config object: a rebuild (lock joints, new artifact) creates a new one,
+    while link enable/disable only changes sphere radii and reuses this cost.
+    """
+    from curobo._src.cost.cost_self_collision import SelfCollisionCost
+    from curobo._src.cost.cost_self_collision_cfg import SelfCollisionCostCfg
+
+    key = (id(sc), str(spheres.device), spheres.dtype)
+    cached = entry.get("_self_collision_pair_cost")
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    cost = SelfCollisionCost(
+        SelfCollisionCostCfg(
+            weight=1.0,
+            self_collision_kin_config=sc,
+            store_pair_distance=True,
+        )
+    )
+    entry["_self_collision_pair_cost"] = (key, cost)
+    return cost
+
+
+def _self_collision_pair_diagnostics(entry: dict, kin, spheres):
+    """Per-sphere self-collision penetration from cuRobo's own pair kernel.
+
+    `store_pair_distance=True` writes every configured pair's squared overlap.
+    Converting that with the same per-sphere padding the kernel used gives the
+    exact signed penetration (positive = collision, negative = clearance). The
+    per-sphere value is the WORST pair it participates in.
+
+    Returns (padding [S], self_distance [S]) as float32 numpy arrays.
+    """
+    import numpy as np
+    import torch
+
+    n_spheres = int(spheres.shape[-2])
+    padding = np.zeros(n_spheres, dtype=np.float32)
+    self_distance = np.full(n_spheres, -np.inf, dtype=np.float32)
+
+    # Escape hatch for a very large collision topology where even the 1.04x
+    # store_pair_distance kernel is too expensive; see
+    # curobov2_ros/scripts/bench_self_collision_pairs.py.
+    import os
+    if os.environ.get("CUROBO_DISABLE_SPHERE_PAIR_DIAG"):
+        return padding, self_distance
+    sc = getattr(kin.config, "self_collision_config", None)
+    if sc is None or getattr(sc, "collision_pairs", None) is None:
+        return padding, self_distance
+    pairs = sc.collision_pairs
+    pad_t = getattr(sc, "sphere_padding", None)
+    if pairs.numel() == 0 or pad_t is None:
+        return padding, self_distance
+    pad = pad_t.detach().reshape(-1)
+    if int(pad.shape[0]) != n_spheres or int(getattr(sc, "num_spheres", -1)) != n_spheres:
+        return padding, self_distance
+    padding = pad.to(dtype=torch.float32).cpu().numpy()
+
+    cost = _self_collision_pair_cost(entry, sc, spheres)
+    cost.setup_batch_tensors(int(spheres.shape[0]), int(spheres.shape[1]))
+    cost.forward(spheres)
+    raw = cost._pair_distance.reshape(-1)
+    idx = pairs.to(dtype=torch.int64)
+    flat = spheres.reshape(-1, 4)
+    a = idx[:, 0]
+    b = idx[:, 1]
+    radius_a = flat[a, 3] + pad[a]
+    radius_b = flat[b, 3] + pad[b]
+    radius_sum = radius_a + radius_b
+    # raw = radius_sum^2 - centre_distance^2. Recover the signed penetration:
+    # positive when the padded spheres overlap.
+    centre_distance = torch.sqrt(torch.clamp(radius_sum * radius_sum - raw, min=0.0))
+    penetration = radius_sum - centre_distance
+    # Disabled spheres (negative radius) are inactive in cuRobo; the kernel
+    # masks their pairs to zero, which must not look like a real contact.
+    valid = (flat[a, 3] >= 0.0) & (flat[b, 3] >= 0.0)
+    penetration = torch.where(
+        valid, penetration, torch.full_like(penetration, float("-inf")))
+
+    per_sphere = torch.full(
+        (n_spheres,), float("-inf"), dtype=penetration.dtype, device=penetration.device)
+    per_sphere.scatter_reduce_(0, a, penetration, reduce="amax", include_self=True)
+    per_sphere.scatter_reduce_(0, b, penetration, reduce="amax", include_self=True)
+    self_distance = per_sphere.detach().cpu().numpy().astype(np.float32)
+    return padding, self_distance
+
+
+def _sphere_link_names(kin, n_spheres: int):
+    """The URDF link owning each sphere, row-aligned with robot_spheres."""
+    kc = kin.config.kinematics_config
+    idx_map = getattr(kc, "link_sphere_idx_map", None)
+    if idx_map is None or int(idx_map.numel()) != n_spheres:
+        return []
+    idx = idx_map.reshape(-1).detach().cpu().tolist()
+    names = {int(v): str(k) for k, v in kc.link_name_to_idx_map.items()}
+    return [names.get(int(v), "") for v in idx]
+
+
 def collision_spheres_with_attached(handle: int, q):
-    """World collision spheres + per-sphere attached flag.
+    """World collision spheres + per-sphere attached flag and diagnostics.
 
     PORT: robot_model_manager.get_collision_spheres_with_attached - sourced from
     the MotionPlanner's kinematics (which carries the fitted attached-object
     spheres); our own kin model never receives grasps.
+
+    The extra `self_padding`, `self_distance`, `world_distance` and `link_names`
+    fields describe the SAME FK and collision model the solver uses, so RViz can
+    colour the exact model instead of approximating it from sphere centres.
     """
     import numpy as np
     import torch
-    from curobo.types import JointState
 
     entry = _REGISTRY[handle]
     mp = entry.get("motion_planner")
     kin = getattr(mp, "kinematics", None) or entry["kin"]
-    js = JointState.from_position(
-        torch.tensor([list(np.asarray(q, dtype=np.float32))], dtype=torch.float32,
-                     device=torch.device("cuda", torch.cuda.current_device())),
-        joint_names=kin.joint_names)
-    spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
+    # One FK feeds the spheres, the world distance and the self-collision pair
+    # query; querying the historical standalone `entry["kin"]` here was the
+    # source of sphere/distance array misalignment once a planner was built.
+    from .collision import _sphere_snapshot
+    world, world_distance, _activation, _checker = _sphere_snapshot(entry, q, kin=kin)
+
+    spheres = torch.as_tensor(
+        world, dtype=torch.float32,
+        device=torch.device("cuda", torch.cuda.current_device())).reshape(1, 1, -1, 4)
+    self_padding, self_distance = _self_collision_pair_diagnostics(
+        entry, kin, spheres)
+
     kc = kin.kinematics_config
-    used_link = entry.get("attach_link_used") or "attached_object"
-    attached_idx = kc.link_name_to_idx_map.get(used_link)
-    n_sph = int(spheres.shape[0])
+    # Only an active attachment counts. The `attached_object*` link always has
+    # preallocated (disabled) sphere slots in the artifact; marking them all as
+    # attached would put those slots in the payload namespace even with nothing
+    # in the gripper.
+    used_link = entry.get("attach_link_used") or ""
+    attached_idx = kc.link_name_to_idx_map.get(used_link) if used_link else None
     link_map = getattr(kc, "link_sphere_idx_map", None)
-    # Mask is built on the GPU and rides the same device->host copy as the
-    # spheres (was: a separate sync + .tolist() of every sphere's link id).
-    mask_col = None
+    mask = []
     if attached_idx is not None and link_map is not None:
-        flat = link_map.reshape(-1)
-        if int(flat.shape[0]) == n_sph:
-            mask_col = (flat == attached_idx).to(spheres.dtype).unsqueeze(1)
-    if mask_col is None:
-        mask_col = torch.zeros((n_sph, 1), dtype=spheres.dtype, device=spheres.device)
-    packed = torch.cat([spheres.detach(), mask_col], dim=1).cpu().numpy()
-    mask = (packed[:, 4] > 0.5).tolist()
+        mask = (link_map.reshape(-1) == attached_idx).detach().cpu().tolist()
+    if len(mask) != world.shape[0]:
+        mask = [False] * world.shape[0]
+
     # Link-relative copy of the attached spheres. The consumer (trajectory
     # preview) re-applies FK of this URDF link at every waypoint, so the
     # payload rides the ghost instead of staying at the live pose. We derive
     # the link frame from the solver's own FK rather than the YAML transform
     # so it is exact for whatever `fixed_transform` the config uses.
-    world = np.ascontiguousarray(packed[:, :4], dtype=np.float32)
     attached_frame = ""
     attached_local = np.zeros_like(world)
     parent = entry.get("attach_parent_link_used") or entry.get("attach_parent_link")
@@ -337,6 +445,10 @@ def collision_spheres_with_attached(handle: int, q):
         "attached": mask,
         "attached_local": attached_local,
         "attach_frame": attached_frame,
+        "self_padding": np.asarray(self_padding, dtype=np.float32).reshape(-1, 1),
+        "self_distance": np.asarray(self_distance, dtype=np.float32).reshape(-1, 1),
+        "world_distance": np.asarray(world_distance, dtype=np.float32).reshape(-1, 1),
+        "link_names": _sphere_link_names(kin, int(world.shape[0])),
     }
 
 from .runtime import _REGISTRY
