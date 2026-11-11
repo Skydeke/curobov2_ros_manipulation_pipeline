@@ -112,11 +112,12 @@ RUN if [ ! -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then \
   rosdep init 2>/dev/null || true; \
   fi
 
-# The upstream package owns its dependency list. Install it editable from the
-# same workspace path the ROS build uses, so the pip install and the colcon
-# symlink install resolve to one source tree. The extra packages here are
-# pipeline dependencies that upstream does not declare.
-COPY --chown=${USERNAME}:${USERNAME} curobo ${ROS_WS}/src/curobo
+# Only the upstream project metadata is copied here, so source edits do not
+# invalidate this dependency layer. Installing the metadata-only stub makes pip
+# resolve upstream's declared dependencies; drop the stub afterwards, colcon
+# ships the actual curobo package. The extra packages are pipeline dependencies
+# that upstream does not declare.
+COPY curobo/curobo/pyproject.toml curobo/curobo/README.md /tmp/curobo-meta/
 RUN python3 -m pip install --ignore-installed \
   "numpy<2" \
   cuda-python \
@@ -127,7 +128,9 @@ RUN python3 -m pip install --ignore-installed \
   hdbscan \
   torchvision \
   bubblify \
-  -e "${ROS_WS}/src/curobo/curobo[benchmark]"
+  "/tmp/curobo-meta[benchmark]" && \
+  python3 -m pip uninstall -y nvidia-curobo && \
+  rm -rf /tmp/curobo-meta
 
 # Someone is misusing pinning, for no good damn reason
 RUN git clone https://github.com/nitesh-subedi/ros2_numpy.git /tmp/ros2_numpy && \
@@ -253,6 +256,7 @@ COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_interfaces/package.
 COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor/package.xml ${ROS_WS}/src/curobo_task_constructor/package.xml
 COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_rviz/package.xml ${ROS_WS}/src/curobo_task_constructor_rviz/package.xml
 COPY --chown=${USERNAME}:${USERNAME} curobo_cpp_runtime/package.xml ${ROS_WS}/src/curobo_cpp_runtime/package.xml
+COPY --chown=${USERNAME}:${USERNAME} curobo/package.xml ${ROS_WS}/src/curobo/package.xml
 
 # rosdep init and apt both need root. Run them as root, then hand the workspace
 # to USERNAME once so colcon can write build/install/log without sudo.
@@ -297,6 +301,9 @@ COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_rviz ${ROS_WS}/src/
 
 # --- native runtime selector/bridge ROS package (normal colcon package) ---
 COPY --chown=${USERNAME}:${USERNAME} curobo_cpp_runtime ${ROS_WS}/src/curobo_cpp_runtime
+
+# --- cuRobo v2 ---
+COPY --chown=${USERNAME}:${USERNAME} curobo ${ROS_WS}/src/curobo
 
 # --base-paths is limited to the directories copied above: a base image may
 # already carry other copies of these packages (e.g. as part of a larger
