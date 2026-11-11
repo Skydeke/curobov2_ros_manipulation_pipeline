@@ -198,7 +198,7 @@ void RosServiceManager::init_services()
     name + "/collision_spheres", 10);
   // Both viz timers live in their own mutually exclusive group. In the default
   // group they share it with every service callback, and a single (multi-second)
-  // generate_trajectory call then starves the 200 ms sphere timer for the whole
+  // generate_trajectory call then starves the 100 ms sphere timer for the whole
   // plan burst -- the gripper/robot spheres simply stop updating while the
   // orchestrator keeps replanning.
   viz_callback_group_ = node_->create_callback_group(
@@ -207,7 +207,7 @@ void RosServiceManager::init_services()
     node_->get_parameter("publish_collision_spheres").as_bool() : true;
   if (sphere_viz) {
     collision_spheres_timer_ = node_->create_wall_timer(
-      std::chrono::milliseconds(200),
+      std::chrono::milliseconds(100),
       std::bind(&RosServiceManager::publish_collision_spheres, this),
       viz_callback_group_);
   }
@@ -884,9 +884,11 @@ void RosServiceManager::publish_collision_spheres_job()
       const bool world_colliding = std::isfinite(world_d) && world_d > 0.0f;
       const bool self_colliding = std::isfinite(self_d) && self_d > 0.0f;
       const bool colliding = world_colliding || self_colliding;
-      const float clearance = std::min(
-        std::isfinite(world_d) ? world_d : std::numeric_limits<float>::infinity(),
-        std::isfinite(self_d) ? self_d : std::numeric_limits<float>::infinity());
+      // World distance is a collision cost: 0 means "no obstacle within the
+      // activation margin", not "0 m clearance". Only the self pair distance is
+      // a signed clearance, so only it can produce the amber warning band.
+      const bool self_near = std::isfinite(self_d) &&
+        self_d <= 0.0F && self_d > static_cast<float>(-near_clearance);
       if (colliding) {
         if (!colliding_details.empty()) {
           colliding_details += "; ";
@@ -920,8 +922,8 @@ void RosServiceManager::publish_collision_spheres_job()
         marker.color.g = 0.05;
       } else if (attached) {
         marker.color.b = 1.0;   // attached object, not colliding = blue
-      } else if (clearance < near_clearance) {
-        marker.color.r = 1.0;   // within the planner's activation margin
+      } else if (self_near) {
+        marker.color.r = 1.0;   // within the planner's self-collision margin
         marker.color.g = 0.45;
       } else {
         marker.color.g = 1.0;   // collision-free = green

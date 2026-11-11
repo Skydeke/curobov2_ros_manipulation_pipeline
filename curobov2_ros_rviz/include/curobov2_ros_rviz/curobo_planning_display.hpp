@@ -60,6 +60,7 @@
 
 namespace Ogre
 {
+class ManualObject;
 class SceneNode;
 }  // namespace Ogre
 
@@ -321,6 +322,10 @@ private:
     const geometry_msgs::msg::Pose & a, const geometry_msgs::msg::Pose & b);
 
   // --- Attached-object spheres ---
+  // Robot collision spheres are rendered through radius-bucketed PointClouds:
+  // hundreds of individual Ogre entities made RViz unusably slow. Attached
+  // payload spheres stay as Shapes because they must ride a link frame during
+  // trajectory playback and are few.
   struct SphereVisual
   {
     Ogre::SceneNode * node = nullptr;
@@ -329,6 +334,12 @@ private:
   };
   std::vector<SphereVisual> sphere_pool_;
   size_t sphere_active_count_ = 0;
+  // One low-poly mesh for every robot sphere. A ManualObject keeps this to one
+  // draw call with exact per-sphere radii, unlike Ogre Shape entities (hundreds
+  // of draw calls) or PointCloud (one uniform radius per cloud).
+  Ogre::ManualObject * robot_sphere_mesh_ = nullptr;
+  Ogre::SceneNode * robot_sphere_node_ = nullptr;
+  std::string robot_sphere_frame_;
   std::mutex spheres_mutex_;
   visualization_msgs::msg::MarkerArray::ConstSharedPtr spheres_msg_new_;
   bool spheres_got_message_ = false;
@@ -338,14 +349,16 @@ private:
     Ogre::Vector3 local = Ogre::Vector3::ZERO;
     std::string frame;
     float sx = 0.0f, sy = 0.0f, sz = 0.0f;
-    float r = 0.0f, g = 0.0f, b = 0.0f, a = 0.5f;
+    float r = 0.0f, g = 1.0f, b = 0.0f, a = 0.5f;
     bool attached = false;
   };
+  std::vector<SphereDatum> attached_spheres_;
   std::vector<SphereDatum> live_spheres_;
   std::vector<SphereDatum> playback_spheres_;
   void syncSpheres();
   void updateSpheresVisibility();
   void applySpheres(const std::vector<SphereDatum> & data);
+  void applyRobotSpheres(const std::vector<SphereDatum> & data);
   void poseSpheres();
 
   // --- World scene-object markers ---
