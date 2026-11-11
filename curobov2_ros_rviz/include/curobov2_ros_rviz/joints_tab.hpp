@@ -218,6 +218,9 @@ private:
   /// jaws are not planning DOFs, so this is the only way a locked gripper can
   /// still be opened or closed from this panel.
   void sendGripperCommand(const NamedPose & pose);
+  /// Create the descriptor's gripper action client ahead of the first click, so
+  /// selecting open/close does not race ROS 2 action discovery.
+  void ensureGripperClient(const NamedPose & pose);
 
   rclcpp::Node::SharedPtr node_;
   QString planner_node_ = QStringLiteral("curobo_server");
@@ -305,6 +308,17 @@ private:
 
   bool goal_active_ = false;
   bool cspace_known_ = false;
+  /// True once the target column holds a real request: a saved target, a user
+  /// edit, Set from current / Zero, a named pose, or the first live reading.
+  /// Until then the rows are placeholders and Plan / Plan + send stay disabled;
+  /// building a goal from an unseeded row would send the arm to the all-zero
+  /// configuration just because RViz opened before /joint_states arrived.
+  bool targets_seeded_ = false;
+  /// A check/plan/plan+send request is in flight. Buttons are disabled while it
+  /// runs so a double click cannot start two plans whose results then race into
+  /// two execution goals (the server rejects the second, but the first may
+  /// already have moved the arm).
+  bool request_active_ = false;
 };
 
 }  // namespace curobov2_ros_rviz

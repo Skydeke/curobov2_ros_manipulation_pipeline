@@ -2120,6 +2120,26 @@ curobo_runtime::RobotDescriptionOutcome CppBridge::robot_description(
   outcome.strategy_params = impl_->manifest.strategy_params;
   outcome.home_names = impl_->manifest.home_names;
   outcome.home_positions = impl_->manifest.home_positions;
+  // The named poses and gripper controllers are descriptor data, not model
+  // artifact data, but the export step copies both maps into manifest.json so
+  // the native bridge can report them without parsing YAML (see
+  // docker/write_artifact_metadata.py). Without this GetJointInfo answers with
+  // empty arrays on curobo_runtime=cpp/auto, and the RViz Joints tab's
+  // "Named pose" combo stays disabled even though the robot has poses.
+  outcome.named_config_names = impl_->manifest.named_config_names;
+  outcome.named_config_joint_names = impl_->manifest.named_config_joint_names;
+  outcome.named_config_positions = impl_->manifest.named_config_positions;
+  outcome.named_config_sizes = impl_->manifest.named_config_sizes;
+  outcome.gripper_names = impl_->manifest.gripper_names;
+  outcome.gripper_types = impl_->manifest.gripper_types;
+  outcome.gripper_controllers = impl_->manifest.gripper_controllers;
+  outcome.gripper_action_ns = impl_->manifest.gripper_action_ns;
+  outcome.gripper_joint_lists = impl_->manifest.gripper_joint_lists;
+  outcome.gripper_command_joints = impl_->manifest.gripper_command_joints;
+  outcome.gripper_open_positions = impl_->manifest.gripper_open_positions;
+  outcome.gripper_close_positions = impl_->manifest.gripper_close_positions;
+  outcome.gripper_max_efforts = impl_->manifest.gripper_max_efforts;
+  outcome.gripper_time_from_start = impl_->manifest.gripper_time_from_start;
   return outcome;
 }
 

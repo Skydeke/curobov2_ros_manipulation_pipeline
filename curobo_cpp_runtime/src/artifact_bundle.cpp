@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include "curobo_cpp_runtime/detail/mini_json.hpp"
@@ -122,6 +123,73 @@ const json::Value * first(const json::Value & document, std::initializer_list<co
     }
   }
   return nullptr;
+}
+
+// Flatten `named_joint_configs: {name: {joint: value}}` into the same
+// (names, joint names, positions, per-pose sizes) tuple the Python descriptor
+// loader produces. manifest.json is written with sorted keys, so this order is
+// alphabetical; a UI that prefers YAML document order still gets the same
+// entries, which is what matters for a named-pose selector.
+void load_named_joint_configs(const json::Value * node, ArtifactManifest & manifest)
+{
+  if (node == nullptr || !node->is_object()) {
+    return;
+  }
+  for (const auto & entry : node->as_object()) {
+    if (!entry.second.is_object()) {
+      continue;
+    }
+    std::vector<std::pair<std::string, double>> pairs;
+    for (const auto & joint : entry.second.as_object()) {
+      if (joint.second.is_number()) {
+        pairs.emplace_back(joint.first, joint.second.as_double());
+      }
+    }
+    if (pairs.empty()) {
+      continue;
+    }
+    manifest.named_config_names.push_back(entry.first);
+    manifest.named_config_sizes.push_back(
+      static_cast<std::int64_t>(pairs.size()));
+    for (const auto & pair : pairs) {
+      manifest.named_config_joint_names.push_back(pair.first);
+      manifest.named_config_positions.push_back(pair.second);
+    }
+  }
+}
+
+// Flatten `gripper_controllers: {name: {...}}` for GetJointInfo. Defaults match
+// curobo_python_runtime/robot_introspection.py, which is the schema's reference
+// implementation: type=GripperCommand, action_ns=gripper_cmd, timeout=2 s.
+void load_gripper_controllers(const json::Value * node, ArtifactManifest & manifest)
+{
+  if (node == nullptr || !node->is_object()) {
+    return;
+  }
+  for (const auto & entry : node->as_object()) {
+    if (!entry.second.is_object()) {
+      continue;
+    }
+    const json::Value & cfg = entry.second;
+    std::vector<std::string> joints = strings(cfg.find("joints"));
+    std::string joint_list;
+    for (const std::string & joint : joints) {
+      joint_list += (joint_list.empty() ? "" : " ") + joint;
+    }
+    manifest.gripper_names.push_back(entry.first);
+    manifest.gripper_types.push_back(
+      cfg.string_at("type", "GripperCommand"));
+    manifest.gripper_controllers.push_back(cfg.string_at("name"));
+    manifest.gripper_action_ns.push_back(
+      cfg.string_at("action_ns", "gripper_cmd"));
+    manifest.gripper_joint_lists.push_back(joint_list);
+    manifest.gripper_command_joints.push_back(cfg.string_at("command_joint"));
+    manifest.gripper_open_positions.push_back(cfg.number_at("open", 0.0));
+    manifest.gripper_close_positions.push_back(cfg.number_at("close", 0.0));
+    manifest.gripper_max_efforts.push_back(cfg.number_at("max_effort", 0.0));
+    manifest.gripper_time_from_start.push_back(
+      cfg.number_at("time_from_start", 2.0));
+  }
 }
 
 void load_scene_capacities(const json::Value & node, ArtifactManifest & manifest)
@@ -633,6 +701,8 @@ ArtifactManifest load_artifact_manifest(const std::string & dir)
       first(document, {"home_names", "home.names", "home.joint_names"}));
     manifest.home_positions = numbers(
       first(document, {"home_positions", "home.positions"}));
+    load_named_joint_configs(document.find("named_joint_configs"), manifest);
+    load_gripper_controllers(document.find("gripper_controllers"), manifest);
     manifest.joint_names = strings(
       first(document, {"joint_names", "cspace.joint_names", "cspace.names"}));
     manifest.link_names = strings(document.find("link_names"));

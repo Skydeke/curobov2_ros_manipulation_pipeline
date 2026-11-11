@@ -46,6 +46,26 @@ struct ArtifactManifest
   std::vector<std::string> home_names;
   std::vector<double> home_positions;
 
+  // The descriptor's named_joint_configs / gripper_controllers, flattened
+  // exactly like RobotDescriptionOutcome so GetJointInfo can report them on the
+  // native runtime as well (the RViz Joints tab's "Named pose" combo). The
+  // export step already copies both maps into manifest.json; they are parsed
+  // here instead of YAML, per the "C++ never parses YAML" rule.
+  std::vector<std::string> named_config_names;
+  std::vector<std::string> named_config_joint_names;
+  std::vector<double> named_config_positions;
+  std::vector<std::int64_t> named_config_sizes;
+  std::vector<std::string> gripper_names;
+  std::vector<std::string> gripper_types;
+  std::vector<std::string> gripper_controllers;
+  std::vector<std::string> gripper_action_ns;
+  std::vector<std::string> gripper_joint_lists;  // space-separated joints
+  std::vector<std::string> gripper_command_joints;
+  std::vector<double> gripper_open_positions;
+  std::vector<double> gripper_close_positions;
+  std::vector<double> gripper_max_efforts;
+  std::vector<double> gripper_time_from_start;
+
   std::vector<std::string> joint_names;
   std::vector<double> joint_lower;
   std::vector<double> joint_upper;

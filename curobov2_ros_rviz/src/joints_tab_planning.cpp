@@ -192,6 +192,13 @@ void JointsTab::publishPreview()
 
 void JointsTab::checkTarget()
 {
+  if (!targets_seeded_) {
+    setStatus(tr("target column not seeded yet — waiting for /joint_states"));
+    return;
+  }
+  if (request_active_ || goal_active_) {
+    return;
+  }
   if (fk_client_ == nullptr || !fk_client_->service_is_ready()) {
     setStatus(tr("fk_batch service not available"));
     return;
@@ -207,6 +214,8 @@ void JointsTab::checkTarget()
   }
 
   setStatus(tr("checking the target configuration..."));
+  request_active_ = true;
+  setButtonsEnabled();
   fk_client_->async_send_request(
     request,
     [this](rclcpp::Client<curobov2_ros_interfaces::srv::FkBatch>::SharedFuture future)
@@ -223,6 +232,8 @@ void JointsTab::checkTarget()
       runOnGuiThread(
         [this, valid, error]()
         {
+          request_active_ = false;
+          setButtonsEnabled();
           if (error.isEmpty()) {
             setStatus(
               valid ? tr("target OK — collision-free and within joint limits")
@@ -242,6 +253,13 @@ void JointsTab::planTarget()
     setStatus(tr("cspace unknown — cannot build a joint-space goal yet"));
     return;
   }
+  if (!targets_seeded_) {
+    setStatus(tr("target column not seeded yet — waiting for /joint_states"));
+    return;
+  }
+  if (request_active_ || goal_active_) {
+    return;
+  }
   if (trajectory_client_ == nullptr || !trajectory_client_->service_is_ready()) {
     setStatus(tr("generate_trajectory service not available"));
     return;
@@ -258,6 +276,8 @@ void JointsTab::planTarget()
   }
 
   setStatus(tr("planning to the target configuration..."));
+  request_active_ = true;
+  setButtonsEnabled();
   trajectory_client_->async_send_request(
     request,
     [this](
@@ -278,6 +298,8 @@ void JointsTab::planTarget()
       runOnGuiThread(
         [this, success, message, waypoints]()
         {
+          request_active_ = false;
+          setButtonsEnabled();
           setStatus(
             success ? tr("plan OK — %1 trajectory segment(s); the robot did NOT move")
                           .arg(waypoints)
@@ -290,6 +312,13 @@ void JointsTab::sendTarget()
 {
   if (!cspace_known_) {
     setStatus(tr("cspace unknown — cannot build a joint-space goal yet"));
+    return;
+  }
+  if (!targets_seeded_) {
+    setStatus(tr("target column not seeded yet — waiting for /joint_states"));
+    return;
+  }
+  if (request_active_ || goal_active_) {
     return;
   }
   if (action_client_ == nullptr || !action_client_->action_server_is_ready()) {
@@ -313,6 +342,8 @@ void JointsTab::sendTarget()
   }
 
   setStatus(tr("planning + executing to the target configuration..."));
+  request_active_ = true;
+  setButtonsEnabled();
   trajectory_client_->async_send_request(
     request,
     [this](
@@ -334,6 +365,8 @@ void JointsTab::sendTarget()
       }
       if (!success) {
         runOnGuiThread([this, message]() {
+          request_active_ = false;
+          setButtonsEnabled();
           setStatus(tr("execute plan FAILED: %1").arg(message));
         });
         return;
@@ -365,7 +398,12 @@ void JointsTab::onGoalResponse(
     curobov2_ros_interfaces::action::SendTrajectory>::SharedPtr handle)
 {
   if (handle == nullptr) {
-    runOnGuiThread([this]() { setStatus(tr("goal rejected (server busy?)")); });
+    runOnGuiThread([this]() {
+      request_active_ = false;
+      setButtonsEnabled();
+      setStatus(tr("goal rejected — the planner is busy; cancel the other "
+                   "execution (task constructor or Joints goal) first"));
+    });
     return;
   }
   goal_handle_ = handle;
@@ -415,7 +453,9 @@ void JointsTab::onGoalResult(
   runOnGuiThread(
     [this, success, message]()
     {
+      request_active_ = false;
       setGoalActive(false);
+      setButtonsEnabled();
       setStatus(success ? tr("target reached: %1").arg(message)
                         : tr("execution failed: %1").arg(message));
     });

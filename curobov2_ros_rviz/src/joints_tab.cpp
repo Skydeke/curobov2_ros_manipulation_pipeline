@@ -3,6 +3,7 @@
 #include <curobov2_ros_rviz/progress_bar_delegate.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -231,7 +232,14 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
   // a row has to be selectable. Decoration and double-click expansion are off,
   // as in MoveIt, so the list stays a flat list of cspace joints.
   tree_->setEditTriggers(QAbstractItemView::EditKeyPressed);
-  tree_->setItemDelegateForColumn(COL_TARGET, new ProgressBarDelegate(COL_TARGET, this));
+  auto * target_delegate = new ProgressBarDelegate(COL_TARGET, this);
+  tree_->setItemDelegateForColumn(COL_TARGET, target_delegate);
+  // A drag is an explicit target choice; it also makes an unseeded row (built
+  // before /joint_states arrived) a valid request.
+  connect(target_delegate, &ProgressBarDelegate::valueEdited, this, [this]() {
+    targets_seeded_ = true;
+    setButtonsEnabled();
+  });
   // The event filter is what makes a plain click on a bar open the editor, the
   // way it does in MoveIt. EditKeyPressed on its own would not: it needs a
   // keypress, and it would fire anywhere in the table, including the joint-name
@@ -306,8 +314,13 @@ JointsTab::JointsTab(QWidget * parent) : QWidget(parent)
   status_->setWordWrap(true);
   layout->addWidget(status_);
 
+  // activated(), not currentIndexChanged(): a gripper command must fire on
+  // every user pick, including picking the SAME open/close row again, which
+  // currentIndexChanged would swallow. It also lets the selection stay visible
+  // instead of snapping back to the placeholder, which read as "nothing was
+  // selected".
   connect(
-    named_pose_combo_, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
+    named_pose_combo_, QOverload<int>::of(&QComboBox::activated), this,
     &JointsTab::onNamedPoseChosen);
 
   // Preview poll: rather than hooking every write path (bar drags write the
@@ -660,18 +673,40 @@ void JointsTab::rebuildRows(
 
     // Restore a target loaded from the config (rviz calls load() BEFORE the
     // rows exist -- they only appear once get_joint_info answers, which needs a
-    // node -- so the value has to be parked until here) and default to zero for
-    // anything new. setTarget clamps to the bounds set just above.
-    setTarget(item, (i < pending_targets_.size()) ? pending_targets_.at(i) : 0.0);
+    // node -- so the value has to be parked until here). Otherwise seed from
+    // the live reading when we have it: a fresh tab must never hold an all-zero
+    // target, because Plan / Plan + send on that would drive the arm to zero as
+    // soon as the operator clicks a button that looked harmless.
+    if (i < pending_targets_.size()) {
+      setTarget(item, pending_targets_.at(i));
+    } else {
+      const auto it = current_.constFind(names[i]);
+      setTarget(item, it != current_.constEnd() ? it.value() : 0.0);
+    }
 
     item->setText(COL_CURRENT, "-");
   }
   tree_->resizeColumnToContents(COL_JOINT);
 
+  // A saved list is an explicit request even before the first joint-state
+  // reading. A live-seeded column is usable only once every row has a reading;
+  // until then Plan / Plan + send stay gated (see setButtonsEnabled).
+  targets_seeded_ = !pending_targets_.isEmpty();
+  if (!targets_seeded_ && !cspace_.isEmpty()) {
+    targets_seeded_ = true;
+    for (const QString & name : cspace_) {
+      if (!current_.contains(name)) {
+        targets_seeded_ = false;
+        break;
+      }
+    }
+  }
+
   // Consumed: applying a saved target list to a cspace whose shape has since
   // changed would map joint values onto the wrong joints, so it is used exactly
   // once — for the first real row set.
   pending_targets_.clear();
+  setButtonsEnabled();
 }
 
 QTreeWidgetItem * JointsTab::rowFor(const QString & joint) const
@@ -736,6 +771,28 @@ void JointsTab::onJointState(const sensor_msgs::msg::JointState::ConstSharedPtr 
           COL_CURRENT, tr("live position from /joint_states: %1 rad")
                          .arg(QString::number(it.value(), 'f', 6)));
       }
+
+      // Seed an untouched target column from the first COMPLETE reading. The
+      // rows are built when get_joint_info answers, which can be before the
+      // first /joint_states; without this they stay at zero and a later Plan +
+      // send would command the arm to the zero configuration.
+      if (!targets_seeded_ && cspace_known_ && !cspace_.isEmpty()) {
+        bool complete = true;
+        for (const QString & name : cspace_) {
+          if (!current_.contains(name)) {
+            complete = false;
+            break;
+          }
+        }
+        if (complete) {
+          for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
+            auto * item = tree_->topLevelItem(i);
+            setTarget(item, current_.value(item->text(COL_JOINT)));
+          }
+          targets_seeded_ = true;
+          setButtonsEnabled();
+        }
+      }
     });
 }
 
@@ -751,6 +808,8 @@ void JointsTab::setTargetsFromCurrent()
     }
     setTarget(item, it.value());
   }
+  targets_seeded_ = true;
+  setButtonsEnabled();
   setStatus(
     missing == 0 ? tr("targets set from the current /joint_states reading")
                  : tr("targets set from current (%1 joint(s) had no reading)").arg(missing));
@@ -761,6 +820,10 @@ void JointsTab::zeroTargets()
   for (int i = 0; i < tree_->topLevelItemCount(); ++i) {
     setTarget(tree_->topLevelItem(i), 0.0);
   }
+  // Explicit request: Zero is allowed to mean the zero configuration, but only
+  // when the operator presses it.
+  targets_seeded_ = true;
+  setButtonsEnabled();
   setStatus(tr("targets zeroed"));
 }
 
@@ -801,24 +864,28 @@ void JointsTab::setNamedPoses(const QVector<NamedPose> & poses)
   named_pose_combo_->setCurrentIndex(restore);
   named_pose_combo_->blockSignals(false);
   named_pose_combo_->setEnabled(!named_poses_.isEmpty());
+
+  // Create the gripper action clients as soon as the descriptor's entries are
+  // known, not on the first click: ROS 2 action discovery completes in the
+  // background while the operator reads the list, so selecting open/close is
+  // not a race against a just-created client.
+  for (const NamedPose & pose : named_poses_) {
+    if (pose.gripper) {
+      ensureGripperClient(pose);
+    }
+  }
 }
 
 void JointsTab::onNamedPoseChosen(int index)
 {
   if (index <= 0) {
-    return;  // the placeholder row, or a cleared combo
+    return;  // the placeholder row
   }
-  const bool gripper =
-    (index - 1) < named_poses_.size() && named_poses_[index - 1].gripper;
   applyNamedPose(index - 1);
-  if (gripper) {
-    // A gripper command is an action, not a staged target: return the combo to
-    // the placeholder so choosing the SAME open/close again still emits a
-    // signal (currentIndexChanged only fires when the index changes).
-    named_pose_combo_->blockSignals(true);
-    named_pose_combo_->setCurrentIndex(0);
-    named_pose_combo_->blockSignals(false);
-  }
+  // The selection stays on the chosen row. Re-picking open/close still fires
+  // because the combo is connected to activated(), not currentIndexChanged();
+  // snapping back to the placeholder made a successful pick look like "nothing
+  // selected" and hid which gripper command had just been sent.
 }
 
 void JointsTab::applyNamedPose(int index)
@@ -886,6 +953,9 @@ void JointsTab::applyNamedPose(int index)
     }
   }
 
+  targets_seeded_ = true;
+  setButtonsEnabled();
+
   QString message =
     tr("named pose '%1': %2 joint(s) from the pose, %3 from the current state")
       .arg(pose.name)
@@ -898,6 +968,34 @@ void JointsTab::applyNamedPose(int index)
     message += tr("; not in the cspace (locked?): %1").arg(absent.join(", "));
   }
   setStatus(message);
+}
+
+void JointsTab::ensureGripperClient(const NamedPose & pose)
+{
+  if (node_ == nullptr || pose.gripper_action.isEmpty()) {
+    return;
+  }
+  const std::string action = pose.gripper_action.toStdString();
+  const bool trajectory =
+    pose.gripper_type == QLatin1String("JointTrajectory") ||
+    pose.gripper_type == QLatin1String("FollowJointTrajectory");
+  if (trajectory) {
+    if (!gripper_trajectory_clients_.contains(pose.gripper_action)) {
+      gripper_trajectory_clients_[pose.gripper_action] =
+        rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
+        node_, action);
+    }
+  } else if (pose.gripper_type == QLatin1String("ParallelGripperCommand")) {
+    if (!parallel_gripper_clients_.contains(pose.gripper_action)) {
+      parallel_gripper_clients_[pose.gripper_action] =
+        rclcpp_action::create_client<control_msgs::action::ParallelGripperCommand>(
+        node_, action);
+    }
+  } else if (!gripper_clients_.contains(pose.gripper_action)) {
+    gripper_clients_[pose.gripper_action] =
+      rclcpp_action::create_client<control_msgs::action::GripperCommand>(
+      node_, action);
+  }
 }
 
 void JointsTab::sendGripperCommand(const NamedPose & pose)
@@ -918,14 +1016,14 @@ void JointsTab::sendGripperCommand(const NamedPose & pose)
     pose.gripper_type == QLatin1String("JointTrajectory") ||
     pose.gripper_type == QLatin1String("FollowJointTrajectory");
 
+  ensureGripperClient(pose);
+
   if (trajectory) {
     auto & client = gripper_trajectory_clients_[pose.gripper_action];
-    if (!client) {
-      client =
-        rclcpp_action::create_client<control_msgs::action::FollowJointTrajectory>(
-        node_, action);
-    }
-    if (!client->action_server_is_ready()) {
+    // wait_for_action_server is only reached when the server was not discovered
+    // yet (first click after startup); a second or two here is better than
+    // silently doing nothing.
+    if (!client->wait_for_action_server(std::chrono::seconds(2))) {
       setStatus(tr("gripper action %1 unavailable").arg(pose.gripper_action));
       return;
     }
@@ -974,11 +1072,7 @@ void JointsTab::sendGripperCommand(const NamedPose & pose)
 
   if (pose.gripper_type == QLatin1String("ParallelGripperCommand")) {
     auto & client = parallel_gripper_clients_[pose.gripper_action];
-    if (!client) {
-      client = rclcpp_action::create_client<
-        control_msgs::action::ParallelGripperCommand>(node_, action);
-    }
-    if (!client->action_server_is_ready()) {
+    if (!client->wait_for_action_server(std::chrono::seconds(2))) {
       setStatus(tr("gripper action %1 unavailable").arg(pose.gripper_action));
       return;
     }
@@ -1017,11 +1111,7 @@ void JointsTab::sendGripperCommand(const NamedPose & pose)
   }
 
   auto & client = gripper_clients_[pose.gripper_action];
-  if (!client) {
-    client = rclcpp_action::create_client<control_msgs::action::GripperCommand>(
-      node_, action);
-  }
-  if (!client->action_server_is_ready()) {
+  if (!client->wait_for_action_server(std::chrono::seconds(2))) {
     setStatus(tr("gripper action %1 unavailable").arg(pose.gripper_action));
     return;
   }

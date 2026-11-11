@@ -194,6 +194,66 @@ TEST(ArtifactSelection, IncompleteCapabilityProfileSelectsHybridCpp)
   EXPECT_EQ(mode, RuntimeMode::Cpp);
 }
 
+TEST(ArtifactSelection, ParsesNamedPosesAndGrippersForGetJointInfo)
+{
+  TemporaryTree tree;
+  const fs::path artifact = tree.artifact("tiago");
+  write_file(
+    artifact / "manifest.json",
+    R"({
+      "arch": "sm_89",
+      "robot": "tiago",
+      "named_joint_configs": {
+        "home": {"torso_lift_joint": 0.149, "arm_1_joint": 0.5},
+        "open": {"gripper_left_finger_joint": 0.045,
+                 "gripper_right_finger_joint": 0.045}
+      },
+      "gripper_controllers": {
+        "gripper": {
+          "type": "JointTrajectory",
+          "name": "gripper_controller",
+          "joints": ["gripper_left_finger_joint",
+                     "gripper_right_finger_joint"],
+          "command_joint": "gripper_left_finger_joint",
+          "open": 0.045,
+          "close": 0.0,
+          "max_effort": 16.0,
+          "time_from_start": 2.0
+        }
+      }
+    })");
+  write_file(artifact / "robot_kinematics_manifest.json", "{}\n");
+  write_file(artifact / "robot_ik_manifest.json", "{}\n");
+  write_file(artifact / "robot_trajopt_manifest.json", "{}\n");
+  write_file(artifact / "robot_motion_manifest.json", "{}\n");
+
+  const auto manifest = curobo_cpp_runtime::load_artifact_manifest(artifact.string());
+  ASSERT_TRUE(manifest.present) << manifest.path;
+  // mini_json stores objects in a std::map, so the order is alphabetical.
+  EXPECT_EQ(manifest.named_config_names,
+    (std::vector<std::string>{"home", "open"}));
+  EXPECT_EQ(manifest.named_config_sizes,
+    (std::vector<std::int64_t>{2, 2}));
+  EXPECT_EQ(manifest.named_config_joint_names,
+    (std::vector<std::string>{
+      "arm_1_joint", "torso_lift_joint",
+      "gripper_left_finger_joint", "gripper_right_finger_joint"}));
+  EXPECT_EQ(manifest.named_config_positions,
+    (std::vector<double>{0.5, 0.149, 0.045, 0.045}));
+
+  ASSERT_EQ(manifest.gripper_names.size(), 1u);
+  EXPECT_EQ(manifest.gripper_names[0], "gripper");
+  EXPECT_EQ(manifest.gripper_types[0], "JointTrajectory");
+  EXPECT_EQ(manifest.gripper_controllers[0], "gripper_controller");
+  EXPECT_EQ(manifest.gripper_joint_lists[0],
+    "gripper_left_finger_joint gripper_right_finger_joint");
+  EXPECT_EQ(manifest.gripper_command_joints[0], "gripper_left_finger_joint");
+  EXPECT_DOUBLE_EQ(manifest.gripper_open_positions[0], 0.045);
+  EXPECT_DOUBLE_EQ(manifest.gripper_close_positions[0], 0.0);
+  EXPECT_DOUBLE_EQ(manifest.gripper_max_efforts[0], 16.0);
+  EXPECT_DOUBLE_EQ(manifest.gripper_time_from_start[0], 2.0);
+}
+
 TEST(ArtifactSelection, ParsesGeneratedNestedManifest)
 {
   TemporaryTree tree;
