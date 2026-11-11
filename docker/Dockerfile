@@ -116,10 +116,13 @@ RUN if [ ! -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then \
 # invalidate this dependency layer. Installing the metadata-only stub makes pip
 # resolve upstream's declared dependencies; drop the stub afterwards, colcon
 # ships the actual curobo package. The extra packages are pipeline dependencies
-# that upstream does not declare.
+# that upstream does not declare. setuptools 80 dropped `develop --uninstall`,
+# which colcon uses to replace existing symlink installs; torch needs >=77, so
+# keep 77-79.
 COPY curobo/curobo/pyproject.toml curobo/curobo/README.md /tmp/curobo-meta/
 RUN python3 -m pip install --ignore-installed \
   "numpy<2" \
+  "setuptools<80" \
   cuda-python \
   cuda-bindings \
   cuda-core \
