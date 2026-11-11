@@ -43,15 +43,19 @@ wheel
 yourdfpy>=0.0.53
 
 # nvidia-cuda-runtime-cu12: from the [cu12] extra. The base image is CUDA 13 but
-# the whole stack above is deliberately cu12-pinned (cuda-bindings~=12.9,
-# cuda-core[cu12], cupy-cuda12x), so the runtime library has to match.
+# the Python stack is cu12 (torch, cuda-bindings~=12.9, cuda-core[cu12],
+# cupy-cuda12x), so the user-space runtime library has to match. The system
+# CUDA 13.2 toolkit is the build toolchain for the native C++ runtime; it is
+# not a substitute for these wheels.
 nvidia-cuda-runtime-cu12>=12
 
 # warp-lang was previously declared as a rosdep key (python3-warp-lang-pip-shim)
 # in package.xml AND force-upgraded afterwards with the comment "Rosdep fucks up
 # warp-lang version". Two sources of truth for one version is what caused that;
-# the pin lives here now, and the rosdep key is gone from package.xml.
-warp-lang>=1.10.0,<1.15.0
+# the pin lives here now, and the rosdep key is gone from package.xml. Keep the
+# lower bound only: an upper bound forces a downgrade when a newer Warp is
+# already installed and hides incompatibilities instead of resolving them.
+warp-lang>=1.10.0
 
 # Only needed to BUILD the vendored tree (setuptools_scm drives its version, and
 # the optional pybind extension path in curobo/curobo/setup.py), never at
