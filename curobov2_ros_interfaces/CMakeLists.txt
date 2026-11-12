@@ -59,6 +59,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/WarmupFK.srv"
   "srv/GenerateRM.srv"
   "msg/MpcCosts.msg"
+  "msg/MpcGoal.msg"
   "msg/ReachabilityMetrics.msg"
   "msg/WorldCollisionContact.msg"
   "msg/SelfCollisionContact.msg"

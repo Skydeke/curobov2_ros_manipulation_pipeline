@@ -89,7 +89,8 @@ curobo_runtime::MpcStepOutcome RetargetController::step_paced_impl(
 
 // PORT: RetargetController.apply_live_goal
 bool RetargetController::apply_live_goal(
-  const std::array<double, 7> & raw, const curobo_runtime::ReactiveState &)
+  const std::array<double, 7> & raw, const std::string &,
+  const curobo_runtime::ReactiveState &)
 {
   goal_ = raw;
   set_target(goal_);

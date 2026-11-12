@@ -120,6 +120,12 @@ RUN if [ ! -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then \
 # which colcon uses to replace existing symlink installs; torch needs >=77, so
 # keep 77-79.
 COPY curobo/curobo/pyproject.toml curobo/curobo/README.md /tmp/curobo-meta/
+# setuptools_scm 9 pulls vcs-versioning, which requires packaging>=26.2; the
+# Ubuntu 22.04 base still resolves its system packaging 21.3 through
+# pkg_resources, so the metadata build fails before pip can install anything.
+# Pin the older scm release for the metadata-only stub.
+RUN sed -i 's/setuptools_scm>=6.2/setuptools_scm<9/' /tmp/curobo-meta/pyproject.toml
+
 RUN python3 -m pip install --ignore-installed \
   "numpy<2" \
   "setuptools<80" \
@@ -281,8 +287,8 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
   ${ROS_WS}/src/curobo \
   --ignore-src --rosdistro ${ROS_DISTRO} -r -y && \
   rm -rf /var/lib/apt/lists/*
-# NOTE: rosdep -r tolerates the iki_kortex_description exec key of
-# curobov2_ros_extra (kortex-only, runtime-only); the package still builds.
+# NOTE: rosdep -r tolerates optional exec dependencies declared by
+# curobov2_ros_extra; the package still builds without them.
 
 RUN chown -R ${USERNAME}:${USERNAME} ${ROS_WS}
 USER ${USERNAME}

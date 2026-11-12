@@ -223,7 +223,7 @@ void PlanningTab::createPlannerClients(const std::string &planner_node) {
 
   // Publisher streaming the live MPC goal towards the current target pose
   // (stamped: the pose rides in the RViz fixed frame, see goalFrame()).
-  this->mpc_goal_pub_ = node_->create_publisher<geometry_msgs::msg::PoseStamped>(
+  this->mpc_goal_pub_ = node_->create_publisher<curobov2_ros_interfaces::msg::MpcGoal>(
       planner_ns + "mpc_goal", 10);
 
   // Live tool pose (base frame) for one-shot seeding of pristine displays.

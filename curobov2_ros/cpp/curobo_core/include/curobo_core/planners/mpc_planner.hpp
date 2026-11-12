@@ -55,7 +55,8 @@ protected:
   curobo_runtime::MpcStepOutcome step_paced_impl(
     const curobo_runtime::ReactiveState & state) override;
   bool apply_live_goal(
-    const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state) override;
+    const std::array<double, 7> & raw, const std::string & tool,
+    const curobo_runtime::ReactiveState & state) override;
 
 private:
   // PORT: MPCController._apply_goal (single pose or simultaneous multi-tool)
@@ -99,6 +100,12 @@ private:
   // one tool while retaining the other tools' commanded targets.
   std::vector<std::string> active_goal_frames_;
   std::vector<std::array<double, 7>> active_goal_poses_;
+  // Last live target applied from /mpc_goal. The RViz streams the active target
+  // continuously so a drag is never missed; re-applying the same pose would
+  // re-seed the MPC every 100 ms and make the arm jitter.
+  std::array<double, 7> last_live_goal_{};
+  std::string last_live_tool_;
+  bool has_last_live_goal_{false};
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr path_pub_;
   rclcpp::Publisher<curobov2_ros_interfaces::msg::MpcCosts>::SharedPtr cost_pub_;
   // PORT: MPCController._csv / _csv_t0 / _csv_t_prev / _csv_last_vlast.
