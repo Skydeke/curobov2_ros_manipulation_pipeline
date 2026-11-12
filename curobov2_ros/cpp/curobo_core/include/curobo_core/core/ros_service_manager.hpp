@@ -168,6 +168,7 @@ private:
   rclcpp::TimerBase::SharedPtr scene_obstacle_timer_;
   rclcpp::CallbackGroup::SharedPtr scene_callback_group_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr collision_spheres_pub_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr self_collision_debug_pub_;
   rclcpp::TimerBase::SharedPtr collision_spheres_timer_;
   std::function<std::vector<float>()> pose_provider_;
   std::function<std::string()> integration_frame_provider_;

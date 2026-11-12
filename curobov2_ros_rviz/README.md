@@ -223,6 +223,12 @@ robots.
   therefore turn red even when the drawn (unpadded) surfaces look separated.
   In the task constructor the same server namespaces apply, so an attached
   object stays in the ghost gripper while playback follows the solution.
+- **Self-collision debug** — `<planner>/self_collision_debug` carries one
+  `LINE_LIST` segment between the centres of every penetrating self-collision
+  pair, plus a `TEXT_VIEW_FACING` label with both link names and the exact
+  padded depth. The bundled RViz config shows it as `Self-Collision Debug`.
+  This is separate from the sphere topic, so it stays cheap when there are no
+  contacts.
 
 The old separate `TargetDisplay` and `CuroboTrajectoryDisplay` plugins are
 gone; use `curobov2_ros_rviz/CuroboPlanningDisplay`.

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <chrono>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -196,6 +197,12 @@ void RosServiceManager::init_services()
   collision_spheres_pub_ =
     node_->create_publisher<visualization_msgs::msg::MarkerArray>(
     name + "/collision_spheres", 10);
+  // Exact self-collision pair overlay. It is a separate topic so the cheap
+  // built-in MarkerArray display can render a few lines/labels without touching
+  // the hundreds of sphere markers.
+  self_collision_debug_pub_ =
+    node_->create_publisher<visualization_msgs::msg::MarkerArray>(
+    name + "/self_collision_debug", 10);
   // Both viz timers live in their own mutually exclusive group. In the default
   // group they share it with every service callback, and a single (multi-second)
   // generate_trajectory call then starves the 100 ms sphere timer for the whole
@@ -782,7 +789,10 @@ void RosServiceManager::publish_scene_obstacles()
 void RosServiceManager::publish_collision_spheres()
 {
   if (collision_spheres_pub_ == nullptr || !collision_spheres_enabled_ ||
-    pose_provider_ == nullptr || collision_spheres_pub_->get_subscription_count() == 0)
+    pose_provider_ == nullptr ||
+    (collision_spheres_pub_->get_subscription_count() == 0 &&
+    (self_collision_debug_pub_ == nullptr ||
+    self_collision_debug_pub_->get_subscription_count() == 0)))
   {
     return;
   }
@@ -930,6 +940,76 @@ void RosServiceManager::publish_collision_spheres_job()
       }
       array.markers.push_back(marker);
     }
+
+    // Self-collision pair debug overlay: one line between the two penetrating
+    // sphere centres plus a label naming both links and the exact depth.
+    visualization_msgs::msg::MarkerArray debug;
+    visualization_msgs::msg::Marker debug_clear;
+    debug_clear.action = visualization_msgs::msg::Marker::DELETEALL;
+    debug.markers.push_back(debug_clear);
+    std::size_t contact_id = 0;
+    for (const auto & contact : sphere_set.self_contacts) {
+      if (contact.sphere_a < 0 || contact.sphere_b < 0 ||
+        static_cast<std::size_t>(contact.sphere_a) >= static_cast<std::size_t>(n) ||
+        static_cast<std::size_t>(contact.sphere_b) >= static_cast<std::size_t>(n))
+      {
+        continue;
+      }
+      const std::size_t a = static_cast<std::size_t>(contact.sphere_a);
+      const std::size_t b = static_cast<std::size_t>(contact.sphere_b);
+
+      visualization_msgs::msg::Marker line;
+      line.header.frame_id = frame;
+      line.header.stamp = node_->get_clock()->now();
+      line.ns = "self_collision_pairs";
+      line.type = visualization_msgs::msg::Marker::LINE_LIST;
+      line.action = visualization_msgs::msg::Marker::ADD;
+      line.id = static_cast<int>(contact_id);
+      line.scale.x = 0.004;
+      line.color.r = 1.0;
+      line.color.a = 0.9;
+      geometry_msgs::msg::Point first;
+      first.x = spheres.data[a * 4 + 0];
+      first.y = spheres.data[a * 4 + 1];
+      first.z = spheres.data[a * 4 + 2];
+      geometry_msgs::msg::Point second;
+      second.x = spheres.data[b * 4 + 0];
+      second.y = spheres.data[b * 4 + 1];
+      second.z = spheres.data[b * 4 + 2];
+      line.points.push_back(first);
+      line.points.push_back(second);
+      debug.markers.push_back(line);
+
+      visualization_msgs::msg::Marker label;
+      label.header = line.header;
+      label.ns = "self_collision_labels";
+      label.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+      label.action = visualization_msgs::msg::Marker::ADD;
+      label.id = static_cast<int>(contact_id);
+      label.pose.position.x = 0.5 * (first.x + second.x);
+      label.pose.position.y = 0.5 * (first.y + second.y);
+      label.pose.position.z = 0.5 * (first.z + second.z) + 0.02;
+      label.pose.orientation.w = 1.0;
+      label.scale.z = 0.025;
+      label.color.r = 1.0;
+      label.color.g = 1.0;
+      label.color.b = 1.0;
+      label.color.a = 1.0;
+      std::ostringstream text;
+      const std::string link_a = link_of(contact.sphere_a);
+      const std::string link_b = link_of(contact.sphere_b);
+      text << (link_a.empty() ? "sphere#" + std::to_string(contact.sphere_a) : link_a)
+           << " <-> "
+           << (link_b.empty() ? "sphere#" + std::to_string(contact.sphere_b) : link_b)
+           << "\n" << (contact.depth * 1000.0F) << " mm";
+      label.text = text.str();
+      debug.markers.push_back(label);
+      ++contact_id;
+    }
+    if (self_collision_debug_pub_ != nullptr) {
+      self_collision_debug_pub_->publish(debug);
+    }
+
     // Surface WHAT is in collision, not just an index. This is the same
     // per-sphere model the planner optimizes, so a red sphere in RViz and this
     // line explain a rejected state without a separate attribution pass.
