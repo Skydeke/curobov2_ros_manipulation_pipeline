@@ -104,36 +104,21 @@ double targetOf(const QTreeWidgetItem * item)
 /// Writes a row's target and repaints it. EVERY write in this file goes through
 /// here, so the clamp to the joint's own limits cannot be bypassed by one path.
 ///
-/// A CONTINUOUS joint (reported range is a full turn or wider) is periodic, so
-/// a value written as the "other" turn — e.g. the descriptor's
-/// laundry_check_gripper j5 = 6.3641, just past the 6.28 top — is not out of
-/// range, it is the SAME pose as 6.3641 - 2*pi = 0.0809. Clamping it to 6.28
-/// (what a plain std::clamp does) silently plans a different configuration;
-/// wrapping it to the in-range full-turn equivalent keeps the pose exact.
+/// A CONTINUOUS joint is periodic. Its reported bounds are a DISPLAY WINDOW,
+/// not a physical stop, so the target must be the user's raw intent: rewriting
+/// 6.3641 to 0.0809 (or clamping it to 6.28) changes the value the planner is
+/// asked for. The planner interprets the target as a pose and takes the
+/// shortest 2*pi-equivalent path from the measured branch; multi-turn motion
+/// needs explicit waypoints. Bounded joints keep the ordinary clamp.
 void setTarget(QTreeWidgetItem * item, double value)
 {
   if (hasBounds(item)) {
     const QPointF limits = boundsOf(item);
     const double lo = limits.x();
     const double hi = limits.y();
-    constexpr double kTwoPi = 6.283185307179586;
-    if (hi - lo >= kTwoPi - 1e-6) {
-      // Continuous: pick the in-range 2*pi-equivalent nearest the raw value.
-      double best = value;
-      double best_dist = std::numeric_limits<double>::infinity();
-      for (int k = -2; k <= 2; ++k) {
-        const double cand = value + static_cast<double>(k) * kTwoPi;
-        if (cand < lo - 1e-9 || cand > hi + 1e-9) {
-          continue;
-        }
-        const double dist = std::fabs(cand - value);
-        if (dist < best_dist) {
-          best_dist = dist;
-          best = cand;
-        }
-      }
-      value = best;
-    } else {
+    const bool continuous =
+      item->data(COL_TARGET, ProgressBarDelegate::ContinuousRole).toBool();
+    if (!continuous) {
       value = std::clamp(value, lo, hi);
     }
   }
@@ -476,6 +461,7 @@ void JointsTab::refreshJointInfo()
       QStringList names;
       QVector<double> lower;
       QVector<double> upper;
+      QVector<bool> continuous;
       QStringList locked;
       QVector<NamedPose> poses;
       bool success = false;
@@ -492,6 +478,9 @@ void JointsTab::refreshJointInfo()
         }
         for (double v : result->upper_limits) {
           upper << v;
+        }
+        for (bool v : result->continuous) {
+          continuous << v;
         }
         for (const auto & n : result->locked_joint_names) {
           locked << QString::fromStdString(n);
@@ -602,7 +591,7 @@ void JointsTab::refreshJointInfo()
         message = QString::fromStdString(e.what());
       }
       runOnGuiThread(
-        [this, names, lower, upper, locked, poses, success, message]()
+        [this, names, lower, upper, continuous, locked, poses, success, message]()
         {
           if (!success) {
             setStatus(tr("get_joint_info failed: %1").arg(message));
@@ -613,9 +602,10 @@ void JointsTab::refreshJointInfo()
           locked_ = locked;
           limits_lower_ = lower;
           limits_upper_ = upper;
+          continuous_ = continuous;
           cspace_known_ = !cspace_.isEmpty();
           if (changed || tree_->topLevelItemCount() == 0) {
-            rebuildRows(cspace_, limits_lower_, limits_upper_);
+            rebuildRows(cspace_, limits_lower_, limits_upper_, continuous_);
           }
           setNamedPoses(poses);
           setButtonsEnabled();
@@ -633,7 +623,8 @@ void JointsTab::refreshJointInfo()
 }
 
 void JointsTab::rebuildRows(
-  const QStringList & names, const QVector<double> & lower, const QVector<double> & upper)
+  const QStringList & names, const QVector<double> & lower, const QVector<double> & upper,
+  const QVector<bool> & continuous)
 {
   tree_->clear();
   for (int i = 0; i < names.size(); ++i) {
@@ -652,6 +643,8 @@ void JointsTab::rebuildRows(
     const double lo = (i < lower.size()) ? lower[i] : 0.0;
     const double hi = (i < upper.size()) ? upper[i] : 0.0;
     // setData is (column, role, value) -- see the note in setTarget().
+    const bool is_continuous = i < continuous.size() && continuous[i];
+    item->setData(COL_TARGET, ProgressBarDelegate::ContinuousRole, is_continuous);
     if (std::isfinite(lo) && std::isfinite(hi) && hi > lo) {
       item->setData(
         COL_TARGET, ProgressBarDelegate::VariableBoundsRole, QPointF(lo, hi));
@@ -664,12 +657,17 @@ void JointsTab::rebuildRows(
     }
     item->setToolTip(
       COL_JOINT,
-      hasBounds(item)
-        ? tr("%1 — drag the bar to set the target, or click once to place it. "
-             "Limits: %2 .. %3 rad.")
+      !hasBounds(item)
+        ? tr("%1 — the model reports no position limit for this joint, so its "
+             "target has to be typed rather than dragged.").arg(names[i])
+        : is_continuous
+        ? tr("%1 — continuous joint: drag the bar to set a target. The %2 .. %3 "
+             "rad range is a display window, not a stop; the planner takes the "
+             "shortest 2*pi-equivalent path from the measured state.")
             .arg(names[i]).arg(lo).arg(hi)
-        : tr("%1 — the model reports no position limit for this joint, so its "
-             "target has to be typed rather than dragged.").arg(names[i]));
+        : tr("%1 — drag the bar to set the target, or click once to place it. "
+             "Limits: %2 .. %3 rad.")
+            .arg(names[i]).arg(lo).arg(hi));
 
     // Restore a target loaded from the config (rviz calls load() BEFORE the
     // rows exist -- they only appear once get_joint_info answers, which needs a
@@ -1200,7 +1198,7 @@ void JointsTab::load(const rviz_common::Config & config)
       // bounds off every row -- the delegate would fall back to plain text and
       // lose the bar -- and because the next refresh does not see the cspace
       // change, it would never put the real limits back.
-      rebuildRows(cspace_, limits_lower_, limits_upper_);
+      rebuildRows(cspace_, limits_lower_, limits_upper_, continuous_);
     }
   }
 }

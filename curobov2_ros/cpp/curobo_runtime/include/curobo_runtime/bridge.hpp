@@ -64,6 +64,9 @@ struct JointLimitsOutcome
 {
   TensorF32 positions;                        // [2, dof]
   std::vector<std::string> joint_names;       // cspace order
+  //: 1 when the joint is continuous (periodic), parallel to joint_names. The
+  //: reported lower/upper is then a coordinate window, not a physical stop.
+  std::vector<std::uint8_t> continuous;
   std::vector<std::string> locked_joint_names;
   std::vector<double> locked_positions;
   //: Lock joints written `lock_joints: {joint: null}` in the robot YAML: out of
@@ -93,6 +96,11 @@ struct LinkCollisionOutcome
 struct PlanRequest
 {
   std::vector<float> start;                   // [dof]
+  //: Per-joint whole-turn shift (2*pi*k, or 0) added to `start`/`joint_target`
+  //: before planning so a continuous joint's segment fits cuRobo's finite
+  //: [-2*pi, 2*pi] window. Subtract it from every returned position: it is a
+  //: constant, so FK and the collision-checked path are unchanged.
+  std::vector<double> window_shift;
   TensorF32 goalset;                          // [G, 7] poses (plan_pose)
   // Simultaneous per-tool Cartesian targets (bimanual). Parallel arrays;
   // `tool_poses` is [T, 7] (x, y, z, qw, qx, qy, qz). Empty for the
@@ -152,6 +160,10 @@ struct RobotDescriptionOutcome
   std::map<std::string, std::string> strategy_params;
   std::vector<std::string> home_names;
   std::vector<double> home_positions;
+  //: The descriptor's `continuous_joints` override. It is authoritative for
+  //: vendors (e.g. UR) that model continuous joints as revolute +/-2*pi in the
+  //: URDF, where the range alone cannot tell a circle from a bounded joint.
+  std::vector<std::string> continuous_joint_names;
   // The descriptor's full `named_joint_configs` map, flattened for the pybind
   // boundary (one name per pose, then a concatenated joint/value list with
   // per-pose sizes). GetJointInfo exposes these so the RViz panel does not have

@@ -206,7 +206,7 @@ private:
   void setButtonsEnabled();
   QTreeWidgetItem * rowFor(const QString & joint) const;
   void rebuildRows(const QStringList & names, const QVector<double> & lower,
-                   const QVector<double> & upper);
+                   const QVector<double> & upper, const QVector<bool> & continuous);
   /// Replace the combo's poses, preserving the selected item when the new list
   /// still contains it. get_joint_info is polled, so this runs repeatedly with
   /// the same descriptor data and must not reset the user's selection.
@@ -255,6 +255,9 @@ private:
   /// losing the model's real bounds.
   QVector<double> limits_lower_;
   QVector<double> limits_upper_;
+  /// Continuous-joint flags from get_joint_info, parallel to cspace_. The
+  /// reported limits are a display window for these, never a physical stop.
+  QVector<bool> continuous_;
   /// Target positions read from the config, waiting for the rows to exist. rviz
   /// calls load() before onInitialize(), and the rows only appear once
   /// get_joint_info has answered; rebuildRows() consumes and clears this.

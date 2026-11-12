@@ -31,7 +31,8 @@ public:
     rclcpp::Node * node, double dt, std::vector<std::string> joint_names,
     std::string strategy_key = "emulator",
     std::map<std::string, std::string> strategy_params = {},
-    std::vector<double> default_home = {});
+    std::vector<double> default_home = {},
+    std::vector<std::string> continuous_joint_names = {});
 
   // PORT: RobotContext.bind_kinematics
   void bind_kinematics() {}
@@ -110,6 +111,7 @@ private:
   std::vector<std::string> joint_names_;
   std::map<std::string, std::string> strategy_params_;
   std::vector<double> default_home_;
+  std::vector<std::string> continuous_joint_names_;
 
   std::mutex strategy_lock_;
   std::unique_ptr<JointCommandStrategy> robot_strategy_;

@@ -39,6 +39,14 @@ string[] joint_names
 float64[] lower_limits
 float64[] upper_limits
 
+# true for continuous joints, parallel to joint_names. A continuous joint has
+# no physical position limit: lower_limits/upper_limits are the finite
+# coordinate window the planner uses, NOT a stop. Consumers must not clamp a
+# continuous target to them; send the raw target and let the planner take the
+# shortest 2*pi-equivalent path. The flag comes from the URDF joint type (or a
+# descriptor's `continuous_joints` override), not from the range width.
+bool[] continuous
+
 # Joints currently pinned out of the cspace (the robot YAML's own
 # `kinematics.lock_joints` unless a SetJointLocks override is in force),
 # parallel to each other. Same values a read-only SetJointLocks query

@@ -14,6 +14,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include <rclcpp/rclcpp.hpp>
@@ -56,6 +57,12 @@ public:
     std::vector<std::string> joint_names);
   ~TrajectoryActionServer();
 
+  //: Continuous joints (descriptor override + model joint type). A replay is
+  //: anchored to the measured 2*pi branch as a WHOLE trajectory; it is never
+  //: rewritten point-by-point after planning.
+  void set_continuous_joint_names(std::vector<std::string> names)
+  {continuous_joint_names_ = std::move(names);}
+
 private:
   rclcpp_action::GoalResponse handle_goal(
     const rclcpp_action::GoalUUID & uuid,
@@ -86,6 +93,7 @@ private:
   PlannerServices * planners_;
   RobotContext * robot_context_;
   std::vector<std::string> joint_names_;
+  std::vector<std::string> continuous_joint_names_;
 
   rclcpp_action::Server<SendTrajectory>::SharedPtr action_server_;
   rclcpp::CallbackGroup::SharedPtr callback_group_;
