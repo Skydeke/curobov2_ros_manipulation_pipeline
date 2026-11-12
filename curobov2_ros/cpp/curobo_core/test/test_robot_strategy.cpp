@@ -123,8 +123,7 @@ TEST(RobotStrategy, RegistryCreatesRealRobotStrategies)
   EXPECT_EQ(keys, (std::vector<std::string>{"emulator", "joint_pose", "joint_speed"}));
 
   auto joint_speed = curobo_core::RobotRegistry::create(
-    "joint_speed", node.get(), 0.02, joints(),
-    {{"action_topic", "/j"}, {"max_joint_accel_dps", "45"}, {"accel_clamp_dt", "0.02"}});
+    "joint_speed", node.get(), 0.02, joints(), {{"action_topic", "/j"}});
   ASSERT_NE(joint_speed, nullptr);
   EXPECT_EQ(joint_speed->get_joint_name(), joints());
 
@@ -135,31 +134,6 @@ TEST(RobotStrategy, RegistryCreatesRealRobotStrategies)
   // ghost exists in Python but is not registered -> None.
   EXPECT_EQ(curobo_core::RobotRegistry::create("ghost", node.get(), 0.02, joints()),
     nullptr);
-}
-
-// PORT: joint_speed_strategy._clamp_velocities
-TEST(JointSpeed, ClampsAccelerationAgainstMeasuredVelocity)
-{
-  if (!rclcpp::ok()) {
-    rclcpp::init(0, nullptr);
-  }
-  auto node = std::make_shared<rclcpp::Node>("unified_planner");
-  curobo_core::JointSpeedStrategy strategy(
-    node.get(), 0.02, joints(),
-    {{"action_topic", "/j"}, {"max_joint_accel_dps", "45"}, {"accel_clamp_dt", "0.02"}});
-
-  // Measured velocity = 0 (feedback), commanded jump = 10 rad/s on joint 1.
-  sensor_msgs::msg::JointState state;
-  state.name = joints();
-  state.position.assign(7, 0.0);
-  state.velocity.assign(7, 0.0);
-  strategy.callback_joint_pose(state);
-
-  const auto clamped = strategy.clamp_velocities({{10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}});
-  const double max_dv = 45.0 * 3.14159265358979323846 / 180.0 * 0.02;
-  ASSERT_EQ(clamped.size(), 1u);
-  EXPECT_NEAR(clamped[0][0], max_dv, 1e-9);
-  EXPECT_DOUBLE_EQ(clamped[0][1], 0.0);
 }
 
 // A native plan is sampled at the TIME-OPTIMIZED interval, not at the node's
@@ -173,8 +147,7 @@ TEST(JointSpeed, ReplayPlanDtOverridesTheInterpolationDt)
   auto node = std::make_shared<rclcpp::Node>("unified_planner_plan_dt");
   node->declare_parameter("time_dilation_factor", 1.0);
   curobo_core::JointSpeedStrategy strategy(
-    node.get(), 0.025, joints(),
-    {{"action_topic", "/j"}, {"max_joint_accel_dps", "300"}, {"accel_clamp_dt", "0.025"}});
+    node.get(), 0.025, joints(), {{"action_topic", "/j"}});
 
   sensor_msgs::msg::JointState state;
   state.name = joints();
@@ -201,69 +174,4 @@ TEST(JointSpeed, ReplayPlanDtOverridesTheInterpolationDt)
   EXPECT_NEAR(strategy.plan_dt(), 0.013, 1e-12);
   EXPECT_NEAR(strategy.dilated_dt(), 0.026, 1e-12);
   EXPECT_NEAR(strategy.time_dilation_scale(), 0.5, 1e-12);
-}
-
-// The acceleration clamp follows the plan's interval when the descriptor did
-// not pin accel_clamp_dt: a 13 ms replay must not be allowed 25 ms worth of
-// velocity change.
-TEST(JointSpeed, AccelerationClampUsesThePlanIntervalWhenNotPinned)
-{
-  if (!rclcpp::ok()) {
-    rclcpp::init(0, nullptr);
-  }
-  auto node = std::make_shared<rclcpp::Node>("unified_planner_plan_dt_clamp");
-  node->declare_parameter("time_dilation_factor", 1.0);
-  curobo_core::JointSpeedStrategy strategy(
-    node.get(), 0.025, joints(), {{"action_topic", "/j"}, {"max_joint_accel_dps", "45"}});
-
-  sensor_msgs::msg::JointState state;
-  state.name = joints();
-  state.position.assign(7, 0.0);
-  state.velocity.assign(7, 0.0);
-  strategy.callback_joint_pose(state);
-
-  strategy.set_command(joints(), {}, {}, {}, 0.013);
-  const auto clamped = strategy.clamp_velocities(
-    {{10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, 1.0);
-  const double max_dv = 45.0 * 3.14159265358979323846 / 180.0 * 0.013;
-  ASSERT_EQ(clamped.size(), 1u);
-  EXPECT_NEAR(clamped[0][0], max_dv, 1e-9);
-}
-
-// time_dilation_factor re-stamps the points but leaves the path positions
-// unchanged, so velocity feed-forward must scale by plan_dt / dilated_dt.
-// Otherwise a slowed trajectory asks the controller for the nominal speed on
-// doubled timestamps and overshoots.
-TEST(JointSpeed, TimeDilationScalesVelocityFeedforward)
-{
-  if (!rclcpp::ok()) {
-    rclcpp::init(0, nullptr);
-  }
-  auto node = std::make_shared<rclcpp::Node>("unified_planner_dilation");
-  node->declare_parameter("time_dilation_factor", 0.5);
-  curobo_core::JointSpeedStrategy strategy(
-    node.get(), 0.02, joints(),
-    {{"action_topic", "/j"}, {"max_joint_accel_dps", "45"}, {"accel_clamp_dt", "0.02"}});
-
-  sensor_msgs::msg::JointState state;
-  state.name = joints();
-  state.position.assign(7, 0.0);
-  state.velocity.assign(7, 0.0);
-  strategy.callback_joint_pose(state);
-
-  EXPECT_NEAR(strategy.time_dilation_scale(), 0.5, 1e-12);
-
-  // No clamp active: the published value is the plan's velocity * 0.5.
-  const auto scaled = strategy.clamp_velocities(
-    {{0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, 0.5);
-  ASSERT_EQ(scaled.size(), 1u);
-  EXPECT_NEAR(scaled[0][0], 0.025, 1e-12);
-
-  // The acceleration clamp uses the DILATED interval: max_accel * dt / 0.5.
-  const auto clamped = strategy.clamp_velocities(
-    {{10.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}}, 0.5);
-  const double max_dv =
-    45.0 * 3.14159265358979323846 / 180.0 * 0.02 / 0.5;
-  ASSERT_EQ(clamped.size(), 1u);
-  EXPECT_NEAR(clamped[0][0], max_dv, 1e-9);
 }

@@ -408,14 +408,24 @@ void TrajectoryActionServer::handle_goal_impl(const std::shared_ptr<GoalHandle> 
         }
       }
     }
-    if (!(replay_dt > 0.0)) {
-      const auto estimated = estimate_replay_dt(positions, velocities);
-      if (estimated.has_value()) {
+    const auto estimated = estimate_replay_dt(positions, velocities);
+    if (estimated.has_value()) {
+      if (!(replay_dt > 0.0)) {
         replay_dt = *estimated;
         RCLCPP_INFO(
           node_->get_logger(),
           "Replay carries no timestamps; inferred sample interval %.6f s from "
           "its velocity feed-forward", replay_dt);
+      } else {
+        const double tolerance = 0.02 * std::max(replay_dt, *estimated);
+        if (std::abs(*estimated - replay_dt) > tolerance) {
+          RCLCPP_WARN(
+            node_->get_logger(),
+            "Replay timestamps imply %.6f s but its velocity feed-forward "
+            "implies %.6f s; using the velocity-consistent interval",
+            replay_dt, *estimated);
+          replay_dt = *estimated;
+        }
       }
     }
     if (replay_dt > 0.0) {

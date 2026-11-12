@@ -39,6 +39,14 @@ ENV ROS_DISTRO=${ROS_DISTRO}
 ENV ROS_WS=${ROS_WS}
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 ENV PIP_NO_CACHE_DIR=1
+# The vendored checkout has no .git in the build context; the upstream package
+# reads its version through setuptools-scm at build and import time.
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=0.8.0
+# CUDA: the base image supplies the toolkit used by the native C++ runtime and
+# the Warp/CMake stages. The Python side is resolved by pip and is not pinned to
+# a CUDA major here; keep the base image's CUDA major and the Python wheels in
+# sync when changing either one.
+#
 # /usr/local/cuda is the alternatives symlink that both the NVIDIA CUDA base
 # images and the cuda-toolkit-* packages create, so one set of ENVs serves a
 # base that ships CUDA and one where CUDA_TOOLKIT installs it. Re-prepending
@@ -104,26 +112,35 @@ RUN if [ ! -f /opt/ros/${ROS_DISTRO}/setup.bash ]; then \
   rosdep init 2>/dev/null || true; \
   fi
 
-# Core numerical stack
+# Only the upstream project metadata is copied here, so source edits do not
+# invalidate this dependency layer. Installing the metadata-only stub makes pip
+# resolve upstream's declared dependencies; drop the stub afterwards, colcon
+# ships the actual curobo package. The extra packages are pipeline dependencies
+# that upstream does not declare. setuptools 80 dropped `develop --uninstall`,
+# which colcon uses to replace existing symlink installs; torch needs >=77, so
+# keep 77-79.
+COPY curobo/curobo/pyproject.toml curobo/curobo/README.md /tmp/curobo-meta/
 RUN python3 -m pip install --ignore-installed \
   "numpy<2" \
-  "cuda-python<13" \
-  "cuda-bindings~=12.9" \
-  "cuda-core[cu12]" \
-  "cupy-cuda12x<14" \
-  "timm" \
+  "setuptools<80" \
+  cuda-python \
+  cuda-bindings \
+  cuda-core \
+  timm \
   einops \
   hdbscan \
-  "viser>=1" \
   torchvision \
-  bubblify
+  bubblify \
+  "/tmp/curobo-meta[benchmark]" && \
+  python3 -m pip uninstall -y nvidia-curobo && \
+  rm -rf /tmp/curobo-meta
 
 # Someone is misusing pinning, for no good damn reason
 RUN git clone https://github.com/nitesh-subedi/ros2_numpy.git /tmp/ros2_numpy && \
   sed -i 's/numpy==1\.24\.2/numpy>=1.26.4,<2/' \
   /tmp/ros2_numpy/setup.py \
   /tmp/ros2_numpy/requirements.txt 2>/dev/null || true && \
-  python3 -m pip install --ignore-installed /tmp/ros2_numpy
+  python3 -m pip install /tmp/ros2_numpy
 
 # Reinstall the message packages against this distro. rosidl-generator-type-
 # description rides along on Jazzy only (it does not exist on Humble).
@@ -147,10 +164,6 @@ RUN add-apt-repository -y universe && \
   pybind11-dev \
   libeigen3-dev \
   && rm -rf /var/lib/apt/lists/*
-
-# --- cuRobo v2: dependencies FIRST, sources LAST ---
-COPY curobo/requirements.txt /tmp/curobo_requirements.txt
-RUN pip install --no-cache-dir -r /tmp/curobo_requirements.txt
 
 # ============================================================================
 # Standalone native cpp_runtime: NOT a colcon package.
@@ -248,17 +261,13 @@ COPY --chown=${USERNAME}:${USERNAME} curobo_task_constructor_rviz/package.xml ${
 COPY --chown=${USERNAME}:${USERNAME} curobo_cpp_runtime/package.xml ${ROS_WS}/src/curobo_cpp_runtime/package.xml
 COPY --chown=${USERNAME}:${USERNAME} curobo/package.xml ${ROS_WS}/src/curobo/package.xml
 
-USER ${USERNAME}
-
-# rosdep keeps its sources cache PER $HOME and `rosdep init` needs root, so run
-# the whole toolchain through $SUDO (a no-op when the build already runs as
-# root): updating as the unprivileged user and installing as root fails with
-# "your rosdep installation has not been initialized yet".
+# rosdep init and apt both need root. Run them as root, then hand the workspace
+# to USERNAME once so colcon can write build/install/log without sudo.
+USER root
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
-  SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"; \
-  $SUDO rosdep init 2>/dev/null || true; \
-  $SUDO rosdep update && $SUDO apt-get update && \
-  $SUDO rosdep install \
+  rosdep init 2>/dev/null || true; \
+  rosdep update && apt-get update && \
+  rosdep install \
   --from-paths \
   ${ROS_WS}/src/curobov2_ros \
   ${ROS_WS}/src/curobov2_ros_interfaces \
@@ -271,9 +280,12 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
   ${ROS_WS}/src/curobo_cpp_runtime \
   ${ROS_WS}/src/curobo \
   --ignore-src --rosdistro ${ROS_DISTRO} -r -y && \
-  $SUDO rm -rf /var/lib/apt/lists/*
+  rm -rf /var/lib/apt/lists/*
 # NOTE: rosdep -r tolerates the iki_kortex_description exec key of
 # curobov2_ros_extra (kortex-only, runtime-only); the package still builds.
+
+RUN chown -R ${USERNAME}:${USERNAME} ${ROS_WS}
+USER ${USERNAME}
 
 # --- curobov2_ros packages (sources; a source edit invalidates from here) ---
 COPY --chown=${USERNAME}:${USERNAME} curobov2_ros ${ROS_WS}/src/curobov2_ros

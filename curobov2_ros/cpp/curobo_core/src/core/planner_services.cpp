@@ -23,6 +23,7 @@
 
 #include "curobo_core/core/obstacle_manager.hpp"
 #include "curobo_core/core/collision_diagnostics.hpp"
+#include "curobo_core/core/trajectory_action_server.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
 #include "curobo_core/planners/zero_motion.hpp"
 #include "curobo_core/robot/continuous_joints.hpp"
@@ -1195,6 +1196,10 @@ void PlannerServices::fill_result(
   const std::int64_t dof = outcome.positions.shape.size() > 1 ? outcome.positions.shape[1] : 0;
   const std::int64_t rows = outcome.positions.shape.empty() ? 0 : outcome.positions.shape[0];
   const std::int64_t vdof = outcome.velocity.shape.size() > 1 ? outcome.velocity.shape[1] : 0;
+  std::vector<std::vector<double>> position_rows;
+  std::vector<std::vector<double>> velocity_rows;
+  position_rows.reserve(static_cast<std::size_t>(rows));
+  velocity_rows.reserve(static_cast<std::size_t>(rows));
   for (std::int64_t t = 0; t < rows; ++t) {
     sensor_msgs::msg::JointState js;
     js.name = outcome.joint_names.empty() ? joint_names_ : outcome.joint_names;
@@ -1214,6 +1219,8 @@ void PlannerServices::fill_result(
         js.velocity.push_back(outcome.velocity.data[static_cast<std::size_t>(t * vdof + j)]);
       }
     }
+    position_rows.push_back(js.position);
+    velocity_rows.push_back(js.velocity);
     out.trajectory.push_back(js);
   }
   // The native planner samples the TIME-OPTIMIZED executable trajectory on a
@@ -1231,6 +1238,21 @@ void PlannerServices::fill_result(
       outcome.motion_time_s / static_cast<double>(rows - 1);
     if (std::isfinite(candidate) && candidate > 1.0e-5 && candidate < 10.0) {
       sample_dt = candidate;
+    }
+  }
+  // motion_time_s and the row count do not always describe the same grid. The
+  // velocity feed-forward does: dp/dt = v_avg. If the two disagree, the plan is
+  // being re-stamped at the wrong rate, which the display shows as an insane
+  // speed and the controller turns into overshoot. Trust the velocities.
+  const auto velocity_dt = estimate_replay_dt(position_rows, velocity_rows);
+  if (velocity_dt.has_value()) {
+    const double tolerance = 0.02 * std::max(sample_dt, *velocity_dt);
+    if (std::abs(*velocity_dt - sample_dt) > tolerance) {
+      RCLCPP_WARN(
+        node_->get_logger(),
+        "Plan timing %.6f s disagrees with its velocity feed-forward %.6f s; "
+        "using the velocity-consistent interval", sample_dt, *velocity_dt);
+      sample_dt = *velocity_dt;
     }
   }
   out.dt = sample_dt;
