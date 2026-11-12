@@ -399,26 +399,22 @@ void PlanningTab::streamMpcGoal() {
     return;
   }
   const geometry_msgs::msg::Pose &p = target_display_->getPose();
-  const geometry_msgs::msg::Pose &l = last_published_goal_;
-  const bool changed =
-      p.position.x != l.position.x || p.position.y != l.position.y ||
-      p.position.z != l.position.z || p.orientation.x != l.orientation.x ||
-      p.orientation.y != l.orientation.y ||
-      p.orientation.z != l.orientation.z || p.orientation.w != l.orientation.w;
-  if (changed) {
-    geometry_msgs::msg::PoseStamped stamped;
-    stamped.header.stamp = node_->now();
-    geometry_msgs::msg::Pose base_pose;
-    if (target_display_->poseInBase(p, base_pose)) {
-      stamped.pose = base_pose;
-      stamped.header.frame_id = "";
-    } else {
-      stamped.pose = p;
-      stamped.header.frame_id = goalFrame();
-    }
-    mpc_goal_pub_->publish(stamped);
-    last_published_goal_ = p;
+  curobov2_ros_interfaces::msg::MpcGoal goal;
+  goal.header.stamp = node_->now();
+  goal.tool_frame = target_display_->getActiveTool();
+  geometry_msgs::msg::Pose base_pose;
+  if (target_display_->poseInBase(p, base_pose)) {
+    goal.pose = base_pose;
+    goal.header.frame_id = "";
+  } else {
+    goal.pose = p;
+    goal.header.frame_id = goalFrame();
   }
+  // Publish every tick while tracking. A drag can begin and end between two
+  // 100 ms deltas (or the active tool can change), and a missed delta used to
+  // leave the server tracking the stale initial goal forever.
+  mpc_goal_pub_->publish(goal);
+  last_published_goal_ = p;
 }
 
 void PlanningTab::stopMpc() {

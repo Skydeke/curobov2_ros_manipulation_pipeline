@@ -492,6 +492,21 @@ struct CppBridge::Impl
   bool mpc_has_goal_state{false};
   bool mpc_has_goal_pose{false};
   curobo::robot::MpcResult last_mpc_result{};
+  // The proposal from the previous feasible step still has to be committed
+  // (`accept`) before the next solve and its seed advanced by the knots the
+  // executor actually consumed. Without this the warm-start seed stays frozen
+  // at mpc_start while the robot moves, so every re-plan only proposes a tiny
+  // step from the original pose.
+  bool mpc_accept_pending{false};
+  int mpc_accept_knots{0};
+  // Sample interval of the native MPC trajectory. The mpc_build config carries
+  // the node's mpc_step_dt; keep it separate from planner_settings so selecting
+  // MPC does not retime the open-loop planners when the user switches back.
+  float mpc_trajectory_dt{0.0F};
+  // Servo command interval. The optimized trajectory starts at the measured
+  // state, so command sample 0 would hold the robot in place; the executor must
+  // advance to the sample that covers this interval.
+  float mpc_command_interval{0.0F};
 
   void require_initialized(const char * method) const
   {
@@ -997,6 +1012,10 @@ struct CppBridge::Impl
     config.trajectory_optimization.trajectory_dt =
       static_cast<float>(planner_settings.interpolation_dt);
     config.trajectory_optimization.num_knots = planner_settings.num_knots;
+    // Ignore sub-micrometre numerical overshoot at joint limits; a measured
+    // joint can sit at -2e-13 for a 0.0 bound and must not invalidate the
+    // start state.
+    config.trajectory_optimization.constraint_tolerance = 1e-4F;
     config.trajectory_optimization.check_effort_limits =
       planner_settings.check_effort_limits;
     config.inverse_kinematics.check_effort_limits =
@@ -1061,6 +1080,9 @@ struct CppBridge::Impl
     if (!mpc) {
       curobo::robot::MpcConfig config;
       config.trajectory_dt = static_cast<float>(planner_settings.interpolation_dt);
+      if (mpc_trajectory_dt > 0.0F) {
+        config.trajectory_dt = mpc_trajectory_dt;
+      }
       config.collision_activation_distance =
         static_cast<float>(std::max(0.0, planner_settings.collision_activation_distance * 0.2));
       mpc = std::make_unique<curobo::robot::MpcController>(*planner, config);
@@ -2457,8 +2479,15 @@ std::vector<std::uint8_t> CppBridge::validate(
       cudaMemcpy(host.data(), violations, host.size() * sizeof(int32_t),
         cudaMemcpyDeviceToHost));
     for (int lane = 0; lane < count; ++lane) {
-      valid[static_cast<std::size_t>(offset + lane)] =
-        host[static_cast<std::size_t>(lane)] == 0 ? 1 : 0;
+      const int32_t flags = host[static_cast<std::size_t>(lane)];
+      valid[static_cast<std::size_t>(offset + lane)] = flags == 0 ? 1 : 0;
+      if (flags != 0) {
+        std::fprintf(
+          stderr,
+          "[validate] invalid flags=%d (q=%d v=%d a=%d jerk=%d world=%d self=%d density=%d)\n",
+          flags, flags & 1, flags & 2, flags & 4, flags & 8, flags & 16, flags & 32,
+          flags & 64);
+      }
     }
   }
   return valid;
@@ -3357,12 +3386,20 @@ void CppBridge::mpc_build(
   if (!cfg_json.empty()) {
     try {
       const json::Value document = json::parse(cfg_json);
-      impl_->planner_settings.interpolation_dt =
-        json_double(document, "trajectory_dt", impl_->planner_settings.interpolation_dt);
+      // The node sends mpc_step_dt as "step_dt" (see mpc_planner.cpp). Older
+      // callers used "trajectory_dt"; keep that as a fallback.
+      const double default_dt = impl_->mpc_trajectory_dt > 0.0F ?
+        impl_->mpc_trajectory_dt : impl_->planner_settings.interpolation_dt;
+      impl_->mpc_trajectory_dt = static_cast<float>(
+        json_double(document, "step_dt", json_double(document, "trajectory_dt", default_dt)));
+      impl_->mpc_command_interval = static_cast<float>(
+        json_double(document, "command_interval", impl_->mpc_command_interval));
     } catch (const std::exception &) {
     }
   }
   impl_->mpc.reset();
+  impl_->mpc_accept_pending = false;
+  impl_->mpc_accept_knots = 0;
   impl_->ensure_mpc("mpc_build");
 }
 
@@ -3388,7 +3425,7 @@ curobo_runtime::MpcGoalOutcome CppBridge::mpc_setup(
 }
 
 curobo_runtime::MpcStepOutcome CppBridge::mpc_step(
-  curobo_runtime::RobotHandle, const curobo_runtime::ReactiveState & state, bool)
+  curobo_runtime::RobotHandle, const curobo_runtime::ReactiveState & state, bool paced)
 {
   std::lock_guard<std::mutex> lock(impl_->mutex);
   impl_->require_initialized("mpc_step");
@@ -3414,44 +3451,97 @@ curobo_runtime::MpcStepOutcome CppBridge::mpc_step(
   velocity_device.upload(velocity);
   acceleration_device.upload(acceleration);
   jerk_device.upload(jerk);
+  // Commit the proposal the executor has just finished and advance the seed by
+  // the whole knots it consumed. This is the same accept+shift handoff the
+  // native MPC tests use; skipping it freezes warm-starting at mpc_start.
+  int executed_knots = 0;
+  if (impl_->mpc_accept_pending) {
+    mpc.accept();
+    executed_knots = impl_->mpc_accept_knots;
+    impl_->mpc_accept_pending = false;
+    impl_->mpc_accept_knots = 0;
+  }
   impl_->last_mpc_result = mpc.step(
     static_cast<const float *>(state_device.get()),
     static_cast<const float *>(velocity_device.get()),
     static_cast<const float *>(acceleration_device.get()),
-    static_cast<const float *>(jerk_device.get()), 0);
+    static_cast<const float *>(jerk_device.get()), executed_knots);
   cuda_check("mpc_step", cudaDeviceSynchronize());
+
+  // `position`/`velocity`/`acceleration` point at the dense optimized
+  // trajectory. Sample 0 is the measured handoff state; commanding it would
+  // hold the robot in place, and returning only the endpoint makes every
+  // window start and end at rest. Mirror the Python `action_sequence`: hand the
+  // executor the segment that covers the command interval.
+  const auto info = impl_->planner->info();
+  const int steps = std::max(1, info.trajectory_steps);
+  const float sample_dt = impl_->last_mpc_result.trajectory_dt;
+  int command_index = 0;
+  if (impl_->last_mpc_result.feasible) {
+    int advance = 1;
+    if (paced && impl_->mpc_command_interval > 0.0F && sample_dt > 0.0F) {
+      advance = static_cast<int>(std::lround(impl_->mpc_command_interval / sample_dt));
+    }
+    command_index = std::max(1, std::min(steps - 1, advance));
+  }
+  if (impl_->last_mpc_result.feasible) {
+    const int samples_per_knot = std::max(1, info.spline_layout.interpolation_steps);
+    const int knots = std::max(
+      0, std::min(
+        info.num_knots,
+        (command_index + samples_per_knot / 2) / samples_per_knot));
+    impl_->mpc_accept_pending = true;
+    impl_->mpc_accept_knots = knots;
+  }
 
   curobo_runtime::MpcStepOutcome outcome;
   outcome.action.has_action = impl_->last_mpc_result.feasible;
+  const bool segment = paced && impl_->mpc_command_interval > 0.0F;
+  // A paced command carries the next command interval ("delta") of the
+  // optimized horizon, mirroring the Python `action_sequence`, plus a small
+  // overlap: the servo loop preempts it one control period later, so the tail
+  // keeps the controller fed when a solve overruns by a few milliseconds
+  // instead of stalling it at the last sample.
+  const int command_rows = std::max(1, std::min(steps, command_index));
+  const int overlap_rows = (segment && sample_dt > 0.0F) ?
+    static_cast<int>(std::lround(0.12F / sample_dt)) : 0;
+  const int first_row = 0;
+  const int row_count = segment ?
+    std::max(1, std::min(steps, command_rows + std::max(0, overlap_rows))) : 1;
+  const std::size_t offset = static_cast<std::size_t>(first_row * dof_count);
+  const std::size_t count = static_cast<std::size_t>(row_count * dof_count);
   if (impl_->last_mpc_result.position != nullptr) {
-    std::vector<float> position(static_cast<std::size_t>(dof_count));
+    std::vector<float> values(count);
     cuda_check(
       "mpc_step",
       cudaMemcpy(
-        position.data(), impl_->last_mpc_result.position,
-        position.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    outcome.action.position.shape = {1, dof_count};
-    outcome.action.position.data = position;
+        values.data(), impl_->last_mpc_result.position + offset,
+        values.size() * sizeof(float), cudaMemcpyDeviceToHost));
+    outcome.action.position.shape = {row_count, dof_count};
+    outcome.action.position.data = std::move(values);
   }
   if (impl_->last_mpc_result.velocity != nullptr) {
-    std::vector<float> values(static_cast<std::size_t>(dof_count));
+    std::vector<float> values(count);
     cuda_check(
       "mpc_step",
       cudaMemcpy(
-        values.data(), impl_->last_mpc_result.velocity,
+        values.data(), impl_->last_mpc_result.velocity + offset,
         values.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    outcome.action.velocity.shape = {1, dof_count};
-    outcome.action.velocity.data = values;
+    outcome.action.velocity.shape = {row_count, dof_count};
+    outcome.action.velocity.data = std::move(values);
   }
   if (impl_->last_mpc_result.acceleration != nullptr) {
-    std::vector<float> values(static_cast<std::size_t>(dof_count));
+    std::vector<float> values(count);
     cuda_check(
       "mpc_step",
       cudaMemcpy(
-        values.data(), impl_->last_mpc_result.acceleration,
+        values.data(), impl_->last_mpc_result.acceleration + offset,
         values.size() * sizeof(float), cudaMemcpyDeviceToHost));
-    outcome.action.acceleration.shape = {1, dof_count};
-    outcome.action.acceleration.data = values;
+    outcome.action.acceleration.shape = {row_count, dof_count};
+    outcome.action.acceleration.data = std::move(values);
+  }
+  if (segment && sample_dt > 0.0F) {
+    outcome.action_dt = sample_dt;
   }
   try {
     const auto pose = impl_->fk_pose(state.position, "mpc_step");
@@ -3550,10 +3640,21 @@ bool CppBridge::mpc_update_goal_poses(
   const auto info = impl_->planner->info();
   const int knots = info.num_knots;
   std::vector<float> seed(static_cast<std::size_t>(knots) * impl_->dof());
+  // Interpolate the seed from the phase start to the target state. A constant
+  // target seed made the optimizer start from the endpoint and reject the
+  // handoff, especially at the straight-arm singularity.
+  const std::vector<float> * seed_start = &phase_q;
+  if (static_cast<int>(impl_->mpc_start.size()) == impl_->dof()) {
+    seed_start = &impl_->mpc_start;
+  }
+  const float seed_denom = knots > 1 ? static_cast<float>(knots - 1) : 1.0F;
   for (int k = 0; k < knots; ++k) {
+    const float alpha = static_cast<float>(k) / seed_denom;
     for (int j = 0; j < impl_->dof(); ++j) {
+      const float start = (*seed_start)[static_cast<std::size_t>(j)];
+      const float goal = phase_q[static_cast<std::size_t>(j)];
       seed[static_cast<std::size_t>(k * impl_->dof() + j)] =
-        phase_q[static_cast<std::size_t>(j)];
+        (1.0F - alpha) * start + alpha * goal;
     }
   }
   DeviceBuffer position_device;
@@ -3572,6 +3673,8 @@ bool CppBridge::mpc_update_goal_poses(
   impl_->mpc_goal_pose = poses_by_tool.front();
   impl_->mpc_has_goal_pose = true;
   impl_->mpc_has_goal_state = false;
+  impl_->mpc_accept_pending = false;
+  impl_->mpc_accept_knots = 0;
   return true;
 }
 
@@ -3607,6 +3710,8 @@ void CppBridge::mpc_update_goal_state(
   impl_->mpc_goal_state = q;
   impl_->mpc_has_goal_state = true;
   impl_->mpc_has_goal_pose = false;
+  impl_->mpc_accept_pending = false;
+  impl_->mpc_accept_knots = 0;
 }
 
 void CppBridge::mpc_reseed(

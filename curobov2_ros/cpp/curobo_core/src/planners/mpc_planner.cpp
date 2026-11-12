@@ -76,6 +76,7 @@ void MPCController::ensure_solver()
       << ",\"warm_start_iters\":" << warm_iters
       << ",\"cold_start_iters\":" << cold_iters
       << ",\"solver_type\":\"" << solver_type << "\""
+      << ",\"command_interval\":" << command_interval
       << ",\"mppi_num_particles\":" << param_int("mpc_mppi_num_particles", 400)
       << ",\"use_cuda_graph\":" << (param_bool(kUse, true) ? "true" : "false")
       << ",\"collision_cache\":" << cache.str() << "}";
@@ -178,6 +179,7 @@ bool MPCController::setup_solver(
 
   const auto target = target_pose_for_status(frames, poses);
   set_target(target);
+  has_last_live_goal_ = false;
 
   const auto setup_outcome = bridge_->mpc_setup(handle_, start_q);
   const bool applied = apply_goal_poses(frames, poses, start_q, start_q);
@@ -186,11 +188,11 @@ bool MPCController::setup_solver(
   if (debug_enabled() && setup_outcome.has_ee) {
     RCLCPP_DEBUG(
       node_->get_logger(),
-      "[MPC DIAG] setup: goals=%zu goal_xyz=[%.4f, %.4f, %.4f] "
-      "start_EE_pos=[%.4f, %.4f, %.4f] fk_err=%.4fm goal_applied=%d",
-      poses.size(), target[0], target[1], target[2], setup_outcome.ee_position[0],
-      setup_outcome.ee_position[1], setup_outcome.ee_position[2],
-      get_position_error(), static_cast<int>(applied));
+      "MPC setup: goals=%zu current_EE_pos=[%.4f, %.4f, %.4f] "
+      "first_goal=[%.4f, %.4f, %.4f] goal_applied=%d",
+      poses.size(), setup_outcome.ee_position[0], setup_outcome.ee_position[1],
+      setup_outcome.ee_position[2], target[0], target[1], target[2],
+      static_cast<int>(applied));
   }
   return true;
 }
@@ -212,26 +214,53 @@ bool MPCController::apply_goal_poses(
       poses.data.push_back(static_cast<float>(value));
     }
   }
-  if (bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q)) {
-    remember_active_goal(tool_frames, tool_poses);
-    return true;
-  }
+  // PORT: _apply_goal with run_ik=True. Use the IK solution as the MPC's seed
+  // (a bent configuration away from the straight-arm singularity) but keep the
+  // Cartesian objective: switching to joint tracking made the arm swing to a
+  // remote elbow branch instead of following the dragged target.
   const auto solved =
     bridge_->mpc_solve_goal_poses(handle_, tool_frames, poses, hold_q, seed_q);
   if (solved.success) {
     std::vector<float> q(
       solved.positions.data.begin(), solved.positions.data.end());
-    bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q);
-    bridge_->mpc_update_goal_state(handle_, q);
+    // The IK solver happily returns a different elbow branch. Using such a
+    // solution as the MPC's SEED makes the optimizer interpolate the whole arm
+    // across the body in one window - which usually ends in a self-collision
+    // and an infeasible step, so a small gizmo drag stalls the arm. Only accept
+    // a seed that stays near the current configuration; otherwise seed from the
+    // measured state and let the Cartesian objective pull the arm locally.
+    float jump = 0.0F;
+    const std::size_t n = std::min(q.size(), hold_q.size());
+    for (std::size_t i = 0; i < n; ++i) {
+      jump = std::max(jump, std::fabs(q[i] - hold_q[i]));
+    }
+    constexpr float kMaxSeedJumpRad = 0.7F;
+    // Only single-tool goals get this guard. A multi-tool goal's IK solution is
+    // the coherent PAIR (both arms at once); rejecting it leaves the optimizer
+    // with no paired seed at all and the bimanual solve fails - which is what
+    // made "one tool up, the other down" stutter.
+    const bool single_tool_goal = tool_frames.size() <= 1;
+    if (jump <= kMaxSeedJumpRad || !single_tool_goal) {
+      if (bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, q)) {
+        remember_active_goal(tool_frames, tool_poses);
+        return true;
+      }
+    } else {
+      RCLCPP_DEBUG(
+        node_->get_logger(),
+        "MPC: IK solution is %.2f rad from the measured state - seeding from the "
+        "state instead of the remote branch", static_cast<double>(jump));
+    }
+  }
+  if (bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q)) {
     remember_active_goal(tool_frames, tool_poses);
-    RCLCPP_INFO(
-      node_->get_logger(), "MPC: goal_state set via multi-seed IK (joint tracking on)");
     return true;
   }
   bridge_->mpc_update_goal_poses(handle_, tool_frames, poses, false, hold_q);
   remember_active_goal(tool_frames, tool_poses);
-  RCLCPP_WARN(
-    node_->get_logger(), "MPC: IK failed for goal pose - pose-only tracking (arm may not move)");
+  RCLCPP_WARN_THROTTLE(
+    node_->get_logger(), *node_->get_clock(), 5000,
+    "MPC: IK failed for goal pose - pose-only tracking (arm may not move)");
   return false;
 }
 
@@ -420,6 +449,12 @@ curobo_runtime::MpcStepOutcome MPCController::step_impl(
     // MpcCosts breakdown + writes the mpc_diag CSV (both mpc_debug only).
     if (paced) {
       publish_predicted_path(outcome);
+      // Also emit the cost/constraint row for paced steps: an infeasible paced
+      // goal is otherwise invisible except for the hold.
+      const double solve_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_solve).count();
+      publish_costs(outcome);
+      write_csv(outcome, solve_ms);
     } else if (outcome.action.has_action) {
       const double solve_ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t_solve).count();
@@ -439,27 +474,55 @@ curobo_runtime::MpcStepOutcome MPCController::step_paced_impl(
 
 // PORT: MPCController.apply_live_goal
 bool MPCController::apply_live_goal(
-  const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state)
+  const std::array<double, 7> & raw, const std::string & tool,
+  const curobo_runtime::ReactiveState & state)
 {
-  // The live topic carries one pose. On a multi-tool robot it retargets the
-  // first/active tool while the other tools keep their commanded targets (or
-  // hold the live state when no multi-tool goal is active).
+  // The RViz streams the active target continuously. Re-applying an unchanged
+  // pose re-runs IK and re-seeds the MPC every 100 ms, which makes the arm
+  // jitter; only react to a real target change.
+  if (has_last_live_goal_ && tool == last_live_tool_) {
+    double delta = 0.0;
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+      delta = std::max(delta, std::abs(raw[i] - last_live_goal_[i]));
+    }
+    if (delta < 1e-4) {
+      return true;
+    }
+  }
+  last_live_goal_ = raw;
+  last_live_tool_ = tool;
+  has_last_live_goal_ = true;
+
+  // On a multi-tool robot retarget the tool named by the live message; the
+  // other tools keep their commanded targets. Without the name every gizmo
+  // drag was applied to the first tool, which crosses the arms and makes the
+  // solver reject the target as infeasible.
   std::vector<std::string> frames = active_goal_frames_;
   std::vector<std::array<double, 7>> poses = active_goal_poses_;
+  std::size_t index = 0;
+  if (!tool.empty() && !frames.empty()) {
+    const auto it = std::find(frames.begin(), frames.end(), tool);
+    if (it != frames.end()) {
+      index = static_cast<std::size_t>(it - frames.begin());
+    }
+  }
   if (poses.empty()) {
     poses.push_back(raw);
+    frames.clear();
   } else {
-    poses.front() = raw;
+    index = std::min(index, poses.size() - 1);
+    poses[index] = raw;
     if (!frames.empty() && frames.size() != poses.size()) {
       frames.clear();
     }
   }
   const auto target = target_pose_for_status(frames, poses);
   set_target(target);
+  // apply_goal_poses already resets the solver with an IK-derived seed. The
+  // old extra reseed_toward_goal() ran a second multi-seed IK on every live
+  // message and then did nothing (mpc_has_goal_state is false in pose mode),
+  // which saturated the bridge/GPU while dragging.
   const bool applied = apply_goal_poses(frames, poses, state.position, state.position);
-  if (applied) {
-    reseed_toward_goal(frames, poses, state);
-  }
   publish_goal_marker(poses, applied);
   return applied;
 }

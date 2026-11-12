@@ -313,6 +313,10 @@ struct MpcStepOutcome
   ReactiveAction action;
   bool has_ee = false;
   std::array<double, 3> ee_position{0.0, 0.0, 0.0};
+  // Sample interval of `action` when it carries a multi-point window (native
+  // MPC returns the optimized trajectory segment). Zero means "use the
+  // executor's command interval", which is the single-command/Python case.
+  double action_dt = 0.0;
   // PORT: mpc_planner._publish_predicted_path - the full optimized horizon
   // (result.robot_state_sequence.joint_state.position, projected to active
   // joints), [T, dof]. Empty when unavailable.

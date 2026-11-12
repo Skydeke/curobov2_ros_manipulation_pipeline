@@ -18,6 +18,7 @@
 #include "curobov2_ros_rviz/curobo_planning_display.hpp"
 #include "curobov2_ros_interfaces/action/send_trajectory.hpp"
 #include "curobov2_ros_interfaces/msg/goalset.hpp"
+#include "curobov2_ros_interfaces/msg/mpc_goal.hpp"
 
 // RVIZ2
 #include <rviz_common/display.hpp>
@@ -243,7 +244,7 @@ private:
   std::string last_display_planner_node_;
 
   // MPC live-tracking members.
-  rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr mpc_goal_pub_;
+  rclcpp::Publisher<curobov2_ros_interfaces::msg::MpcGoal>::SharedPtr mpc_goal_pub_;
   bool mpc_active_;
   bool mpc_starting_;
   geometry_msgs::msg::Pose last_published_goal_;

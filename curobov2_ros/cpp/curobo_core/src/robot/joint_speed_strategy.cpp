@@ -108,9 +108,21 @@ std::vector<std::vector<double>> JointSpeedStrategy::taper_terminal_velocity(
     vel_clamped[n - 1] = std::vector<double>(dof, 0.0);
     return vel_clamped;
   }
+  // The controller (`allow_nonzero_velocity_at_trajectory_end: false`) REFUSES a
+  // trajectory whose last point is still moving, so the terminal sample has to
+  // be brought to rest. But a paced MPC command is a slice out of the middle of
+  // the plan, not a goal: tapering terminal_taper_dt (0.6 s by default, longer
+  // than the whole 0.24 s command window) would erase the velocity feed-forward
+  // of the entire window and turn the streaming into a 4 Hz sawtooth.
+  //
+  // Cap the ramp at a few samples. The servo loop replaces the command one
+  // control interval in, well before that tail is reached, so it is never
+  // executed - it only satisfies the controller's end-of-trajectory check.
+  constexpr std::size_t kMaxTaperSamples = 3;
   const std::size_t k = std::max<std::size_t>(
     1, std::min<std::size_t>(
-      n - 1, static_cast<std::size_t>(std::llround(terminal_taper_dt_ / dt))));
+      std::min<std::size_t>(kMaxTaperSamples, n - 1),
+      static_cast<std::size_t>(std::llround(terminal_taper_dt_ / dt))));
   for (std::size_t e = 0; e < k; ++e) {
     const double factor = static_cast<double>(e) / static_cast<double>(k);
     auto & row = vel_clamped[n - 1 - e];
@@ -142,7 +154,9 @@ void JointSpeedStrategy::send_trajectrory()
     }
     const double speed_scale = time_dilation_scale();
     auto vel_clamped = clamp_velocities(vel_command_, speed_scale);
-    vel_clamped = taper_terminal_velocity(vel_clamped);
+    if (taper_terminal_command_) {
+      vel_clamped = taper_terminal_velocity(vel_clamped);
+    }
     // Acceleration is d2p/dt2, so it follows the velocity scale squared.
     // (Replay trajectories usually carry no acceleration feed-forward; this
     // keeps the path correct when they do.)
