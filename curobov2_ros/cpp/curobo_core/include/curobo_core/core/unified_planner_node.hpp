@@ -22,6 +22,8 @@
 #include <tf2_ros/buffer.h>
 #include <tf2_ros/transform_listener.h>
 
+#include "curobov2_ros_interfaces/msg/mpc_goal.hpp"
+
 #include "curobo_runtime/gpu_lanes.hpp"
 
 #include "curobo_core/core/attachment_services.hpp"
@@ -86,7 +88,7 @@ private:
   std::vector<float> current_pose() const;
 
   // PORT: unified_planner_node.mpc_goal_callback
-  void handle_mpc_goal(const geometry_msgs::msg::PoseStamped & msg);
+  void handle_mpc_goal(const curobov2_ros_interfaces::msg::MpcGoal & msg);
 
   curobo_runtime::IBridge * bridge_ = nullptr;
   curobo_runtime::RobotHandle handle_ = -1;
@@ -149,7 +151,10 @@ private:
   // robot segmentation (mask services registered via RosServiceManager).
   std::shared_ptr<tf2_ros::Buffer> tf_buffer_;
   std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
-  rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr mpc_goal_sub_;
+  rclcpp::Subscription<curobov2_ros_interfaces::msg::MpcGoal>::SharedPtr mpc_goal_sub_;
+  // Dedicated reentrant group: the live goal must be delivered while the
+  // servo loop and default-group services are busy.
+  rclcpp::CallbackGroup::SharedPtr mpc_goal_cb_group_;
   // PORT: obstacle_manager._build_mapper - the mapper cfg JSON is built at
   // startup but COMPLETED (with decay_factor, which needs the camera/laser
   // frame rates) after their managers exist. The bridge builds the mapper

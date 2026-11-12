@@ -128,13 +128,14 @@ int JointCommandStrategy::set_command(
   const std::vector<std::vector<double>> & vel_command,
   const std::vector<std::vector<double>> & accel_command,
   const std::vector<std::vector<double>> & position_command,
-  double plan_dt)
+  double plan_dt, bool taper_terminal)
 {
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
   position_command_ = position_command;
   vel_command_ = vel_command;
   accel_command_ = accel_command;
   joint_names_ = joint_names;
+  taper_terminal_command_ = taper_terminal;
   // A non-positive value means "no override": the plan was sampled at the
   // strategy's own interpolation_dt. Anything else (including a stale override
   // from the previous replay) is replaced, so a plain joint command cannot
@@ -297,109 +298,140 @@ void JointCommandStrategy::send_as_action(
   const trajectory_msgs::msg::JointTrajectory & msg,
   const std::vector<std::vector<double>> & positions)
 {
-  std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-  for (auto & route : routes_) {
-    route.result.reset();
-    route.last_progress.reset();
-    route.goal_handle.reset();
-  }
-  action_seq_ += 1;
-  const int seq = action_seq_;
+  // Build everything under the buffer lock, but NEVER touch the action client
+  // (wait_for_action_server / async_send_goal) while holding it.
+  //
+  // rclcpp_action dispatches a client's feedback/result/goal-response callback
+  // while holding the client's own goal-handle mutex, and those callbacks take
+  // `buffer_lock_`. Calling async_send_goal under the buffer lock therefore
+  // inverts the lock order:
+  //   servo thread:      buffer_lock_ -> action-client mutex
+  //   feedback callback: action-client mutex -> buffer_lock_
+  // which deadlocks the servo lane against the controller's feedback stream.
+  // The node then stops servicing every callback (the servo holds
+  // RobotContext::strategy_lock_ while it is stuck), which is what "MPC went
+  // bricked" looked like.
+  struct PendingGoal
+  {
+    ControllerRoute * route;
+    rclcpp_action::Client<FollowJT>::SharedPtr client;
+    FollowJT::Goal goal;
+    rclcpp_action::Client<FollowJT>::SendGoalOptions options;
+  };
+  std::vector<PendingGoal> pending;
 
-  const int n = static_cast<int>(msg.points.size());
-  action_total_duration_s_ = dilated_dt() * std::max(n - 1, 0);
-
-  if (routes_.empty()) {
-    throw std::runtime_error(
-      std::string("strategy_params must name either action_topic or "
-      "controller_names + <controller>.action/<controller>.joints — the "
-      "FollowJointTrajectory action is the only execution path"));
-  }
-
-  for (auto & route : routes_) {
-    if (!route.client) {
-      route.client = rclcpp_action::create_client<FollowJT>(node_, route.action);
+  {
+    std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+    for (auto & route : routes_) {
+      route.result.reset();
+      route.last_progress.reset();
+      route.goal_handle.reset();
     }
-    if (!route.client->wait_for_action_server(std::chrono::seconds(5))) {
-      route.result = ActionResult{
-        false, 0, 0,
-        "FollowJointTrajectory action server " + route.action + " not available"};
+    action_seq_ += 1;
+    const int seq = action_seq_;
+
+    const int n = static_cast<int>(msg.points.size());
+    action_total_duration_s_ = dilated_dt() * std::max(n - 1, 0);
+
+    if (routes_.empty()) {
       throw std::runtime_error(
-        "FollowJointTrajectory action server " + route.action +
+        std::string("strategy_params must name either action_topic or "
+        "controller_names + <controller>.action/<controller>.joints — the "
+        "FollowJointTrajectory action is the only execution path"));
+    }
+
+    pending.reserve(routes_.size());
+    for (auto & route : routes_) {
+      if (!route.client) {
+        route.client = rclcpp_action::create_client<FollowJT>(node_, route.action);
+      }
+      PendingGoal entry;
+      entry.route = &route;
+      entry.client = route.client;
+      entry.goal.trajectory = project_trajectory(msg, route.joints);
+      ControllerRoute * route_ptr = &route;
+      entry.options.feedback_callback =
+        [this, seq, route_ptr](
+          rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr,
+          const std::shared_ptr<const FollowJT::Feedback> feedback) {
+          std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+          if (seq != action_seq_) {
+            return;
+          }
+          const auto & t = feedback->desired.time_from_start;
+          const double ts = static_cast<double>(t.sec) +
+            static_cast<double>(t.nanosec) * 1e-9;
+          if (action_total_duration_s_ > 0.0) {
+            route_ptr->last_progress =
+              std::min(1.0, std::max(0.0, ts / action_total_duration_s_));
+          }
+        };
+      entry.options.result_callback =
+        [this, seq, route_ptr](
+          const rclcpp_action::ClientGoalHandle<FollowJT>::WrappedResult & wrapped) {
+          std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+          if (seq != action_seq_) {
+            return;
+          }
+          const bool succeeded =
+            wrapped.code == rclcpp_action::ResultCode::SUCCEEDED;
+          ActionResult result;
+          result.succeeded = succeeded;
+          result.status = static_cast<int>(wrapped.code);
+          result.error_code = wrapped.result ? wrapped.result->error_code : 0;
+          result.error_string = wrapped.result ? wrapped.result->error_string : "";
+          route_ptr->result = result;
+          route_ptr->last_progress = succeeded ? std::make_optional(1.0) : std::nullopt;
+          // MoveIt cancels the remaining controllers when one aborts: a dead
+          // peer must not let the others keep tracking the plan on their own.
+          if (!succeeded) {
+            for (auto & other : routes_) {
+              if (&other == route_ptr || !other.goal_handle || !other.client) {
+                continue;
+              }
+              try {
+                other.client->async_cancel_goal(other.goal_handle);
+              } catch (const std::exception &) {
+                // best-effort
+              }
+            }
+          }
+        };
+      entry.options.goal_response_callback =
+        [this, seq, route_ptr](
+          rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr goal_handle) {
+          std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+          if (seq != action_seq_) {
+            return;
+          }
+          if (!goal_handle) {
+            route_ptr->result = ActionResult{
+              false, 0, 0, "action goal rejected / not accepted"};
+            return;
+          }
+          route_ptr->goal_handle = goal_handle;
+        };
+      pending.push_back(std::move(entry));
+    }
+  }
+
+  for (auto & entry : pending) {
+    if (!entry.client->wait_for_action_server(std::chrono::seconds(5))) {
+      const std::string action = entry.route->action;
+      std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+      entry.route->result = ActionResult{
+        false, 0, 0,
+        "FollowJointTrajectory action server " + action + " not available"};
+      throw std::runtime_error(
+        "FollowJointTrajectory action server " + action +
         " is not available; refusing to fall back to topic publish");
     }
   }
-
-  for (auto & route : routes_) {
-    FollowJT::Goal goal;
-    goal.trajectory = project_trajectory(msg, route.joints);
-    ControllerRoute * route_ptr = &route;
-    rclcpp_action::Client<FollowJT>::SendGoalOptions options;
-    options.feedback_callback =
-      [this, seq, route_ptr](
-        rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr,
-        const std::shared_ptr<const FollowJT::Feedback> feedback) {
-        std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-        if (seq != action_seq_) {
-          return;
-        }
-        const auto & t = feedback->desired.time_from_start;
-        const double ts = static_cast<double>(t.sec) +
-          static_cast<double>(t.nanosec) * 1e-9;
-        if (action_total_duration_s_ > 0.0) {
-          route_ptr->last_progress =
-            std::min(1.0, std::max(0.0, ts / action_total_duration_s_));
-        }
-      };
-    options.result_callback =
-      [this, seq, route_ptr](
-        const rclcpp_action::ClientGoalHandle<FollowJT>::WrappedResult & wrapped) {
-        std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-        if (seq != action_seq_) {
-          return;
-        }
-        const bool succeeded =
-          wrapped.code == rclcpp_action::ResultCode::SUCCEEDED;
-        ActionResult result;
-        result.succeeded = succeeded;
-        result.status = static_cast<int>(wrapped.code);
-        result.error_code = wrapped.result ? wrapped.result->error_code : 0;
-        result.error_string = wrapped.result ? wrapped.result->error_string : "";
-        route_ptr->result = result;
-        route_ptr->last_progress = succeeded ? std::make_optional(1.0) : std::nullopt;
-        // MoveIt cancels the remaining controllers when one aborts: a dead
-        // peer must not let the others keep tracking the plan on their own.
-        if (!succeeded) {
-          for (auto & other : routes_) {
-            if (&other == route_ptr || !other.goal_handle || !other.client) {
-              continue;
-            }
-            try {
-              other.client->async_cancel_goal(other.goal_handle);
-            } catch (const std::exception &) {
-              // best-effort
-            }
-          }
-        }
-      };
-    options.goal_response_callback =
-      [this, seq, route_ptr](
-        rclcpp_action::ClientGoalHandle<FollowJT>::SharedPtr goal_handle) {
-        std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
-        if (seq != action_seq_) {
-          return;
-        }
-        if (!goal_handle) {
-          route_ptr->result = ActionResult{
-            false, 0, 0, "action goal rejected / not accepted"};
-          return;
-        }
-        route_ptr->goal_handle = goal_handle;
-      };
-    route.client->async_send_goal(goal, options);
+  for (auto & entry : pending) {
+    entry.client->async_send_goal(entry.goal, entry.options);
   }
 
-  mark_execution_start(n, positions);
+  mark_execution_start(static_cast<int>(msg.points.size()), positions);
 }
 
 // PORT: JointCommandStrategy.clear_execution_timer

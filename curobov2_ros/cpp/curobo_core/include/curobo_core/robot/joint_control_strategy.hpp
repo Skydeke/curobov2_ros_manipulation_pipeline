@@ -49,7 +49,7 @@ public:
     const std::vector<std::vector<double>> & vel_command,
     const std::vector<std::vector<double>> & accel_command,
     const std::vector<std::vector<double>> & position_command,
-    double plan_dt = 0.0);
+    double plan_dt = 0.0, bool taper_terminal = true);
 
   // PORT: get_joint_name
   std::vector<std::string> get_joint_name();
@@ -135,6 +135,10 @@ protected:
   //: Plan sample interval override (0 = use dt_). Atomic because send_as_action
   //: reads the derived durations just after the buffer lock is released.
   std::atomic<double> trajectory_dt_{0.0};
+  //: Whether the command is a complete terminal motion (open-loop replay) or a
+  //: paced MPC window that hands off at speed. A paced window must not taper
+  //: its terminal velocity to zero or every servo step restarts from rest.
+  bool taper_terminal_command_{true};
   std::size_t command_index_ = 0;
   double trajectory_progression_ = 0.0;
   RobotState robot_state_ = RobotState::kIdle;

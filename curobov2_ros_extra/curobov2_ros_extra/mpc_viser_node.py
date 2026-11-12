@@ -36,12 +36,11 @@ from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.task import Future
 from geometry_msgs.msg import Pose
-from geometry_msgs.msg import PoseStamped as PoseStampedMsg
 from sensor_msgs.msg import JointState
 
 from curobov2_ros_interfaces.action import SendTrajectory
 from curobov2_ros_interfaces.srv import SetPlanner
-from curobov2_ros_interfaces.msg import Goalset
+from curobov2_ros_interfaces.msg import Goalset, MpcGoal
 
 from ._viser_helpers import (
     _start_positions,
@@ -55,7 +54,7 @@ from ._viser_helpers import (
 class MpcViserNode(Node):
     """Reactive-MPC viser node with a live-tracking goal gizmo. The target is set by dragging the control frame. A ``SetPlanner`` call
     selects the MPC (reactive) controller, a ``SendTrajectory`` action starts
-    the continuous servo loop, and ``PoseStamped`` messages on the mpc_goal topic
+    the continuous servo loop, and ``MpcGoal`` messages on the mpc_goal topic
     retarget it live."""
 
     def __init__(self):
@@ -103,10 +102,11 @@ class MpcViserNode(Node):
         )
         self._action_client = ActionClient(self, SendTrajectory, f'{prefix}/execute_trajectory')
 
-        # Live MPC goal: publishing a stamped pose retargets the active
-        # reactive loop. Viser-world coordinates coincide with the robot
-        # base frame, so the header stays empty ("" == base convention).
-        self._goal_pub = self.create_publisher(PoseStampedMsg, f'{prefix}/mpc_goal', 10)
+        # Live MPC goal: publishing a pose retargets the active reactive loop.
+        # Viser-world coordinates coincide with the robot base frame, so the
+        # header stays empty ("" == base convention). tool_frame is empty for
+        # this single-gizmo node (the server uses its first tool).
+        self._goal_pub = self.create_publisher(MpcGoal, f'{prefix}/mpc_goal', 10)
 
         self._js_sub = self.create_subscription(
             JointState, '/joint_states', self._on_js, 10
@@ -236,7 +236,8 @@ class MpcViserNode(Node):
         if self._last_goal_key == key:
             return
         self._last_goal_key = key
-        msg = PoseStampedMsg()
+        msg = MpcGoal()
+        msg.tool_frame = ""
         msg.header.frame_id = ""
         msg.pose.position.x = float(pos[0])
         msg.pose.position.y = float(pos[1])

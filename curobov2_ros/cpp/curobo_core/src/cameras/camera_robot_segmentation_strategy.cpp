@@ -203,7 +203,25 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
         return result;
       };
     const std::string masks_json = masks_json_ ? masks_json_(resolve_mask_frame) : "[]";
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+    // A servo step holds the GPU SHARED for its whole command interval, so a
+    // blocking exclusive acquisition parks this ROS callback for the length of
+    // that step. One parked thread per incoming frame then drains the node's
+    // executor: services, action feedback handling and every other
+    // subscription (including live goal updates) stall until the servo loop
+    // ends. Frames are rate-limited and superseded by the next one, so drop
+    // this frame instead of waiting for the GPU.
+    auto & gpu_barrier = curobo_runtime::Runtime::instance().barrier();
+    if (!gpu_barrier.acquire_exclusive(/*blocking=*/false)) {
+      RCLCPP_DEBUG_THROTTLE(
+        node_->get_logger(), *node_->get_clock(), 2000,
+        "[%s] GPU busy - dropping depth frame", name_.c_str());
+      return;
+    }
+    struct ExclusiveRelease
+    {
+      curobo_runtime::CaptureBarrier & barrier;
+      ~ExclusiveRelease() {barrier.release_exclusive();}
+    } gpu_guard{gpu_barrier};
     const auto masked = bridge_->robot_segment(handle_, depth, k, cam_pose, qf, masks_json);
     publish_masked(masked.data, frame.height, frame.width, frame.encoding, msg.header.stamp);
 

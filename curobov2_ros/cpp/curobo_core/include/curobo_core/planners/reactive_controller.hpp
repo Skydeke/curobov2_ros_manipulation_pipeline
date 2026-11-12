@@ -99,8 +99,15 @@ public:
   bool is_on_target() const {return last_position_error_ < convergence_threshold_;}
 
   // PORT: ReactiveController.set_live_goal / _take_live_goal
-  void set_live_goal(const std::array<double, 7> & raw);
-  std::optional<std::array<double, 7>> take_live_goal();
+  struct LiveGoal
+  {
+    std::array<double, 7> pose{};
+    // Empty = the legacy single-tool form; otherwise the named tool frame the
+    // live pose belongs to (bimanual RViz sends the active gizmo).
+    std::string tool;
+  };
+  void set_live_goal(const std::array<double, 7> & raw, const std::string & tool = "");
+  std::optional<LiveGoal> take_live_goal();
 
   // PORT: ReactiveController.ensure_solver (build the solver lazily) and
   // update_world (push the shared scene into the solver's collision world).
@@ -118,7 +125,8 @@ protected:
   virtual curobo_runtime::MpcStepOutcome step_impl(
     const curobo_runtime::ReactiveState & state, bool paced) = 0;
   virtual bool apply_live_goal(
-    const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state) = 0;
+    const std::array<double, 7> & raw, const std::string & tool,
+    const curobo_runtime::ReactiveState & state) = 0;
 
   // PORT: ReactiveController.step_paced (default -> step_impl(paced=false)).
   virtual curobo_runtime::MpcStepOutcome step_paced_impl(
@@ -170,11 +178,18 @@ private:
     const curobo_runtime::ReactiveAction & action) const;
   void close_state_loop(
     RobotContext * robot_context, curobo_runtime::ReactiveState & state) const;
+  // Measured position + differentiated velocity for the next solve. Kept
+  // separate from the prediction so the solver is never handed a state whose
+  // position is "now" and velocity is "one command window in the future".
+  void update_state_from_feedback(
+    RobotContext * robot_context, curobo_runtime::ReactiveState & state);
   // PORT: ReactiveController._send_command
   void send_command(
     RobotContext * robot_context, const curobo_runtime::ReactiveAction & action,
     const std::vector<float> & current_position = {},
-    double plan_dt = 0.0);
+    double plan_dt = 0.0,
+    bool taper_terminal = true,
+    int skip_rows = 0);
   // PORT: ReactiveController._init_robot_at_start
   void init_robot_at_start(
     RobotContext * robot_context, const std::vector<float> & start_q);
@@ -188,7 +203,16 @@ private:
   bool exec_csv_enabled();
 
   std::mutex live_goal_lock_;
-  std::optional<std::array<double, 7>> latest_goal_;
+  std::optional<LiveGoal> latest_goal_;
+  // Timestamp (monotonic seconds) of the last measured feedback sample, for the
+  // finite-difference velocity in update_state_from_feedback().
+  double prev_feedback_time_ = 0.0;
+  // Last feasible paced window, so an infeasible re-plan can keep streaming its
+  // tail instead of freezing the arm for a beat.
+  curobo_runtime::ReactiveAction last_action_;
+  double last_action_dt_ = 0.0;
+  double last_action_start_ = 0.0;
+  bool have_last_action_ = false;
   bool latest_goal_fresh_ = false;
   bool start_initialized_ = false;
   std::function<void()> perception_refresh_;
