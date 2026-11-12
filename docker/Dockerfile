@@ -126,9 +126,22 @@ COPY curobo/curobo/pyproject.toml curobo/curobo/README.md /tmp/curobo-meta/
 # Pin the older scm release for the metadata-only stub.
 RUN sed -i 's/setuptools_scm>=6.2/setuptools_scm<9/' /tmp/curobo-meta/pyproject.toml
 
+# Build the metadata stub without isolation. Ubuntu's system setuptools 59
+# cannot parse [project], so the wheel is named UNKNOWN and has no
+# Requires-Dist entries; pip then silently skips warp-lang and every other
+# upstream dependency. Build the wheel with a modern setuptools first, then
+# install that wheel normally so pip can also build third-party metadata
+# (e.g. the benchmark extra uses a poetry backend). pandas is floored because
+# the Python 3.12 Jazzy base otherwise selects a source-only pandas whose
+# NumPy Cython headers require Cython 3. setuptools is pinned to 78.1.1:
+# torch requires >=77.0.3, and 78.1.1 still provides
+# `setup.py develop --uninstall`, which colcon --symlink-install uses.
 RUN python3 -m pip install --ignore-installed \
   "numpy<2" \
-  "setuptools<80" \
+  "setuptools==78.1.1" \
+  "setuptools_scm<9" \
+  "packaging>=26.2" \
+  wheel \
   cuda-python \
   cuda-bindings \
   cuda-core \
@@ -136,10 +149,15 @@ RUN python3 -m pip install --ignore-installed \
   einops \
   hdbscan \
   torchvision \
-  bubblify \
-  "/tmp/curobo-meta[benchmark]" && \
+  bubblify && \
+  python3 -m pip wheel --no-build-isolation --no-deps \
+  -w /tmp/curobo-wheels "/tmp/curobo-meta" && \
+  python3 -m pip install --ignore-installed \
+  "numpy<2" \
+  "pandas>=2.2.3" \
+  "$(ls /tmp/curobo-wheels/*.whl)[benchmark]" && \
   python3 -m pip uninstall -y nvidia-curobo && \
-  rm -rf /tmp/curobo-meta
+  rm -rf /tmp/curobo-meta /tmp/curobo-wheels
 
 # Someone is misusing pinning, for no good damn reason
 RUN git clone https://github.com/nitesh-subedi/ros2_numpy.git /tmp/ros2_numpy && \
