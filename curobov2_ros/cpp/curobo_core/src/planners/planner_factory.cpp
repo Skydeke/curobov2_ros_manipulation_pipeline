@@ -9,6 +9,7 @@
 #include "curobo_core/planners/joint_space_planner.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
 #include "curobo_core/planners/multipoint_planner.hpp"
+#include "curobo_core/planners/reactive_controller.hpp"
 #include "curobo_core/planners/retarget_controller.hpp"
 
 namespace curobo_core
@@ -117,9 +118,22 @@ TrajectoryPlanner * PlannerManager::get_planner(const std::string & planner_type
   }
   auto planner = PlannerFactory::create(
     key, bridge_, handle_, joint_names_, node_, reactive_lane_);
+  if (auto * reactive = dynamic_cast<ReactiveController *>(planner.get())) {
+    reactive->set_continuous_joint_names(continuous_joint_names_);
+  }
   TrajectoryPlanner * raw = planner.get();
   planners_[key] = std::move(planner);
   return raw;
+}
+
+void PlannerManager::set_continuous_joint_names(std::vector<std::string> names)
+{
+  continuous_joint_names_ = std::move(names);
+  for (auto & entry : planners_) {
+    if (auto * reactive = dynamic_cast<ReactiveController *>(entry.second.get())) {
+      reactive->set_continuous_joint_names(continuous_joint_names_);
+    }
+  }
 }
 
 // PORT: PlannerManager.set_current_planner

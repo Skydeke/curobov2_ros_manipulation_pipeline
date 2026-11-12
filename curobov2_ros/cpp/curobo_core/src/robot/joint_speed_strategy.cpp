@@ -183,6 +183,11 @@ void JointSpeedStrategy::send_trajectrory()
 // PORT: JointSpeedStrategy.get_joint_pose / get_joint_velocity
 std::vector<double> JointSpeedStrategy::get_joint_pose()
 {
+  // Measured pose on the continuous-joint unwrapped branch (same physical pose).
+  std::vector<double> pose = measured_pose();
+  if (!pose.empty()) {
+    return pose;
+  }
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
   return joint_pose_;
 }
@@ -281,6 +286,8 @@ void JointSpeedStrategy::callback_joint_pose(const sensor_msgs::msg::JointState 
       static_cast<std::int64_t>(msg.header.stamp.sec) * 1000000000 +
       static_cast<std::int64_t>(msg.header.stamp.nanosec),
       feedback);
+  } else {
+    track_measured(feedback);
   }
 }
 

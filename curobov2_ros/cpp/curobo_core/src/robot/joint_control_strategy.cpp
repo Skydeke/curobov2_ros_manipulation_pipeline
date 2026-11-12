@@ -214,9 +214,12 @@ void JointCommandStrategy::record_joint_feedback(
   std::int64_t stamp_ns, const std::vector<double> & position)
 {
   std::lock_guard<std::recursive_mutex> lk(buffer_lock_);
+  // Unwrap continuous joints BEFORE storing: interpolation must see the
+  // physical path, not a +pi -> -pi jump between two adjacent samples.
+  const std::vector<double> tracked = track_measured(position);
   // Never mix joint-vector sizes in one buffer: interpolation indexes both
   // neighbours by the first one's length.
-  if (!feedback_buffer_.empty() && feedback_buffer_.back().second.size() != position.size()) {
+  if (!feedback_buffer_.empty() && feedback_buffer_.back().second.size() != tracked.size()) {
     return;
   }
   // Out-of-order stamps (clock jump, sim-time reset) break the sorted-search
@@ -224,7 +227,7 @@ void JointCommandStrategy::record_joint_feedback(
   if (!feedback_buffer_.empty() && stamp_ns < feedback_buffer_.back().first) {
     feedback_buffer_.clear();
   }
-  feedback_buffer_.emplace_back(stamp_ns, position);
+  feedback_buffer_.emplace_back(stamp_ns, tracked);
   while (feedback_buffer_.size() > 600) {
     feedback_buffer_.pop_front();
   }

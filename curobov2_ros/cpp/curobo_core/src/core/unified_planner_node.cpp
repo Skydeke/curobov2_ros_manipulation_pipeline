@@ -85,6 +85,11 @@ void UnifiedPlannerNode::declare_parameters() {
   // PORT: MPC / reactive parameters (design section 7.5).
   declare_parameter<double>("convergence_threshold", 0.01);
   declare_parameter<int>("max_mpc_iterations", 1000);
+  // MoveIt-compatible start-state acceptance: the planned/replayed start must
+  // be within this distance of the measured state, otherwise execution refuses
+  // it instead of silently retargeting. Same name and meaning as MoveIt's
+  // planning-pipeline parameter.
+  declare_parameter<double>("start_state_max_bounds_error", 0.1);
   declare_parameter<double>("mpc_step_dt", 0.03);
   declare_parameter<int>("mpc_horizon_steps", 30);
   declare_parameter<int>("mpc_warm_start_iters", 5);
@@ -258,7 +263,16 @@ void UnifiedPlannerNode::setup() {
         << ",\"seg_distance_threshold\":"
         << get_parameter("robot_segmentation_distance_threshold").as_double()
         << ",\"seg_mask_margin\":"
-        << get_parameter("robot_segmentation_mask_margin").as_double() << "}";
+        << get_parameter("robot_segmentation_mask_margin").as_double()
+        // The descriptor's explicit continuous-joint override. The Python
+        // model merges it with the URDF joint type; the node keeps a copy too
+        // for execution and RViz, which never read the Python registry.
+        << ",\"continuous_joints\":[";
+    for (std::size_t i = 0; i < desc.continuous_joint_names.size(); ++i) {
+      model_cfg << (i ? "," : "") << "\""
+                << desc.continuous_joint_names[i] << "\"";
+    }
+    model_cfg << "]}";
     try {
       bridge_->robot_model_build(handle_, model_cfg.str());
     } catch (const std::exception &e) {
@@ -270,6 +284,20 @@ void UnifiedPlannerNode::setup() {
     }
     const auto limits = bridge_->joint_limits(handle_);
     joint_names_ = limits.joint_names;
+    // Continuous joints: descriptor override + the model's own joint type.
+    // Both are authoritative; the +/-2*pi range is only the planner window.
+    continuous_joint_names_ = desc.continuous_joint_names;
+    for (std::size_t i = 0;
+      i < limits.joint_names.size() && i < limits.continuous.size(); ++i)
+    {
+      if (limits.continuous[i] != 0 &&
+        std::find(
+          continuous_joint_names_.begin(), continuous_joint_names_.end(),
+          limits.joint_names[i]) == continuous_joint_names_.end())
+      {
+        continuous_joint_names_.push_back(limits.joint_names[i]);
+      }
+    }
     // `lock_joints: {joint: null}` - held out of the cspace but NOT pinned: the
     // collision model must follow them from the joint state (see
     // push_unpinned_lock_joints), e.g. the PTU gimbal.
@@ -561,6 +589,7 @@ void UnifiedPlannerNode::setup() {
   // context and the SendTrajectory action over it.
   planner_services_ = std::make_unique<PlannerServices>(
       this, bridge_, handle_, joint_names_, obstacle_manager_.get());
+  planner_services_->set_continuous_joint_names(continuous_joint_names_);
   // PORT: unified_planner_node.lane_plan - the plan body runs on the plan lane.
   planner_services_->set_plan_lane(lane_plan_.get());
   // PORT: unified_planner_node.lane_reactive - MPC/retarget servo jobs.
@@ -603,7 +632,7 @@ void UnifiedPlannerNode::setup() {
   robot_context_ = std::make_unique<RobotContext>(
       this, get_parameter("interpolation_dt").as_double(), joint_names_,
       get_parameter("control_strategy").as_string(), strategy_params,
-      default_home);
+      default_home, continuous_joint_names_);
   // The unpinned lock joints (lock_joints: {joint: null}) ride the control
   // strategy's joint-state topic but are not part of the cspace pose. The
   // strategy forwards the raw message; a low-rate timer pushes the values into
@@ -626,6 +655,7 @@ void UnifiedPlannerNode::setup() {
   planner_services_->set_robot_context(robot_context_.get());
   action_server_ = std::make_unique<TrajectoryActionServer>(
       this, planner_services_.get(), robot_context_.get(), joint_names_);
+  action_server_->set_continuous_joint_names(continuous_joint_names_);
 
   // PORT: the collision-sphere viz reads the robot's live joint pose.
   ros_service_manager_->set_pose_provider([this]() { return current_pose(); });

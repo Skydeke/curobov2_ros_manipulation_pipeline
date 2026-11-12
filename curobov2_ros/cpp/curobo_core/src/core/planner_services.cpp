@@ -25,6 +25,7 @@
 #include "curobo_core/core/collision_diagnostics.hpp"
 #include "curobo_core/planners/mpc_planner.hpp"
 #include "curobo_core/planners/zero_motion.hpp"
+#include "curobo_core/robot/continuous_joints.hpp"
 #include "curobo_core/robot/robot_context.hpp"
 #include "curobo_runtime/runtime.hpp"
 #include "curobo_core/planners/reactive_controller.hpp"
@@ -417,93 +418,137 @@ std::vector<float> PlannerServices::resolve_start(
   return ordered;
 }
 
-// Continuous-joint target normalisation (see the header). A full turn is the
-// wrap period; the reported range of a continuous joint is 2*pi (cuRobo's
-// [-2*pi, 2*pi] is 4*pi, comfortably >= one turn, so exactly one equivalent
-// of any target falls in range except at the very edges).
-void PlannerServices::wrap_full_turn_targets(curobo_runtime::PlanRequest & request) const
+// Continuous joints are circles. cuRobo plans in R^n, so the finite
+// [-2*pi, 2*pi] window its parser reports is used as a coordinate chart:
+//   * the requested start is lifted to the measured branch (same physical pose),
+//   * a joint target is lifted by SHORTEST PATH from that start (|delta| <= pi),
+//   * one common 2*pi multiple shifts both into the window,
+//   * fill_result subtracts that same constant from every output point.
+// Bounded joints are left byte-for-byte untouched.
+bool PlannerServices::prepare_continuous_joints(
+  curobo_runtime::PlanRequest & request) const
 {
-  if (request.joint_target.empty()) {
-    return;
+  if (request.start.empty()) {
+    return true;
   }
   curobo_runtime::JointLimitsOutcome limits;
   try {
     limits = bridge_->joint_limits(handle_);
-  } catch (const std::exception &) {
-    return;  // limits unavailable: leave the target verbatim
+  } catch (const std::exception & e) {
+    RCLCPP_WARN(
+      node_->get_logger(),
+      "Continuous-joint preparation skipped: joint limits unavailable (%s)",
+      e.what());
+    return true;
   }
   const std::size_t dof = limits.joint_names.size();
-  if (request.joint_target.size() != dof || limits.positions.data.size() < 2 * dof) {
-    return;
+  // request.start/joint_target are in the NODE's cspace order (joint_names_),
+  // which is normally the same as the bridge's. Map by name so a reordered
+  // bridge cannot apply a joint's shift to the wrong column.
+  if (request.start.size() != joint_names_.size() ||
+    joint_names_.size() != dof || limits.positions.data.size() < 2 * dof)
+  {
+    return true;
   }
-  constexpr double kTwoPi = 6.283185307179586;
-  for (std::size_t j = 0; j < dof; ++j) {
-    const double lo = limits.positions.data[j];
-    const double hi = limits.positions.data[dof + j];
-    // Bounded revolute/prismatic joints have a range shorter than a turn;
-    // only full-turn (continuous) joints are periodic under 2*pi.
-    if (!std::isfinite(lo) || !std::isfinite(hi) || hi - lo < kTwoPi - 1e-6) {
+  std::vector<double> measured;
+  if (current_pose_provider_) {
+    try {
+      const auto pose = current_pose_provider_();
+      measured.assign(pose.begin(), pose.end());
+    } catch (const std::exception &) {
+      measured.clear();
+    }
+  }
+  const bool have_measured = measured.size() == dof;
+  // MoveIt-compatible start-state tolerance. A plan whose requested start is
+  // physically farther than this from the measured state is still solved (the
+  // planner is also used for compute-only previews), but it will not execute.
+  const double start_state_max_bounds_error =
+    node_->has_parameter("start_state_max_bounds_error") ?
+    node_->get_parameter("start_state_max_bounds_error").as_double() : 0.1;
+
+  request.window_shift.assign(dof, 0.0);
+  for (std::size_t c = 0; c < joint_names_.size(); ++c) {
+    const std::string & name = joint_names_[c];
+    const auto found =
+      std::find(limits.joint_names.begin(), limits.joint_names.end(), name);
+    if (found == limits.joint_names.end()) {
       continue;
     }
-    const double start = j < request.start.size() ?
-      static_cast<double>(request.start[j]) : static_cast<double>(request.joint_target[j]);
-    const double target = request.joint_target[j];
-    // cuRobo converts a continuous joint to revolute with limits of
-    // +/-2*3.14 (=+/-6.28), which is ~0.0032 rad SHORT of a full turn. So the
-    // +/-2*pi equivalent of a target can fall *just outside* [-6.28, 6.28]:
-    // e.g. target 0 on a joint whose start is 5.997 -- the short way is
-    // 2*pi = 6.2832, but the range tops out at 6.2800. Admit equivalents within
-    // a small tolerance of the range and snap them INSIDE the range; that is
-    // what lets the SHORT path be chosen instead of a full-turn sweep that
-    // usually self-collides.
-    constexpr double kRangeTolerance = 0.01;
-    // ...but never park the goal exactly ON the boundary: a goal pinned to the
-    // limit is infeasible for the solver, and the symptom is a
-    // "start: clear / goal: clear / no solution" failure for motions of a few
-    // milliradians. Staying kBoundaryMargin inside moves the pose error from
-    // 0.0032 to 0.0042 rad (0.24 deg).
-    constexpr double kBoundaryMargin = 1e-3;
-    const double inner_lo = lo + kBoundaryMargin;
-    const double inner_hi = hi - kBoundaryMargin;
-    double best = target;
-    double best_dist = std::numeric_limits<double>::infinity();
-    for (int k = -2; k <= 2; ++k) {
-      const double cand = target + static_cast<double>(k) * kTwoPi;
-      if (cand < lo - kRangeTolerance || cand > hi + kRangeTolerance) {
-        continue;  // equivalent genuinely outside the reported range
-      }
-      // Measure the DISTANCE to the unclamped equivalent, then clamp only the
-      // selected value. Clamping before the distance makes a candidate just
-      // outside the range (e.g. target 0 on a start of pi: k=+1 is 6.2832,
-      // clamped to 6.279) look ~0.004 rad closer than the in-range k=0. That
-      // wrongly picks the OTHER half-turn (3.14 -> 6.279 instead of 3.14 -> 0)
-      // and the arm sweeps through itself.
-      const double clamped = std::clamp(cand, inner_lo, inner_hi);
-      const double dist = std::abs(cand - start);
-      if (dist < best_dist) {
-        best_dist = dist;
-        best = clamped;
+    const std::size_t j =
+      static_cast<std::size_t>(std::distance(limits.joint_names.begin(), found));
+    const double lo = limits.positions.data[j];
+    const double hi = limits.positions.data[dof + j];
+    // Explicit joint type first; a legacy bridge that reports no mask falls
+    // back to the range width. Once the mask is known, it is authoritative.
+    bool continuous = is_continuous_joint(continuous_joint_names_, name);
+    if (j < limits.continuous.size()) {
+      continuous = continuous || limits.continuous[j] != 0;
+    } else if (!continuous) {
+      continuous = is_continuous_range(lo, hi);
+    }
+    if (!continuous) {
+      continue;
+    }
+    if (!std::isfinite(lo) || !std::isfinite(hi)) {
+      throw std::runtime_error(
+        "continuous joint '" + name + "' has non-finite limits; cannot build a chart");
+    }
+
+    const double requested_start = request.start[c];
+    double start_lift = requested_start;
+    if (have_measured) {
+      // Same physical pose on the branch the robot actually reports. This is
+      // used for EXECUTION continuity; it never changes the requested pose.
+      start_lift = periodic_lift(start_lift, measured[c]);
+      if (std::fabs(wrap_pi(start_lift - measured[c])) >
+        start_state_max_bounds_error)
+      {
+        RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "Requested start for continuous joint %s differs physically from the "
+          "measured state by %.3f rad (start_state_max_bounds_error=%.3f); this "
+          "plan is compute-only and will not match the robot at execution",
+          name.c_str(), wrap_pi(start_lift - measured[c]),
+          start_state_max_bounds_error);
       }
     }
-    // A target typed straight onto an end stop (the Joints tab slider's limit)
-    // needs the same margin, or it stays pinned to the boundary.
-    best = std::clamp(best, inner_lo, inner_hi);
-    // If the wrapped equivalent landed within no-motion range of the start,
-    // keep the start verbatim. The boundary-margin clamp above can leave a gap
-    // of a few float32 ulps (~1e-6 at 2*pi), which the zero-delta guard would
-    // otherwise miss - sending a stationary request to the solver as a ~1e-6
-    // rad motion and faulting the CUDA-graph solve.
-    if (std::abs(best - start) <= ZERO_DELTA_TOL) {
-      best = start;
+    double target_lift = start_lift;
+    const bool has_target = !request.joint_target.empty() &&
+      request.joint_target.size() == dof;
+    const double requested_target =
+      has_target ? static_cast<double>(request.joint_target[c]) : start_lift;
+    if (has_target) {
+      // A single segment is a shortest-path move; multi-turn motion must be
+      // requested as explicit intermediate waypoints.
+      target_lift = start_lift + wrap_pi(requested_target - start_lift);
     }
-    if (best != target) {
+
+    double shift = 0.0;
+    if (!choose_window_shift(start_lift, target_lift, lo, hi, shift)) {
+      throw std::runtime_error(
+        "continuous joint '" + name + "' has a window narrower than one turn "
+        "([" + std::to_string(lo) + ", " + std::to_string(hi) + "])");
+    }
+    request.window_shift[c] = shift;
+    request.start[c] = static_cast<float>(start_lift + shift);
+    if (has_target) {
+      request.joint_target[c] = static_cast<float>(target_lift + shift);
+    }
+    if (std::fabs(start_lift - requested_start) > 1e-6 ||
+      (has_target && std::fabs(target_lift - requested_target) > 1e-6))
+    {
       RCLCPP_INFO(
         node_->get_logger(),
-        "Continuous joint %s: snapped target %.6f -> %.6f (nearest start %.6f)",
-        limits.joint_names[j].c_str(), target, best, start);
+        "Continuous joint %s: requested start %.6f target %s -> shortest-path "
+        "start %.6f target %s (window shift %+.6f rad)",
+        name.c_str(), requested_start,
+        has_target ? std::to_string(requested_target).c_str() : "(none)",
+        start_lift, has_target ? std::to_string(target_lift).c_str() : "(none)",
+        shift);
     }
-    request.joint_target[j] = static_cast<float>(best);
   }
+  return true;
 }
 
 // PORT: unified_planner_node._plan_trajectory_goal request assembly
@@ -584,9 +629,6 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
     for (double v : goal.goalsets.front().target_joint_positions) {
       plan_request.joint_target.push_back(static_cast<float>(v));
     }
-    // Snap continuous-joint targets to the in-range equivalent nearest the
-    // start so a negative / un-wrapped joint goal plans like its wrapped twin.
-    wrap_full_turn_targets(plan_request);
   } else if (!goal.goalsets.empty() && !goal.goalsets.front().tool_frames.empty()) {
     const auto & g = goal.goalsets.front();
     // One goalset, N simultaneous per-tool targets.  The Cartesian planner's
@@ -643,11 +685,17 @@ curobo_runtime::PlanRequest PlannerServices::build_request(
       plan_request.goalset.data.push_back(static_cast<float>(pose.orientation.z));
     }
   }
+  // Apply the continuous-joint chart to the assembled request, whatever kind
+  // of goal it is: a pose goal still needs its start on a valid window branch,
+  // and its result still has to be shifted back.
+  prepare_continuous_joints(plan_request);
   return plan_request;
 }
 
 // PORT: single_planner._publish_plan_image
-void PlannerServices::publish_plan_image(const curobo_runtime::PlanOutcome & outcome)
+void PlannerServices::publish_plan_image(
+  const curobo_runtime::PlanOutcome & outcome,
+  const std::vector<double> & window_shift)
 {
   if (!node_->has_parameter("publish_plan_debug_image") ||
     !node_->get_parameter("publish_plan_debug_image").as_bool())
@@ -661,8 +709,21 @@ void PlannerServices::publish_plan_image(const curobo_runtime::PlanOutcome & out
       node_->get_name() + std::string("/motion_plan_debug"), qos);
   }
   try {
+    // Plot the executed (unshifted) positions, not the shifted planner window.
+    curobo_runtime::TensorF32 plotted = outcome.positions;
+    const std::int64_t cols =
+      plotted.shape.size() > 1 ? plotted.shape.back() : 0;
+    if (!window_shift.empty() && cols > 0) {
+      const std::size_t shift_count =
+        std::min(window_shift.size(), static_cast<std::size_t>(cols));
+      for (std::size_t i = 0; i + shift_count <= plotted.data.size(); i += cols) {
+        for (std::size_t j = 0; j < shift_count; ++j) {
+          plotted.data[i + j] -= static_cast<float>(window_shift[j]);
+        }
+      }
+    }
     const auto img = bridge_->render_plan_image(
-      outcome.positions, outcome.velocity, outcome.acceleration,
+      plotted, outcome.velocity, outcome.acceleration,
       outcome.joint_names.empty() ? joint_names_ : outcome.joint_names, 0.025);
     if (!img.has_value || img.height <= 0 || img.width <= 0) {
       return;
@@ -1138,7 +1199,13 @@ void PlannerServices::fill_result(
     sensor_msgs::msg::JointState js;
     js.name = outcome.joint_names.empty() ? joint_names_ : outcome.joint_names;
     for (std::int64_t j = 0; j < dof; ++j) {
-      js.position.push_back(outcome.positions.data[static_cast<std::size_t>(t * dof + j)]);
+      // Remove the whole-turn window shift. It is a per-joint constant, so the
+      // physical path (FK/collision) is unchanged; the first point lands on
+      // the measured branch and no per-point rewrite happens after validation.
+      const double shift = static_cast<std::size_t>(j) < request.window_shift.size() ?
+        request.window_shift[static_cast<std::size_t>(j)] : 0.0;
+      js.position.push_back(
+        outcome.positions.data[static_cast<std::size_t>(t * dof + j)] - shift);
     }
     if (vdof > 0 &&
       outcome.velocity.data.size() >= static_cast<std::size_t>((t + 1) * vdof))
@@ -1204,7 +1271,7 @@ void PlannerServices::fill_result(
   // _publish_plan_image (once per new plan).
   apply_start_locks(out.trajectory, resolved_goal.start_pose, joint_names_);
   stage_preview(out.trajectory, out.dt);
-  publish_plan_image(outcome);
+  publish_plan_image(outcome, request.window_shift);
   out.stats.solver_time_s = outcome.solver_time_s;
   out.stats.position_error_mm = outcome.position_error_mm;
   out.stats.motion_time_s = outcome.motion_time_s;

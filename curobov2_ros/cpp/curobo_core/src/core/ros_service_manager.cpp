@@ -335,6 +335,19 @@ void RosServiceManager::handle_get_joint_info(
     for (std::size_t j = 0; j < dof; ++j) {
       response->lower_limits.push_back(limits.positions.data[j]);
       response->upper_limits.push_back(limits.positions.data[dof + j]);
+      // Explicit joint type (URDF `continuous` + descriptor override), never a
+      // range-width guess: a bounded 4*pi revolute joint is still bounded.
+      bool continuous = j < limits.continuous.size() && limits.continuous[j] != 0;
+      if (!continuous &&
+        std::find(
+          robot_description_.continuous_joint_names.begin(),
+          robot_description_.continuous_joint_names.end(),
+          limits.joint_names[j]) !=
+        robot_description_.continuous_joint_names.end())
+      {
+        continuous = true;
+      }
+      response->continuous.push_back(continuous);
     }
     response->locked_joint_names = limits.locked_joint_names;
     response->locked_positions = limits.locked_positions;

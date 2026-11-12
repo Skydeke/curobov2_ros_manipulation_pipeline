@@ -3,6 +3,7 @@
 // planner names/modes. No GPU (FakeBridge), no ROS graph.
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <memory>
 #include <string>
 #include <vector>
@@ -12,12 +13,19 @@
 #include "curobo_core/planners/joint_space_planner.hpp"
 #include "curobo_core/planners/planner_factory.hpp"
 #include "curobo_core/planners/zero_motion.hpp"
+#include "curobo_core/robot/continuous_joints.hpp"
 #include "curobo_runtime/fake_bridge.hpp"
 
+using curobo_core::align_trajectory_to_measured;
+using curobo_core::choose_window_shift;
+using curobo_core::ContinuousJointTracker;
 using curobo_core::ExecutionMode;
 using curobo_core::is_zero_delta;
+using curobo_core::kTwoPiContinuous;
+using curobo_core::periodic_lift;
 using curobo_core::PlannerFactory;
 using curobo_core::PlannerManager;
+using curobo_core::wrap_pi;
 
 TEST(ZeroMotion, DetectsEqualAndDifferentJointVectors)
 {
@@ -38,6 +46,89 @@ TEST(ZeroMotion, ToleratesFloat32QuantizationAtTheJointLimits)
   EXPECT_TRUE(is_zero_delta({0.0f}, {5e-5f}));
   // ...but a real (if small) motion still plans.
   EXPECT_FALSE(is_zero_delta({0.0f}, {1e-3f}));
+}
+
+TEST(ContinuousJoints, WrapPiChoosesShortestRepresentative)
+{
+  EXPECT_NEAR(wrap_pi(0.0), 0.0, 1e-12);
+  EXPECT_NEAR(wrap_pi(kTwoPiContinuous), 0.0, 1e-12);
+  EXPECT_NEAR(wrap_pi(-kTwoPiContinuous), 0.0, 1e-12);
+  // The +/-pi tie resolves to +pi deterministically.
+  EXPECT_NEAR(wrap_pi(3.141592653589793), 3.141592653589793, 1e-12);
+  EXPECT_NEAR(wrap_pi(-3.141592653589793), 3.141592653589793, 1e-12);
+  EXPECT_NEAR(wrap_pi(6.3641), 0.0809, 1e-3);
+  EXPECT_NEAR(wrap_pi(20.0), 20.0 - 3.0 * kTwoPiContinuous, 1e-12);
+}
+
+TEST(ContinuousJoints, WindowShiftAlwaysFitsAShortestPathSegment)
+{
+  // The parser window [-6.28, 6.28] is a little narrower than two turns.
+  const double lo = -6.28;
+  const double hi = 6.28;
+  for (double start = -10.0; start <= 10.0; start += 0.37) {
+    for (double target_request = -10.0; target_request <= 10.0;
+      target_request += 0.53)
+    {
+      const double target = start + wrap_pi(target_request - start);
+      double shift = 0.0;
+      ASSERT_TRUE(choose_window_shift(start, target, lo, hi, shift))
+        << "start=" << start << " target=" << target;
+      const double s = start + shift;
+      const double t = target + shift;
+      EXPECT_GE(s, lo);
+      EXPECT_LE(s, hi);
+      EXPECT_GE(t, lo);
+      EXPECT_LE(t, hi);
+      EXPECT_NEAR(s, start + std::round(shift / kTwoPiContinuous) * kTwoPiContinuous, 1e-9);
+    }
+  }
+}
+
+TEST(ContinuousJoints, TrackerUnwrapsAcrossTheSeam)
+{
+  ContinuousJointTracker tracker;
+  tracker.configure({"j1", "j2"}, {"j2"});
+  // +3.14 -> -3.14 is a continuous +0.0032 rad step through the seam.
+  auto first = tracker.unwrap({0.0, 3.14});
+  EXPECT_NEAR(first[1], 3.14, 1e-12);
+  auto second = tracker.unwrap({0.0, -3.14});
+  EXPECT_GT(second[1], 3.14);          // continued forward, not jumped back
+  EXPECT_NEAR(second[1], 3.14 + 0.003185, 1e-5);
+  // Bounded joints are never touched.
+  EXPECT_DOUBLE_EQ(second[0], 0.0);
+}
+
+TEST(ContinuousJoints, ReplayIsShiftedAsAWholeTrajectory)
+{
+  // Planned -3.0 -> -2.7, robot measured +3.28 on the other branch.
+  std::vector<std::string> names = {"j1", "j2"};
+  std::vector<std::vector<double>> positions = {{-3.0, 1.0}, {-2.7, 1.1}};
+  const auto result = align_trajectory_to_measured(
+    names, positions, names, {3.2831853, 1.0}, {"j1"});
+  ASSERT_TRUE(result.ok) << result.error;
+  EXPECT_NEAR(positions.front()[0], 3.2831853, 1e-6);
+  // The step is preserved exactly (whole-trajectory constant shift).
+  EXPECT_NEAR(positions[1][0] - positions[0][0], 0.3, 1e-9);
+  // Bounded joint unchanged.
+  EXPECT_DOUBLE_EQ(positions[1][1], 1.1);
+}
+
+TEST(ContinuousJoints, ReplayWithWrongFirstPointIsRejected)
+{
+  std::vector<std::string> names = {"j1"};
+  std::vector<std::vector<double>> positions = {{0.0}, {0.2}};
+  const auto result = align_trajectory_to_measured(
+    names, positions, names, {1.0}, {"j1"});
+  EXPECT_FALSE(result.ok);
+}
+
+TEST(ContinuousJoints, GenuineLongStepIsRejectedNotRewritten)
+{
+  std::vector<std::string> names = {"j1"};
+  std::vector<std::vector<double>> positions = {{0.0}, {4.0}};
+  const auto result = align_trajectory_to_measured(
+    names, positions, names, {0.0}, {"j1"});
+  EXPECT_FALSE(result.ok);
 }
 
 TEST(PlannerFactory, CatalogAndCreation)

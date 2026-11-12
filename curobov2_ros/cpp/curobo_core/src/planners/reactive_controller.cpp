@@ -2,6 +2,8 @@
 // 1:1 C++ port of curobov2_ros/planners/reactive_controller.py.
 #include "curobo_core/planners/reactive_controller.hpp"
 
+#include "curobo_core/robot/continuous_joints.hpp"
+
 #include "curobo_runtime/runtime.hpp"
 
 #include <algorithm>
@@ -277,6 +279,32 @@ void ReactiveController::send_command(
     position.push_back(std::move(p));
     velocity.push_back(std::move(v));
     acceleration.push_back(std::move(a));
+  }
+  // Lift every continuous joint to the measured branch. cuRobo reports the
+  // action in its own numeric window; a value on the "other" turn is the same
+  // physical pose but would make the controller interpolate the long way. A
+  // single action is always interpreted as the shortest-path move; deliberate
+  // multi-turn motion must be requested as explicit waypoints upstream.
+  if (!continuous_joint_names_.empty() && !position.empty() &&
+    current_position.size() == static_cast<std::size_t>(cols))
+  {
+    for (std::int64_t c = 0; c < cols; ++c) {
+      if (c >= static_cast<std::int64_t>(joint_names_.size()) ||
+        !is_continuous_joint(
+          continuous_joint_names_,
+          joint_names_[static_cast<std::size_t>(c)]))
+      {
+        continue;
+      }
+      double reference = current_position[static_cast<std::size_t>(c)];
+      for (std::size_t r = 0; r < position.size(); ++r) {
+        if (r > 0) {
+          reference = position[r - 1][static_cast<std::size_t>(c)];
+        }
+        position[r][static_cast<std::size_t>(c)] =
+          periodic_lift(position[r][static_cast<std::size_t>(c)], reference);
+      }
+    }
   }
   // The native MPC exposes only the next action (a single [dof] row), while
   // the Python paced path returns the optimized action sequence. A one-point
