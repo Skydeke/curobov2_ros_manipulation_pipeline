@@ -175,6 +175,14 @@ struct RobotDescriptionOutcome
   std::vector<double> gripper_time_from_start;
 };
 
+// One penetrating self-collision sphere pair from the exported pair list.
+struct SelfPairContact
+{
+  std::int32_t sphere_a = -1;
+  std::int32_t sphere_b = -1;
+  float depth = 0.0F;   // positive penetration (m), padding included
+};
+
 // PORT: robot_model_manager.get_collision_spheres_with_attached - world
 // collision spheres sourced from the MotionPlanner's kinematics (which carries
 // the fitted attached-object spheres), with a per-sphere attached flag.
@@ -210,6 +218,9 @@ struct SphereSetOutcome
   TensorF32 world_distance;                   // [S, 1] metres
   // URDF link that owns each sphere (empty if the bridge does not report it).
   std::vector<std::string> link_names;        // [S]
+  // Every configured pair whose padded spheres actually penetrate at this q.
+  // Used by the RViz debug overlay to draw the contact and name both links.
+  std::vector<SelfPairContact> self_contacts;
 };
 
 // PORT: collision_distance._attributed_collisions - one world contact: a robot

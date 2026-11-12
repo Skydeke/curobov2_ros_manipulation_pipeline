@@ -295,7 +295,8 @@ def _self_collision_pair_diagnostics(entry: dict, kin, spheres):
     exact signed penetration (positive = collision, negative = clearance). The
     per-sphere value is the WORST pair it participates in.
 
-    Returns (padding [S], self_distance [S]) as float32 numpy arrays.
+    Returns (padding [S], self_distance [S], contacts) where contacts is a list
+    of [sphere_a, sphere_b, penetration] rows for pairs actually in collision.
     """
     import numpy as np
     import torch
@@ -309,17 +310,17 @@ def _self_collision_pair_diagnostics(entry: dict, kin, spheres):
     # curobov2_ros/scripts/bench_self_collision_pairs.py.
     import os
     if os.environ.get("CUROBO_DISABLE_SPHERE_PAIR_DIAG"):
-        return padding, self_distance
+        return padding, self_distance, []
     sc = getattr(kin.config, "self_collision_config", None)
     if sc is None or getattr(sc, "collision_pairs", None) is None:
-        return padding, self_distance
+        return padding, self_distance, []
     pairs = sc.collision_pairs
     pad_t = getattr(sc, "sphere_padding", None)
     if pairs.numel() == 0 or pad_t is None:
-        return padding, self_distance
+        return padding, self_distance, []
     pad = pad_t.detach().reshape(-1)
     if int(pad.shape[0]) != n_spheres or int(getattr(sc, "num_spheres", -1)) != n_spheres:
-        return padding, self_distance
+        return padding, self_distance, []
     padding = pad.to(dtype=torch.float32).cpu().numpy()
 
     cost = _self_collision_pair_cost(entry, sc, spheres)
@@ -348,7 +349,17 @@ def _self_collision_pair_diagnostics(entry: dict, kin, spheres):
     per_sphere.scatter_reduce_(0, a, penetration, reduce="amax", include_self=True)
     per_sphere.scatter_reduce_(0, b, penetration, reduce="amax", include_self=True)
     self_distance = per_sphere.detach().cpu().numpy().astype(np.float32)
-    return padding, self_distance
+
+    contact_rows = torch.nonzero(penetration > 0.0, as_tuple=False).reshape(-1)
+    contacts = []
+    if int(contact_rows.numel()) > 0:
+        pairs_cpu = idx[contact_rows].detach().cpu().numpy()
+        depths_cpu = penetration[contact_rows].detach().cpu().numpy()
+        contacts = [
+            [int(pair[0]), int(pair[1]), float(depth)]
+            for pair, depth in zip(pairs_cpu, depths_cpu)
+        ]
+    return padding, self_distance, contacts
 
 
 def _sphere_link_names(kin, n_spheres: int):
@@ -388,7 +399,7 @@ def collision_spheres_with_attached(handle: int, q):
     spheres = torch.as_tensor(
         world, dtype=torch.float32,
         device=torch.device("cuda", torch.cuda.current_device())).reshape(1, 1, -1, 4)
-    self_padding, self_distance = _self_collision_pair_diagnostics(
+    self_padding, self_distance, self_contacts = _self_collision_pair_diagnostics(
         entry, kin, spheres)
 
     kc = kin.kinematics_config
@@ -449,6 +460,7 @@ def collision_spheres_with_attached(handle: int, q):
         "self_distance": np.asarray(self_distance, dtype=np.float32).reshape(-1, 1),
         "world_distance": np.asarray(world_distance, dtype=np.float32).reshape(-1, 1),
         "link_names": _sphere_link_names(kin, int(world.shape[0])),
+        "self_contacts": self_contacts,
     }
 
 from .runtime import _REGISTRY

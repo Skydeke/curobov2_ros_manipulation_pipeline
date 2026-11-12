@@ -1070,6 +1070,23 @@ SphereSetOutcome PyBridge::collision_spheres_with_attached(
       PyErr_Clear();
       out.link_names.clear();
     }
+    try {
+      const auto rows =
+        result.attr("__getitem__")("self_contacts").cast<std::vector<std::vector<double>>>();
+      for (const auto & row : rows) {
+        if (row.size() < 3) {
+          continue;
+        }
+        SelfPairContact contact;
+        contact.sphere_a = static_cast<std::int32_t>(row[0]);
+        contact.sphere_b = static_cast<std::int32_t>(row[1]);
+        contact.depth = static_cast<float>(row[2]);
+        out.self_contacts.push_back(contact);
+      }
+    } catch (const py::error_already_set &) {
+      PyErr_Clear();
+      out.self_contacts.clear();
+    }
     return out;
   } catch (const py::error_already_set & e) {
     throw BridgeError("programming", e.what());

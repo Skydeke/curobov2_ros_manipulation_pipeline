@@ -2882,6 +2882,13 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
           std::max(outcome.self_distance.data[ia], penetration);
         outcome.self_distance.data[ib] =
           std::max(outcome.self_distance.data[ib], penetration);
+        if (penetration > 0.0F) {
+          curobo_runtime::SelfPairContact contact;
+          contact.sphere_a = a;
+          contact.sphere_b = b;
+          contact.depth = penetration;
+          outcome.self_contacts.push_back(contact);
+        }
       }
     }
 
