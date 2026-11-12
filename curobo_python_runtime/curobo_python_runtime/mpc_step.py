@@ -268,6 +268,7 @@ def mpc_step(handle: int, state, paced: bool):
 
     return {
         "action": action_dict,
+        "action_dt": float(getattr(result, "action_dt", 0.0) or 0.0),
         "ee_position": ee_position,
         "horizon_position": horizon_position,
         "pose_pos_err_m": _first(getattr(result, "position_error", None)),

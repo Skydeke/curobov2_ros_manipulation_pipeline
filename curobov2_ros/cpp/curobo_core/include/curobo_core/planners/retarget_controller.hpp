@@ -49,7 +49,8 @@ protected:
   curobo_runtime::MpcStepOutcome step_paced_impl(
     const curobo_runtime::ReactiveState & state) override;
   bool apply_live_goal(
-    const std::array<double, 7> & raw, const curobo_runtime::ReactiveState & state) override;
+    const std::array<double, 7> & raw, const std::string & tool,
+    const curobo_runtime::ReactiveState & state) override;
 
 private:
   bool built_ = false;

@@ -98,6 +98,10 @@ void UnifiedPlannerNode::declare_parameters() {
   declare_parameter<int>("mpc_mppi_num_particles", 400);
   declare_parameter<double>("mpc_vel_feedback_alpha", 1.0);
   declare_parameter<double>("mpc_command_interval", 0.24);
+  // Declared up front so a launch parameter / runtime override is visible
+  // before the MPC solver is built (the solver opens the diagnostic CSV).
+  declare_parameter<bool>("mpc_debug", false);
+  declare_parameter<bool>("exec_debug_csv", false);
   // PORT: retarget_* (MotionRetargeter teleop).
   declare_parameter<double>("retarget_position_weight", 1.0);
   declare_parameter<double>("retarget_orientation_weight", 1.0);
@@ -669,11 +673,14 @@ void UnifiedPlannerNode::setup() {
     // lookup timeout to be honoured (see camera_strategy.cpp).
     tf_buffer_->setUsingDedicatedThread(true);
   }
-  mpc_goal_sub_ = create_subscription<geometry_msgs::msg::PoseStamped>(
+  mpc_goal_cb_group_ = create_callback_group(rclcpp::CallbackGroupType::Reentrant);
+  rclcpp::SubscriptionOptions mpc_goal_options;
+  mpc_goal_options.callback_group = mpc_goal_cb_group_;
+  mpc_goal_sub_ = create_subscription<curobov2_ros_interfaces::msg::MpcGoal>(
       std::string(get_name()) + "/mpc_goal", 10,
-      [this](const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
+      [this](const curobov2_ros_interfaces::msg::MpcGoal::SharedPtr msg) {
         handle_mpc_goal(*msg);
-      });
+      }, mpc_goal_options);
 
   // PORT: the node's startup default warmup. The Python server warms both up in
   // __init__, so the recorded /warmup_ik and /warmup_fk replies are
@@ -762,7 +769,7 @@ std::string UnifiedPlannerNode::integration_frame() { return base_link_; }
 
 // PORT: unified_planner_node.mpc_goal_callback
 void UnifiedPlannerNode::handle_mpc_goal(
-    const geometry_msgs::msg::PoseStamped &msg) {
+    const curobov2_ros_interfaces::msg::MpcGoal &msg) {
   TrajectoryPlanner *planner =
       planner_services_ ? planner_services_->manager().current() : nullptr;
   auto *reactive = dynamic_cast<ReactiveController *>(planner);
@@ -784,10 +791,11 @@ void UnifiedPlannerNode::handle_mpc_goal(
   }
   reactive->set_live_goal({pose.position.x, pose.position.y, pose.position.z,
                            pose.orientation.w, pose.orientation.x,
-                           pose.orientation.y, pose.orientation.z});
+                           pose.orientation.y, pose.orientation.z}, msg.tool_frame);
   RCLCPP_DEBUG(get_logger(),
-               "Reactive goal updated from topic: [%.3f, %.3f, %.3f]",
-               pose.position.x, pose.position.y, pose.position.z);
+               "Reactive goal updated from topic: tool='%s' base=[%.3f, %.3f, %.3f]",
+               msg.tool_frame.c_str(), pose.position.x, pose.position.y,
+               pose.position.z);
 }
 
 // The control strategy forwards its raw joint-state message, before it reduces

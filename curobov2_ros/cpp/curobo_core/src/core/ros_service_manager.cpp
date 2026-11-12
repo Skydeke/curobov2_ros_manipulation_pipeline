@@ -831,7 +831,7 @@ void RosServiceManager::publish_collision_spheres_job()
     // and the visualizer must never show a stale collision model. The bridge
     // returns the exact per-sphere diagnostics in the same call, so the cost is
     // the FK + one scene query + the self-collision pair kernel (measured at
-    // ~0.4 ms for TIAGo on an RTX 4060), not a reason to cache.
+    // ~0.4 ms on the reference robot), not a reason to cache.
     const auto sphere_set = bridge_->collision_spheres_with_attached(handle_, q);
     const auto & spheres = sphere_set.spheres;
     if (spheres.shape.size() != 2 || spheres.shape[1] != 4) {

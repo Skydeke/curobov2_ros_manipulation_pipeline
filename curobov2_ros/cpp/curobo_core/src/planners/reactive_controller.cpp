@@ -149,6 +149,22 @@ PlannerResult ReactiveController::plan_reactive_impl(
   }
 
   try {
+    // An invalid start state makes every MPC candidate infeasible before the
+    // goal is even considered. Surface that explicitly instead of reporting a
+    // generic "step infeasible" three times.
+    if (!start_q.empty()) {
+      curobo_runtime::TensorF32 start_tensor;
+      start_tensor.shape = {1, static_cast<std::int64_t>(start_q.size())};
+      start_tensor.data = start_q;
+      const auto start_valid = bridge_->validate(handle_, start_tensor);
+      if (!start_valid.empty() && start_valid.front() == 0) {
+        RCLCPP_ERROR(
+          node_->get_logger(),
+          "%s start state FAILED collision/limit validation - every plan will "
+          "be rejected until the robot is in a collision-free, in-limit pose",
+          get_planner_name().c_str());
+      }
+    }
     // PORT: ReactiveController._setup_exclusive - setup() cold-starts the
     // solver, which CAPTURES CUDA graphs. Capture is process-global, so it must
     // run exclusive (other GPU jobs drain, then pause) or a concurrent
@@ -187,20 +203,21 @@ PlannerResult ReactiveController::plan_reactive_impl(
 }
 
 // PORT: ReactiveController._set_live_goal / _take_live_goal
-void ReactiveController::set_live_goal(const std::array<double, 7> & raw)
+void ReactiveController::set_live_goal(
+  const std::array<double, 7> & raw, const std::string & tool)
 {
   std::lock_guard<std::mutex> lk(live_goal_lock_);
-  latest_goal_ = raw;
+  latest_goal_ = LiveGoal{raw, tool};
   latest_goal_fresh_ = true;
 }
 
-std::optional<std::array<double, 7>> ReactiveController::take_live_goal()
+std::optional<ReactiveController::LiveGoal> ReactiveController::take_live_goal()
 {
   std::lock_guard<std::mutex> lk(live_goal_lock_);
   if (!latest_goal_fresh_) {
     return std::nullopt;
   }
-  std::optional<std::array<double, 7>> raw = latest_goal_;
+  std::optional<LiveGoal> raw = latest_goal_;
   latest_goal_.reset();
   latest_goal_fresh_ = false;
   return raw;
@@ -226,7 +243,16 @@ curobo_runtime::ReactiveState ReactiveController::read_state(
   curobo_runtime::ReactiveState state;
   const auto pose = robot_context->get_joint_pose();
   state.position.assign(pose.begin(), pose.end());
-  state.velocity.assign(state.position.size(), 0.0f);
+  // Feed the measured velocity into the solver. A paced command hands over a
+  // moving robot, so starting every re-plan from zero velocity makes the MPC
+  // ramp up from rest in each window and the arm only creeps forward. The
+  // joint-state strategy keeps the measured velocity next to the position.
+  const auto velocity = robot_context->get_joint_velocity();
+  if (velocity.size() == pose.size()) {
+    state.velocity.assign(velocity.begin(), velocity.end());
+  } else {
+    state.velocity.assign(state.position.size(), 0.0f);
+  }
   state.acceleration.assign(state.position.size(), 0.0f);
   return state;
 }
@@ -251,18 +277,49 @@ void ReactiveController::close_state_loop(
   state.position.assign(pose.begin(), pose.end());
 }
 
+// Measured position + finite-difference velocity.
+void ReactiveController::update_state_from_feedback(
+  RobotContext * robot_context, curobo_runtime::ReactiveState & state)
+{
+  const auto pose = robot_context->get_joint_pose();
+  const double t = now();
+  const std::size_t n = pose.size();
+  const bool have_prev =
+    prev_feedback_time_ > 0.0 && state.position.size() == n;
+  if (have_prev) {
+    const double dt = std::max(t - prev_feedback_time_, 1e-3);
+    state.velocity.resize(n);
+    for (std::size_t i = 0; i < n; ++i) {
+      state.velocity[i] =
+        static_cast<float>((pose[i] - state.position[i]) / dt);
+    }
+  } else {
+    state.velocity.assign(n, 0.0F);
+  }
+  state.position.assign(pose.begin(), pose.end());
+  state.acceleration.assign(n, 0.0F);
+  prev_feedback_time_ = t;
+}
+
 // PORT: ReactiveController._send_command
 void ReactiveController::send_command(
   RobotContext * robot_context, const curobo_runtime::ReactiveAction & action,
-  const std::vector<float> & current_position, double plan_dt)
+  const std::vector<float> & current_position, double plan_dt, bool taper_terminal,
+  int skip_rows)
 {
   const bool window = action.position.shape.size() == 2 && action.position.shape[0] > 1;
   const std::int64_t rows = action.position.shape.empty() ? 0 : action.position.shape[0];
   const std::int64_t cols = action.position.shape.empty() ? 0 : action.position.shape.back();
+  // The plan starts at the pose sampled BEFORE the solve (~90 ms). Sending that
+  // stale prefix makes the controller brake back to it at every window boundary
+  // - the visible pulsing. Start at the row that corresponds to "now".
+  const std::int64_t first_row =
+    (skip_rows > 0 && rows > 1) ?
+    std::min<std::int64_t>(static_cast<std::int64_t>(skip_rows), rows - 1) : 0;
   std::vector<std::vector<double>> position;
   std::vector<std::vector<double>> velocity;
   std::vector<std::vector<double>> acceleration;
-  for (std::int64_t r = 0; r < static_cast<std::int64_t>(rows); ++r) {
+  for (std::int64_t r = first_row; r < static_cast<std::int64_t>(rows); ++r) {
     std::vector<double> p(cols, 0.0), v(cols, 0.0), a(cols, 0.0);
     for (std::int64_t c = 0; c < cols; ++c) {
       const std::size_t idx = static_cast<std::size_t>(r * cols + c);
@@ -325,7 +382,8 @@ void ReactiveController::send_command(
     acceleration.insert(acceleration.begin(), std::vector<double>(cols, 0.0));
   }
   (void)window;
-  robot_context->set_and_send_command({}, velocity, acceleration, position, plan_dt);
+  robot_context->set_and_send_command(
+    {}, velocity, acceleration, position, plan_dt, taper_terminal);
 }
 
 // PORT: ReactiveController._init_robot_at_start
@@ -426,6 +484,30 @@ bool ReactiveController::execute_immediate(const ReactiveExecutionContext & ctx)
         std::chrono::steady_clock::now().time_since_epoch()).count();
     }
     curobo_runtime::ReactiveState current_state = read_state(ctx.robot_context);
+    prev_feedback_time_ = 0.0;
+    have_last_action_ = false;
+    last_action_dt_ = 0.0;
+    last_action_start_ = 0.0;
+
+    // A failed plan must never be streamed to the controllers. Hold the
+    // measured position for a few windows (the solver may recover), then abort
+    // the goal instead of driving forever from an infeasible plan.
+    const auto hold_action = [&current_state]() {
+        curobo_runtime::ReactiveAction action;
+        action.has_action = true;
+        const std::int64_t n = static_cast<std::int64_t>(current_state.position.size());
+        action.position.shape = {2, n};
+        action.velocity.shape = {2, n};
+        action.acceleration.shape = {2, n};
+        for (int row = 0; row < 2; ++row) {
+          for (float value : current_state.position) {
+            action.position.data.push_back(value);
+            action.velocity.data.push_back(0.0F);
+            action.acceleration.data.push_back(0.0F);
+          }
+        }
+        return action;
+      };
 
     while (is_goal_active_) {
       if (ctx.cancel_requested && ctx.cancel_requested()) {
@@ -453,7 +535,7 @@ bool ReactiveController::execute_immediate(const ReactiveExecutionContext & ctx)
         try {
           // PORT: retargeting runs the solver's IK, which can capture a graph.
           auto guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-          apply_live_goal(*raw, current_state);
+          apply_live_goal(raw->pose, raw->tool, current_state);
         } catch (const std::exception & e) {
           RCLCPP_ERROR_THROTTLE(
             node_->get_logger(), *node_->get_clock(), 1000,
@@ -479,7 +561,17 @@ bool ReactiveController::execute_immediate(const ReactiveExecutionContext & ctx)
         step_times_.push_back(now() - step_t0);
       }
       compute_position_error(outcome);
-      send_command(ctx.robot_context, outcome.action, current_state.position);
+      if (!outcome.action.has_action) {
+        // A transiently infeasible window must not kill the tracking goal.
+        // Hold the measured position for this window and re-plan next tick.
+        RCLCPP_WARN_THROTTLE(
+          node_->get_logger(), *node_->get_clock(), 5000,
+          "%s: step infeasible - holding the measured position",
+          get_planner_name().c_str());
+        outcome.action = hold_action();
+        outcome.action_dt = 0.0;
+      }
+      send_command(ctx.robot_context, outcome.action, current_state.position, outcome.action_dt);
 
       curobo_runtime::ReactiveState predicted = state_from_action(outcome.action);
       close_state_loop(ctx.robot_context, predicted);
@@ -524,6 +616,30 @@ bool ReactiveController::execute_paced(const ReactiveExecutionContext & ctx, dou
         std::chrono::steady_clock::now().time_since_epoch()).count();
     }
     curobo_runtime::ReactiveState current_state = read_state(ctx.robot_context);
+    prev_feedback_time_ = 0.0;
+    have_last_action_ = false;
+    last_action_dt_ = 0.0;
+    last_action_start_ = 0.0;
+
+    // A failed plan must never be streamed to the controllers. Hold the
+    // measured position for a few windows (the solver may recover), then abort
+    // the goal instead of driving forever from an infeasible plan.
+    const auto hold_action = [&current_state]() {
+        curobo_runtime::ReactiveAction action;
+        action.has_action = true;
+        const std::int64_t n = static_cast<std::int64_t>(current_state.position.size());
+        action.position.shape = {2, n};
+        action.velocity.shape = {2, n};
+        action.acceleration.shape = {2, n};
+        for (int row = 0; row < 2; ++row) {
+          for (float value : current_state.position) {
+            action.position.data.push_back(value);
+            action.velocity.data.push_back(0.0F);
+            action.acceleration.data.push_back(0.0F);
+          }
+        }
+        return action;
+      };
 
     while (is_goal_active_) {
       if (ctx.cancel_requested && ctx.cancel_requested()) {
@@ -551,7 +667,7 @@ bool ReactiveController::execute_paced(const ReactiveExecutionContext & ctx, dou
         try {
           // PORT: retargeting runs the solver's IK, which can capture a graph.
           auto guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-          apply_live_goal(*raw, current_state);
+          apply_live_goal(raw->pose, raw->tool, current_state);
         } catch (const std::exception & e) {
           RCLCPP_ERROR_THROTTLE(
             node_->get_logger(), *node_->get_clock(), 1000,
@@ -577,15 +693,80 @@ bool ReactiveController::execute_paced(const ReactiveExecutionContext & ctx, dou
         step_times_.push_back(now() - step_t0);
       }
       compute_position_error(outcome);
-      send_command(
-        ctx.robot_context, outcome.action, current_state.position, interval);
+      bool command_sent = false;
+      if (!outcome.action.has_action) {
+        // A single infeasible window must not stop the arm: bimanual goals with
+        // the two tools moving in opposite directions sit close to the
+        // self-collision boundary and flip feasible/infeasible from one window
+        // to the next. Freezing for that window is what reads as jitter. Keep
+        // streaming the REST of the last feasible window (time-shifted so it
+        // continues where it left off) and only hold if that tail is used up.
+        const std::int64_t last_rows =
+          last_action_.position.shape.empty() ? 0 : last_action_.position.shape[0];
+        if (have_last_action_ && last_action_dt_ > 0.0 && last_rows > 2) {
+          const int skip = static_cast<int>(
+            std::floor((now() - last_action_start_) / last_action_dt_));
+          if (skip < last_rows - 1) {
+            RCLCPP_WARN_THROTTLE(
+              node_->get_logger(), *node_->get_clock(), 3000,
+              "%s: step infeasible - continuing the previous window",
+              get_planner_name().c_str());
+            send_command(
+              ctx.robot_context, last_action_, current_state.position,
+              last_action_dt_, /*taper_terminal=*/true, skip);
+            command_sent = true;
+            outcome.action = last_action_;
+            outcome.action_dt = last_action_dt_;
+          }
+        }
+        if (!command_sent) {
+          RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 5000,
+            "%s: step infeasible - holding the measured position",
+            get_planner_name().c_str());
+          outcome.action = hold_action();
+          outcome.action_dt = 0.0;
+        }
+      }
+      // The native bridge returns the optimized segment, sampled at its own
+      // trajectory dt. Stamp the controller trajectory with that interval so it
+      // follows the planned velocity profile instead of rest-to-rest over the
+      // full servo window. The loop itself still paces at `interval`.
+      const double command_dt = outcome.action_dt > 0.0 ? outcome.action_dt : interval;
+      // Skip the part of the plan already spent solving; the command must start
+      // where the robot is now, not where it was 90 ms ago.
+      int skip_rows = 0;
+      if (command_dt > 0.0) {
+        skip_rows = static_cast<int>(
+          std::floor(std::min(0.10, now() - step_t0) / command_dt));
+      }
+      // The command is a slice out of the middle of the plan (plus the far-end
+      // taper): the terminal sample must be at rest or the controller rejects
+      // the goal outright, but the taper is capped to a few samples so it never
+      // reaches the part this window actually executes.
+      if (!command_sent) {
+        send_command(
+          ctx.robot_context, outcome.action, current_state.position, command_dt,
+          /*taper_terminal=*/true, skip_rows);
+      }
+      if (outcome.action.has_action) {
+        last_action_ = outcome.action;
+        last_action_dt_ = command_dt;
+        last_action_start_ = step_t0;
+        have_last_action_ = true;
+      }
       if (ctx.feedback) {
         ctx.feedback(
           is_on_target() ? "ON_TARGET" : "TRACKING", step_progression(),
           is_on_target(), feedback_command(outcome.action), get_position_error());
       }
 
-      wait_for_execution(ctx.robot_context, interval);
+      // The command just sent covers exactly `interval` of the plan, so the
+      // next window must be solved and sent before it runs out: pace on the
+      // control period, not on the period plus the solve time.
+      const double solve_elapsed = now() - step_t0;
+      wait_for_execution(
+        ctx.robot_context, std::max(0.02, interval - solve_elapsed));
 
       curobo_runtime::ReactiveState predicted = state_from_action(outcome.action);
       close_state_loop(ctx.robot_context, predicted);
@@ -653,7 +834,11 @@ void ReactiveController::wait_for_execution(RobotContext * robot_context, double
     bool aborted = false;   // goal ended/cancelled: skip the pacing floor
   };
   auto state = std::make_shared<WaitState>();
-  const double timeout_s = std::max(interval * 2.0 + 0.2, 0.5);
+  // Paced streaming: the command covers one control interval and the next
+  // window replaces it. Wait exactly that long (the caller subtracts the solve
+  // time), not the old "interval plus a safety margin", or the controller runs
+  // dry between windows.
+  const double timeout_s = std::max(interval, 0.05);
 
   if (wait_cb_group_ == nullptr) {
     // Own group so these poll callbacks never serialize with the default group

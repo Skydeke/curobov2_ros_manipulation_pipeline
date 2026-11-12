@@ -1205,6 +1205,10 @@ MpcStepOutcome PyBridge::mpc_step(
     py::object result = bridge_module().attr("mpc_step")(handle, state_dict, paced);
     MpcStepOutcome out;
     out.action = dict_to_reactive_action(result.attr("__getitem__")("action"));
+    py::object action_dt = result.attr("__getitem__")("action_dt");
+    if (!action_dt.is_none()) {
+      out.action_dt = action_dt.cast<double>();
+    }
     py::object horizon = result.attr("__getitem__")("horizon_position");
     if (!horizon.is_none()) {
       out.horizon_position = array_to_tensor(horizon);

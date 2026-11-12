@@ -91,7 +91,8 @@ int RobotContext::set_command(
   const std::vector<std::vector<double>> & accel_command,
   const std::vector<std::vector<double>> & position_command,
   bool feed_ghost,
-  double plan_dt)
+  double plan_dt,
+  bool taper_terminal)
 {
   std::lock_guard<std::mutex> lk(strategy_lock_);
   // PORT: RobotContext.set_command(joint_names=None) resolves the names from the
@@ -104,14 +105,15 @@ int RobotContext::set_command(
   // the full-joint preview itself, so the controller projection cannot strip
   // the jaw columns from the ghost.
   if (feed_ghost && ghost_strategy_ != nullptr) {
-    ghost_strategy_->set_command(names, vel_command, accel_command, position_command, plan_dt);
+    ghost_strategy_->set_command(
+      names, vel_command, accel_command, position_command, plan_dt, taper_terminal);
     ghost_strategy_->send_trajectrory();
   }
   if (robot_strategy_ == nullptr) {
     return -1;
   }
   return robot_strategy_->set_command(
-    names, vel_command, accel_command, position_command, plan_dt);
+    names, vel_command, accel_command, position_command, plan_dt, taper_terminal);
 }
 
 void RobotContext::set_ghost_command(
@@ -119,14 +121,16 @@ void RobotContext::set_ghost_command(
   const std::vector<std::vector<double>> & vel_command,
   const std::vector<std::vector<double>> & accel_command,
   const std::vector<std::vector<double>> & position_command,
-  double plan_dt)
+  double plan_dt,
+  bool taper_terminal)
 {
   std::lock_guard<std::mutex> lk(strategy_lock_);
   if (ghost_strategy_ == nullptr) {
     return;
   }
   const std::vector<std::string> names = resolve_command_names(joint_names);
-  ghost_strategy_->set_command(names, vel_command, accel_command, position_command, plan_dt);
+  ghost_strategy_->set_command(
+    names, vel_command, accel_command, position_command, plan_dt, taper_terminal);
   ghost_strategy_->send_trajectrory();
 }
 
@@ -136,20 +140,23 @@ bool RobotContext::set_and_send_command(
   const std::vector<std::vector<double>> & vel_command,
   const std::vector<std::vector<double>> & accel_command,
   const std::vector<std::vector<double>> & position_command,
-  double plan_dt)
+  double plan_dt,
+  bool taper_terminal)
 {
   std::lock_guard<std::mutex> lk(strategy_lock_);
   // PORT: joint_names=None resolves inside this critical section.
   const std::vector<std::string> names = resolve_command_names(joint_names);
   // PORT: the ghost preview always gets the command (and publishes it).
   if (ghost_strategy_ != nullptr) {
-    ghost_strategy_->set_command(names, vel_command, accel_command, position_command, plan_dt);
+    ghost_strategy_->set_command(
+      names, vel_command, accel_command, position_command, plan_dt, taper_terminal);
     ghost_strategy_->send_trajectrory();
   }
   if (robot_strategy_ == nullptr) {
     return false;
   }
-  robot_strategy_->set_command(names, vel_command, accel_command, position_command, plan_dt);
+  robot_strategy_->set_command(
+    names, vel_command, accel_command, position_command, plan_dt, taper_terminal);
   robot_strategy_->send_trajectrory();
   return true;
 }

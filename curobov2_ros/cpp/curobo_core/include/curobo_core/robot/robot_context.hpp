@@ -46,7 +46,8 @@ public:
     const std::vector<std::vector<double>> & accel_command,
     const std::vector<std::vector<double>> & position_command,
     bool feed_ghost = true,
-    double plan_dt = 0.0);
+    double plan_dt = 0.0,
+    bool taper_terminal = true);
   // Preview-only update: drive the ghost strategy without touching the active
   // control strategy. Used by the replay path, which projects the stored
   // full-joint plan to the controller's arm joints but must keep the finger
@@ -56,14 +57,16 @@ public:
     const std::vector<std::vector<double>> & vel_command,
     const std::vector<std::vector<double>> & accel_command,
     const std::vector<std::vector<double>> & position_command,
-    double plan_dt = 0.0);
+    double plan_dt = 0.0,
+    bool taper_terminal = true);
   // PORT: RobotContext.set_and_send_command
   bool set_and_send_command(
     const std::vector<std::string> & joint_names,
     const std::vector<std::vector<double>> & vel_command,
     const std::vector<std::vector<double>> & accel_command,
     const std::vector<std::vector<double>> & position_command,
-    double plan_dt = 0.0);
+    double plan_dt = 0.0,
+    bool taper_terminal = true);
 
   // PORT: RobotContext.get_joint_pose / get_joint_pose_at / get_joint_velocity /
   // get_joint_name / stop_robot / get_progression / get_robot_state

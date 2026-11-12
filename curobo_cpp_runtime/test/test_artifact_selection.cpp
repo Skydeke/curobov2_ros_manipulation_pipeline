@@ -197,12 +197,12 @@ TEST(ArtifactSelection, IncompleteCapabilityProfileSelectsHybridCpp)
 TEST(ArtifactSelection, ParsesNamedPosesAndGrippersForGetJointInfo)
 {
   TemporaryTree tree;
-  const fs::path artifact = tree.artifact("tiago");
+  const fs::path artifact = tree.artifact("reference");
   write_file(
     artifact / "manifest.json",
     R"({
       "arch": "sm_89",
-      "robot": "tiago",
+      "robot": "reference",
       "named_joint_configs": {
         "home": {"torso_lift_joint": 0.149, "arm_1_joint": 0.5},
         "open": {"gripper_left_finger_joint": 0.045,
