@@ -1,4 +1,4 @@
 [submodule "curobo/curobo"]
 	path = curobo/curobo
-	url = git@github.com:Skydeke/curobo.git
+	url = https://github.com/Skydeke/curobo.git
 	branch = main
