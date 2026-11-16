@@ -7,8 +7,6 @@
   <maintainer email="me@todo.com">me</maintainer>
   <license>Apache-2.0</license>
   <exec_depend>curobo</exec_depend>
-  <exec_depend>iki_kortex_description</exec_depend>
-  <exec_depend>iki_kortex_moveit_config</exec_depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
