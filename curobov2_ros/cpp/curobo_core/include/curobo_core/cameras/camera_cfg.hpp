@@ -45,6 +45,12 @@ std::vector<std::string> integration_frame_candidates(rclcpp::Node * node);
 // configured robot base, same frame as integration_frame_candidates().
 std::string integration_frame(rclcpp::Node * node);
 
+// The PLANNER (model) base frame - the `base_link` parameter, e.g. odom. The
+// robot's collision spheres and the solvers live in this frame, so anything
+// compared against them (robot segmentation) must be expressed here, NOT in
+// the mapper frame (which may be the moving chassis on a mobile base).
+std::string planner_base_frame(rclcpp::Node * node);
+
 // PORT: camera_cfg._parse_floats
 std::optional<std::vector<double>> parse_floats(const std::string & text);
 

@@ -339,6 +339,24 @@ PlannerServices::PlannerServices(
       &PlannerServices::handle_generate_trajectory_batch, this,
       std::placeholders::_1, std::placeholders::_2),
     rmw_qos_profile_services_default, plan_callback_group_);
+
+  try {
+    request_adapters_ = std::make_unique<adapters::AdapterChain>(node_, bridge_, handle_);
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(
+      node_->get_logger(), "Failed to initialize planning request adapters: %s", e.what());
+    throw;
+  }
+}
+
+bool PlannerServices::adapt_goal(
+  curobov2_ros_interfaces::msg::TrajectoryGoal & goal, std::string & error)
+{
+  if (!request_adapters_ || !request_adapters_->enabled()) {
+    return true;
+  }
+  const std::vector<float> start = resolve_start(goal.start_pose.name, goal.start_pose.position);
+  return request_adapters_->adapt(goal, start, pose_resolver_, error);
 }
 
 // PORT: joint_order.resolve_start_pose (name reorder, prefix padding from the
@@ -480,12 +498,20 @@ bool PlannerServices::prepare_continuous_joints(
       static_cast<std::size_t>(std::distance(limits.joint_names.begin(), found));
     const double lo = limits.positions.data[j];
     const double hi = limits.positions.data[dof + j];
-    // Explicit joint type first; a legacy bridge that reports no mask falls
-    // back to the range width. Once the mask is known, it is authoritative.
-    bool continuous = is_continuous_joint(continuous_joint_names_, name);
-    if (j < limits.continuous.size()) {
-      continuous = continuous || limits.continuous[j] != 0;
-    } else if (!continuous) {
+    // Joint type: the robot descriptor is authoritative when it lists any
+    // continuous joints. A mobile base's PRISMATIC translation joints span more
+    // than one turn (+/-10 m), so both the artifact's range-width heuristic and
+    // its exported mask classify them as continuous; wrapping their start by a
+    // common 2*pi (base_y -5.5 -> +0.783) leaves the model metres away from the
+    // measured base and every Cartesian goal becomes unreachable. Only a joint
+    // the descriptor declares continuous may take the chart/2*pi treatment.
+    // Without a descriptor, keep the legacy bridge-mask/range fallback.
+    bool continuous = false;
+    if (!continuous_joint_names_.empty()) {
+      continuous = is_continuous_joint(continuous_joint_names_, name);
+    } else if (j < limits.continuous.size()) {
+      continuous = limits.continuous[j] != 0;
+    } else {
       continuous = is_continuous_range(lo, hi);
     }
     if (!continuous) {
@@ -1442,8 +1468,15 @@ void PlannerServices::handle_generate_trajectory(
     response->response.message = "No planner selected";
     return;
   }
+  auto goal = request->request;
+  std::string adapter_error;
+  if (!adapt_goal(goal, adapter_error)) {
+    response->response.success = false;
+    response->response.message = "Request adapter rejected: " + adapter_error;
+    return;
+  }
   on_plan_lane(
-    lane_plan_, [&]() {fill_result(planner, request->request, response->response);});
+    lane_plan_, [&]() {fill_result(planner, goal, response->response);});
   // Surface the same failure diagnostics at the service's top level. Clients
   // that only look at the outer response still get the start/goal collision
   // attribution when a plan they expected to succeed failed.
@@ -1465,8 +1498,16 @@ void PlannerServices::handle_generate_trajectory_batch(
   response->responses.resize(request->requests.size());
   bool all_ok = true;
   for (std::size_t i = 0; i < request->requests.size(); ++i) {
+    auto goal = request->requests[i];
+    std::string adapter_error;
+    if (!adapt_goal(goal, adapter_error)) {
+      response->responses[i].success = false;
+      response->responses[i].message = "Request adapter rejected: " + adapter_error;
+      all_ok = false;
+      continue;
+    }
     on_plan_lane(lane_plan_, [&]() {
-        fill_result(planner, request->requests[i], response->responses[i]);
+        fill_result(planner, goal, response->responses[i]);
       });
     all_ok = all_ok && response->responses[i].success;
   }

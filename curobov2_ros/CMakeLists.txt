@@ -36,6 +36,7 @@ find_package(visualization_msgs REQUIRED)
 find_package(builtin_interfaces REQUIRED)
 find_package(nav2_msgs REQUIRED)
 find_package(curobov2_ros_interfaces REQUIRED)
+find_package(pluginlib REQUIRED)
 
 # The interpreter that has torch and cuRobo: system Python 3.12 (decision Q2).
 find_package(Python3 COMPONENTS Development.Embed REQUIRED)
@@ -136,6 +137,7 @@ add_library(curobo_core SHARED
   cpp/curobo_core/src/lasers/laser_pointcloud_strategy.cpp
   cpp/curobo_core/src/lasers/laser_scan_strategy.cpp
   cpp/curobo_core/src/convert.cpp
+  cpp/curobo_core/src/adapters/adapter_chain.cpp
 )
 
 target_include_directories(curobo_core PUBLIC
@@ -157,6 +159,7 @@ target_link_libraries(curobo_core PUBLIC
   ${visualization_msgs_TARGETS}
   ${builtin_interfaces_TARGETS}
   ${nav2_msgs_TARGETS}
+  pluginlib::pluginlib
 )
 
 set_target_properties(curobo_core PROPERTIES
@@ -324,4 +327,5 @@ if(BUILD_TESTING)
 
 endif()
 
+ament_export_dependencies(pluginlib)
 ament_package()

@@ -412,6 +412,12 @@ struct CppBridge::Impl
     int esdf_count{0};
     curobo::robot::ObstacleHandle voxel_handle{};
     bool voxel_added{false};
+    // Mapper frame (e.g. base_link) pose in the planner base frame. Identity
+    // unless the node separates the mapper frame from the planning root and
+    // calls set_esdf_pose() before the refresh (mobile manipulator: the grid
+    // rides the chassis while the solvers plan in odom).
+    std::array<double, 3> frame_position{{0.0, 0.0, 0.0}};
+    std::array<double, 4> frame_quaternion{{1.0, 0.0, 0.0, 0.0}};
     DeviceBuffer depth;
     DeviceBuffer rgb;
     DeviceBuffer intrinsics;
@@ -687,6 +693,30 @@ struct CppBridge::Impl
     return full;
   }
 
+  // Grid centre + orientation in the planner base frame: the AOT mapper origin
+  // (a mapper-frame point) mapped through the mapper frame's pose.
+  curobo::robot::Pose mapper_grid_pose() const
+  {
+    curobo::robot::Pose pose;
+    const auto & q = mapper->frame_quaternion;
+    const auto & t = mapper->frame_position;
+    const double w = q[0], x = q[1], y = q[2], z = q[3];
+    const double vx = mapper->view.origin[0];
+    const double vy = mapper->view.origin[1];
+    const double vz = mapper->view.origin[2];
+    const double tx = 2.0 * (y * vz - z * vy);
+    const double ty = 2.0 * (z * vx - x * vz);
+    const double tz = 2.0 * (x * vy - y * vx);
+    pose.position = {
+      static_cast<float>(vx + w * tx + (y * tz - z * ty) + t[0]),
+      static_cast<float>(vy + w * ty + (z * tx - x * tz) + t[1]),
+      static_cast<float>(vz + w * tz + (x * ty - y * tx) + t[2])};
+    pose.quaternion = {
+      static_cast<float>(w), static_cast<float>(x),
+      static_cast<float>(y), static_cast<float>(z)};
+    return pose;
+  }
+
   void ensure_native_voxel_grid()
   {
     if (mapper == nullptr || mapper->runtime == nullptr) {
@@ -712,13 +742,12 @@ struct CppBridge::Impl
       static_cast<float>(nx) * voxel,
       static_cast<float>(ny) * voxel,
       static_cast<float>(nz) * voxel};
-    // curobo::robot::VoxelGrid.pose is the grid centre, which is exactly the
-    // AOT mapper origin. The ESDF array still starts at origin - extent/2.
-    grid.pose.position = {
-      mapper->view.origin[0],
-      mapper->view.origin[1],
-      mapper->view.origin[2]};
-    grid.pose.quaternion = {1.0F, 0.0F, 0.0F, 0.0F};
+    // curobo::robot::VoxelGrid.pose is the grid centre in the PLANNER base
+    // frame. The AOT mapper origin is the centre in the MAPPER frame, so it is
+    // mapped through the mapper-frame pose the node supplied (identity when the
+    // mapper integrates in the planner base). The ESDF array still starts at
+    // origin - extent/2 in the mapper frame.
+    grid.pose = mapper_grid_pose();
     const std::size_t count =
       static_cast<std::size_t>(nx) * static_cast<std::size_t>(ny) *
       static_cast<std::size_t>(nz);
@@ -2236,6 +2265,25 @@ curobo_runtime::RobotDescriptionOutcome CppBridge::robot_description(
   outcome.gripper_close_positions = impl_->manifest.gripper_close_positions;
   outcome.gripper_max_efforts = impl_->manifest.gripper_max_efforts;
   outcome.gripper_time_from_start = impl_->manifest.gripper_time_from_start;
+  // Descriptor-only data the artifact manifest does not carry: the explicit
+  // `continuous_joints` override. The embedded Python descriptor reader parses
+  // the robot YAML, and the node needs this list to keep a mobile base's
+  // PRISMATIC translation joints out of the +/-2*pi continuous chart: their
+  // +/-10 m range is wider than a turn, so the artifact's range-width
+  // heuristic in joint_limits() flags them continuous, and the request's base
+  // start would then be wrapped by 2*pi (base_y -5.5 -> +0.783), leaving the
+  // model metres away from the measured base and every Cartesian goal
+  // unreachable.
+  if (impl_->has_python()) {
+    try {
+      const auto descriptor =
+        impl_->python->robot_description(robot_arg, robot_config_file);
+      outcome.continuous_joint_names = descriptor.continuous_joint_names;
+    } catch (const std::exception &) {
+      // Keep the artifact-only outcome; joint_limits() then falls back to the
+      // range heuristic (fixed-base arms without an explicit override).
+    }
+  }
   return outcome;
 }
 
@@ -3453,6 +3501,23 @@ bool CppBridge::world_push(curobo_runtime::RobotHandle)
   // The native Scene is the live collision world; there is no Python-style
   // copy step to push. esdf_refresh already updated the voxel layer in place.
   return true;
+}
+
+void CppBridge::set_esdf_pose(
+  curobo_runtime::RobotHandle, const std::array<double, 3> & position,
+  const std::array<double, 4> & quaternion_wxyz)
+{
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->require_initialized("set_esdf_pose");
+  if (impl_->mapper == nullptr || !impl_->native_scene_valid) {
+    return;
+  }
+  impl_->mapper->frame_position = position;
+  impl_->mapper->frame_quaternion = quaternion_wxyz;
+  if (impl_->mapper->voxel_added && impl_->scene != nullptr) {
+    impl_->scene->scene().update_obstacle_pose(
+      impl_->mapper->voxel_handle, impl_->mapper_grid_pose());
+  }
 }
 
 curobo_runtime::VoxelGrid CppBridge::voxel_grid(curobo_runtime::RobotHandle)

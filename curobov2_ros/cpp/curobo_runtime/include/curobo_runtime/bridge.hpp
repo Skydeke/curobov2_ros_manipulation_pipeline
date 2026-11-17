@@ -570,6 +570,18 @@ public:
   // CUDA collision model. Without it the planner would not collide against the
   // camera-observed voxels (the published grid would show unchecked voxels).
   virtual bool world_push(RobotHandle handle) = 0;
+  // Put the perception ESDF grid in the planner base frame.
+  //
+  // The mapper integrates around a frame that MOVES with the robot: for a
+  // mobile manipulator whose planning root is odom, the grid is kept in
+  // `base_link` so `mapper_grid_center` is a constant, chassis-relative box
+  // that rides the robot. The scene is expressed in the planner base (odom),
+  // so the node passes the mapper frame's pose there and the backend places the
+  // grid as a posed obstacle. `position` is the frame origin, `quaternion_wxyz`
+  // its orientation, both in the planner base frame. Default: no-op.
+  virtual void set_esdf_pose(
+    RobotHandle /*handle*/, const std::array<double, 3> & /*position*/,
+    const std::array<double, 4> & /*quaternion_wxyz*/) {}
   // Ensure the trajopt solver's CUDA graphs were captured for `mode`
   // ("pose"/"cspace"). cuRobo reuses one captured graph set across BOTH solve
   // modes; a pose<->cspace switch changes the goal-buffer structure under it and

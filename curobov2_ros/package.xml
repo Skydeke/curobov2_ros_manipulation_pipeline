@@ -29,6 +29,7 @@
   <depend>tf2_ros</depend>
   <depend>tf2</depend>
   <depend>curobov2_ros_interfaces</depend>
+  <depend>pluginlib</depend>
 
   <!-- Runtime / launch deps (kept from the Python package). -->
   <exec_depend>rclpy</exec_depend>

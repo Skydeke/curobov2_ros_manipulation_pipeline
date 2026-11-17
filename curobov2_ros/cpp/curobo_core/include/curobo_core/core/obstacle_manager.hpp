@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <mutex>
 #include <set>
@@ -118,6 +119,17 @@ public:
     esdf_refresh_min_interval_ = seconds;
   }
 
+
+  // Pose of the mapper frame in the planner base frame (position + wxyz). The
+  // node supplies it from TF; when the mapper integrates in the planner base
+  // the provider can be left unset (identity). See IBridge::set_esdf_pose.
+  using EsdfFramePoseProvider =
+    std::function<bool (std::array<double, 3> &, std::array<double, 4> &)>;
+  void set_esdf_frame_pose_provider(EsdfFramePoseProvider provider)
+  {
+    esdf_frame_pose_provider_ = std::move(provider);
+  }
+
   // PORT: obstacle_manager._validate_spec (public for testing / set_objects).
   std::string validate_spec(
     const SceneObjectSpec & spec, const std::set<std::string> & taken) const;
@@ -206,6 +218,8 @@ private:
   std::int64_t last_pushed_epoch_ = -1;
   double last_push_time_ = 0.0;
   double esdf_refresh_min_interval_ = 0.0;
+  // Mapper frame pose in the planner base frame (unset -> identity).
+  EsdfFramePoseProvider esdf_frame_pose_provider_;
 };
 
 }  // namespace curobo_core

@@ -27,30 +27,35 @@ std::string masked_depth_topic(const std::string & depth_topic)
   return topic.substr(0, idx) + "/masked_depth";
 }
 
-// The frame the depth is integrated in: ALWAYS the configured robot base
-// (`base_link`). Depth and the Mapper's grid box must share ONE frame, and the
-// grid is a fixed volume allocated once, so this is pinned — and
-// `mapper_grid_center` is base-relative, so the voxels ride the robot. That is
-// deliberate: the solver's voxel collision cache is built around `base_link`, so
-// integrating in a world frame (map/odom) would leave the ESDF pushed into the
-// cache in a different frame from the one the cache is expressed in.
-std::vector<std::string> integration_frame_candidates(rclcpp::Node * node)
-{
-  std::vector<std::string> frames;
-  std::string frame;
-  if (node != nullptr && node->has_parameter("base_link")) {
-    frame = node->get_parameter("base_link").as_string();
-  }
-  frames.push_back(frame.empty() ? "base_0" : frame);
-  return frames;
-}
-
-// Single pick for callers WITHOUT a TF buffer (marker/service metadata): the
-// configured robot base, same frame as integration_frame_candidates().
+// The frame the depth is integrated in and the frame the Mapper's grid box is
+// expressed in: `mapper_frame`, defaulting to the configured robot base
+// (`base_link`). Depth and the grid box must share ONE frame, and the grid is a
+// fixed volume allocated once, so `mapper_grid_center` is frame-relative. For a
+// fixed-base robot the mapper frame IS the planning base. A mobile manipulator
+// whose cspace root is odom sets `mapper_frame` to the moving chassis instead:
+// the box then rides the robot, and the node places the ESDF in the planner
+// base on every refresh (IBridge::set_esdf_pose).
 std::string integration_frame(rclcpp::Node * node)
 {
+  if (node != nullptr && node->has_parameter("mapper_frame")) {
+    const std::string frame = node->get_parameter("mapper_frame").as_string();
+    if (!frame.empty()) {
+      return frame;
+    }
+  }
   return (node != nullptr && node->has_parameter("base_link")) ?
-         node->get_parameter("base_link").as_string() : "base_0";
+         node->get_parameter("base_link").as_string() : "base_link";
+}
+
+std::vector<std::string> integration_frame_candidates(rclcpp::Node * node)
+{
+  return {integration_frame(node)};
+}
+
+std::string planner_base_frame(rclcpp::Node * node)
+{
+  return (node != nullptr && node->has_parameter("base_link")) ?
+         node->get_parameter("base_link").as_string() : "base_link";
 }
 
 // PORT: camera_cfg._parse_floats

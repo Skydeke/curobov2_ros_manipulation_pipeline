@@ -687,8 +687,12 @@ void RosServiceManager::publish_sparse_voxel_grid_job()
     }
     auto msg = std::make_unique<curobov2_ros_interfaces::msg::SparseVoxelGrid>();
     msg->header.stamp = node_->get_clock()->now();
-    msg->header.frame_id = node_->has_parameter("base_link") ?
-      node_->get_parameter("base_link").as_string() : "base_link";
+    // `grid.origin` and the occupied indices are expressed in the MAPPER frame
+    // (`mapper_frame`, e.g. base_link), so the message must be labelled with
+    // that frame. Labelling it with the planner base (odom) placed every voxel
+    // one robot pose away from where it belongs.
+    msg->header.frame_id = integration_frame_provider_ ? integration_frame_provider_() :
+      integration_frame(node_);
     msg->origin.x = static_cast<float>(grid.origin[0]);
     msg->origin.y = static_cast<float>(grid.origin[1]);
     msg->origin.z = static_cast<float>(grid.origin[2]);

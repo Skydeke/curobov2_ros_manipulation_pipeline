@@ -122,6 +122,9 @@ public:
   void warmup_mapper(curobo_runtime::RobotHandle handle) override;
   bool esdf_refresh(curobo_runtime::RobotHandle handle) override;
   bool world_push(curobo_runtime::RobotHandle handle) override;
+  void set_esdf_pose(
+    curobo_runtime::RobotHandle handle, const std::array<double, 3> & position,
+    const std::array<double, 4> & quaternion_wxyz) override;
   curobo_runtime::VoxelGrid voxel_grid(curobo_runtime::RobotHandle handle) override;
   int clear_voxel_map(curobo_runtime::RobotHandle handle) override;
   int clear_voxel_region(

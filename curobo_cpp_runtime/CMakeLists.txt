@@ -47,6 +47,7 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
   find_package(Eigen3 REQUIRED)
   find_package(curobov2_ros_interfaces REQUIRED)
   find_package(curobov2_ros REQUIRED)
+  find_package(pluginlib REQUIRED)
 
   set(CUROBO_ROS_LIBS ${curobov2_ros_LIBRARIES})
   if(NOT CUROBO_ROS_LIBS)
@@ -145,6 +146,7 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CUROBO_CPP_INCLUDE_DIR}>
     ${curobov2_ros_INCLUDE_DIRS}
+    ${pluginlib_INCLUDE_DIRS}
   )
   target_link_libraries(curobo_cpp_runtime PUBLIC
     curobo_cpp_selection
@@ -165,6 +167,7 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
     ${curobov2_ros_interfaces_TARGETS}
     ${CUROBO_ROBOT_RUNTIME}
     ${CUROBO_MAPPER_RUNTIME}
+    pluginlib::pluginlib
     ${_cudart_target}
     ${CUDA_DRIVER_LIBRARY}
   )

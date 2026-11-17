@@ -93,6 +93,12 @@ private:
   curobo_runtime::IBridge * bridge_ = nullptr;
   curobo_runtime::RobotHandle handle_ = -1;
   std::string base_link_;
+  // Frame the depth is integrated in / the Mapper grid box is expressed in.
+  // Defaults to base_link_ (fixed-base robots). A mobile manipulator whose
+  // planning root is odom keeps the box on the moving chassis (`base_link`):
+  // `mapper_grid_center` is then a constant, robot-relative offset, and the
+  // ESDF is placed in the planner base through IBridge::set_esdf_pose().
+  std::string mapper_frame_;
   std::vector<std::string> joint_names_;
 
   // PORT: the collision model's unpinned lock joints - `lock_joints: {joint: null}`
