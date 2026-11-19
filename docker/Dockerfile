@@ -326,7 +326,9 @@ COPY curobo ${ROS_WS}/src/curobo
 # names. ${ROS_WS}/install is sourced for bases whose image already carries
 # workspace deps; it does not exist yet on a fresh build and that is tolerated.
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
-  source ${ROS_WS}/install/setup.bash 2>/dev/null; \
+  if [ -f ${ROS_WS}/install/setup.bash ]; then \
+    source ${ROS_WS}/install/setup.bash; \
+  fi; \
   colcon build \
   --base-paths \
   ${ROS_WS}/src/curobov2_ros \
