@@ -1008,6 +1008,10 @@ void RosServiceManager::publish_collision_spheres_job()
       label.pose.position.z = 0.5 * (first.z + second.z) + 0.02;
       label.pose.orientation.w = 1.0;
       label.scale.z = 0.025;
+      // RViz2 uses scale.x as the space width for TEXT_VIEW_FACING. Leaving it
+      // at zero keeps a ~1 m default, so "a <-> b" renders with huge gaps at
+      // small text sizes (ros2/rviz#1336). Match the space width to the text.
+      label.scale.x = label.scale.z;
       label.color.r = 1.0;
       label.color.g = 1.0;
       label.color.b = 1.0;
