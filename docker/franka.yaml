@@ -30,6 +30,11 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      # CUROBO_CUDA_ARCHS is required by the Dockerfile. Override it with a
+      # single target for a much faster build, e.g.:
+      #   CUROBO_CUDA_ARCHS=89 docker compose -f docker/franka.yaml build
+      args:
+        CUROBO_CUDA_ARCHS: ${CUROBO_CUDA_ARCHS:-all-major}
     runtime: nvidia
     network_mode: host
     ipc: host

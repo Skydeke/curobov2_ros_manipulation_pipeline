@@ -17,7 +17,7 @@
 # The default base is a CUDA runtime image; nvcc is installed only in the
 # native build stage, so it never reaches the final image.
 
-ARG BASE_IMAGE=nvidia/cuda:13.4.1-runtime-ubuntu24.04
+ARG BASE_IMAGE=nvidia/cuda:13.4.3-runtime-ubuntu24.04
 FROM ${BASE_IMAGE} AS curobo-python-base
 
 ARG ROS_DISTRO=jazzy

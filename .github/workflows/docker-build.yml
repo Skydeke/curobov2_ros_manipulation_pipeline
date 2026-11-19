@@ -81,6 +81,11 @@ jobs:
         with:
           context: .
           file: docker/Dockerfile
+          # The Dockerfile requires this. The published image targets every
+          # major architecture the toolkit supports; override it for a faster
+          # single-GPU build.
+          build-args: |
+            CUROBO_CUDA_ARCHS=all-major
           push: true
           network: host
           tags: ${{ steps.meta.outputs.tags }}
