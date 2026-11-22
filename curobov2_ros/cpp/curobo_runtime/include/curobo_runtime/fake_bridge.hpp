@@ -65,6 +65,9 @@ public:
   std::vector<std::string> tool_frames(RobotHandle handle) override;
   LinkCollisionOutcome set_link_collision(
     RobotHandle handle, const std::vector<std::string> & link_names, bool enabled) override;
+  LinkCollisionOutcome set_object_link_collision(
+    RobotHandle handle, const std::string & object_name,
+    const std::vector<std::string> & link_names, bool enabled) override;
 
   // M3
   void motion_planner_build(RobotHandle handle, const std::string & cfg_json) override;

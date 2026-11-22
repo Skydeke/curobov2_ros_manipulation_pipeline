@@ -94,14 +94,15 @@ inline bool choose_window_shift(
   const double mid = 0.5 * (start_lift + target_lift);
   const double center = 0.5 * (window_lo + window_hi);
   const long long k_center = static_cast<long long>(std::llround((center - mid) / kTwoPiContinuous));
-  // A lift that ALREADY fits is preferred over a centred one. Centring moves
-  // the chart a whole turn away from the values the robot reports; a pose plan
-  // then lets the solver pick the equivalent goal branch, and the output
-  // (start - shift) can come back a full turn away from the measured state
-  // (a wrist joint spinning 360 deg for a goal the arm could reach as-is).
-  // Shift only when the pair does not fit where it is.
+  // CENTRE the segment first: a start/target pair sitting in the middle of the
+  // window leaves the solver room to turn in BOTH directions instead of hugging
+  // one edge. Centring moves the chart a whole turn away from the values the
+  // robot reports, but that is harmless now that the result is canonicalised on
+  // output (fill_result) -- the client never sees the shifted branch. The
+  // already-fitting and off-centre options remain as fallbacks for a segment
+  // that is too long to centre.
   const long long candidates[] = {
-    0, k_center, k_center - 1, k_center + 1, k_center - 2, k_center + 2};
+    k_center, 0, k_center - 1, k_center + 1, k_center - 2, k_center + 2};
   for (const long long k : candidates) {
     const double s = start_lift + static_cast<double>(k) * kTwoPiContinuous;
     const double t = target_lift + static_cast<double>(k) * kTwoPiContinuous;

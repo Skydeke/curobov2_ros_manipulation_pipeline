@@ -527,6 +527,12 @@ public:
   // PORT: robot_model_manager.set_link_collision (kc.enable/disable_link_spheres).
   virtual LinkCollisionOutcome set_link_collision(
     RobotHandle handle, const std::vector<std::string> & link_names, bool enabled) = 0;
+  // Per-object analogue of set_link_collision: disable/enable collisions
+  // between one named scene obstacle and the listed robot links only. The
+  // links keep colliding with the table and every other obstacle.
+  virtual LinkCollisionOutcome set_object_link_collision(
+    RobotHandle handle, const std::string & object_name,
+    const std::vector<std::string> & link_names, bool enabled) = 0;
 
   // ---- M3: planning -----------------------------------------------------
   // PORT: config_wrapper_motion.set_motion_gen_config (build the shared

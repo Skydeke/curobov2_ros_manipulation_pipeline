@@ -121,6 +121,14 @@ public:
   // -- shared
   void acquire_shared();
   void release_shared();
+
+  // Reader pause: while paused, no NEW shared acquire succeeds (existing
+  // readers drain normally). A writer uses this to stop capture lanes from
+  // re-entering between its request and its acquire, so the exclusive acquire
+  // is bounded by the in-flight frames only instead of by a stream of new
+  // ones. Resume must pair with every pause.
+  void pause_readers();
+  void resume_readers();
   // -- exclusive
   bool acquire_exclusive(bool blocking = true);
   void release_exclusive();
@@ -185,6 +193,7 @@ private:
   int readers_ = 0;
   std::optional<std::thread::id> writer_;
   int writers_waiting_ = 0;
+  int readers_paused_ = 0;
 };
 
 // PORT: gpu_lanes.py:LegacyGpuLock

@@ -515,6 +515,41 @@ bool PlannerServices::prepare_continuous_joints(
       continuous = is_continuous_range(lo, hi);
     }
     if (!continuous) {
+      // A BOUNDED revolute joint can still be reported on a 2*pi-shifted
+      // branch: the driver/encoder wraps, so e.g. joint_2 (limits [0.873,
+      // 5.411]) arrives as -2.363 = 3.920 - 2*pi. The joint is then outside its
+      // limits and every joint-space plan fails ("plan_cspace returned None"),
+      // which exhausts the recovery ladder. Its limits are narrower than one
+      // turn, so at most one 2*pi multiple lands inside them; apply it -- the
+      // same "same physical pose" repair the continuous joints get. A genuinely
+      // out-of-range joint has no such multiple and is left untouched.
+      const double requested_start = request.start[c];
+      if (std::isfinite(lo) && std::isfinite(hi) &&
+        (requested_start < lo || requested_start > hi))
+      {
+        const double k = std::round(
+          (0.5 * (lo + hi) - requested_start) / kTwoPiContinuous);
+        const double lifted = requested_start + k * kTwoPiContinuous;
+        if (lifted >= lo && lifted <= hi) {
+          const bool has_target = !request.joint_target.empty() &&
+            request.joint_target.size() == dof;
+          const double requested_target =
+            has_target ? static_cast<double>(request.joint_target[c]) : lifted;
+          request.start[c] = static_cast<float>(lifted);
+          if (has_target) {
+            // Shortest path from the lifted start, exactly like a continuous
+            // joint: the requested target may itself be on either branch.
+            request.joint_target[c] = static_cast<float>(
+              lifted + wrap_pi(requested_target - lifted));
+          }
+          RCLCPP_INFO(
+            node_->get_logger(),
+            "Bounded joint %s: requested start %.6f is outside [%.4f, %.4f]; "
+            "lifted by %+.6f rad to %.6f (wrapped encoder reading)",
+            name.c_str(), requested_start, lo, hi,
+            k * kTwoPiContinuous, lifted);
+        }
+      }
       continue;
     }
     if (!std::isfinite(lo) || !std::isfinite(hi)) {
@@ -546,12 +581,25 @@ bool PlannerServices::prepare_continuous_joints(
     const double requested_target =
       has_target ? static_cast<double>(request.joint_target[c]) : start_lift;
     if (has_target) {
-      // A single segment is a shortest-path move; multi-turn motion must be
-      // requested as explicit intermediate waypoints.
+      // Shortest path. Multi-turn motion is NOT inferred from the value: a
+      // legitimate named pose can sit outside (-pi, pi] (KATE's carry pose
+      // has joint_4 = -4.55), and preserving that delta turned every return
+      // leg into a ~5.6 rad wrist swing. Inferring it from a "whole number of
+      // turns" is equally wrong when the measured start is wound (home then
+      // reads as a 9-turn spin). An intentional multi-turn command needs an
+      // explicit wire opt-in, not a heuristic on the number.
       target_lift = start_lift + wrap_pi(requested_target - start_lift);
     }
 
     double shift = 0.0;
+    if (!choose_window_shift(start_lift, target_lift, lo, hi, shift) && has_target) {
+      // The requested delta does not fit this joint's window. The window is
+      // baked into the robot artifact, and a narrow one still caps a single
+      // segment; degrade to the shortest-path move rather than failing the
+      // whole leg (e.g. a recovery rung). A wide artifact window takes the
+      // branch above and honours the full multi-turn request.
+      target_lift = start_lift + wrap_pi(requested_target - start_lift);
+    }
     if (!choose_window_shift(start_lift, target_lift, lo, hi, shift)) {
       throw std::runtime_error(
         "continuous joint '" + name + "' has a window narrower than one turn "
@@ -567,11 +615,13 @@ bool PlannerServices::prepare_continuous_joints(
     {
       RCLCPP_INFO(
         node_->get_logger(),
-        "Continuous joint %s: requested start %.6f target %s -> shortest-path "
-        "start %.6f target %s (window shift %+.6f rad)",
+        "Continuous joint %s: requested start %.6f target %s -> branch start "
+        "%.6f target %s -> WINDOW start %.6f target %s (shift %+.6f rad)",
         name.c_str(), requested_start,
         has_target ? std::to_string(requested_target).c_str() : "(none)",
         start_lift, has_target ? std::to_string(target_lift).c_str() : "(none)",
+        start_lift + shift,
+        has_target ? std::to_string(target_lift + shift).c_str() : "(none)",
         shift);
     }
   }
@@ -1222,21 +1272,53 @@ void PlannerServices::fill_result(
   const std::int64_t dof = outcome.positions.shape.size() > 1 ? outcome.positions.shape[1] : 0;
   const std::int64_t rows = outcome.positions.shape.empty() ? 0 : outcome.positions.shape[0];
   const std::int64_t vdof = outcome.velocity.shape.size() > 1 ? outcome.velocity.shape[1] : 0;
+  const std::vector<std::string> & out_names =
+    outcome.joint_names.empty() ? joint_names_ : outcome.joint_names;
+  // One extra whole-turn constant per continuous joint, chosen so the FIRST
+  // point lands in the canonical chart (-pi, pi]. Subtracting window_shift
+  // alone only restores the MEASURED branch, which in this cell keeps winding
+  // (the Kinova counters accumulate turns: joint_6 has read -135 rad), so the
+  // client's plan chain would carry the wind-up into the next stage's
+  // requested start and every leg would have to be lifted back by whole turns.
+  //
+  // This is a whole-trajectory constant, NOT a per-point wrap: it is added to
+  // every point identically, so the path is preserved exactly -- including a
+  // motion of more than one turn -- and only the branch the client sees is
+  // canonical. The server still lifts the start to the measured branch
+  // internally for execution continuity (and align_trajectory_to_measured
+  // re-anchors the replay), so the physical plan is unchanged.
+  std::vector<double> canonical_shift(static_cast<std::size_t>(dof), 0.0);
+  for (std::int64_t j = 0; j < dof; ++j) {
+    const std::string & joint_name = static_cast<std::size_t>(j) < out_names.size() ?
+      out_names[static_cast<std::size_t>(j)] : std::string();
+    if (joint_name.empty() ||
+      !is_continuous_joint(continuous_joint_names_, joint_name))
+    {
+      continue;
+    }
+    const double shift = static_cast<std::size_t>(j) < request.window_shift.size() ?
+      request.window_shift[static_cast<std::size_t>(j)] : 0.0;
+    const double first =
+      outcome.positions.data[static_cast<std::size_t>(j)] - shift;
+    canonical_shift[static_cast<std::size_t>(j)] =
+      kTwoPiContinuous * std::round(first / kTwoPiContinuous);
+  }
   std::vector<std::vector<double>> position_rows;
   std::vector<std::vector<double>> velocity_rows;
   position_rows.reserve(static_cast<std::size_t>(rows));
   velocity_rows.reserve(static_cast<std::size_t>(rows));
   for (std::int64_t t = 0; t < rows; ++t) {
     sensor_msgs::msg::JointState js;
-    js.name = outcome.joint_names.empty() ? joint_names_ : outcome.joint_names;
+    js.name = out_names;
     for (std::int64_t j = 0; j < dof; ++j) {
-      // Remove the whole-turn window shift. It is a per-joint constant, so the
-      // physical path (FK/collision) is unchanged; the first point lands on
-      // the measured branch and no per-point rewrite happens after validation.
+      // Remove the whole-turn window shift plus the canonicalising constant.
+      // Both are per-joint constants, so the physical path (FK/collision) is
+      // unchanged; no per-point rewrite happens after validation.
       const double shift = static_cast<std::size_t>(j) < request.window_shift.size() ?
         request.window_shift[static_cast<std::size_t>(j)] : 0.0;
       js.position.push_back(
-        outcome.positions.data[static_cast<std::size_t>(t * dof + j)] - shift);
+        outcome.positions.data[static_cast<std::size_t>(t * dof + j)] - shift -
+        canonical_shift[static_cast<std::size_t>(j)]);
     }
     if (vdof > 0 &&
       outcome.velocity.data.size() >= static_cast<std::size_t>((t + 1) * vdof))

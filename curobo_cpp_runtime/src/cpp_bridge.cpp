@@ -16,6 +16,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <random>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -402,6 +403,12 @@ struct CppBridge::Impl
   bool native_scene_valid{true};
   bool python_planner_built{false};
   std::string motion_cfg_json;
+  // Per-object collision layers used by the extended SetLinkCollision path.
+  // Objects start on the common layer 1; an allowance moves one object to a
+  // private bit and clears that bit on the allowed links only.
+  std::map<std::string, std::uint32_t> object_layer_bits;
+  std::map<std::string, std::uint32_t> link_blocked_bits;
+  std::uint32_t next_object_layer_bit{2U};
 
   struct MapperState
   {
@@ -476,7 +483,9 @@ struct CppBridge::Impl
   {
     int tool_index{0};
     std::array<float, 7> object_in_link{};
-    float radius{0.0F};
+    // The SAME spheres the planner collides with, in the object frame. One
+    // ball for the whole payload hid every corner the surface fit covers.
+    std::vector<curobo::robot::CollisionSphere> spheres;
   };
   std::map<std::string, VisualAttachment> visual_attachments;
 
@@ -2579,6 +2588,8 @@ std::vector<std::uint8_t> CppBridge::validate(
   }
   const int lanes = std::max(1, impl_->planner_settings.num_trajopt_seeds);
   std::vector<std::uint8_t> valid(static_cast<std::size_t>(batch), 1);
+  int invalid_samples = 0;
+  int32_t invalid_flags = 0;
 
   for (int offset = 0; offset < batch; offset += lanes) {
     const int count = std::min(lanes, batch - offset);
@@ -2624,13 +2635,23 @@ std::vector<std::uint8_t> CppBridge::validate(
       const int32_t flags = host[static_cast<std::size_t>(lane)];
       valid[static_cast<std::size_t>(offset + lane)] = flags == 0 ? 1 : 0;
       if (flags != 0) {
-        std::fprintf(
-          stderr,
-          "[validate] invalid flags=%d (q=%d v=%d a=%d jerk=%d world=%d self=%d density=%d)\n",
-          flags, flags & 1, flags & 2, flags & 4, flags & 8, flags & 16, flags & 32,
-          flags & 64);
+        invalid_samples += 1;
+        invalid_flags |= flags;
       }
     }
+  }
+  // One summary line per validate() call instead of one per rejected sample:
+  // a single fan-out validation can reject hundreds of lanes, which otherwise
+  // floods the log.
+  if (invalid_samples > 0) {
+    std::fprintf(
+      stderr,
+      "[validate] %d/%d sample(s) invalid (flags=%d q=%d v=%d a=%d jerk=%d "
+      "world=%d self=%d density=%d)\n",
+      invalid_samples, batch, invalid_flags,
+      invalid_flags & 1, invalid_flags & 2, invalid_flags & 4,
+      invalid_flags & 8, invalid_flags & 16, invalid_flags & 32,
+      invalid_flags & 64);
   }
   return valid;
 }
@@ -2693,6 +2714,22 @@ curobo_runtime::SceneVersion CppBridge::scene_set(
   impl_->require_initialized("scene_set");
   impl_->ensure_scene();
   const auto version = impl_->scene->set_objects_json(objects_json, clear_first);
+  if (clear_first) {
+    // A new world starts with every link on the full layer mask. Restore any
+    // per-object allowance bits left by the previous scene before dropping
+    // the bookkeeping.
+    for (const auto & entry : impl_->link_blocked_bits) {
+      if (impl_->planner) {
+        impl_->planner->set_link_collision_mask(entry.first, 0xFFFFFFFFU);
+      }
+      if (impl_->ik) {
+        impl_->ik->set_link_collision_mask(entry.first, 0xFFFFFFFFU);
+      }
+    }
+    impl_->object_layer_bits.clear();
+    impl_->link_blocked_bits.clear();
+    impl_->next_object_layer_bit = 2U;
+  }
   if (clear_first && impl_->mapper && impl_->mapper->voxel_added) {
     // Scene::clear() also drops the voxel layer; re-attach the mapper grid from
     // its stable device ESDF buffer.
@@ -2757,6 +2794,200 @@ curobo_runtime::JointLimitsOutcome CppBridge::joint_limits(curobo_runtime::Robot
   outcome.unpinned_lock_joint_names = impl_->unpinned_lock_joint_names;
   return outcome;
 }
+
+
+namespace {
+
+// PORT: curobo/_src/geom/sphere_fit/sphere_count.py::estimate_sphere_count.
+// One sphere per 15 cm^3 of bounding-box volume, clamped to [3, 100].
+int estimate_sphere_count(float dx, float dy, float dz)
+{
+  const double volume_cm3 =
+    static_cast<double>(dx) * static_cast<double>(dy) * static_cast<double>(dz) *
+    1.0e6;  // m^3 -> cm^3
+  const int n = static_cast<int>((1.0 / 15.0) * volume_cm3);
+  return std::max(std::min(100, n), 3);
+}
+
+// PORT: trimesh.sample.sample_surface_even + trimesh.points.remove_close, the
+// two functions curobo's SphereFitType.SURFACE path runs
+// (fit_voxel.sample_even_fit_mesh -> trimesh.sample.sample_surface_even, which
+// calls trimesh.points.remove_close). SURFACE is NOT an inscribed-sphere fit:
+// it takes radius = sqrt(mesh.area / (3 * count)), draws 3 * count random
+// area-weighted points on the mesh triangles, greedily drops one point of every
+// pair closer than radius, and returns the first count survivors -- each with
+// the caller's fixed surface_radius. Replicated here for the primitive's
+// bounding mesh, which is the box for a CUBOID obstacle.
+
+struct MeshTriangle
+{
+  std::array<float, 3> origin;
+  std::array<float, 3> edge1;
+  std::array<float, 3> edge2;
+  float area{0.0F};
+};
+
+std::vector<MeshTriangle> box_mesh_triangles(float dx, float dy, float dz)
+{
+  const float hx = dx * 0.5F, hy = dy * 0.5F, hz = dz * 0.5F;
+  const std::array<std::array<float, 3>, 8> v = {{
+    {-hx, -hy, -hz}, {hx, -hy, -hz}, {hx, hy, -hz}, {-hx, hy, -hz},
+    {-hx, -hy, hz}, {hx, -hy, hz}, {hx, hy, hz}, {-hx, hy, hz}}};
+  const int faces[12][3] = {
+    {0, 1, 2}, {0, 2, 3}, {4, 6, 5}, {4, 7, 6}, {0, 4, 5}, {0, 5, 1},
+    {3, 2, 6}, {3, 6, 7}, {0, 3, 7}, {0, 7, 4}, {1, 5, 6}, {1, 6, 2}};
+  std::vector<MeshTriangle> tris;
+  tris.reserve(12);
+  for (const auto & f : faces) {
+    MeshTriangle t;
+    t.origin = v[static_cast<std::size_t>(f[0])];
+    const auto & b = v[static_cast<std::size_t>(f[1])];
+    const auto & c = v[static_cast<std::size_t>(f[2])];
+    t.edge1 = {b[0] - t.origin[0], b[1] - t.origin[1], b[2] - t.origin[2]};
+    t.edge2 = {c[0] - t.origin[0], c[1] - t.origin[1], c[2] - t.origin[2]};
+    const std::array<float, 3> cross = {
+      t.edge1[1] * t.edge2[2] - t.edge1[2] * t.edge2[1],
+      t.edge1[2] * t.edge2[0] - t.edge1[0] * t.edge2[2],
+      t.edge1[0] * t.edge2[1] - t.edge1[1] * t.edge2[0]};
+    t.area = 0.5F * std::sqrt(
+      cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]);
+    tris.push_back(t);
+  }
+  return tris;
+}
+
+// PORT: trimesh.points.remove_close. Keep points no closer than `radius`,
+// dropping, for every closer-than-radius pair, the endpoint that appears in
+// more such pairs (its "degree"); ties drop the first index, matching numpy's
+// argmax on [degree_i, degree_j].
+std::vector<std::array<float, 3>> remove_close(
+  const std::vector<std::array<float, 3>> & points, float radius)
+{
+  const std::size_t n = points.size();
+  std::vector<int> degree(n, 0);
+  std::vector<std::pair<std::size_t, std::size_t>> pairs;
+  const float r2 = radius * radius;
+  for (std::size_t i = 0; i < n; ++i) {
+    for (std::size_t j = i + 1; j < n; ++j) {
+      const float dx = points[i][0] - points[j][0];
+      const float dy = points[i][1] - points[j][1];
+      const float dz = points[i][2] - points[j][2];
+      if (dx * dx + dy * dy + dz * dz <= r2) {
+        pairs.emplace_back(i, j);
+        degree[i] += 1;
+        degree[j] += 1;
+      }
+    }
+  }
+  std::vector<bool> keep(n, true);
+  for (const auto & pair : pairs) {
+    keep[degree[pair.first] >= degree[pair.second] ? pair.first : pair.second] =
+      false;
+  }
+  std::vector<std::array<float, 3>> kept;
+  kept.reserve(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    if (keep[i]) {
+      kept.push_back(points[i]);
+    }
+  }
+  return kept;
+}
+
+std::vector<curobo::robot::CollisionSphere> fit_surface_spheres(
+  int type, const std::array<float, 3> & dims, int capacity)
+{
+  constexpr float kSurfaceRadius = 0.002F;  // surface_radius=0.002
+  constexpr float kPi = 3.14159265358979F;
+  std::vector<curobo::robot::CollisionSphere> spheres;
+  const float dx = std::max(1e-4F, dims[0]);
+  const float dy = std::max(1e-4F, dims[1]);
+  const float dz = std::max(1e-4F, dims[2]);
+  const int slots = std::max(1, capacity);
+  // estimate_sphere_count uses the mesh BOUNDING-BOX volume. A SPHERE obstacle
+  // carries its radius in `dims`, so its box is (2r)^3; a cuboid's dims are the
+  // box itself.
+  const float bx = (type == 1) ? 2.0F * dx : dx;
+  const float by = (type == 1) ? 2.0F * dy : dy;
+  const float bz = (type == 1) ? 2.0F * dz : dz;
+  const int n = std::max(
+    1, std::min(estimate_sphere_count(bx, by, bz), slots));
+
+  // trimesh draws from OS entropy when no seed is given, so the exact points
+  // differ run to run; the algorithm (and therefore the spacing statistics) is
+  // what is replicated. A fixed seed keeps a rebuild reproducible.
+  std::mt19937 rng(0x5EEDu);
+  std::uniform_real_distribution<float> uniform(0.0F, 1.0F);
+  std::vector<std::array<float, 3>> samples;
+  const int draws = n * 3;
+  samples.reserve(static_cast<std::size_t>(draws));
+  float radius = 0.0F;
+
+  if (type == 0) {  // cuboid: sample the box mesh triangles by area
+    const auto tris = box_mesh_triangles(dx, dy, dz);
+    float area = 0.0F;
+    std::vector<float> cumulative;
+    cumulative.reserve(tris.size());
+    for (const auto & t : tris) {
+      area += t.area;
+      cumulative.push_back(area);
+    }
+    radius = std::sqrt(area / (3.0F * static_cast<float>(n)));
+    for (int k = 0; k < draws; ++k) {
+      const float pick = uniform(rng) * area;
+      std::size_t index = 0;
+      while (index + 1 < cumulative.size() && cumulative[index] < pick) {
+        ++index;
+      }
+      const auto & t = tris[index];
+      float a = uniform(rng);
+      float b = uniform(rng);
+      if (a + b > 1.0F) {
+        a = 1.0F - a;
+        b = 1.0F - b;
+      }
+      samples.push_back({
+        t.origin[0] + a * t.edge1[0] + b * t.edge2[0],
+        t.origin[1] + a * t.edge1[1] + b * t.edge2[1],
+        t.origin[2] + a * t.edge1[2] + b * t.edge2[2]});
+    }
+  } else {
+    // Sphere (type 1) and anything else: the shell of the primitive, sampled
+    // uniformly and thinned the same way.
+    const bool is_sphere = (type == 1);
+    const float R = 0.5F * dx;
+    const float hx = 0.5F * dx, hy = 0.5F * dy, hz = 0.5F * dz;
+    const float area = is_sphere
+      ? 4.0F * kPi * R * R
+      : 2.0F * (dx * dy + dy * dz + dz * dx);
+    radius = std::sqrt(area / (3.0F * static_cast<float>(n)));
+    for (int k = 0; k < draws; ++k) {
+      const float phi = std::acos(1.0F - 2.0F * uniform(rng));
+      const float theta = 2.0F * kPi * uniform(rng);
+      const float sx = std::sin(phi) * std::cos(theta);
+      const float sy = std::sin(phi) * std::sin(theta);
+      const float sz = std::cos(phi);
+      std::array<float, 3> point;
+      if (is_sphere) {
+        point = {R * sx, R * sy, R * sz};
+      } else {
+        point = {hx * sx, hy * sy, hz * sz};
+      }
+      samples.push_back(point);
+    }
+  }
+
+  const auto kept = remove_close(samples, radius);
+  for (std::size_t i = 0; i < kept.size() && static_cast<int>(i) < n; ++i) {
+    curobo::robot::CollisionSphere s;
+    s.center = kept[i];
+    s.radius = kSurfaceRadius;
+    spheres.push_back(s);
+  }
+  return spheres;
+}
+
+}  // namespace
 
 void CppBridge::attach_object(
   curobo_runtime::RobotHandle, const std::string & name, const std::vector<float> & q)
@@ -2832,20 +3063,20 @@ void CppBridge::attach_object(
   attachment.object_in_link.position = {relative[0], relative[1], relative[2]};
   attachment.object_in_link.quaternion = {
     relative[3], relative[4], relative[5], relative[6]};
-  // One enclosing sphere is conservative and keeps the attachment within the
-  // per-link slot budget the artifact reserves for a grasp payload.
-  curobo::robot::CollisionSphere sphere;
-  sphere.center = {0.0F, 0.0F, 0.0F};
-  if (record->type == 1) {  // sphere
-    sphere.radius = std::max(0.005F, record->dims[0]);
-  } else {
-    // Inscribed sphere: never protrudes outside the object's own AABB, so it
-    // cannot dip through the support plane at the grasp pose.
-    sphere.radius = std::max(
-      0.005F, 0.5F * std::min(
-        record->dims[0], std::min(record->dims[1], record->dims[2])));
+  // Surface fit, not one inscribed sphere: every corner and protrusion of the
+  // payload is covered, which is what the Python path does (morphit SURFACE
+  // fit) and what keeps the payload from passing through the world.
+  // The fit is capped by the attach link's sphere-slot capacity, exactly like
+  // the Python path's min(estimate_sphere_count(mesh), n_slots).
+  int attach_capacity = 0;
+  {
+    const auto slots_it = impl_->native_sphere_slots.find(link);
+    if (slots_it != impl_->native_sphere_slots.end()) {
+      attach_capacity = static_cast<int>(slots_it->second.size());
+    }
   }
-  attachment.spheres.push_back(sphere);
+  attachment.spheres = fit_surface_spheres(
+    record->type, record->dims, attach_capacity);
   if (impl_->scene) {
     // The grasped obstacle stays in the scene list (so detach can restore it)
     // but must not collide with the attachment model or the gripper at the
@@ -2859,7 +3090,35 @@ void CppBridge::attach_object(
   impl_->attached_objects.insert(name);
   impl_->attach_links[name] = link;
   impl_->visual_attachments[name] = Impl::VisualAttachment{
-    best_tool, relative, sphere.radius};
+    best_tool, relative, attachment.spheres};
+  // Diagnostic: where the payload actually lands in the world, so a retreat
+  // that cannot find a path can be checked against the table plane and the
+  // grasp pose instead of guessed at.
+  {
+    const auto tool = tool_poses[static_cast<std::size_t>(best_tool)];
+    const auto object_world = pose_multiply(tool, relative);
+    const float w = object_world[3], x = object_world[4], y = object_world[5],
+      zq = object_world[6];
+    float zmin = std::numeric_limits<float>::infinity();
+    float zmax = -std::numeric_limits<float>::infinity();
+    for (const auto & sphere : attachment.spheres) {
+      const float vx = sphere.center[0], vy = sphere.center[1],
+        vz = sphere.center[2];
+      const float tx = 2.0F * (y * vz - zq * vy);
+      const float ty = 2.0F * (zq * vx - x * vz);
+      const float tz = 2.0F * (x * vy - y * vx);
+      const float cz = vz + w * tz + (x * ty - y * tx) + object_world[2];
+      zmin = std::min(zmin, cz - sphere.radius);
+      zmax = std::max(zmax, cz + sphere.radius);
+    }
+    std::fprintf(
+      stderr,
+      "[attach] '%s' -> '%s': object world z=%.4f dims=(%.3f,%.3f,%.3f) "
+      "%zu spheres, payload world z [%.4f, %.4f]\n",
+      name.c_str(), link.c_str(), object_world[2],
+      record->dims[0], record->dims[1], record->dims[2],
+      attachment.spheres.size(), zmin, zmax);
+  }
 }
 
 std::string CppBridge::detach_object(curobo_runtime::RobotHandle)
@@ -2936,10 +3195,24 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
       }
     }
 
-    // Native attach writes into the attach link's reserved sphere slots. Mirror
-    // the same slots here: the pair list already contains them, so the payload
-    // participates in the exact self-collision query instead of being appended
-    // as an extra collider outside the model.
+    // The attach link's reserved slots carry the payload's FITTED spheres --
+    // the exact set the planner collides with (attach_object wrote them into
+    // the solver's model). Mirror that set here so RViz shows the payload the
+    // way the Python path does: the fitted surface spheres themselves, not one
+    // enclosing ball. Slots beyond the fitted count are disabled (radius -100).
+    const auto rotate_point = [](const std::array<float, 7> & pose,
+                                 const std::array<float, 3> & v) {
+        // Poses here are [x,y,z,qw,qx,qy,qz] (w FIRST), matching pose_multiply /
+        // pose_inverse and Pose::quaternion.
+        const float w = pose[3], x = pose[4], y = pose[5], z = pose[6];
+        const float tx = 2.0F * (y * v[2] - z * v[1]);
+        const float ty = 2.0F * (z * v[0] - x * v[2]);
+        const float tz = 2.0F * (x * v[1] - y * v[0]);
+        return std::array<float, 3>{
+          v[0] + w * tx + (y * tz - z * ty) + pose[0],
+          v[1] + w * ty + (z * tx - x * tz) + pose[1],
+          v[2] + w * tz + (x * ty - y * tx) + pose[2]};
+      };
     std::set<int> used_slots;
     for (const auto & entry : impl_->visual_attachments) {
       const auto link_it = impl_->attach_links.find(entry.first);
@@ -2950,25 +3223,29 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
       if (slots_it == impl_->native_sphere_slots.end()) {
         continue;
       }
-      int slot = -1;
-      for (const int candidate : slots_it->second) {
-        if (used_slots.insert(candidate).second) {
-          slot = candidate;
-          break;
-        }
-      }
-      if (slot < 0) {
-        continue;
-      }
       const auto & attachment = entry.second;
       const auto tool = impl_->tool_pose(q, attachment.tool_index, "collision_spheres");
       const auto world = pose_multiply(tool, attachment.object_in_link);
-      const std::size_t base = static_cast<std::size_t>(slot) * 4;
-      outcome.spheres.data[base + 0] = world[0];
-      outcome.spheres.data[base + 1] = world[1];
-      outcome.spheres.data[base + 2] = world[2];
-      outcome.spheres.data[base + 3] = attachment.radius;
-      outcome.attached[static_cast<std::size_t>(slot)] = 1;
+      const auto & slots = slots_it->second;
+      for (std::size_t k = 0; k < slots.size(); ++k) {
+        const std::size_t slot = static_cast<std::size_t>(slots[k]);
+        if (slot >= n) {
+          continue;
+        }
+        used_slots.insert(slots[k]);
+        const std::size_t base = slot * 4;
+        if (k < attachment.spheres.size()) {
+          const auto & sphere = attachment.spheres[k];
+          const auto center = rotate_point(world, sphere.center);
+          outcome.spheres.data[base + 0] = center[0];
+          outcome.spheres.data[base + 1] = center[1];
+          outcome.spheres.data[base + 2] = center[2];
+          outcome.spheres.data[base + 3] = sphere.radius;
+          outcome.attached[slot] = 1;
+        } else {
+          outcome.spheres.data[base + 3] = -100.0F;
+        }
+      }
     }
 
     // Exact self-collision pair distances, same tensors as the native kernel.
@@ -3063,59 +3340,80 @@ curobo_runtime::SphereSetOutcome CppBridge::collision_spheres_with_attached(
   const bool has_self_distance = has_per_row(outcome.self_distance);
   const bool has_world_distance = has_per_row(outcome.world_distance);
   const bool has_link_names = outcome.link_names.size() == base_rows;
+  const auto rotate_point = [](const std::array<float, 7> & pose,
+                               const std::array<float, 3> & v) {
+      // Poses here are [x,y,z,qw,qx,qy,qz] (w FIRST), matching pose_multiply /
+      // pose_inverse and Pose::quaternion. Reading w last rotated every
+      // attached sphere by the wrong quaternion, which is the "payload drawn
+      // somewhere else" symptom.
+      const float w = pose[3], x = pose[4], y = pose[5], z = pose[6];
+      const float tx = 2.0F * (y * v[2] - z * v[1]);
+      const float ty = 2.0F * (z * v[0] - x * v[2]);
+      const float tz = 2.0F * (x * v[1] - y * v[0]);
+      return std::array<float, 3>{
+        v[0] + w * tx + (y * tz - z * ty) + pose[0],
+        v[1] + w * ty + (z * tx - x * tz) + pose[1],
+        v[2] + w * tz + (x * ty - y * tx) + pose[2]};
+    };
   for (const auto & entry : impl_->visual_attachments) {
     const auto & attachment = entry.second;
     const auto tool = impl_->tool_pose(q, attachment.tool_index, "collision_spheres");
     const auto world = pose_multiply(tool, attachment.object_in_link);
-    outcome.spheres.data.push_back(world[0]);
-    outcome.spheres.data.push_back(world[1]);
-    outcome.spheres.data.push_back(world[2]);
-    outcome.spheres.data.push_back(attachment.radius);
-    outcome.attached.push_back(1);
-    if (has_padding) {
-      outcome.self_padding.data.push_back(0.0F);
-    }
-    if (has_self_distance) {
-      // Not a member of the embedded model's pair list: no self constraint.
-      outcome.self_distance.data.push_back(
-        -std::numeric_limits<float>::infinity());
-    }
-    if (has_world_distance) {
-      // The world copy is disabled while attached; the diagnostic scene may
-      // still contain it. Leave this row explicitly unknown rather than
-      // reporting the payload as penetrating itself.
-      outcome.world_distance.data.push_back(std::numeric_limits<float>::quiet_NaN());
-    }
-    if (has_link_names) {
-      const auto link = impl_->attach_links.find(entry.first);
-      outcome.link_names.push_back(
-        link == impl_->attach_links.end() ? std::string() : link->second);
-    }
-    if (outcome.attached_local.shape.size() == 2 &&
-      outcome.attached_local.shape[1] == 4)
-    {
-      outcome.attached_local.data.push_back(0.0F);
-      outcome.attached_local.data.push_back(0.0F);
-      outcome.attached_local.data.push_back(0.0F);
-      outcome.attached_local.data.push_back(0.0F);
-      outcome.attached_local.shape[0] =
-        static_cast<std::int64_t>(outcome.attached_local.shape[0] + 1);
+    for (const auto & sphere : attachment.spheres) {
+      const auto center = rotate_point(world, sphere.center);
+      outcome.spheres.data.push_back(center[0]);
+      outcome.spheres.data.push_back(center[1]);
+      outcome.spheres.data.push_back(center[2]);
+      outcome.spheres.data.push_back(sphere.radius);
+      outcome.attached.push_back(1);
+      if (has_padding) {
+        outcome.self_padding.data.push_back(0.0F);
+      }
+      if (has_self_distance) {
+        // Not a member of the embedded model's pair list: no self constraint.
+        outcome.self_distance.data.push_back(
+          -std::numeric_limits<float>::infinity());
+      }
+      if (has_world_distance) {
+        // The world copy is disabled while attached; the diagnostic scene may
+        // still contain it. Leave this row explicitly unknown rather than
+        // reporting the payload as penetrating itself.
+        outcome.world_distance.data.push_back(
+          std::numeric_limits<float>::quiet_NaN());
+      }
+      if (has_link_names) {
+        const auto link = impl_->attach_links.find(entry.first);
+        outcome.link_names.push_back(
+          link == impl_->attach_links.end() ? std::string() : link->second);
+      }
+      if (outcome.attached_local.shape.size() == 2 &&
+        outcome.attached_local.shape[1] == 4)
+      {
+        // `attached_local` is drawn in the ATTACH FRAME, so the centre must be
+        // the object-frame sphere transformed by object_in_link. Writing the
+        // object-frame centre here offset every payload sphere by the object's
+        // pose within the link (up to ~0.3 m in the viewer).
+        const auto local = rotate_point(attachment.object_in_link, sphere.center);
+        outcome.attached_local.data.push_back(local[0]);
+        outcome.attached_local.data.push_back(local[1]);
+        outcome.attached_local.data.push_back(local[2]);
+        outcome.attached_local.data.push_back(sphere.radius);
+        outcome.attached_local.shape[0] =
+          static_cast<std::int64_t>(outcome.attached_local.shape[0] + 1);
+      }
     }
   }
+  const std::size_t rows = static_cast<std::size_t>(outcome.spheres.data.size() / 4);
   if (has_padding) {
-    outcome.self_padding.shape[0] = static_cast<std::int64_t>(
-      base_rows + impl_->visual_attachments.size());
+    outcome.self_padding.shape[0] = static_cast<std::int64_t>(rows);
   }
   if (has_self_distance) {
-    outcome.self_distance.shape[0] = static_cast<std::int64_t>(
-      base_rows + impl_->visual_attachments.size());
+    outcome.self_distance.shape[0] = static_cast<std::int64_t>(rows);
   }
   if (has_world_distance) {
-    outcome.world_distance.shape[0] = static_cast<std::int64_t>(
-      base_rows + impl_->visual_attachments.size());
+    outcome.world_distance.shape[0] = static_cast<std::int64_t>(rows);
   }
-  outcome.spheres.shape[0] = static_cast<std::int64_t>(
-    base_rows + impl_->visual_attachments.size());
+  outcome.spheres.shape[0] = static_cast<std::int64_t>(rows);
   return outcome;
 }
 
@@ -3150,6 +3448,95 @@ curobo_runtime::LinkCollisionOutcome CppBridge::set_link_collision(
   }
   if (impl_->python) {
     impl_->python->set_link_collision(impl_->python_handle, link_names, enabled);
+  }
+  return outcome;
+}
+
+curobo_runtime::LinkCollisionOutcome CppBridge::set_object_link_collision(
+  curobo_runtime::RobotHandle, const std::string & object_name,
+  const std::vector<std::string> & link_names, bool enabled)
+{
+  std::lock_guard<std::mutex> lock(impl_->mutex);
+  impl_->require_initialized("set_object_link_collision");
+  curobo_runtime::LinkCollisionOutcome outcome;
+
+  const auto * record = impl_->scene ? impl_->scene->object(object_name) : nullptr;
+  if (record == nullptr) {
+    outcome.unknown = link_names;
+    if (impl_->python) {
+      try {
+        impl_->python->set_object_link_collision(
+          impl_->python_handle, object_name, link_names, enabled);
+      } catch (const std::exception &) {
+      }
+    }
+    return outcome;
+  }
+
+  const std::uint32_t all_bits = 0xFFFFFFFFU;
+  auto apply_masks = [&](const std::vector<std::string> & links, std::uint32_t blocked_add,
+      std::uint32_t blocked_remove) {
+      for (const auto & link : links) {
+        if (std::find(impl_->link_names.begin(), impl_->link_names.end(), link) ==
+          impl_->link_names.end())
+        {
+          outcome.unknown.push_back(link);
+          continue;
+        }
+        std::uint32_t & blocked = impl_->link_blocked_bits[link];
+        blocked |= blocked_add;
+        blocked &= ~blocked_remove;
+        const std::uint32_t mask = all_bits & ~blocked;
+        if (impl_->planner) {
+          impl_->planner->set_link_collision_mask(link, mask);
+        }
+        if (impl_->ik) {
+          impl_->ik->set_link_collision_mask(link, mask);
+        }
+        outcome.applied.push_back(link);
+      }
+    };
+
+  auto it = impl_->object_layer_bits.find(object_name);
+  if (!enabled) {
+    std::uint32_t bit = 0U;
+    if (it == impl_->object_layer_bits.end()) {
+      bit = impl_->next_object_layer_bit;
+      if (bit == 0U || bit == 1U) {
+        outcome.unknown = link_names;
+        return outcome;
+      }
+      impl_->next_object_layer_bit <<= 1U;
+      impl_->object_layer_bits[object_name] = bit;
+    } else {
+      bit = it->second;
+    }
+    impl_->scene->scene().set_obstacle_layers(record->handle, bit);
+    apply_masks(link_names, bit, 0U);
+  } else if (it != impl_->object_layer_bits.end()) {
+    const std::uint32_t bit = it->second;
+    impl_->scene->scene().set_obstacle_layers(record->handle, 1U);
+    apply_masks(link_names, 0U, bit);
+  } else {
+    // Already enabled. Still report the links so a repeated call is a no-op
+    // success rather than an empty failure.
+    for (const auto & link : link_names) {
+      if (std::find(impl_->link_names.begin(), impl_->link_names.end(), link) ==
+        impl_->link_names.end())
+      {
+        outcome.unknown.push_back(link);
+      } else {
+        outcome.applied.push_back(link);
+      }
+    }
+  }
+
+  if (impl_->python) {
+    try {
+      impl_->python->set_object_link_collision(
+        impl_->python_handle, object_name, link_names, enabled);
+    } catch (const std::exception &) {
+    }
   }
   return outcome;
 }

@@ -1126,6 +1126,23 @@ LinkCollisionOutcome PyBridge::set_link_collision(
   }
 }
 
+LinkCollisionOutcome PyBridge::set_object_link_collision(
+  RobotHandle handle, const std::string & object_name,
+  const std::vector<std::string> & link_names, bool enabled)
+{
+  py::gil_scoped_acquire gil;
+  try {
+    py::object result = bridge_module().attr("set_object_link_collision")(
+      handle, object_name, link_names, enabled);
+    LinkCollisionOutcome out;
+    out.applied = result.attr("__getitem__")("applied").cast<std::vector<std::string>>();
+    out.unknown = result.attr("__getitem__")("unknown").cast<std::vector<std::string>>();
+    return out;
+  } catch (const py::error_already_set & e) {
+    throw BridgeError("programming", e.what());
+  }
+}
+
 // ---- M5: reactive control (MPC) --------------------------------------------
 namespace
 {

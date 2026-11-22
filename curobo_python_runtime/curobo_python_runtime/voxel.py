@@ -210,14 +210,22 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     # collision model keeps the unmodified radii, so planning clearance is
     # unchanged.
     if spheres.numel() > 0:
-        centres = spheres[:, :3]
-        dist = torch.cdist(centres.unsqueeze(0), centres.unsqueeze(0))[0]
-        dist.fill_diagonal_(float("inf"))
-        pad = torch.clamp(0.5 * dist.min(dim=1).values, max=0.05)
-        # Never "revive" a disabled sphere (negative radius = collision sentinel).
-        pad = torch.where(spheres[:, 3] > 0.0, pad, torch.zeros_like(pad))
-        spheres = torch.cat([centres, (spheres[:, 3] + pad).unsqueeze(1)], dim=1)
-        del centres, dist, pad
+        # Nearest-neighbour spacing is computed over the VALID spheres only. A
+        # disabled slot (radius -100) is a collision sentinel whose centre sits
+        # at its link origin (the flange); including it in the neighbour search
+        # gave a real gripper/finger sphere a too-small pad, so its surface was
+        # under-covered and robot pixels survived the mask.
+        valid = spheres[:, 3] > 0.0
+        pad = torch.zeros_like(spheres[:, 3])
+        if bool(valid.any()):
+            vcentres = spheres[valid, :3]
+            dist = torch.cdist(vcentres.unsqueeze(0), vcentres.unsqueeze(0))[0]
+            dist.fill_diagonal_(float("inf"))
+            pad[valid] = torch.clamp(0.5 * dist.min(dim=1).values, max=0.05)
+            del vcentres, dist
+        spheres = torch.cat(
+            [spheres[:, :3], (spheres[:, 3] + pad).unsqueeze(1)], dim=1)
+        del pad
 
     # One kernel launch replaces the host-side pixel loop: unproject, transform to
     # base, compare against every sphere. `masks_json` shapes are a per-tool

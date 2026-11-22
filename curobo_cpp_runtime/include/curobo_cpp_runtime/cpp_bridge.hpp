@@ -99,6 +99,9 @@ public:
   curobo_runtime::LinkCollisionOutcome set_link_collision(
     curobo_runtime::RobotHandle handle, const std::vector<std::string> & link_names,
     bool enabled) override;
+  curobo_runtime::LinkCollisionOutcome set_object_link_collision(
+    curobo_runtime::RobotHandle handle, const std::string & object_name,
+    const std::vector<std::string> & link_names, bool enabled) override;
 
   // ---- planning ----
   void motion_planner_build(
