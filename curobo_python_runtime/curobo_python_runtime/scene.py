@@ -426,6 +426,22 @@ def _clear_attached_voxels(handle: int, spec) -> bool:
     except Exception:
         return False
     return False
+def _apply_link_collision_mask(kparams, link: str, layers: int) -> None:
+    import torch
+
+    link_idx = kparams.link_name_to_idx_map[link]
+    idx = torch.as_tensor(link_idx, device=kparams.link_sphere_idx_map.device)
+    if idx.ndim == 0:
+        selected = kparams.link_sphere_idx_map == idx
+    else:
+        selected = torch.isin(kparams.link_sphere_idx_map, idx)
+    value = int(layers)
+    if value >= 1 << 31:
+        value -= 1 << 32
+    masks = kparams.sphere_collision_mask.view(torch.int32)
+    masks.masked_fill_(selected.unsqueeze(0), value)
+
+
 def set_object_link_collision(handle: int, object_name: str, link_names,
                              enabled: bool) -> dict:
     """Toggle collisions between one scene obstacle and specific links only.
@@ -497,7 +513,7 @@ def set_object_link_collision(handle: int, object_name: str, link_names,
         else:
             blocked &= ~bit
         blocked_bits[link] = blocked
-        kparams.set_link_collision_mask(link, all_bits & ~blocked)
+        _apply_link_collision_mask(kparams, link, all_bits & ~blocked)
         applied.append(link)
     if enabled and object_name in object_bits:
         object_bits.pop(object_name, None)

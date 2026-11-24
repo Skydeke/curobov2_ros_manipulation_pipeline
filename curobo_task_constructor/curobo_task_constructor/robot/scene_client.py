@@ -64,22 +64,6 @@ def _desired_attached(scene) -> list:
     return [single] if single else []
 
 
-def _joint_fit_key(joint_state):
-    """Hashable identity of a payload fitting configuration, or None.
-
-    The server stores ONE ``object_in_link`` per payload; two plans that fit at
-    different configurations need a fresh attach, and two that fit at the same
-    one do not. ``None`` means "no configuration supplied" (the server would
-    fall back to the current state), which never matches a real fit.
-    """
-    if joint_state is None:
-        return None
-    positions = getattr(joint_state, "position", None)
-    if not positions:
-        return None
-    return tuple(round(float(v), 6) for v in positions)
-
-
 class _SceneClientMixin:
     def get_object_pose(self, name: str):
         rec = self._query_scene_objects().get(name)
@@ -321,7 +305,6 @@ class _SceneClientMixin:
             self._plan_scene_active = True
             self._plan_scene_original = list(self.get_attached_objects() or [])
             self._plan_scene_attached = []
-            self._plan_scene_fit = None
         desired = _desired_attached(scene)
         if not desired:
             # No payload for this leg. Drop any stale attach once so a later
@@ -331,19 +314,17 @@ class _SceneClientMixin:
                 for name in self._plan_scene_original:
                     self.attach_object(name, joint_state=joint_state)
                 self._plan_scene_attached = []
-                self._plan_scene_fit = None
             return
-        # Re-attach whenever the desired set OR the configuration it is fitted
-        # at changes. The server holds ONE fitting configuration per payload
-        # (``object_in_link``), and every solve after the grasp uses it to place
-        # the payload's spheres. If the set is unchanged but the planning state
-        # moved -- a later leg of the same task, or a fresh burst on a server
-        # that still holds the previous attach -- skipping the attach here leaves
-        # the payload fitted at the OLD joint state, so the retreat plans
-        # against a payload placed where the arm was, not where it is going.
-        fit_key = _joint_fit_key(joint_state)
-        if (desired == list(self._plan_scene_attached or [])
-                and fit_key == self._plan_scene_fit):
+        # Attach ONCE, at the configuration where the object is actually
+        # grasped. The first post-grasp leg (the retreat) starts at the grasp
+        # pose, so its ``joint_state`` is the correct fit. Later legs must NOT
+        # re-fit: the server stores one ``object_in_link`` per payload and
+        # places it relative to the CURRENT flange. Re-fitting at a later leg's
+        # start (the lift end, the carry start) pins the payload to the object's
+        # ORIGINAL world pose at that flange -- i.e. below the hand, back on the
+        # table -- so the return leg drags it through the table and
+        # ``plan_cspace`` returns None even though start and goal are clear.
+        if desired == list(self._plan_scene_attached or []):
             return
         self.detach_object(None)
         for name in self._plan_scene_original:
@@ -352,7 +333,6 @@ class _SceneClientMixin:
         for name in desired:
             self.attach_object(name, joint_state=joint_state)
         self._plan_scene_attached = list(desired)
-        self._plan_scene_fit = fit_key
 
     def end_plan_scene(self) -> None:
         """Restore the attach state captured by ``plan_scene``. Called at the end of a plan burst (``TaskExecutor.plan``). Detaches the

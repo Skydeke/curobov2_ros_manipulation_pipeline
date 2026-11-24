@@ -2,3 +2,11 @@
 	path = curobo/curobo
 	url = https://github.com/Skydeke/curobo.git
 	branch = main
+[submodule "cutamp/cutamp"]
+	path = cutamp/cutamp
+	url = https://github.com/Skydeke/cuTAMP.git
+	branch = main
+[submodule "graspgenx/GraspGenX"]
+	path = graspgenx/GraspGenX
+	url = https://github.com/Skydeke/GraspGenX.git
+	branch = main

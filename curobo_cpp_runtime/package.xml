@@ -16,6 +16,7 @@
 
   <depend>rclcpp</depend>
   <depend>rclcpp_action</depend>
+  <depend>rclcpp_components</depend>
   <depend>curobov2_ros</depend>
   <depend>curobov2_ros_interfaces</depend>
   <depend>geometry_msgs</depend>
