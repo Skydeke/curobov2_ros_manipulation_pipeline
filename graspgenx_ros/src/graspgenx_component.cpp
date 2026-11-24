@@ -7,6 +7,8 @@
 #include <rclcpp_components/register_node_macro.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
 #include <sensor_msgs/msg/point_field.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <algorithm>
 #include <array>
@@ -41,6 +43,7 @@ struct Candidate
 {
   Mat4 pose;
   double score;
+  double width{0.0};
 };
 
 Mat4 identity()
@@ -149,6 +152,28 @@ geometry_msgs::msg::PoseStamped stamped_pose(
   return message;
 }
 
+Mat4 matrix_from_pose(const geometry_msgs::msg::Pose & pose)
+{
+  const double x = pose.orientation.x;
+  const double y = pose.orientation.y;
+  const double z = pose.orientation.z;
+  const double w = pose.orientation.w;
+  Mat4 m = identity();
+  m[0] = 1.0 - 2.0 * (y * y + z * z);
+  m[1] = 2.0 * (x * y - w * z);
+  m[2] = 2.0 * (x * z + w * y);
+  m[4] = 2.0 * (x * y + w * z);
+  m[5] = 1.0 - 2.0 * (x * x + z * z);
+  m[6] = 2.0 * (y * z - w * x);
+  m[8] = 2.0 * (x * z - w * y);
+  m[9] = 2.0 * (y * z + w * x);
+  m[10] = 1.0 - 2.0 * (x * x + y * y);
+  m[3] = pose.position.x;
+  m[7] = pose.position.y;
+  m[11] = pose.position.z;
+  return m;
+}
+
 float read_component(
   const std::uint8_t * pointer, std::uint8_t datatype, bool big_endian)
 {
@@ -250,6 +275,8 @@ public:
         &GraspGenXComponent::handle_generate_grasps, this,
         std::placeholders::_1, std::placeholders::_2),
       rclcpp::ServicesQoS(), service_group_);
+    hand_publisher_ =
+      create_publisher<visualization_msgs::msg::MarkerArray>("~/hand", 1);
 
     rclcpp::QoS objects_qos(1);
     objects_qos.reliable().transient_local();
@@ -382,7 +409,7 @@ private:
       };
       if (
         std::abs(local[0]) <= half[0] && std::abs(local[1]) <= half[1] &&
-        std::abs(local[2]) <= half[2])
+        std::abs(local[2]) <= half[2] && local[2] >= -half[2] + 0.005)
       {
         cropped.push_back(point);
       }
@@ -618,15 +645,58 @@ private:
 
       // Keep only candidates whose open finger volume actually contains
       // object points. The network predicts in free space as well; those
-      // candidates close on air.
+      // candidates close on air. Clamp each pose above the support plane
+      // FIRST, so a grasp that the clamp pushes off the object is dropped
+      // here instead of being published and closing above it.
       const double half_width = std::max(0.07, 0.5 * sweep_extents_open_[0]);
       const double half_thick = std::max(0.02, 0.5 * sweep_extents_open_[1]);
       const double depth_min = 0.0;
       const double depth_max =
         std::max(0.09, sweep_offset_open_[2] + 0.5 * sweep_extents_open_[2]);
+
+      const auto & obb = object.obb;
+      const double qn = std::sqrt(
+        obb.pose.orientation.x * obb.pose.orientation.x +
+        obb.pose.orientation.y * obb.pose.orientation.y +
+        obb.pose.orientation.z * obb.pose.orientation.z +
+        obb.pose.orientation.w * obb.pose.orientation.w);
+      const double qx = obb.pose.orientation.x / (qn > 1e-9 ? qn : 1.0);
+      const double qy = obb.pose.orientation.y / (qn > 1e-9 ? qn : 1.0);
+      const double qz = obb.pose.orientation.z / (qn > 1e-9 ? qn : 1.0);
+      const double qw = obb.pose.orientation.w / (qn > 1e-9 ? qn : 1.0);
+      const double half_z = 0.5 * (
+        std::abs(2.0 * (qx * qz - qw * qy)) * obb.scale.x +
+        std::abs(2.0 * (qy * qz + qw * qx)) * obb.scale.y +
+        std::abs(1.0 - 2.0 * (qx * qx + qy * qy)) * obb.scale.z);
+      const double plane_clearance =
+        static_cast<double>(request->min_distance_to_plane);
+      const double plane_floor = obb.pose.position.z - half_z + plane_clearance;
+      auto clamp_to_plane = [&](Mat4 & pose) {
+          const double ex = 0.5 * sweep_extents_open_[0];
+          const double ey = 0.5 * sweep_extents_open_[1];
+          const double ez = 0.5 * sweep_extents_open_[2];
+          double min_z = 1e9;
+          for (int sx = -1; sx <= 1; sx += 2) {
+            for (int sy = -1; sy <= 1; sy += 2) {
+              for (int sz = -1; sz <= 1; sz += 2) {
+                const double x = sx * ex + sweep_offset_open_[0];
+                const double y = sy * ey + sweep_offset_open_[1];
+                const double z = sz * ez + sweep_offset_open_[2];
+                const double wz =
+                  pose[8] * x + pose[9] * y + pose[10] * z + pose[11];
+                min_z = std::min(min_z, wz);
+              }
+            }
+          }
+          if (min_z < plane_floor) {
+            pose[11] += plane_floor - min_z;
+          }
+        };
+
       std::vector<Candidate> inliers;
       inliers.reserve(candidates.size());
-      for (const auto & candidate : candidates) {
+      for (auto & candidate : candidates) {
+        clamp_to_plane(candidate.pose);
         const Mat4 & g = candidate.pose;
         const double tx = g[3], ty = g[7], tz = g[11];
         std::size_t inside = 0;
@@ -654,7 +724,9 @@ private:
           inside >= needed && min_x <= -0.003 && max_x >= 0.003 &&
           std::abs(centre) <= 0.015)
         {
-          inliers.push_back(candidate);
+          Candidate adjusted = candidate;
+          adjusted.width = max_x - min_x;
+          inliers.push_back(adjusted);
         }
       }
       if (!inliers.empty()) {
@@ -704,7 +776,8 @@ private:
 
       response->grasps.reserve(candidates.size());
       for (const auto & candidate : candidates) {
-        const Mat4 grasp = multiply(candidate.pose, grasp_to_tool_);
+        const Mat4 base_pose = candidate.pose;
+        const Mat4 grasp = multiply(base_pose, grasp_to_tool_);
         const Mat4 pre_grasp = multiply(
           grasp, translation(-pre_distance, 0.0, 0.0));
         const Mat4 retreat = multiply(
@@ -720,8 +793,15 @@ private:
         message.score = candidate.score;
         message.is_full_antipodal = false;
         message.is_half_antipodal = false;
-        message.grasp_width = grasp_width;
+        message.grasp_width =
+          candidate.width > 0.0 ? candidate.width : grasp_width;
         response->grasps.push_back(std::move(message));
+      }
+
+      if (!response->grasps.empty()) {
+        publish_hand_markers(
+          response->grasps.front().grasp.pose,
+          response->grasps.front().grasp_width, stamp);
       }
 
       response->success = true;
@@ -743,6 +823,58 @@ private:
       response->message = "Unknown error in GenerateGrasps";
       RCLCPP_ERROR(get_logger(), "GenerateGrasps failed with an unknown error");
     }
+  }
+
+  // GPD-style hand: two finger pads, a palm bar and a back pad, as solid
+  // cubes in the tool frame. Same shape and colours as GPD's `hand` markers.
+  void publish_hand_markers(
+    const geometry_msgs::msg::Pose & tool_pose, double width,
+    const rclcpp::Time & stamp)
+  {
+    constexpr double kPadLen = 0.08;
+    constexpr double kPadWidth = 0.05;
+    constexpr double kPadThick = 0.023;
+    const double opening = std::min(0.12, std::max(0.02, width));
+    const double finger_y = 0.5 * opening + 0.5 * kPadWidth;
+    const Mat4 tool = matrix_from_pose(tool_pose);
+
+    struct Cube
+    {
+      int id;
+      double x;
+      double y;
+      std::array<double, 3> scale;
+      std::array<float, 3> rgb;
+    };
+    const std::array<Cube, 4> cubes{{
+      {0, 0.04, -finger_y, {kPadLen, kPadWidth, kPadThick}, {0.0F, 0.0F, 1.0F}},
+      {1, 0.04, finger_y, {kPadLen, kPadWidth, kPadThick}, {1.0F, 0.0F, 0.0F}},
+      {2, -0.01, 0.0, {0.02, 0.14, kPadThick}, {0.0F, 1.0F, 0.0F}},
+      {3, -0.05, 0.0, {kPadLen, kPadWidth, kPadThick}, {1.0F, 1.0F, 0.0F}},
+    }};
+
+    visualization_msgs::msg::MarkerArray array;
+    array.markers.reserve(cubes.size());
+    for (const auto & cube : cubes) {
+      visualization_msgs::msg::Marker marker;
+      marker.header.frame_id = frame_id_;
+      marker.header.stamp = stamp;
+      marker.ns = "hand";
+      marker.id = cube.id;
+      marker.type = visualization_msgs::msg::Marker::CUBE;
+      marker.action = visualization_msgs::msg::Marker::ADD;
+      marker.scale.x = cube.scale[0];
+      marker.scale.y = cube.scale[1];
+      marker.scale.z = cube.scale[2];
+      marker.color.r = cube.rgb[0];
+      marker.color.g = cube.rgb[1];
+      marker.color.b = cube.rgb[2];
+      marker.color.a = 0.8F;
+      marker.pose = pose_from_matrix(
+        multiply(tool, translation(cube.x, cube.y, 0.0)));
+      array.markers.push_back(std::move(marker));
+    }
+    hand_publisher_->publish(array);
   }
 
   bool mesh_available()
@@ -806,6 +938,8 @@ private:
   rclcpp::CallbackGroup::SharedPtr service_group_;
   rclcpp::Service<grasp_pose_detection_interfaces::srv::GenerateGrasps>::SharedPtr
     service_;
+  rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr
+    hand_publisher_;
   rclcpp::Subscription<
     grasp_pose_detection_interfaces::msg::ObjectArray>::SharedPtr
     objects_subscription_;
