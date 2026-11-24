@@ -107,6 +107,18 @@ def scene_set(handle: int, objects_json: str, clear_first: bool):
         entry.get("scene_names", []) + [s["name"] for s in specs])
     entry["scene_specs"] = list(specs) if clear_first else (
         entry.get("scene_specs", []) + list(specs))
+    if clear_first:
+        # Restore any per-object allowance bits before dropping the maps.
+        kparams = getattr(entry.get("kin"), "kinematics_config", None)
+        if kparams is not None and hasattr(kparams, "set_link_collision_mask"):
+            for link in (entry.get("_link_blocked_bits") or {}):
+                try:
+                    kparams.set_link_collision_mask(link, 0xFFFFFFFF)
+                except Exception:
+                    pass
+        entry["_object_layer_bits"] = {}
+        entry["_link_blocked_bits"] = {}
+        entry["_next_object_layer_bit"] = 2
     return entry["scene_version"]
 def scene_get(handle: int) -> str:
     """The current scene objects as JSON (name/type/dims), for get_scene_objects."""
@@ -414,6 +426,103 @@ def _clear_attached_voxels(handle: int, spec) -> bool:
     except Exception:
         return False
     return False
+def _apply_link_collision_mask(kparams, link: str, layers: int) -> None:
+    import torch
+
+    link_idx = kparams.link_name_to_idx_map[link]
+    idx = torch.as_tensor(link_idx, device=kparams.link_sphere_idx_map.device)
+    if idx.ndim == 0:
+        selected = kparams.link_sphere_idx_map == idx
+    else:
+        selected = torch.isin(kparams.link_sphere_idx_map, idx)
+    value = int(layers)
+    if value >= 1 << 31:
+        value -= 1 << 32
+    masks = kparams.sphere_collision_mask.view(torch.int32)
+    masks.masked_fill_(selected.unsqueeze(0), value)
+
+
+def set_object_link_collision(handle: int, object_name: str, link_names,
+                             enabled: bool) -> dict:
+    """Toggle collisions between one scene obstacle and specific links only.
+
+    The object stays in the scene. It is moved to a private collision layer and
+    only the listed links lose that layer from their sphere masks; the same
+    links keep colliding with the table and every other obstacle. Empty
+    ``link_names`` is not meaningful here (the legacy global switch remains
+    ``set_link_collision``).
+    """
+    entry = _REGISTRY[handle]
+    links = [str(name) for name in (link_names or [])]
+    if not links:
+        return {"applied": [], "unknown": []}
+    am = _attachment_manager(entry)
+    kparams = getattr(am, "kinematics_params", None)
+    if kparams is None:
+        kparams = getattr(entry.get("kin"), "kinematics_config", None)
+    if kparams is None or not hasattr(kparams, "set_link_collision_mask"):
+        return {"applied": [], "unknown": links}
+
+    checkers = list(_solver_scene_checkers(entry))
+    diagnostic = entry.get("scene_collision")
+    if diagnostic is not None and diagnostic not in checkers:
+        checkers.append(diagnostic)
+
+    all_bits = 0xFFFFFFFF
+    object_bits = entry.setdefault("_object_layer_bits", {})
+    blocked_bits = entry.setdefault("_link_blocked_bits", {})
+    next_bit = int(entry.get("_next_object_layer_bit", 2))
+
+    bit = object_bits.get(object_name)
+    if not enabled:
+        if bit is None:
+            bit = next_bit
+            if bit <= 1 or bit > 0x80000000:
+                return {"applied": [], "unknown": links}
+            next_bit <<= 1
+            object_bits[object_name] = bit
+            entry["_next_object_layer_bit"] = next_bit
+    elif bit is None:
+        # Already enabled; report the valid links as a no-op success.
+        applied = [n for n in links if n in kparams.link_name_to_idx_map]
+        return {"applied": applied, "unknown": [n for n in links if n not in applied]}
+
+    # Apply the object layer to every checker that knows the object.
+    seen = False
+    for checker in checkers:
+        data = getattr(checker, "data", None)
+        if data is None:
+            continue
+        try:
+            if not data.check_obstacle_exists(object_name):
+                continue
+            data.set_obstacle_layers(object_name, bit if not enabled else 1)
+            seen = True
+        except Exception:
+            continue
+
+    applied = []
+    unknown = []
+    for link in links:
+        if link not in kparams.link_name_to_idx_map:
+            unknown.append(link)
+            continue
+        blocked = blocked_bits.get(link, 0)
+        if not enabled:
+            blocked |= bit
+        else:
+            blocked &= ~bit
+        blocked_bits[link] = blocked
+        _apply_link_collision_mask(kparams, link, all_bits & ~blocked)
+        applied.append(link)
+    if enabled and object_name in object_bits:
+        object_bits.pop(object_name, None)
+    if not seen and applied:
+        # The checkers did not know the object; do not pretend it worked.
+        return {"applied": [], "unknown": links}
+    return {"applied": applied, "unknown": unknown}
+
+
 def attach_object(handle: int, name: str, q,
                   link: Optional[str] = None) -> None:
     """Fit + attach `name` to its arm's attach link at joint config `q`.

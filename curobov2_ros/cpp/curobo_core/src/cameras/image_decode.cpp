@@ -125,8 +125,26 @@ std::vector<float> resize_depth_bilinear(
     float * out = dst.data() + static_cast<std::size_t>(oy) * dst_w;
     for (std::uint32_t ox = 0; ox < dst_w; ++ox) {
       const Tap & t = xt[ox];
-      const float top = r0[t.i0] + (r0[t.i1] - r0[t.i0]) * t.w;
-      const float bot = r1[t.i0] + (r1[t.i1] - r1[t.i0]) * t.w;
+      const float t00 = r0[t.i0];
+      const float t10 = r0[t.i1];
+      const float t01 = r1[t.i0];
+      const float t11 = r1[t.i1];
+      // A depth image is a MASKED measurement, not a colour image: 0 means
+      // "no return" and, for the segmented stream, "robot". Bilinear blending
+      // of a masked 0 with a valid neighbour invents a surface INSIDE the
+      // robot (a too-large depth on the mask boundary), which the mapper then
+      // integrates as voxels even though the segmenter removed the pixel. Keep
+      // the mask: an output pixel is valid only if every tap is valid, so a
+      // masked pixel never becomes nonzero. This also avoids blending across
+      // depth discontinuities (flying pixels).
+      if (!(t00 > 0.0f && t10 > 0.0f && t01 > 0.0f && t11 > 0.0f &&
+        std::isfinite(t00) && std::isfinite(t10) && std::isfinite(t01) && std::isfinite(t11)))
+      {
+        out[ox] = 0.0f;
+        continue;
+      }
+      const float top = t00 + (t10 - t00) * t.w;
+      const float bot = t01 + (t11 - t01) * t.w;
       out[ox] = top + (bot - top) * wy;
     }
   }

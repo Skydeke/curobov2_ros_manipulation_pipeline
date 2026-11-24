@@ -196,6 +196,37 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
     js = JointState.from_position(q_t, joint_names=kin.joint_names)
     spheres = kin.compute_kinematics(js).robot_spheres.reshape(-1, 4)
 
+    # The collision spheres SAMPLE the robot's surfaces; they are not a solid
+    # cover. Links whose samples are far apart (the chassis mounting plate is 49
+    # spheres of r=2 mm spaced 4.5-9.7 cm, the wheel discs are a single ring in
+    # the wheel's mid-plane) leave real robot surface -- plate top, wheel
+    # sidewalls -- outside the spheres. Those pixels survive the distance
+    # threshold, and since the camera is mounted on the chassis they are
+    # integrated as voxels that ride the robot (visible as a handful of voxels
+    # at the wheels/base when the arm is retracted).
+    #
+    # Pad each sphere by half its nearest-neighbour spacing so the union of
+    # spheres fully covers the sampled surface. This is MASK-ONLY: the planner's
+    # collision model keeps the unmodified radii, so planning clearance is
+    # unchanged.
+    if spheres.numel() > 0:
+        # Nearest-neighbour spacing is computed over the VALID spheres only. A
+        # disabled slot (radius -100) is a collision sentinel whose centre sits
+        # at its link origin (the flange); including it in the neighbour search
+        # gave a real gripper/finger sphere a too-small pad, so its surface was
+        # under-covered and robot pixels survived the mask.
+        valid = spheres[:, 3] > 0.0
+        pad = torch.zeros_like(spheres[:, 3])
+        if bool(valid.any()):
+            vcentres = spheres[valid, :3]
+            dist = torch.cdist(vcentres.unsqueeze(0), vcentres.unsqueeze(0))[0]
+            dist.fill_diagonal_(float("inf"))
+            pad[valid] = torch.clamp(0.5 * dist.min(dim=1).values, max=0.05)
+            del vcentres, dist
+        spheres = torch.cat(
+            [spheres[:, :3], (spheres[:, 3] + pad).unsqueeze(1)], dim=1)
+        del pad
+
     # One kernel launch replaces the host-side pixel loop: unproject, transform to
     # base, compare against every sphere. `masks_json` shapes are a per-tool
     # refinement and keep the analytic host path below (usually empty).

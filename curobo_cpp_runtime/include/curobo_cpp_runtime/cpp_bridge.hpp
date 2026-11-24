@@ -1,13 +1,3 @@
-// SPDX-License-Identifier: Apache-2.0
-// CppBridge: the cpp_runtime implementation of curobo_runtime::IBridge.
-//
-// It is installed in Runtime before curobo_core::UnifiedPlannerNode is
-// constructed, so the ROS surface (services, actions, parameters) is identical
-// to the Python backend. With `auto`, the bridge also owns a Python fallback:
-// native methods are used while the native scene is an exact mirror; methods
-// that only the Python backend implements switch the planner to Python so the
-// two scenes cannot silently diverge. Explicit `cpp` keeps the fallback off and
-// throws for unsupported methods.
 #ifndef CUROBO_CPP_RUNTIME__NATIVE_BRIDGE_HPP_
 #define CUROBO_CPP_RUNTIME__NATIVE_BRIDGE_HPP_
 
@@ -99,6 +89,9 @@ public:
   curobo_runtime::LinkCollisionOutcome set_link_collision(
     curobo_runtime::RobotHandle handle, const std::vector<std::string> & link_names,
     bool enabled) override;
+  curobo_runtime::LinkCollisionOutcome set_object_link_collision(
+    curobo_runtime::RobotHandle handle, const std::string & object_name,
+    const std::vector<std::string> & link_names, bool enabled) override;
 
   // ---- planning ----
   void motion_planner_build(
@@ -122,6 +115,9 @@ public:
   void warmup_mapper(curobo_runtime::RobotHandle handle) override;
   bool esdf_refresh(curobo_runtime::RobotHandle handle) override;
   bool world_push(curobo_runtime::RobotHandle handle) override;
+  void set_esdf_pose(
+    curobo_runtime::RobotHandle handle, const std::array<double, 3> & position,
+    const std::array<double, 4> & quaternion_wxyz) override;
   curobo_runtime::VoxelGrid voxel_grid(curobo_runtime::RobotHandle handle) override;
   int clear_voxel_map(curobo_runtime::RobotHandle handle) override;
   int clear_voxel_region(

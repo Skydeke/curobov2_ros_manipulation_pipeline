@@ -339,6 +339,24 @@ PlannerServices::PlannerServices(
       &PlannerServices::handle_generate_trajectory_batch, this,
       std::placeholders::_1, std::placeholders::_2),
     rmw_qos_profile_services_default, plan_callback_group_);
+
+  try {
+    request_adapters_ = std::make_unique<adapters::AdapterChain>(node_, bridge_, handle_);
+  } catch (const std::exception & e) {
+    RCLCPP_ERROR(
+      node_->get_logger(), "Failed to initialize planning request adapters: %s", e.what());
+    throw;
+  }
+}
+
+bool PlannerServices::adapt_goal(
+  curobov2_ros_interfaces::msg::TrajectoryGoal & goal, std::string & error)
+{
+  if (!request_adapters_ || !request_adapters_->enabled()) {
+    return true;
+  }
+  const std::vector<float> start = resolve_start(goal.start_pose.name, goal.start_pose.position);
+  return request_adapters_->adapt(goal, start, pose_resolver_, error);
 }
 
 // PORT: joint_order.resolve_start_pose (name reorder, prefix padding from the
@@ -480,15 +498,58 @@ bool PlannerServices::prepare_continuous_joints(
       static_cast<std::size_t>(std::distance(limits.joint_names.begin(), found));
     const double lo = limits.positions.data[j];
     const double hi = limits.positions.data[dof + j];
-    // Explicit joint type first; a legacy bridge that reports no mask falls
-    // back to the range width. Once the mask is known, it is authoritative.
-    bool continuous = is_continuous_joint(continuous_joint_names_, name);
-    if (j < limits.continuous.size()) {
-      continuous = continuous || limits.continuous[j] != 0;
-    } else if (!continuous) {
+    // Joint type: the robot descriptor is authoritative when it lists any
+    // continuous joints. A mobile base's PRISMATIC translation joints span more
+    // than one turn (+/-10 m), so both the artifact's range-width heuristic and
+    // its exported mask classify them as continuous; wrapping their start by a
+    // common 2*pi (base_y -5.5 -> +0.783) leaves the model metres away from the
+    // measured base and every Cartesian goal becomes unreachable. Only a joint
+    // the descriptor declares continuous may take the chart/2*pi treatment.
+    // Without a descriptor, keep the legacy bridge-mask/range fallback.
+    bool continuous = false;
+    if (!continuous_joint_names_.empty()) {
+      continuous = is_continuous_joint(continuous_joint_names_, name);
+    } else if (j < limits.continuous.size()) {
+      continuous = limits.continuous[j] != 0;
+    } else {
       continuous = is_continuous_range(lo, hi);
     }
     if (!continuous) {
+      // A BOUNDED revolute joint can still be reported on a 2*pi-shifted
+      // branch: the driver/encoder wraps, so e.g. joint_2 (limits [0.873,
+      // 5.411]) arrives as -2.363 = 3.920 - 2*pi. The joint is then outside its
+      // limits and every joint-space plan fails ("plan_cspace returned None"),
+      // which exhausts the recovery ladder. Its limits are narrower than one
+      // turn, so at most one 2*pi multiple lands inside them; apply it -- the
+      // same "same physical pose" repair the continuous joints get. A genuinely
+      // out-of-range joint has no such multiple and is left untouched.
+      const double requested_start = request.start[c];
+      if (std::isfinite(lo) && std::isfinite(hi) &&
+        (requested_start < lo || requested_start > hi))
+      {
+        const double k = std::round(
+          (0.5 * (lo + hi) - requested_start) / kTwoPiContinuous);
+        const double lifted = requested_start + k * kTwoPiContinuous;
+        if (lifted >= lo && lifted <= hi) {
+          const bool has_target = !request.joint_target.empty() &&
+            request.joint_target.size() == dof;
+          const double requested_target =
+            has_target ? static_cast<double>(request.joint_target[c]) : lifted;
+          request.start[c] = static_cast<float>(lifted);
+          if (has_target) {
+            // Shortest path from the lifted start, exactly like a continuous
+            // joint: the requested target may itself be on either branch.
+            request.joint_target[c] = static_cast<float>(
+              lifted + wrap_pi(requested_target - lifted));
+          }
+          RCLCPP_INFO(
+            node_->get_logger(),
+            "Bounded joint %s: requested start %.6f is outside [%.4f, %.4f]; "
+            "lifted by %+.6f rad to %.6f (wrapped encoder reading)",
+            name.c_str(), requested_start, lo, hi,
+            k * kTwoPiContinuous, lifted);
+        }
+      }
       continue;
     }
     if (!std::isfinite(lo) || !std::isfinite(hi)) {
@@ -520,12 +581,25 @@ bool PlannerServices::prepare_continuous_joints(
     const double requested_target =
       has_target ? static_cast<double>(request.joint_target[c]) : start_lift;
     if (has_target) {
-      // A single segment is a shortest-path move; multi-turn motion must be
-      // requested as explicit intermediate waypoints.
+      // Shortest path. Multi-turn motion is NOT inferred from the value: a
+      // legitimate named pose can sit outside (-pi, pi] (KATE's carry pose
+      // has joint_4 = -4.55), and preserving that delta turned every return
+      // leg into a ~5.6 rad wrist swing. Inferring it from a "whole number of
+      // turns" is equally wrong when the measured start is wound (home then
+      // reads as a 9-turn spin). An intentional multi-turn command needs an
+      // explicit wire opt-in, not a heuristic on the number.
       target_lift = start_lift + wrap_pi(requested_target - start_lift);
     }
 
     double shift = 0.0;
+    if (!choose_window_shift(start_lift, target_lift, lo, hi, shift) && has_target) {
+      // The requested delta does not fit this joint's window. The window is
+      // baked into the robot artifact, and a narrow one still caps a single
+      // segment; degrade to the shortest-path move rather than failing the
+      // whole leg (e.g. a recovery rung). A wide artifact window takes the
+      // branch above and honours the full multi-turn request.
+      target_lift = start_lift + wrap_pi(requested_target - start_lift);
+    }
     if (!choose_window_shift(start_lift, target_lift, lo, hi, shift)) {
       throw std::runtime_error(
         "continuous joint '" + name + "' has a window narrower than one turn "
@@ -541,11 +615,13 @@ bool PlannerServices::prepare_continuous_joints(
     {
       RCLCPP_INFO(
         node_->get_logger(),
-        "Continuous joint %s: requested start %.6f target %s -> shortest-path "
-        "start %.6f target %s (window shift %+.6f rad)",
+        "Continuous joint %s: requested start %.6f target %s -> branch start "
+        "%.6f target %s -> WINDOW start %.6f target %s (shift %+.6f rad)",
         name.c_str(), requested_start,
         has_target ? std::to_string(requested_target).c_str() : "(none)",
         start_lift, has_target ? std::to_string(target_lift).c_str() : "(none)",
+        start_lift + shift,
+        has_target ? std::to_string(target_lift + shift).c_str() : "(none)",
         shift);
     }
   }
@@ -1196,21 +1272,53 @@ void PlannerServices::fill_result(
   const std::int64_t dof = outcome.positions.shape.size() > 1 ? outcome.positions.shape[1] : 0;
   const std::int64_t rows = outcome.positions.shape.empty() ? 0 : outcome.positions.shape[0];
   const std::int64_t vdof = outcome.velocity.shape.size() > 1 ? outcome.velocity.shape[1] : 0;
+  const std::vector<std::string> & out_names =
+    outcome.joint_names.empty() ? joint_names_ : outcome.joint_names;
+  // One extra whole-turn constant per continuous joint, chosen so the FIRST
+  // point lands in the canonical chart (-pi, pi]. Subtracting window_shift
+  // alone only restores the MEASURED branch, which in this cell keeps winding
+  // (the Kinova counters accumulate turns: joint_6 has read -135 rad), so the
+  // client's plan chain would carry the wind-up into the next stage's
+  // requested start and every leg would have to be lifted back by whole turns.
+  //
+  // This is a whole-trajectory constant, NOT a per-point wrap: it is added to
+  // every point identically, so the path is preserved exactly -- including a
+  // motion of more than one turn -- and only the branch the client sees is
+  // canonical. The server still lifts the start to the measured branch
+  // internally for execution continuity (and align_trajectory_to_measured
+  // re-anchors the replay), so the physical plan is unchanged.
+  std::vector<double> canonical_shift(static_cast<std::size_t>(dof), 0.0);
+  for (std::int64_t j = 0; j < dof; ++j) {
+    const std::string & joint_name = static_cast<std::size_t>(j) < out_names.size() ?
+      out_names[static_cast<std::size_t>(j)] : std::string();
+    if (joint_name.empty() ||
+      !is_continuous_joint(continuous_joint_names_, joint_name))
+    {
+      continue;
+    }
+    const double shift = static_cast<std::size_t>(j) < request.window_shift.size() ?
+      request.window_shift[static_cast<std::size_t>(j)] : 0.0;
+    const double first =
+      outcome.positions.data[static_cast<std::size_t>(j)] - shift;
+    canonical_shift[static_cast<std::size_t>(j)] =
+      kTwoPiContinuous * std::round(first / kTwoPiContinuous);
+  }
   std::vector<std::vector<double>> position_rows;
   std::vector<std::vector<double>> velocity_rows;
   position_rows.reserve(static_cast<std::size_t>(rows));
   velocity_rows.reserve(static_cast<std::size_t>(rows));
   for (std::int64_t t = 0; t < rows; ++t) {
     sensor_msgs::msg::JointState js;
-    js.name = outcome.joint_names.empty() ? joint_names_ : outcome.joint_names;
+    js.name = out_names;
     for (std::int64_t j = 0; j < dof; ++j) {
-      // Remove the whole-turn window shift. It is a per-joint constant, so the
-      // physical path (FK/collision) is unchanged; the first point lands on
-      // the measured branch and no per-point rewrite happens after validation.
+      // Remove the whole-turn window shift plus the canonicalising constant.
+      // Both are per-joint constants, so the physical path (FK/collision) is
+      // unchanged; no per-point rewrite happens after validation.
       const double shift = static_cast<std::size_t>(j) < request.window_shift.size() ?
         request.window_shift[static_cast<std::size_t>(j)] : 0.0;
       js.position.push_back(
-        outcome.positions.data[static_cast<std::size_t>(t * dof + j)] - shift);
+        outcome.positions.data[static_cast<std::size_t>(t * dof + j)] - shift -
+        canonical_shift[static_cast<std::size_t>(j)]);
     }
     if (vdof > 0 &&
       outcome.velocity.data.size() >= static_cast<std::size_t>((t + 1) * vdof))
@@ -1442,8 +1550,15 @@ void PlannerServices::handle_generate_trajectory(
     response->response.message = "No planner selected";
     return;
   }
+  auto goal = request->request;
+  std::string adapter_error;
+  if (!adapt_goal(goal, adapter_error)) {
+    response->response.success = false;
+    response->response.message = "Request adapter rejected: " + adapter_error;
+    return;
+  }
   on_plan_lane(
-    lane_plan_, [&]() {fill_result(planner, request->request, response->response);});
+    lane_plan_, [&]() {fill_result(planner, goal, response->response);});
   // Surface the same failure diagnostics at the service's top level. Clients
   // that only look at the outer response still get the start/goal collision
   // attribution when a plan they expected to succeed failed.
@@ -1465,8 +1580,16 @@ void PlannerServices::handle_generate_trajectory_batch(
   response->responses.resize(request->requests.size());
   bool all_ok = true;
   for (std::size_t i = 0; i < request->requests.size(); ++i) {
+    auto goal = request->requests[i];
+    std::string adapter_error;
+    if (!adapt_goal(goal, adapter_error)) {
+      response->responses[i].success = false;
+      response->responses[i].message = "Request adapter rejected: " + adapter_error;
+      all_ok = false;
+      continue;
+    }
     on_plan_lane(lane_plan_, [&]() {
-        fill_result(planner, request->requests[i], response->responses[i]);
+        fill_result(planner, goal, response->responses[i]);
       });
     all_ok = all_ok && response->responses[i].success;
   }

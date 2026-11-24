@@ -171,12 +171,13 @@ class _PlanClientMixin:
             raise
         self._session.note_planner_sent(key)
 
-    def set_link_collision(self, link_names, enabled: bool) -> None:
+    def set_link_collision(self, link_names, enabled: bool,
+                           object_name: str = "") -> None:
         """Re-enable/disable collision spheres for an explicit link set.
 
-        The task orchestrator uses this at task boundaries (before a new pick
-        and before release) so an interrupted plan cannot leave the server's
-        gripper link masks disabled into the next task.
+        With ``object_name`` empty this is the historical global link switch.
+        With an object name it toggles only that obstacle against the listed
+        links; the same links keep colliding with the table and everything else.
         """
         links = sorted({str(name) for name in (link_names or []) if str(name)})
         if not links:
@@ -184,22 +185,44 @@ class _PlanClientMixin:
         req = SetLinkCollision.Request()
         req.link_names = list(links)
         req.enabled = bool(enabled)
+        req.object_name = str(object_name or "")
         res = self._call(self._link_collision_client, req)
         if not res.success:
             raise RuntimeError(f"set_link_collision failed: {res.message}")
         self._session.note_collision_sent(links, enabled)
 
-    def _set_links_collision(self, requests: list, enabled: bool) -> None:
-        """Enable/disable collision spheres for the goalsets' allowed links.
+    def _scene_collision_pairs(self, requests: list) -> dict:
+        """Group SceneDiff ``(object, link)`` allowances by object.
 
-        Contact/collision allowance lives ENTIRELY in the task constructor:
-        stages derive it from the scene (``GoalsetSpec.allowed_collisions``)
-        and this adapter applies it via the server's ``set_link_collision``
-        service for the duration of each solve — spheres OFF
-        (``enabled=False``) allows contact, spheres ON (``enabled=True``)
-        restores the check. The wire ``Goalset`` carries no collision concept;
-        the planning interfaces never see it.
+        The task constructor has always carried object+link pairs in
+        ``SceneDiff.disabled_collisions``. This adapter used to collapse them
+        to a bare link list, which made the server disable the links against
+        every obstacle. Grouping them here preserves the user-facing
+        ``allowCollisions(object, links)`` contract.
         """
+        grouped: dict = {}
+        for request in requests or []:
+            scene = getattr(request, "scene", None)
+            pairs = getattr(scene, "disabled_collisions", None) if scene is not None else None
+            for object_name, link in (pairs or ()):
+                grouped.setdefault(str(object_name), set()).add(str(link))
+        return {obj: sorted(links) for obj, links in grouped.items()}
+
+    def _set_links_collision(self, requests: list, enabled: bool) -> None:
+        """Apply the request's collision allowance.
+
+        Object-scoped allowances (the normal task-constructor path) are sent
+        one object at a time through the extended SetLinkCollision service.
+        Legacy callers that only filled ``GoalsetSpec.allowed_collisions``
+        keep the historical global link switch, because that is exactly what
+        the wire contract said before.
+        """
+        grouped = self._scene_collision_pairs(requests)
+        if grouped:
+            for object_name, links in sorted(grouped.items()):
+                self._send_object_collision_update(object_name, links, enabled)
+            return
+
         links = sorted(
             {
                 link
@@ -214,9 +237,6 @@ class _PlanClientMixin:
         depth = getattr(tls, "depth", 0)
         held = getattr(tls, "links", None)
         if depth > 0 and held != links:
-            # Mixed nesting (not produced by our graphs — every scope wraps
-            # one request's attempts): fall back to a stateless extra call
-            # so the outer scope still balances. Session and depth untouched.
             self._send_collision_update(links, enabled)
             return
         if not enabled:
@@ -235,6 +255,21 @@ class _PlanClientMixin:
             tls.depth = 0
             return
         tls.depth = depth - 1
+
+    def _send_object_collision_update(self, object_name: str, links, enabled: bool) -> None:
+        req = SetLinkCollision.Request()
+        req.link_names = list(links)
+        req.enabled = bool(enabled)
+        req.object_name = str(object_name)
+        try:
+            res = self._call(self._link_collision_client, req)
+        except Exception:
+            self._session.invalidate()
+            raise
+        if not res.success:
+            self._session.invalidate()
+            raise ServiceError(
+                f"set_link_collision(object={object_name!r}) failed: {res.message}")
 
     def _send_collision_update(self, links, enabled: bool) -> None:
         """One set_link_collision round trip (refuse/fail invalidates)."""

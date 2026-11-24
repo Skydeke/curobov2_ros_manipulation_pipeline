@@ -33,7 +33,7 @@
   <depend>trajectory_msgs</depend>
   <depend>urdf</depend>
   <depend>eigen3_cmake_module</depend>
-  <build_depend>Eigen3</build_depend>
+  <build_depend>eigen</build_depend>
 
   <exec_depend>libqt5-core</exec_depend>
   <exec_depend>libqt5-gui</exec_depend>

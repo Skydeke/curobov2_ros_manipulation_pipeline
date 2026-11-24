@@ -1,0 +1,47 @@
+# Run cuTAMP for one pick/place task and return an ordered goal path.
+#
+# The scene is the complete TAMP world: every movable and every static object.
+# Objects are curobov2_ros_interfaces/SceneObject (CUBOID, SPHERE, CAPSULE,
+# CYLINDER; MESH is rejected by the planner). Poses are in the robot base
+# frame, which is also the frame of the returned goalsets.
+
+curobov2_ros_interfaces/SceneObject[] objects
+# Names (must exist in `objects`) that cuTAMP may move. Every other object is
+# treated as a static support surface.
+string[] movable_names
+# Goal atoms, e.g. "On(block0,table)" or "HandEmpty()". The predicate names and
+# arity are cuTAMP's PDDL domain (see cutamp/tamp_domain.py).
+string[] goal_atoms
+
+# Initial joint configuration, in cuRobo's active-DOF order. Empty is only
+# valid for a built-in cuTAMP robot (panda/ur5); a custom robot must send it.
+float64[] q_init
+
+# 0 = the cuTAMP library default for each value.
+int32 num_particles
+int32 num_opt_steps
+int32 num_initial_plans
+# Maximum optimization/sampling duration in seconds. <= 0 = no limit.
+float64 max_loop_dur
+
+# Optional externally generated 6-DOF grasp candidates from an external
+# grasp generator. Parallel arrays; pose is the arm tool-frame pose in the
+# robot base frame (the same frame as `objects`). score is higher-is-better.
+string[] grasp_object_names
+geometry_msgs/Pose[] grasp_tool_poses
+float64[] grasp_scores
+---
+
+bool success
+string message
+# One Goalset per ordered segment (approach / grasp / lift or place / open /
+# retreat), each with exactly one pose. The caller feeds the list to
+# /curobo_server/generate_trajectory in order.
+curobov2_ros_interfaces/Goalset[] goalsets
+# Parallel to `goalsets`: 1 = close the gripper, 0 = open it.
+int32[] gripper_close
+# Parallel to `goalsets`: zero-based index of the pick/place action the segment
+# belongs to (three consecutive segments share one index).
+int32[] action_index
+# Number of cuTAMP particles that satisfied all constraints in the best plan.
+int32 num_satisfying

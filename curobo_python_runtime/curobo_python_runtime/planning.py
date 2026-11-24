@@ -513,16 +513,21 @@ def _run_ordered_waypoints(planner, start_state, layout, req):
     if len(active_indices) == 1 and passive_indices:
         hold_mask = _passive_joint_mask(planner, active_indices[0], passive_indices)
     hold_saved = _apply_passive_hold(planner, hold_mask) if hold_mask is not None else None
+    # Same passive-hold keyword issue as plan_pose: this cuRobo's
+    # plan_pose_waypoints does not accept goal_state/seed_hold_mask, so only
+    # pass them when a hold is actually active (single-arm paths never need it).
+    waypoint_kwargs = {
+        "path_tolerance": layout["path_tolerance"],
+        "final_tolerance": layout["final_tolerance"],
+        "max_attempts": max(1, int(req.get("max_attempts", 1))),
+        "track_orientation": layout["track_orientation"],
+        "outer_iterations": layout["outer_iterations"],
+    }
+    if hold_mask is not None:
+        waypoint_kwargs["goal_state"] = start_state
+        waypoint_kwargs["seed_hold_mask"] = hold_mask.bool()
     try:
-        result = planner.plan_pose_waypoints(
-            goal, start_state,
-            path_tolerance=layout["path_tolerance"],
-            final_tolerance=layout["final_tolerance"],
-            max_attempts=max(1, int(req.get("max_attempts", 1))),
-            track_orientation=layout["track_orientation"],
-            outer_iterations=layout["outer_iterations"],
-            goal_state=start_state if hold_mask is not None else None,
-            seed_hold_mask=hold_mask.bool() if hold_mask is not None else None)
+        result = planner.plan_pose_waypoints(goal, start_state, **waypoint_kwargs)
     finally:
         _restore_passive_hold(hold_saved)
     return _plan_outcome(planner, result)
@@ -658,13 +663,19 @@ def plan_pose(handle: int, req) -> dict:
     hold_saved = None
     if hold_mask is not None:
         hold_saved = _apply_passive_hold(planner, hold_mask)
+    # `goal_state` / `seed_hold_mask` are the passive-arm hold (bimanual) knobs.
+    # This cuRobo's MotionPlanner.plan_pose does not accept them, so passing
+    # them as None still raised "unexpected keyword argument 'goal_state'" and
+    # EVERY single-arm pose plan failed. Only add them when a hold is active.
+    plan_kwargs = {
+        "max_attempts": int(req.get("max_attempts", 1)),
+        "enable_graph_attempt": int(req.get("enable_graph_attempt", 1)),
+    }
+    if hold_mask is not None:
+        plan_kwargs["goal_state"] = start_state
+        plan_kwargs["seed_hold_mask"] = hold_mask.bool()
     try:
-        result = planner.plan_pose(
-            goal, start_state,
-            max_attempts=int(req.get("max_attempts", 1)),
-            enable_graph_attempt=int(req.get("enable_graph_attempt", 1)),
-            goal_state=start_state if hold_mask is not None else None,
-            seed_hold_mask=hold_mask.bool() if hold_mask is not None else None)
+        result = planner.plan_pose(goal, start_state, **plan_kwargs)
     finally:
         _restore_passive_hold(hold_saved)
         if per_tool_criteria:

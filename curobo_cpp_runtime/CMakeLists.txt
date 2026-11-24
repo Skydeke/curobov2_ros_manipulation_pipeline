@@ -34,6 +34,7 @@ set_target_properties(curobo_cpp_selection PROPERTIES
 if(NOT CUROBO_CPP_SELECTION_ONLY)
   find_package(rclcpp REQUIRED)
   find_package(rclcpp_action REQUIRED)
+  find_package(rclcpp_components REQUIRED)
   find_package(tf2_ros REQUIRED)
   find_package(tf2 REQUIRED)
   find_package(geometry_msgs REQUIRED)
@@ -47,6 +48,7 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
   find_package(Eigen3 REQUIRED)
   find_package(curobov2_ros_interfaces REQUIRED)
   find_package(curobov2_ros REQUIRED)
+  find_package(pluginlib REQUIRED)
 
   set(CUROBO_ROS_LIBS ${curobov2_ros_LIBRARIES})
   if(NOT CUROBO_ROS_LIBS)
@@ -137,14 +139,30 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
 
   add_library(curobo_cpp_runtime SHARED
     src/cpp_bridge.cpp
+    src/cpp_bridge_attachment.cpp
+    src/cpp_bridge_fk_ik.cpp
+    src/cpp_bridge_lifecycle.cpp
+    src/cpp_bridge_mapper.cpp
+    src/cpp_bridge_model.cpp
+    src/cpp_bridge_mpc.cpp
+    src/cpp_bridge_plan_cspace.cpp
+    src/cpp_bridge_plan_pose.cpp
+    src/cpp_bridge_scene.cpp
+    src/cpp_bridge_stubs.cpp
+    src/detail/device_buffer.cpp
+    src/detail/json_helpers.cpp
+    src/detail/pose_math.cpp
+    src/detail/sphere_fit.cpp
     src/native_scene.cpp
     src/runtime_selector.cpp
   )
   target_include_directories(curobo_cpp_runtime PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
     $<INSTALL_INTERFACE:include>
     $<BUILD_INTERFACE:${CUROBO_CPP_INCLUDE_DIR}>
     ${curobov2_ros_INCLUDE_DIRS}
+    ${pluginlib_INCLUDE_DIRS}
   )
   target_link_libraries(curobo_cpp_runtime PUBLIC
     curobo_cpp_selection
@@ -165,6 +183,7 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
     ${curobov2_ros_interfaces_TARGETS}
     ${CUROBO_ROBOT_RUNTIME}
     ${CUROBO_MAPPER_RUNTIME}
+    pluginlib::pluginlib
     ${_cudart_target}
     ${CUDA_DRIVER_LIBRARY}
   )
@@ -186,7 +205,30 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
   set_target_properties(curobo_trajectory_planner_cpp PROPERTIES
     INSTALL_RPATH "$ORIGIN/..;${CUROBO_CPP_ROOT}/lib")
 
+  # Composable wrapper that installs the selected bridge before
+  # UnifiedPlannerNode::setup() calls Runtime::start(). Without it, loading the
+  # stock curobo_core::UnifiedPlannerNode component always selects PyBridge.
+  add_library(curobo_planner_cpp_component SHARED
+    src/cpp_planner_component.cpp
+  )
+  target_link_libraries(curobo_planner_cpp_component
+    curobo_cpp_runtime
+    ${CUROBO_ROS_LIBS}
+    rclcpp::rclcpp
+    rclcpp_components::component
+  )
+  rclcpp_components_register_nodes(
+    curobo_planner_cpp_component
+    "curobo_cpp_runtime::UnifiedPlannerCppComponent")
+  set_target_properties(curobo_planner_cpp_component PROPERTIES
+    INSTALL_RPATH "$ORIGIN;${CUROBO_CPP_ROOT}/lib")
+
   install(TARGETS curobo_cpp_runtime
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+  )
+  install(TARGETS curobo_planner_cpp_component
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
@@ -196,8 +238,9 @@ if(NOT CUROBO_CPP_SELECTION_ONLY)
   )
   install(DIRECTORY include/ DESTINATION include)
   ament_export_include_directories(include)
-  ament_export_libraries(curobo_cpp_runtime)
-  ament_export_dependencies(rclcpp curobov2_ros curobov2_ros_interfaces)
+  ament_export_libraries(curobo_cpp_runtime curobo_planner_cpp_component)
+  ament_export_dependencies(
+    rclcpp rclcpp_components curobov2_ros curobov2_ros_interfaces)
 endif()
 
 if(BUILD_TESTING)

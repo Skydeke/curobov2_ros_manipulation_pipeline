@@ -1,0 +1,76 @@
+# cuRobo + cuTAMP + GraspGenX image.
+#
+# The standalone cuRobo image is docker/Dockerfile. This file only layers the
+# additional Python packages and ROS components on top of it; it does not
+# rebuild or modify the cuRobo image.
+#
+# Build context: this repository's root.
+#
+#   docker build -f docker/Dockerfile.cutamp \
+#     --build-arg BASE_IMAGE=<curobo-image> \
+#     -t <curobo-cutamp-image> .
+#
+# The default BASE_IMAGE is the KATE cuRobo image because it already provides
+# grasp_pose_detection_interfaces. A generic cuRobo image works if that package
+# is installed; pass it with --build-arg BASE_IMAGE=...
+
+ARG BASE_IMAGE=curobo:latest
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-c"]
+
+ARG ROS_WS=/root/ros2_ws
+ARG ROS_DISTRO=jazzy
+
+ENV ROS_DISTRO=${ROS_DISTRO}
+ENV ROS_WS=${ROS_WS}
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+USER root
+
+# cuTAMP and GraspGenX are Python libraries; their sources are installed
+# editable so the submodule commit is what runs.
+COPY cutamp/cutamp /opt/cutamp
+COPY graspgenx/GraspGenX /opt/graspgenx
+
+RUN python3 -m pip install --no-cache-dir --no-deps \
+      diffusers omegaconf jaxtyping roma addict h5py \
+      msgpack msgpack-numpy pyzmq antlr4-python3-runtime regex && \
+    python3 -m pip install --no-cache-dir --no-deps --no-build-isolation -e /opt/cutamp && \
+    python3 -m pip install --no-cache-dir --no-deps --no-build-isolation -e /opt/graspgenx
+
+ENV GRASPGENX_CHECKPOINT_DIR=/opt/graspgenx/ext/graspgenx_checkpoints
+ENV GRASPGENX_GRIPPER_CFG_DIR=/opt/graspgenx/ext/gripper_descriptions
+
+RUN mkdir -p /opt/graspgenx/ext/gripper_descriptions && \
+    python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('adithyamurali/GraspGenXModel', \
+                  local_dir='/opt/graspgenx/ext/graspgenx_checkpoints')"
+
+# ROS components. They are separate from the standalone cuRobo package set.
+# cutamp_ros_interfaces must be built before cutamp_ros; colcon orders them by
+# package.xml dependencies.
+COPY cutamp_ros_interfaces ${ROS_WS}/src/cutamp_ros_interfaces
+COPY cutamp_ros ${ROS_WS}/src/cutamp_ros
+COPY graspgenx_ros ${ROS_WS}/src/graspgenx_ros
+
+# cutamp_ros installs its Python helper (cutamp_ros/bridge.py) into the colcon
+# site-packages directory from CMake, so the embedded interpreter that cuRobo's
+# PyBridge owns imports it as soon as the workspace setup file is sourced.
+RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${ROS_WS}/install/setup.bash && \
+    colcon build \
+      --base-paths \
+        ${ROS_WS}/src/cutamp_ros_interfaces \
+        ${ROS_WS}/src/cutamp_ros \
+        ${ROS_WS}/src/graspgenx_ros \
+      --packages-select cutamp_ros_interfaces cutamp_ros graspgenx_ros \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+# Keep the workspace sourced in interactive shells.
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
+    echo "source ${ROS_WS}/install/setup.bash" >> /root/.bashrc
+
+WORKDIR ${ROS_WS}

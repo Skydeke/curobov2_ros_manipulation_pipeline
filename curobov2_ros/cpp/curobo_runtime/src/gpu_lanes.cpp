@@ -69,7 +69,10 @@ void CaptureBarrier::acquire_shared()
   }
   {
     std::unique_lock<std::mutex> lk(mutex_);
-    cond_.wait(lk, [&] {return !writer_.has_value() && writers_waiting_ == 0;});
+    cond_.wait(lk, [&] {
+      return !writer_.has_value() && writers_waiting_ == 0
+             && readers_paused_ == 0;
+    });
     readers_ += 1;
   }
   tls(this).shared_depth = 1;
@@ -88,6 +91,21 @@ void CaptureBarrier::release_shared()
     readers_ -= 1;
     cond_.notify_all();
   }
+}
+
+void CaptureBarrier::pause_readers()
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  readers_paused_ += 1;
+}
+
+void CaptureBarrier::resume_readers()
+{
+  std::lock_guard<std::mutex> lk(mutex_);
+  if (readers_paused_ > 0) {
+    readers_paused_ -= 1;
+  }
+  cond_.notify_all();
 }
 
 // PORT: gpu_lanes.py:CaptureBarrier.acquire_exclusive

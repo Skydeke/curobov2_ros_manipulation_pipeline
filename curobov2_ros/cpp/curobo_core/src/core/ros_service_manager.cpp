@@ -492,7 +492,19 @@ void RosServiceManager::handle_clear_voxel_map(
     // the lock the pair raced an in-flight capture; without the push the solvers
     // kept the old voxels (clear_dynamic_voxels does not bump the epoch, so the
     // freshness gate would not re-push either).
-    auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
+    // Stop the capture lanes from taking new read holds while this writer
+    // waits. Without it a 3 Hz depth stream keeps re-entering between the
+    // request and the acquire, and the clear can wait tens of seconds; with
+    // it the acquire is bounded by the frames already in flight. The guard
+    // resumes on every exit path.
+    auto & barrier = curobo_runtime::Runtime::instance().barrier();
+    barrier.pause_readers();
+    struct ResumeReaders
+    {
+      curobo_runtime::CaptureBarrier & barrier;
+      ~ResumeReaders() {barrier.resume_readers();}
+    } resume_readers{barrier};
+    auto gpu_guard = barrier.exclusive();
     n_blocks = obstacle_manager_->clear_dynamic_voxels();
     refreshed = obstacle_manager_->refresh_esdf();
     if (refreshed) {
@@ -539,7 +551,10 @@ void RosServiceManager::handle_set_link_collision(
     // gpu.exclusive():` because it mutates kinematics tensors shared by every
     // solver.
     auto gpu_guard = curobo_runtime::Runtime::instance().barrier().exclusive();
-    const auto outcome = bridge_->set_link_collision(handle_, link_names, request->enabled);
+    const auto outcome = request->object_name.empty() ?
+      bridge_->set_link_collision(handle_, link_names, request->enabled) :
+      bridge_->set_object_link_collision(
+        handle_, request->object_name, link_names, request->enabled);
     const std::vector<std::string> & applied = outcome.applied;
     unknown = outcome.unknown;
     response->applied_links = applied;
@@ -552,14 +567,27 @@ void RosServiceManager::handle_set_link_collision(
     }
     if (!applied.empty()) {
       const char * state = request->enabled ? "enabled" : "disabled";
-      RCLCPP_INFO(
-        node_->get_logger(), "Collision spheres %s for: %s", state,
-        py_list(applied).c_str());
+      if (request->object_name.empty()) {
+        RCLCPP_INFO(
+          node_->get_logger(), "Collision spheres %s for: %s", state,
+          py_list(applied).c_str());
+        response->message =
+          std::string("Collision ") + state + " for " + py_list(applied);
+      } else {
+        RCLCPP_INFO(
+          node_->get_logger(), "Collision with '%s' %s for links: %s",
+          request->object_name.c_str(), state, py_list(applied).c_str());
+        response->message =
+          std::string("Collision with '") + request->object_name + "' " +
+          state + " for " + py_list(applied);
+      }
       response->success = true;
-      response->message = std::string("Collision ") + state + " for " + py_list(applied);
     } else {
       response->success = false;
-      response->message = "No valid links found in: " + py_list(link_names);
+      response->message = request->object_name.empty() ?
+        ("No valid links found in: " + py_list(link_names)) :
+        ("Object '" + request->object_name +
+         "' or links not found; no collision toggle applied");
     }
   } catch (const std::exception & e) {
     response->success = false;
@@ -687,8 +715,12 @@ void RosServiceManager::publish_sparse_voxel_grid_job()
     }
     auto msg = std::make_unique<curobov2_ros_interfaces::msg::SparseVoxelGrid>();
     msg->header.stamp = node_->get_clock()->now();
-    msg->header.frame_id = node_->has_parameter("base_link") ?
-      node_->get_parameter("base_link").as_string() : "base_link";
+    // `grid.origin` and the occupied indices are expressed in the MAPPER frame
+    // (`mapper_frame`, e.g. base_link), so the message must be labelled with
+    // that frame. Labelling it with the planner base (odom) placed every voxel
+    // one robot pose away from where it belongs.
+    msg->header.frame_id = integration_frame_provider_ ? integration_frame_provider_() :
+      integration_frame(node_);
     msg->origin.x = static_cast<float>(grid.origin[0]);
     msg->origin.y = static_cast<float>(grid.origin[1]);
     msg->origin.z = static_cast<float>(grid.origin[2]);
@@ -1004,6 +1036,10 @@ void RosServiceManager::publish_collision_spheres_job()
       label.pose.position.z = 0.5 * (first.z + second.z) + 0.02;
       label.pose.orientation.w = 1.0;
       label.scale.z = 0.025;
+      // RViz2 uses scale.x as the space width for TEXT_VIEW_FACING. Leaving it
+      // at zero keeps a ~1 m default, so "a <-> b" renders with huge gaps at
+      // small text sizes (ros2/rviz#1336). Match the space width to the text.
+      label.scale.x = label.scale.z;
       label.color.r = 1.0;
       label.color.g = 1.0;
       label.color.b = 1.0;

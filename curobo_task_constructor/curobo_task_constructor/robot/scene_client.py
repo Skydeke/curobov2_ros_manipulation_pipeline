@@ -306,17 +306,30 @@ class _SceneClientMixin:
             self._plan_scene_original = list(self.get_attached_objects() or [])
             self._plan_scene_attached = []
         desired = _desired_attached(scene)
-        if desired == list(self._plan_scene_attached or []):
+        if not desired:
+            # No payload for this leg. Drop any stale attach once so a later
+            # leg's attach is a real mutation, not a no-op on a stale fit.
+            if self._plan_scene_attached:
+                self.detach_object(None)
+                for name in self._plan_scene_original:
+                    self.attach_object(name, joint_state=joint_state)
+                self._plan_scene_attached = []
             return
-        if (not self._plan_scene_attached
-                and desired == self._plan_scene_original):
-            # Already in the requested state; no preview mutation needed.
-            self._plan_scene_attached = list(desired)
+        # Attach ONCE, at the configuration where the object is actually
+        # grasped. The first post-grasp leg (the retreat) starts at the grasp
+        # pose, so its ``joint_state`` is the correct fit. Later legs must NOT
+        # re-fit: the server stores one ``object_in_link`` per payload and
+        # places it relative to the CURRENT flange. Re-fitting at a later leg's
+        # start (the lift end, the carry start) pins the payload to the object's
+        # ORIGINAL world pose at that flange -- i.e. below the hand, back on the
+        # table -- so the return leg drags it through the table and
+        # ``plan_cspace`` returns None even though start and goal are clear.
+        if desired == list(self._plan_scene_attached or []):
             return
         self.detach_object(None)
         for name in self._plan_scene_original:
             if name not in desired:
-                self.attach_object(name)
+                self.attach_object(name, joint_state=joint_state)
         for name in desired:
             self.attach_object(name, joint_state=joint_state)
         self._plan_scene_attached = list(desired)

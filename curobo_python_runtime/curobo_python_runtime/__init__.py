@@ -51,7 +51,7 @@ from .robot_introspection import _resolve_descriptor, collision_spheres_with_att
 from .kinematics import fk, joint_limits, link_poses
 from .ik import _build_ik_solver, _ik_solver, ik, ik_config, ik_multi
 from .collision import _link_of_factory, _rot_from_quat_wxyz, _sphere_snapshot, collision_attribution, collision_distance, validate
-from .scene import ATTACH_LINK, _attachment_manager, _clear_attached_voxels, _cuboid_world_aabb, _reapply_attached_disables, _scene_collision, _solver_scene_checkers, _to_scene, attach_object, detach_object, scene_get, scene_set
+from .scene import ATTACH_LINK, _attachment_manager, _clear_attached_voxels, _cuboid_world_aabb, _reapply_attached_disables, _scene_collision, _solver_scene_checkers, _to_scene, attach_object, detach_object, scene_get, scene_set, set_object_link_collision
 from .link_collision import _solver_bound_scene, set_link_collision
 from .motion_planner import _reset_scene_cuda_graphs, _warmup_cspace, _warmup_pose, motion_planner_build, prepare_solve_mode
 from .plan_result import _as_2d_list, _flat_list, _knot_motion_time, _plan_outcome, _position_error_mm, _select_goal_index, _select_seed_index, considered_rows
@@ -175,6 +175,7 @@ __all__ = [
     'robot_spheres',
     'scene_get',
     'scene_set',
+    'set_object_link_collision',
     'set_global_flags',
     'set_link_collision',
     'shutdown',

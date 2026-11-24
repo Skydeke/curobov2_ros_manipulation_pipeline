@@ -514,6 +514,14 @@ LinkCollisionOutcome FakeBridge::set_link_collision(
   return out;
 }
 
+LinkCollisionOutcome FakeBridge::set_object_link_collision(
+  RobotHandle, const std::string &, const std::vector<std::string> & link_names, bool)
+{
+  LinkCollisionOutcome out;
+  out.applied = link_names;
+  return out;
+}
+
 TensorF32 FakeBridge::robot_segment(
   RobotHandle, const TensorF32 & depth, const TensorF32 &, const std::array<double, 7> &,
   const std::vector<float> &, const std::string &)

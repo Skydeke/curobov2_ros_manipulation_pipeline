@@ -5,6 +5,13 @@
 string[] link_names   # Links to enable or disable
 bool enabled          # true = enable, false = disable
 
+# Optional per-object allowance. Empty preserves the historical behaviour:
+# the listed robot links stop colliding with EVERYTHING. When set, only the
+# collisions between `object_name` and the listed links are toggled; the links
+# keep colliding with the table and every other obstacle. The object must
+# already be in the scene.
+string object_name ""
+
 ---
 
 bool success

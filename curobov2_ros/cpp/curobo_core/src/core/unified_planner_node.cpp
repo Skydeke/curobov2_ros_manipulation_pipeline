@@ -230,6 +230,28 @@ void UnifiedPlannerNode::setup() {
   }
   base_link_ = get_parameter("base_link").as_string();
 
+  // mapper_frame: the frame the depth is integrated in and the frame the
+  // Mapper's grid box is expressed in. Defaults to the planning base, where
+  // the grid is a fixed world box around a fixed robot. A mobile manipulator
+  // whose cspace root is odom sets this to the moving chassis (`base_link`):
+  // `mapper_grid_center` is then a constant robot-relative offset, the grid
+  // rides the robot, and each ESDF refresh places it in the planner base with
+  // the chassis pose (IBridge::set_esdf_pose).
+  if (!has_parameter("mapper_frame")) {
+    declare_parameter<std::string>("mapper_frame", base_link_);
+  }
+  mapper_frame_ = get_parameter("mapper_frame").as_string();
+  if (mapper_frame_.empty()) {
+    mapper_frame_ = base_link_;
+  }
+  if (mapper_frame_ != base_link_) {
+    RCLCPP_INFO(
+      get_logger(),
+      "Mapper frame '%s' (planner base '%s'): the ESDF grid follows the robot "
+      "and is re-placed in the planner base on every refresh.",
+      mapper_frame_.c_str(), base_link_.c_str());
+  }
+
   // control_strategy: descriptor default unless overridden at launch.
   if (!has_parameter("control_strategy")) {
     declare_parameter<std::string>(
@@ -288,18 +310,25 @@ void UnifiedPlannerNode::setup() {
     }
     const auto limits = bridge_->joint_limits(handle_);
     joint_names_ = limits.joint_names;
-    // Continuous joints: descriptor override + the model's own joint type.
-    // Both are authoritative; the +/-2*pi range is only the planner window.
+    // Continuous joints: the descriptor's explicit list is AUTHORITATIVE when
+    // it names any. It is the only place the URDF joint type is recorded.
+    //
+    // Do NOT union it with the model's mask: the artifact flags a joint
+    // continuous by RANGE WIDTH (> 2*pi), and a mobile base's +/-10 m
+    // prismatic translation joints trip that heuristic. Treating base_x/base_y
+    // as circles wraps the start by a common 2*pi (base_y -5.5 -> +0.783),
+    // which leaves the model metres from the measured base - joint-space plans
+    // still execute (both ends shift together) but every Cartesian goal is
+    // unreachable. The model mask is only the fallback when the descriptor
+    // omits `continuous_joints`.
     continuous_joint_names_ = desc.continuous_joint_names;
-    for (std::size_t i = 0;
-      i < limits.joint_names.size() && i < limits.continuous.size(); ++i)
-    {
-      if (limits.continuous[i] != 0 &&
-        std::find(
-          continuous_joint_names_.begin(), continuous_joint_names_.end(),
-          limits.joint_names[i]) == continuous_joint_names_.end())
+    if (continuous_joint_names_.empty()) {
+      for (std::size_t i = 0;
+        i < limits.joint_names.size() && i < limits.continuous.size(); ++i)
       {
-        continuous_joint_names_.push_back(limits.joint_names[i]);
+        if (limits.continuous[i] != 0) {
+          continuous_joint_names_.push_back(limits.joint_names[i]);
+        }
       }
     }
     // `lock_joints: {joint: null}` - held out of the cspace but NOT pinned: the
@@ -399,6 +428,39 @@ void UnifiedPlannerNode::setup() {
   config_services_->set_integration_frame_provider(
       [this]() { return integration_frame(); });
   obstacle_manager_ = std::make_unique<ObstacleManager>(bridge_, handle_);
+  // Place the perception ESDF grid in the planner base frame. When the mapper
+  // integrates in that same frame this resolves to the identity; with
+  // mapper_frame != base_link (mobile base) it carries the moving chassis pose,
+  // so the box stays around the robot while the solvers plan in the fixed root.
+  obstacle_manager_->set_esdf_frame_pose_provider(
+    [this](
+      std::array<double, 3> & position, std::array<double, 4> & quaternion) {
+      position = {0.0, 0.0, 0.0};
+      quaternion = {1.0, 0.0, 0.0, 0.0};
+      if (mapper_frame_ == base_link_ || mapper_frame_.empty()) {
+        return true;
+      }
+      if (tf_buffer_ == nullptr) {
+        return false;
+      }
+      try {
+        const auto tf =
+          get_transform(*tf_buffer_, base_link_, mapper_frame_, 0.05);
+        position = {
+          tf.transform.translation.x, tf.transform.translation.y,
+          tf.transform.translation.z};
+        quaternion = {
+          tf.transform.rotation.w, tf.transform.rotation.x,
+          tf.transform.rotation.y, tf.transform.rotation.z};
+        return true;
+      } catch (const std::exception & e) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "mapper frame '%s' is not available yet (%s); the ESDF grid keeps "
+          "its previous pose", mapper_frame_.c_str(), e.what());
+        return false;
+      }
+    });
   // PORT: unified_planner_node._esdf_refresh_min_interval (open-loop throttle).
   obstacle_manager_->set_esdf_refresh_min_interval(
       get_parameter("esdf_refresh_min_interval").as_double());
@@ -765,7 +827,7 @@ void UnifiedPlannerNode::configure_mapper_from_params() {
 // Frame the depth is integrated in: always the configured robot base. Exposed
 // so the mapper_workspace marker and the workspace service report the same
 // frame the voxels are in (see integration_frame() in camera_cfg.cpp).
-std::string UnifiedPlannerNode::integration_frame() { return base_link_; }
+std::string UnifiedPlannerNode::integration_frame() { return mapper_frame_; }
 
 // PORT: unified_planner_node.mpc_goal_callback
 void UnifiedPlannerNode::handle_mpc_goal(

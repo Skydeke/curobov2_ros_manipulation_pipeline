@@ -15,6 +15,7 @@ submodule. `cpp_runtime` is built with standalone CMake; it is never added to
 | `include/curobo_cpp_runtime/runtime_selector.hpp` | factory that constructs `PyBridge` or `CppBridge` |
 | `include/curobo_cpp_runtime/native_scene.hpp` | SceneObject JSON -> `curobo::robot::Scene` |
 | `src/curobo_server_main.cpp` | `curobo_trajectory_planner_cpp` executable |
+| `src/cpp_planner_component.cpp` | `UnifiedPlannerCppComponent` composable wrapper (installs the selected bridge) |
 
 ## Runtime selection
 
@@ -56,6 +57,28 @@ The executable installs the selected bridge with
 `curobo_runtime::Runtime::instance().set_bridge_for_test()` before constructing
 `curobo_core::UnifiedPlannerNode`. The launch-level node name stays
 `curobo_server`.
+
+`curobo_cpp_runtime::UnifiedPlannerCppComponent` does the same thing for a
+`component_container_mt`. Use it whenever the server is composed with other
+nodes (cuTAMP, GraspGenX): the stock `curobo_core::UnifiedPlannerNode`
+component never installs a bridge, so `Runtime::start()` silently falls back
+to `PyBridge` and `curobo_runtime:=cpp/auto` would be ignored. Load the
+composable server **first**: the bridge must be installed before
+`Runtime::start()`, and `set_bridge_for_test()` throws after it.
+
+```python
+curobo_component = ComposableNode(
+    package="curobo_cpp_runtime",
+    plugin="curobo_cpp_runtime::UnifiedPlannerCppComponent",
+    name="curobo_server",
+    parameters=[{"curobo_runtime": "auto", "robot": ..., "robot_config_file": ...}],
+    extra_arguments=[{"use_intra_process_comms": True}],
+)
+```
+
+For an explicit `curobo_runtime:=python`, the stock
+`curobov2_ros`/`curobo_core::UnifiedPlannerNode` component is equivalent and
+skips the wrapper.
 
 ## Artifact layout and manifest
 

@@ -332,6 +332,16 @@ bool ObstacleManager::remove_all_objects(std::string & message)
 // PORT: obstacle_manager.refresh_esdf
 bool ObstacleManager::refresh_esdf()
 {
+  // The mapper integrates around a frame that moves with the robot
+  // (`mapper_frame`, e.g. base_link) while the solvers plan in a fixed root
+  // (odom). Place the grid in the planner base before the ESDF is rebuilt.
+  if (esdf_frame_pose_provider_) {
+    std::array<double, 3> position{0.0, 0.0, 0.0};
+    std::array<double, 4> quaternion{1.0, 0.0, 0.0, 0.0};
+    if (esdf_frame_pose_provider_(position, quaternion)) {
+      bridge_->set_esdf_pose(handle_, position, quaternion);
+    }
+  }
   const bool refreshed = bridge_->esdf_refresh(handle_);
   if (refreshed) {
     std::lock_guard<std::mutex> lock(state_mutex_);

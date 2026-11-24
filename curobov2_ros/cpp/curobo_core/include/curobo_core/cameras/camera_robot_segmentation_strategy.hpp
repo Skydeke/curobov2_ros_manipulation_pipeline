@@ -56,7 +56,8 @@ private:
   void publish_robot_pointcloud(
     const std::vector<float> & depth, const std::vector<float> & masked,
     std::uint32_t h, std::uint32_t w, const std::array<double, 9> & k,
-    const std::array<double, 7> & cam_pose, const builtin_interfaces::msg::Time & stamp);
+    const std::array<double, 7> & cam_pose, const std::string & cloud_frame,
+    const builtin_interfaces::msg::Time & stamp);
   void publish_masked(
     const std::vector<float> & masked, std::uint32_t h, std::uint32_t w,
     const std::string & encoding, const builtin_interfaces::msg::Time & stamp);

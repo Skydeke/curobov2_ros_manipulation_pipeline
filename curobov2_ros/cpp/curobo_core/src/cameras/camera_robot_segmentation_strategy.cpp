@@ -122,25 +122,53 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
       static_cast<std::int64_t>(msg.header.stamp.sec) * 1000000000LL +
       static_cast<std::int64_t>(msg.header.stamp.nanosec);
 
+    // The camera pose used by the mask must be in the PLANNER base: the robot
+    // spheres are FK output in that frame. On a mobile robot the mapper frame
+    // (base_link) moves with the chassis, so the two are NOT interchangeable.
+    const std::string planner_base = planner_base_frame(node_);
     std::array<double, 7> cam_pose{0, 0, 0, 1, 0, 0, 0};
-    bool have_pose = static_pose_.has_value();
-    if (have_pose) {
+    // Frame the returned points/cloud are expressed in (for debug output).
+    std::string cloud_frame = planner_base;
+    bool have_pose = false;
+    if (static_pose_.has_value()) {
+      // Static extrinsics are the camera -> MAPPER base transform (that is what
+      // camera_depth_map_strategy hands the integrator). Compose them with the
+      // mapper -> planner base TF so the mask compares like with like.
       cam_pose = *static_pose_;
-    } else if (!frame_id_.empty()) {
-      // PORT: _transform_points_to_base - camera -> base at the CAPTURE stamp
-      // (not the latest), so a moving wrist camera masks the right pixels.
-      for (const std::string & base : integration_frame_candidates(node_)) {
+      cloud_frame = integration_frame(node_);
+      if (cloud_frame != planner_base) {
         const auto transform =
-          lookup_transform_at(*tf_buffer_, base, frame_id_, msg.header.stamp);
+          lookup_transform_at(*tf_buffer_, planner_base, cloud_frame, msg.header.stamp);
         if (!transform.has_value()) {
-          continue;
+          RCLCPP_WARN_THROTTLE(
+            node_->get_logger(), *node_->get_clock(), 2000,
+            "[%s] TF %s -> %s unavailable; dropping this depth frame",
+            name_.c_str(), cloud_frame.c_str(), planner_base.c_str());
+          return;
         }
+        const auto & t = transform->transform.translation;
+        const auto & r = transform->transform.rotation;
+        const Eigen::Quaterniond qb = Eigen::Quaterniond(
+          r.w, r.x, r.y, r.z).normalized();
+        const Eigen::Vector3d pb(cam_pose[0], cam_pose[1], cam_pose[2]);
+        const Eigen::Quaterniond qc(cam_pose[3], cam_pose[4], cam_pose[5], cam_pose[6]);
+        const Eigen::Vector3d p = qb * pb + Eigen::Vector3d(t.x, t.y, t.z);
+        const Eigen::Quaterniond q = (qb * qc).normalized();
+        cam_pose = {p.x(), p.y(), p.z(), q.w(), q.x(), q.y(), q.z()};
+        cloud_frame = planner_base;
+      }
+      have_pose = true;
+    } else if (!frame_id_.empty()) {
+      // PORT: _transform_points_to_base - camera -> PLANNER base at the CAPTURE
+      // stamp (not the latest), so a moving wrist camera masks the right pixels.
+      const auto transform =
+        lookup_transform_at(*tf_buffer_, planner_base, frame_id_, msg.header.stamp);
+      if (transform.has_value()) {
         const auto & t = transform->transform.translation;
         const auto & r = transform->transform.rotation;
         const auto q = normalize_quat_wxyz({r.w, r.x, r.y, r.z});
         cam_pose = {t.x, t.y, t.z, q[0], q[1], q[2], q[3]};
         have_pose = true;
-        break;
       }
     }
     if (!have_pose) {
@@ -177,9 +205,9 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
     // up, and nothing else may touch the GPU while the barrier is held.
     std::map<std::string, std::optional<std::array<double, 7>>> mask_frame_cache;
     const MaskFrameResolver resolve_mask_frame =
-      [this, &msg, &mask_frame_cache](const std::string & frame)
+      [this, &msg, &mask_frame_cache, &planner_base](const std::string & frame)
       -> std::optional<std::array<double, 7>> {
-        const std::vector<std::string> bases = integration_frame_candidates(node_);
+        const std::vector<std::string> bases = {planner_base};
         if (frame.empty() || std::find(bases.begin(), bases.end(), frame) != bases.end()) {
           return std::array<double, 7>{0, 0, 0, 1, 0, 0, 0};
         }
@@ -230,7 +258,7 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
     if (want_cloud) {
       publish_robot_pointcloud(
         frame.data, masked.data, frame.height, frame.width, *intrinsics, cam_pose,
-        msg.header.stamp);
+        cloud_frame, msg.header.stamp);
     }
   } catch (const std::exception & e) {
     // WARN, not DEBUG: a persistent failure here silently stops the masked
@@ -246,7 +274,8 @@ void RobotSegmentationCameraStrategy::callback_depth(const sensor_msgs::msg::Ima
 void RobotSegmentationCameraStrategy::publish_robot_pointcloud(
   const std::vector<float> & depth, const std::vector<float> & masked,
   std::uint32_t h, std::uint32_t w, const std::array<double, 9> & k,
-  const std::array<double, 7> & cam_pose, const builtin_interfaces::msg::Time & stamp)
+  const std::array<double, 7> & cam_pose, const std::string & cloud_frame,
+  const builtin_interfaces::msg::Time & stamp)
 {
   const double fx = k[0], fy = k[4], cx = k[2], cy = k[5];
   const Eigen::Matrix3d rot = quat_to_matrix({cam_pose[3], cam_pose[4], cam_pose[5], cam_pose[6]});
@@ -270,7 +299,7 @@ void RobotSegmentationCameraStrategy::publish_robot_pointcloud(
   }
   sensor_msgs::msg::PointCloud2 msg;
   msg.header.stamp = stamp;
-  msg.header.frame_id = integration_frame(node_);
+  msg.header.frame_id = cloud_frame;
   msg.height = 1;
   msg.width = static_cast<std::uint32_t>(points.size() / 3);
   msg.is_bigendian = false;

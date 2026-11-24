@@ -19,6 +19,7 @@
 #include "curobov2_ros_interfaces/srv/set_planner.hpp"
 #include "curobov2_ros_interfaces/srv/trajectory_generation.hpp"
 #include "curobov2_ros_interfaces/srv/trajectory_generation_batch.hpp"
+#include "curobo_core/adapters/adapter_chain.hpp"
 #include "curobo_core/planners/planner_factory.hpp"
 #include "curobo_runtime/bridge.hpp"
 
@@ -116,6 +117,11 @@ private:
   curobo_runtime::PlanRequest build_request(
     const curobov2_ros_interfaces::msg::TrajectoryGoal & goal) const;
 
+  // Run the configured request-adapter chain on a mutable goal. Returns false
+  // with `error` set when an adapter rejects the request.
+  bool adapt_goal(
+    curobov2_ros_interfaces::msg::TrajectoryGoal & goal, std::string & error);
+
   // PORT: gpu_lanes.py:GpuLane._run_job's fatal path. `fill_result` catches the
   // planner exception and returns it as a service result string, so a CUDA fatal
   // error (illegal memory access / device-side assert) never reaches
@@ -161,6 +167,7 @@ private:
   std::function<void(const sensor_msgs::msg::JointState &)> start_lock_callback_;
   RobotContext * robot_context_ = nullptr;
   PlannerManager manager_;
+  std::unique_ptr<adapters::AdapterChain> request_adapters_;
 
   rclcpp::Service<curobov2_ros_interfaces::srv::SetPlanner>::SharedPtr set_planner_srv_;
   rclcpp::Service<curobov2_ros_interfaces::srv::GetPlanners>::SharedPtr get_planners_srv_;
