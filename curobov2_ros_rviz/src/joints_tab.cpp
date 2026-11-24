@@ -720,7 +720,7 @@ QTreeWidgetItem * JointsTab::rowFor(const QString & joint) const
 
 void JointsTab::onJointState(const sensor_msgs::msg::JointState::ConstSharedPtr msg)
 {
-  // Match BY NAME. The kortex sim publishes the finger joint FIRST, so
+  // Match BY NAME. A publisher may put the finger joint FIRST, so
   // /joint_states order is not the cspace order and indexing into the tree by
   // position would silently show the wrong value on the wrong joint.
   //

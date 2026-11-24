@@ -1,4 +1,4 @@
-"""kortex_mtc_test.py as a StageSpec tree — validation target #1. The legacy MoveIt-pipeline test asked for this stage sequence:
+"""A seven-stage move/gripper sequence as a StageSpec tree.
 
     current_state
     -> move_to (pose goal, base_link)
@@ -8,9 +8,9 @@
     -> move_to (named "open", gripper)
     -> move_to (named "close", gripper)
 
-Reproduced here 1:1 under the declarative format, solved and executed against
-the MockCuroboServer — same ordering, same goals. The "cartesian path variant" leg is a ``cartesian_path`` stage rather than a
-pose ``move_to``."""
+Solved and executed against the MockCuroboServer with the same ordering and the
+same goals. The "cartesian path variant" leg is a ``cartesian_path`` stage
+rather than a pose ``move_to``."""
 
 from __future__ import annotations
 
@@ -67,9 +67,9 @@ def _cartesian_shift(name: str, dz: float) -> StageSpec:
                      f"planner: classic\n"))
 
 
-def _kortex_spec() -> StageSpec:
-    """The 7-stage kortex_mtc_test sequence as a serial container."""
-    return StageSpec(stage_type="", name="kortex task",
+def _spec() -> StageSpec:
+    """The seven-stage sequence as a serial container."""
+    return StageSpec(stage_type="", name="test task",
                      container_type="serial",
                      children=[
                          StageSpec(stage_type="current_state",
@@ -85,10 +85,10 @@ def _kortex_spec() -> StageSpec:
 
 def _executor():
     robot = MockCuroboServer(named=_named_configs())
-    return robot, TaskExecutor(_kortex_spec(), robot, task_id="kortex")
+    return robot, TaskExecutor(_spec(), robot, task_id="test")
 
 
-def test_kortex_sequence_solves():
+def test_sequence_solves():
     robot, ex = _executor()
     assert ex.init(), ex.describe()["comment"]
     assert ex.plan()
@@ -97,7 +97,7 @@ def test_kortex_sequence_solves():
     assert sol.cost > 0.0
 
 
-def test_kortex_sequence_ends_gripper_closed():
+def test_sequence_ends_gripper_closed():
     robot, ex = _executor()
     assert ex.init() and ex.plan()
     sol = ex.best()
@@ -106,7 +106,7 @@ def test_kortex_sequence_ends_gripper_closed():
     assert abs(finger - CLOSE) < 1e-9
 
 
-def test_kortex_sequence_leaf_order_matches_stage_order():
+def test_sequence_leaf_order_matches_stage_order():
     robot, ex = _executor()
     assert ex.init() and ex.plan()
     sol = ex.best()
@@ -119,7 +119,7 @@ def test_kortex_sequence_leaf_order_matches_stage_order():
     assert sum(1 for l in chain if l.plan_request is not None) == 6
 
 
-def test_kortex_sequence_executes_all_motions_in_order():
+def test_sequence_executes_all_motions_in_order():
     robot, ex = _executor()
     assert ex.init() and ex.plan()
     results = ex.execute(ex.best())
@@ -131,7 +131,7 @@ def test_kortex_sequence_executes_all_motions_in_order():
         JOINT_NAMES.index("finger_joint")] == CLOSE
 
 
-def test_kortex_cartesian_shift_is_a_straight_line():
+def test_cartesian_shift_is_a_straight_line():
     """The point of the leg: the tool tracks the line, it does not swing.
 
     As a pose ``move_to`` the solver is free to bow anywhere; the
@@ -153,7 +153,7 @@ def test_kortex_cartesian_shift_is_a_straight_line():
     assert pts[0][2] - pts[-1][2] == pytest.approx(0.08, abs=1e-6)
 
 
-def test_kortex_cartesian_shift_records_its_axis_hold():
+def test_cartesian_shift_records_its_axis_hold():
     """The goalset must actually carry the int8[6] hold, or the leg is a no-op."""
     robot, ex = _executor()
     assert ex.init() and ex.plan()
@@ -163,7 +163,7 @@ def test_kortex_cartesian_shift_records_its_axis_hold():
         [1, 1, 1, 1, 1, 0]
 
 
-def test_kortex_sequence_statistics():
+def test_sequence_statistics():
     robot, ex = _executor()
     assert ex.init() and ex.plan()
     stats = ex.statistics()

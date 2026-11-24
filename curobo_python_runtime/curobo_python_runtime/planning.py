@@ -108,11 +108,10 @@ def _clamp_to_limits(entry, positions):
 
     Gazebo (and some hardware drivers) report an at-rest joint a hair OUTSIDE
     its [lower, upper] bound - e.g. -3e-9 when the limit is exactly 0.0, which
-    is common for robots whose zero pose sits on a joint stop (OpenArm's
-    joint4 and lift). cuRobo's cspace constraint then rejects the *start*
-    state outright ("Start or End state in collision") and no planner will
-    move, even though the state is physically fine. Clamp, don't tolerate: the
-    limit check is an exact `lo - q <= 0` test.
+    is common for robots whose zero pose sits on a joint stop. cuRobo's cspace
+    constraint then rejects the *start* state outright ("Start or End state in
+    collision") and no planner will move, even though the state is physically
+    fine. Clamp, don't tolerate: the limit check is an exact `lo - q <= 0` test.
     """
     import numpy as np
     try:

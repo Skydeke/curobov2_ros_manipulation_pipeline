@@ -113,8 +113,8 @@ PlannerResult ReactiveController::plan_reactive_impl(
   // start_pose when present, else the robot's current pose. A start pose may
   // carry every URDF joint (both arms + fingers + lift); the solver cspace is
   // only the active joints, so resolve by NAME instead of forwarding the raw
-  // width (a 17-wide OpenArm joint_states message used to fail the bridge's
-  // dof check).
+  // width (a joint_states message wider than the cspace used to fail the
+  // bridge's dof check).
   std::vector<float> start_q;
   std::vector<double> current;
   const std::vector<std::string> active_names = (robot_context != nullptr) ?

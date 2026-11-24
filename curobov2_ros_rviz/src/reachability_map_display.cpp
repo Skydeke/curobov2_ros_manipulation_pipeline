@@ -358,7 +358,7 @@ void ReachabilityMapDisplay::loadURDF()
   } catch (const std::exception &) {
   }
   if (urdf_xml_.empty()) {
-    std::ifstream ifs("/tmp/kortex.urdf");
+    std::ifstream ifs("/tmp/robot.urdf");
     if (ifs) {
       std::stringstream buf;
       buf << ifs.rdbuf();

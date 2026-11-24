@@ -1,14 +1,18 @@
-"""The REAL pick graph from ``kortex_curobo_grasping``, replayed on the mock. ``grasp_orchestrator.py`` is rclpy-only, so the graph it builds was moved into
-``kortex_curobo_grasping/ctc.py`` — pure data, no ROS. That makes the
-deliverable itself testable: this file imports the *production* builder (not a
-re-declaration that could silently drift), hands it a candidate window, and
-solves the resulting tree against ``MockCuroboServer``."""
+"""The real pick graph from an optional grasp orchestrator, replayed on the mock.
+
+The orchestrator is an external package, not part of this repo; its rclpy-only
+builder lives in a pure-data ``ctc_manager`` module. Set
+``GRASP_ORCHESTRATOR_PKG`` to the package's parent directory (or install it) to
+run this module. It imports the *production* builder (not a re-declaration that
+could silently drift), hands it a candidate window, and solves the resulting
+tree against ``MockCuroboServer``. Skipped when the package is absent.
+"""
 
 from __future__ import annotations
 
 import math
+import os
 import sys
-from pathlib import Path
 
 import pytest
 
@@ -17,18 +21,13 @@ from curobo_task_constructor.core.state import ObjectSpec, SceneDiff
 from curobo_task_constructor.executor import TaskExecutor
 from tests.mock_curobo import JOINT_NAMES, MockCuroboServer, fk_positions
 
-#: The orchestrator package lives in a sibling workspace package, not in this
-#: repo. Add it to the path only if it is actually there, so the suite still
-#: runs (minus this file) in a bare checkout of curobo_task_constructor.
-for _root in (Path(__file__).resolve().parents[i] for i in range(1, 6)):
-    _pkg = _root / "iki_kortex_curobo_grasping"
-    if (_pkg / "kortex_curobo_grasping" / "ctc_manager.py").is_file():
-        sys.path.insert(0, str(_pkg))
-        break
+_pkg_root = os.environ.get("GRASP_ORCHESTRATOR_PKG")
+if _pkg_root:
+    sys.path.insert(0, _pkg_root)
 
 ctc = pytest.importorskip(
-    "kortex_curobo_grasping.ctc_manager",
-    reason="kortex_curobo_grasping (the grasp orchestrator) is not present",
+    "grasp_orchestrator.ctc_manager",
+    reason="grasp_orchestrator (the grasp orchestrator) is not present",
 )
 
 OBJECT = "object_0"

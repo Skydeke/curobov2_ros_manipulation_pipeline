@@ -58,13 +58,13 @@ class GripperCommand(PropagatingEitherWay):
         # not from the planner's stale lock-joint value. The planner's cspace
         # ignores the extra joint; it is only there for the state chain, the
         # solution's start/end snapshots and the ghost preview. Every joint
-        # the controller moves is updated (TIAGo has two fingers on one
-        # FollowJointTrajectory command).
+        # the controller moves is updated (a parallel gripper has two fingers
+        # on one FollowJointTrajectory command).
         joints = gripper_joint_names(
             self.robot, cmd.get("gripper", ""), cmd.get("joint", ""))
         if joints:
             # The display consumer cannot resolve a descriptor, so carry every
-            # jaw the controller moves (TIAGo's pal-gripper has two fingers).
+            # jaw the controller moves (a parallel gripper has two fingers).
             cmd["joints"] = {name: cmd["position"] for name in joints}
         end_joint_state = merged_joint_state(
             self.robot, base_joint_state, measured,

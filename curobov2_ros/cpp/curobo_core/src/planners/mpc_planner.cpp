@@ -135,8 +135,9 @@ bool MPCController::setup_solver(
   const std::vector<float> & start_q, const ReactiveGoal & goal)
 {
   // A reactive goal is exactly ONE goalset: either one legacy Cartesian pose
-  // or a simultaneous multi-tool goal (both OpenArm grasp frames). Candidate
-  // sets with several poses belong to the open-loop planners.
+  // or a simultaneous multi-tool goal (both grasp frames of a dual-arm
+  // robot). Candidate sets with several poses belong to the open-loop
+  // planners.
   std::vector<std::string> frames;
   std::vector<std::array<double, 7>> poses;
   if (!goal.tool_poses.empty()) {

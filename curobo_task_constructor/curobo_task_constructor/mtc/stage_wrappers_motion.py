@@ -284,8 +284,8 @@ class MultiToolMoveTo(_MotionBase):
 
         move = stages.MultiToolMoveTo("bimanual", planner)
         move.setGoals([
-            {"frame": "openarm_left_grasp_frame", "pose": left_pose},
-            {"frame": "openarm_right_grasp_frame", "pose": right_pose},
+            {"frame": "left_grasp_frame", "pose": left_pose},
+            {"frame": "right_grasp_frame", "pose": right_pose},
         ])
 
     Each entry may also be a ``(frame, pose)`` pair; ``pose`` may be any

@@ -1,17 +1,15 @@
-"""KATE recovery rungs plan their flat ``home`` goal.
+"""Recovery rungs plan their flat ``home`` goal.
 
-KATE is a six-DOF Jaco2. Its jaws are driven by a dedicated gripper
+The test robot is a six-DOF arm whose jaws are driven by a dedicated gripper
 controller and are NOT part of the planner cspace. ``recover_open_detach_home``
 therefore chains ``GripperCommand(open) -> MoveTo(home)``, and the command
 legitimately leaves the two commanded finger joints in the task state so the
 ghost preview is truthful.
 
 The planning request for ``home`` must still start from a cspace-sized vector.
-This mock is KATE-shaped: six arm joints in ``_joint_order``, two non-cspace
-finger joints in the descriptor's gripper map, and a ``plan()`` that enforces
-the joint-space wire contract (start names are the cspace, target length is
-the cspace length). Before the regression fix the open rung handed the solver
-an eight-joint start for a six-joint goal.
+This mock has six arm joints in ``_joint_order``, two non-cspace finger joints
+in the descriptor's gripper map, and a ``plan()`` that enforces the joint-space
+wire contract (start names are the cspace, target length is the cspace length).
 """
 
 from __future__ import annotations
@@ -26,40 +24,40 @@ from curobo_task_constructor.graph.spec import StageSpec
 from curobo_task_constructor.stages.move_to import MoveTo
 from tests.mock_curobo import MockCuroboServer
 
-KATE_ARM = [
-    "j2n6s200_joint_1",
-    "j2n6s200_joint_2",
-    "j2n6s200_joint_3",
-    "j2n6s200_joint_4",
-    "j2n6s200_joint_5",
-    "j2n6s200_joint_6",
+ARM = [
+    "joint_1",
+    "joint_2",
+    "joint_3",
+    "joint_4",
+    "joint_5",
+    "joint_6",
 ]
-KATE_FINGERS = [
-    "j2n6s200_joint_finger_1",
-    "j2n6s200_joint_finger_2",
+FINGERS = [
+    "finger_joint1",
+    "finger_joint2",
 ]
 #: The descriptor's perception_pose, i.e. the recovery rungs' flat goal.
 HOME = [2.86, 3.92, 5.744, 2.6, 0.55, 0.0]
 START = [1.36, 2.66, 5.15, -3.03, 0.53, 2.15]
 
 
-class KateRecoveryMock(MockCuroboServer):
-    """The KATE surface the recovery stages touch, with a strict wire mock."""
+class RecoveryMock(MockCuroboServer):
+    """The robot surface the recovery stages touch, with a strict wire mock."""
 
     def __init__(self):
         super().__init__()
-        self._joint_order = list(KATE_ARM)
+        self._joint_order = list(ARM)
         # CurrentState reads the normalized /joint_states cache: arm joints
-        # only, exactly like the live KATE adapter.
-        self._current = JointStateStub(names=list(KATE_ARM),
+        # only, like the live robot adapter.
+        self._current = JointStateStub(names=list(ARM),
                                        positions=list(START))
         self._grippers = {
-            "j2n6s200": {
+            "gripper": {
                 "type": "GripperCommand",
-                "name": "j2n6s200_gripper",
+                "name": "gripper_controller",
                 "action_ns": "gripper_cmd",
-                "joints": list(KATE_FINGERS),
-                "command_joint": KATE_FINGERS[0],
+                "joints": list(FINGERS),
+                "command_joint": FINGERS[0],
                 "open": 0.0,
                 "close": 1.3,
                 "max_effort": 0.0,
@@ -84,23 +82,23 @@ class KateRecoveryMock(MockCuroboServer):
             start = getattr(request, "start_pose", None)
             names = list(getattr(start, "name", []) or [])
             positions = list(getattr(start, "position", []) or [])
-            # KATE-shaped contract: a joint-space segment starts from the
-            # six-joint cspace, in cspace order, with no extra lock joints.
-            if names != KATE_ARM:
+            # Wire contract: a joint-space segment starts from the six-joint
+            # cspace, in cspace order, with no extra lock joints.
+            if names != ARM:
                 return PlanResult(
                     False,
                     "joint goal received a non-cspace start state "
-                    f"{names}; expected {KATE_ARM}")
-            if len(positions) != len(KATE_ARM):
+                    f"{names}; expected {ARM}")
+            if len(positions) != len(ARM):
                 return PlanResult(
                     False,
                     f"start has {len(positions)} positions, expected "
-                    f"{len(KATE_ARM)}")
-            if len(target) != len(KATE_ARM):
+                    f"{len(ARM)}")
+            if len(target) != len(ARM):
                 return PlanResult(
                     False,
                     f"goal has {len(target)} positions, expected "
-                    f"{len(KATE_ARM)}")
+                    f"{len(ARM)}")
             self.joint_requests.append(request)
         return super().plan(request)
 
@@ -123,8 +121,8 @@ def _open() -> StageSpec:
     return StageSpec(
         stage_type="gripper_command", name="open",
         params_yaml=(
-            "gripper: j2n6s200\n"
-            f"joint: {KATE_FINGERS[0]}\n"
+            "gripper: gripper\n"
+            f"joint: {FINGERS[0]}\n"
             "position: 0.0\n"))
 
 
@@ -146,8 +144,8 @@ CASES = {
 
 
 @pytest.mark.parametrize("kind", list(CASES))
-def test_kate_recovery_rung_plans_home_from_the_cspace(kind):
-    robot = KateRecoveryMock()
+def test_recovery_rung_plans_home_from_the_cspace(kind):
+    robot = RecoveryMock()
     ex = TaskExecutor(_task(*CASES[kind]), robot, task_id=kind)
     assert ex.init(), ex.describe()["comment"]
     assert ex.plan(), ex.describe()["comment"]
@@ -155,13 +153,13 @@ def test_kate_recovery_rung_plans_home_from_the_cspace(kind):
     home = next(leaf for leaf in ex.flatten_leaves(ex.best())
                 if leaf.stage.name == "home")
     request = home.plan_request
-    assert list(request.start_pose.name) == KATE_ARM
+    assert list(request.start_pose.name) == ARM
     assert list(request.goalsets[0].target_joint_positions) == pytest.approx(HOME)
 
 
-def test_kate_joint_goal_fills_missing_arm_joints_from_the_measurement():
+def test_joint_goal_fills_missing_arm_joints_from_the_measurement():
     """A state carrying only the jaws still plans a full-cspace home goal."""
-    robot = KateRecoveryMock()
+    robot = RecoveryMock()
     stage = MoveTo("home")
     stage.robot = robot
     stage.params = {
@@ -170,17 +168,17 @@ def test_kate_joint_goal_fills_missing_arm_joints_from_the_measurement():
         "planning_attempts": 1,
     }
     state = InterfaceState(joint_state=JointStateStub(
-        names=list(KATE_FINGERS), positions=[0.0, 0.0]))
+        names=list(FINGERS), positions=[0.0, 0.0]))
     stage.compute_forward(state)
 
     assert stage.solutions, "home must plan after filling the missing arm"
     request = stage.solutions[0].plan_request
-    assert list(request.start_pose.name) == KATE_ARM
+    assert list(request.start_pose.name) == ARM
 
 
-def test_kate_open_rung_keeps_the_jaws_in_the_chained_state():
+def test_open_rung_keeps_the_jaws_in_the_chained_state():
     """Only the planning start is projected; the task state stays complete."""
-    robot = KateRecoveryMock()
+    robot = RecoveryMock()
     ex = TaskExecutor(_task(*CASES["recover_open_detach_home"]), robot,
                       task_id="recover_open_detach_home")
     assert ex.init() and ex.plan()
@@ -192,8 +190,8 @@ def test_kate_open_rung_keeps_the_jaws_in_the_chained_state():
     # leg still carries that full state for the next stage / ghost preview.
     end = dict(zip(open_leaf.end.joint_state.name,
                    open_leaf.end.joint_state.position))
-    assert end[KATE_FINGERS[0]] == pytest.approx(0.0)
-    assert end[KATE_FINGERS[1]] == pytest.approx(0.0)
+    assert end[FINGERS[0]] == pytest.approx(0.0)
+    assert end[FINGERS[1]] == pytest.approx(0.0)
     chained = set(home.start.joint_state.name)
-    assert set(KATE_ARM) <= chained
-    assert set(KATE_FINGERS) <= chained
+    assert set(ARM) <= chained
+    assert set(FINGERS) <= chained

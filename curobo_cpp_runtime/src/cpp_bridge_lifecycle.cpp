@@ -335,6 +335,6 @@ void CppBridge::robot_model_update_lock_joints(
   }
   // See robot_model_rebuild_locks: the native model is frozen at export. Do not
   // invalidate the native scene solely for a lock update; that would force
-  // every OpenArm finger update onto the Python planner.
+  // every finger update onto the Python planner.
 }
 }  // namespace curobo_cpp_runtime

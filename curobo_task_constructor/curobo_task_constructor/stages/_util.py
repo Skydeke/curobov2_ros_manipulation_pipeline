@@ -83,9 +83,8 @@ def cspace_joint_state(robot, joint_state):
     stage's state complete. A *planning* start, however, must not hand those
     extra joints to the solver: the wire resolves a named start by cspace name
     but falls back to POSITIONAL when a cspace joint is missing, and a longer
-    vector then misaligns every DOF. KATE's ``open -> home`` recovery leg is
-    exactly this case (the gripper stage added two finger joints to a six-DOF
-    arm goal).
+    vector then misaligns every DOF. A gripper stage that added two finger
+    joints to a six-DOF arm goal is exactly this case.
 
     Returns ``joint_state`` unchanged when there is no canonical order or no
     names to reorder; otherwise a state containing only the cspace joints that
@@ -171,8 +170,8 @@ def gripper_controllers(robot) -> dict:
 def gripper_joint_names(robot, gripper: str = "", joint: str = "") -> list:
     """Every joint one gripper command moves, in descriptor order.
 
-    A parallel gripper (TIAGo's pal-gripper) has two finger joints driven by
-    one ``FollowJointTrajectory`` command; a single-joint ``GripperCommand``
+    A parallel gripper has two finger joints driven by one
+    ``FollowJointTrajectory`` command; a single-joint ``GripperCommand``
     has one. The task state must carry every commanded joint, otherwise the
     next leg's preview (and a state-only consumer) still sees the other jaw
     at its stale plan-time value.
@@ -288,13 +287,13 @@ def merged_joint_state(robot, primary, fallback=None, overrides=None):
 def gripper_command_for_joint_goal(robot, targets):
     """A gripper command for a joint goal the planner cspace does not own.
 
-    TIAGo's fingers are ``lock_joints``, not planning DOFs: a sparse goal like
-    ``{gripper_left_finger_joint: 0.045}`` cannot be a cuRobo trajectory. The
-    old path projected it onto the cspace, leaving an arm-only goal equal to
-    the start pose — a full-arm plan that did not move the jaws. When every
+    A gripper whose joints are ``lock_joints`` rather than planning DOFs: a
+    sparse goal like ``{finger_joint1: 0.045}`` cannot be a cuRobo trajectory.
+    Projecting it onto the cspace would leave an arm-only goal equal to the
+    start pose, i.e. a full-arm plan that does not move the jaws. When every
     named joint belongs to a descriptor gripper (and none is a planning DOF),
     route the goal to that gripper's controller instead. Robots whose cspace
-    DOES contain the jaws (KATE/Kortex) fall through to normal planning.
+    DOES contain the jaws fall through to normal planning.
     """
     if not isinstance(targets, dict) or not targets:
         return None

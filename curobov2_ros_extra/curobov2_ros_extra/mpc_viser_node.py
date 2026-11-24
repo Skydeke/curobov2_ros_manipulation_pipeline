@@ -276,7 +276,7 @@ class MpcViserNode(Node):
 
         # One gizmo per configured tool frame. Send them together: the MPC
         # server's bimanual path needs one pose per arm, not just the active
-        # gizmo (which used to leave the second OpenArm arm untargeted).
+        # gizmo (which used to leave the second arm untargeted).
         try:
             frame_poses = self._viz.get_control_frame_pose()
         except Exception:  # noqa: BLE001

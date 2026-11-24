@@ -73,8 +73,7 @@ namespace curobov2_ros_rviz
  * MoveIt dependency.
  *
  * Renders in the fixed frame directly: the goals are expressed in the robot's
- * base frame by the server, so set the RViz fixed frame to the robot base
- * (the default setup in kortex_sim.rviz).
+ * base frame by the server, so set the RViz fixed frame to the robot base.
  */
 class ReachabilityMapDisplay : public rviz_common::Display
 {

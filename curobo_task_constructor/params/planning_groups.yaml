@@ -1,4 +1,4 @@
-# Per-group planner configuration (moveit_wrapper jaco2.yaml shape).
+# Per-group planner configuration.
 #
 # Load with curobo_task_constructor.mtc.core.load_planner_configs():
 #

@@ -26,7 +26,7 @@ All AI/ROS nodes share one 8 GB GPU. Consequences:
 
 `ObjectArray` (`~/objects`, transient-local) -> `object_index` selection ->
 GraspGenX -> `Grasp[]`. The per-object cloud must already be in `frame_id`
-(`base_footprint` for KATE); the component rejects a mismatched frame instead
+(e.g. `base_footprint`); the component rejects a mismatched frame instead
 of relabelling it.
 
 GraspGenX poses are canonical gripper-base poses (`+Z` approach, `+X` close).

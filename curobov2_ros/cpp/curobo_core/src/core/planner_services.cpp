@@ -582,8 +582,8 @@ bool PlannerServices::prepare_continuous_joints(
       has_target ? static_cast<double>(request.joint_target[c]) : start_lift;
     if (has_target) {
       // Shortest path. Multi-turn motion is NOT inferred from the value: a
-      // legitimate named pose can sit outside (-pi, pi] (KATE's carry pose
-      // has joint_4 = -4.55), and preserving that delta turned every return
+      // legitimate named pose can sit outside (-pi, pi] (a carry pose with
+      // joint_4 = -4.55), and preserving that delta turned every return
       // leg into a ~5.6 rad wrist swing. Inferring it from a "whole number of
       // turns" is equally wrong when the measured start is wound (home then
       // reads as a 9-turn spin). An intentional multi-turn command needs an
@@ -1277,7 +1277,7 @@ void PlannerServices::fill_result(
   // One extra whole-turn constant per continuous joint, chosen so the FIRST
   // point lands in the canonical chart (-pi, pi]. Subtracting window_shift
   // alone only restores the MEASURED branch, which in this cell keeps winding
-  // (the Kinova counters accumulate turns: joint_6 has read -135 rad), so the
+  // (joint counters accumulate turns: joint_6 has read -135 rad), so the
   // client's plan chain would carry the wind-up into the next stage's
   // requested start and every leg would have to be lifted back by whole turns.
   //

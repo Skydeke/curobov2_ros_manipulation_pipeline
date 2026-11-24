@@ -79,7 +79,7 @@ class RobotModelViserNode(Node):
             add_control_frames=add_frames,
         )
 
-        # Active robot joints (kortex: joint_1..joint_7).
+        # Active robot joints.
         self._joint_names = active_joint_names_from_content(cp) or [
             f'joint_{i + 1}' for i in range(7)
         ]

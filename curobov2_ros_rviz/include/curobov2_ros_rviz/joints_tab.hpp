@@ -50,8 +50,8 @@ namespace curobov2_ros_rviz
 /// so this tab mirrors the useful half of that panel:
 ///
 ///  * one row per cspace joint, showing the live /joint_states position
-///    (subscribed, name-matched — never by index, since the kortex sim
-///    publishes the finger joint FIRST) plus a draggable target bar bounded by
+///    (subscribed, name-matched, never by index, since a publisher may
+///    put the finger joint FIRST) plus a draggable target bar bounded by
 ///    the model's real position limits -- MoveIt's ProgressBarDelegate;
 ///  * "Set from current" / "Zero" to seed a target configuration;
 ///  * "Plan" and "Plan + send" driving a JOINT-SPACE goal
@@ -262,8 +262,8 @@ private:
   /// calls load() before onInitialize(), and the rows only appear once
   /// get_joint_info has answered; rebuildRows() consumes and clears this.
   QVector<double> pending_targets_;
-  /// Live positions by joint NAME (not index: the kortex sim publishes the
-  /// finger joint first, so /joint_states order is NOT the cspace order).
+  /// Live positions by joint NAME (not index: a publisher may put the finger
+  /// joint first, so /joint_states order is NOT the cspace order).
   /// Written on the GUI thread only (the drain in onJointState).
   QHash<QString, double> current_;
   /// Coalescing buffer for /joint_states. The subscription fires on rviz's

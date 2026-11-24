@@ -92,11 +92,11 @@ JointCommandStrategy::JointCommandStrategy(
   // by joint and executed on each controller in parallel:
   //
   //   strategy_params:
-  //     controller_names: "torso_controller arm_controller"
-  //     torso_controller.action: /torso_controller/follow_joint_trajectory
-  //     torso_controller.joints: "torso_lift_joint"
+  //     controller_names: "arm_controller gripper_controller"
   //     arm_controller.action: /arm_controller/follow_joint_trajectory
-  //     arm_controller.joints: "arm_1_joint arm_2_joint ... arm_7_joint"
+  //     arm_controller.joints: "joint_1 joint_2 ... joint_7"
+  //     gripper_controller.action: /gripper_controller/follow_joint_trajectory
+  //     gripper_controller.joints: "finger_joint1 finger_joint2"
   auto names_it = params_.find("controller_names");
   if (names_it != params_.end()) {
     for (const std::string & name : split_tokens(names_it->second)) {

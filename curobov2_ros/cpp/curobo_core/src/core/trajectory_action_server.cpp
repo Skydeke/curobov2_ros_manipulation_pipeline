@@ -258,7 +258,7 @@ ReactiveGoal make_reactive_goal(
     goal.goalsets.push_back(std::move(poses));
   }
   // Multi-tool goals are carried by tool_frames + tool_poses (the bimanual
-  // OpenArm path). Legacy clients only fill `poses`.
+  // path). Legacy clients only fill `poses`.
   if (!request.goal.goalsets.empty()) {
     const auto & first = request.goal.goalsets.front();
     goal.tool_frames.assign(first.tool_frames.begin(), first.tool_frames.end());

@@ -925,8 +925,8 @@ ArtifactBundle ArtifactBundleResolver::resolve(
   }
 
   // `robot` is the robot *descriptor* path in some launches (e.g.
-  // openarm.yaml), while the artifact directory is named after the cuRobo
-  // config (`openarm_bimanual`). Try the config basename first, then the
+  // robot.yaml), while the artifact directory is named after the cuRobo
+  // config (e.g. `robot_bimanual`). Try the config basename first, then the
   // descriptor basename, so both plain robot names and paths resolve.
   std::string robot_name = artifact_key_from_path(robot);
   if (robot_name.empty()) {

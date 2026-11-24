@@ -76,7 +76,7 @@ def test_drive_solution_dict_routes_gripper_segment_without_execute():
     d = {"sub_trajectories": [{
         "info": {"id": 1, "cost": 0.0, "comment": "", "stage_id": 1,
                  "planner_id": ""},
-        "execution_info": {"controller_names": ["j2n6s200_gripper"]},
+        "execution_info": {"controller_names": ["gripper_controller"]},
         "trajectory": {"joint_names": [], "points": []},
         "scene_diff": {"before": {"added": [], "removed": [], "attached": None,
                                   "detached": None},

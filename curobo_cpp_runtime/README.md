@@ -98,13 +98,13 @@ skips the wrapper.
 {
   "arch": "sm_89",
   "robot": {
-    "name": "openarm_bimanual",
-    "base_link": "openarm_body_link0",
-    "curobo_config": "/workspace/.../openarm_bimanual.yml"
+    "name": "dual_arm",
+    "base_link": "base_link",
+    "curobo_config": "/workspace/.../dual_arm.yml"
   },
   "files": {
-    "robot_config": "/workspace/.../robots/openarm_bimanual.yaml",
-    "curobo_config": "/workspace/.../openarm_bimanual.yml"
+    "robot_config": "/workspace/.../robots/dual_arm.yaml",
+    "curobo_config": "/workspace/.../dual_arm.yml"
   },
   "source_hash": "<sha256 of files.robot_config>",
   "home": {"joint_names": ["..."], "positions": [0.0]},

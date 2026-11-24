@@ -56,7 +56,7 @@ bool CuroboFK::initFromString(const std::string & urdf_xml)
     }
 
     // URDF <mimic>: value = master_value * multiplier + offset. Joints that
-    // appear in the commanded set (e.g. a robotiq gripper's finger_joint)
+    // appear in the commanded set (e.g. a parallel gripper's finger_joint)
     // drive their coupled (mimicking) joints here, so the whole finger
     // mechanism closes/opens together instead of the mimics staying at 0.
     if (joint->mimic) {

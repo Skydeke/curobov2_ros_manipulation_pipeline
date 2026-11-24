@@ -53,7 +53,7 @@ def test_legacy_single_gripper_block_is_the_default_entry():
     path = _descriptor(
         """
 gripper_controller:
-  name: kate_gripper
+  name: test_gripper
   action_ns: gripper_cmd
   joint: finger_1
   open: 0.0
@@ -64,7 +64,7 @@ gripper_controller:
     try:
         g = get_gripper_controllers(path)
         assert set(g) == {"default"}
-        assert g["default"]["name"] == "kate_gripper"
+        assert g["default"]["name"] == "test_gripper"
         assert g["default"]["joints"] == ["finger_1"]
         assert g["default"]["allow_stalling"] is True
     finally:

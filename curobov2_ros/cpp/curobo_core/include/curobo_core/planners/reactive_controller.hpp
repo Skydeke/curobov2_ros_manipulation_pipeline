@@ -34,7 +34,7 @@ namespace curobo_core
 // The reactive goal (PORT: the SendTrajectory goal's goalsets). Reactive
 // controllers require exactly one goalset entry: either a single Cartesian
 // pose (`goalsets[0][0]`) or a simultaneous multi-tool goal
-// (`tool_frames`/`tool_poses`, e.g. both OpenArm grasp frames).
+// (`tool_frames`/`tool_poses`, e.g. both grasp frames of a dual-arm robot).
 struct ReactiveGoal
 {
   std::vector<std::vector<std::array<double, 7>>> goalsets;   // [set][pose][7]

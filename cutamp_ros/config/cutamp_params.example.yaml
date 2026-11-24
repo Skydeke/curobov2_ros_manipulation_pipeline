@@ -1,6 +1,6 @@
 # Example `cutamp_config` for cutamp_ros::CuTampComponent.
 #
-# IMPORTANT: the launch file (kate_bringup/launch/jaco2/moveit_curobo.launch.py)
+# IMPORTANT: the launch file
 # reads this file with yaml.safe_load and passes the whole mapping as
 # `parameters=[...]`. Keys must therefore be FLAT (no `cutamp:` /
 # `ros__parameters:` nesting). Copy this file into the robot repo and fill in

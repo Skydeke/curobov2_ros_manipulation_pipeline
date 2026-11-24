@@ -461,8 +461,7 @@ class _PlanClientMixin:
         name = controller or cfg.get("name") or "gripper"
         ns = action_ns or cfg.get("action_ns") or "gripper_cmd"
         # JointTrajectory grippers are FollowJointTrajectory controllers, not
-        # GripperCommand ones (TIAGo's pal-gripper). One point, all joints to
-        # `position`.
+        # GripperCommand ones. One point, all joints to `position`.
         is_traj = gtype in ("JointTrajectory", "FollowJointTrajectory")
         action = (
             f"/{name}/follow_joint_trajectory" if is_traj and name

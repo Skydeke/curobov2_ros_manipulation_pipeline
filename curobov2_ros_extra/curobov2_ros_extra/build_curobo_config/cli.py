@@ -4,9 +4,9 @@
 Create a new config from a URDF::
 
     ros2 run curobov2_ros_extra build_curobo_config \
-        --urdf /tmp/kortex.urdf \
+        --urdf /tmp/robot.urdf \
         --asset-path ~/ros2_ws \
-        --output /tmp/kortex_curobo.yml \
+        --output /tmp/robot_curobo.yml \
         --tool-frame grasping_frame
 
 Edit an existing config (loads spheres + collision matrix, like a
@@ -56,9 +56,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--asset-path",
         default=None,
-        help="Parent directory containing mesh dirs "
-        "(e.g., the parent of both 'kortex_description/' and 'robotiq_description/'). "
-        "Required in create mode.",
+        help="Parent directory containing the robot package's mesh tree "
+        "(e.g. the parent of '<robot_pkg>/meshes/'). Required in create mode.",
     )
     parser.add_argument(
         "--output",
@@ -127,7 +126,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="LINK=N",
         help="Edit mode: refit LINK with an exact sphere budget of N spheres "
-        "(repeatable, e.g. --budget j2n6s200_link_3=8).",
+        "(repeatable, e.g. --budget link_3=8).",
     )
     parser.add_argument(
         "--lock-joint",

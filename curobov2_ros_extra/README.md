@@ -17,23 +17,7 @@ visualization nodes, and the cuRobo robot-config generator.
 
 Build a cuRobo v2 YAML config (collision spheres + self-collision matrix) from a URDF.
 
-### Kortex (Kinova Gen3 + Robotiq 2F-140)
-
-```bash
-# 1. Generate URDF from xacro
-xacro $(ros2 pkg prefix iki_kortex_description)/share/iki_kortex_description/urdf_xacro/kortex_standalone.urdf.xacro \
-  name:=gen3 arm:=gen3 dof:=7 gripper:=robotiq_2f_140 sim_gazebo:=true \
-  > /tmp/kortex.urdf
-
-# 2. Build cuRobo config
-ros2 run curobov2_ros_extra build_curobo_config \
-  --urdf /tmp/kortex.urdf \
-  --asset-path ~/ros2_ws \
-  --output /tmp/kortex_curobo.yml \
-  --tool-frame grasping_frame
-```
-
-### Any other robot
+### Any robot
 
 ```bash
 ros2 run curobov2_ros_extra build_curobo_config \
@@ -52,29 +36,29 @@ ros2 run curobov2_ros_extra build_curobo_config \
 # bubblify spheres merged in. cspace, lock_joints, extra links and all
 # other custom fields are preserved.
 ros2 run curobov2_ros_extra build_curobo_config \
-  --config /tmp/adir.curobo.yml \
-  --output /tmp/adir.curobo.yml \
+  --config /tmp/robot.curobo.yml \
+  --output /tmp/robot.curobo.yml \
   --with-bubblify --bubblify-port 8080
 
 # Refit one link and recompute the collision matrix
 ros2 run curobov2_ros_extra build_curobo_config \
-  --config /tmp/adir.curobo.yml \
-  --refit-link j2n6s200_link_3 \
-  --output /tmp/adir.curobo.yml
+  --config /tmp/robot.curobo.yml \
+  --refit-link link_3 \
+  --output /tmp/robot.curobo.yml
 
 # Refit links with morphit (cuRobo builder path) and per-link budgets
 ros2 run curobov2_ros_extra build_curobo_config \
-  --config /tmp/adir.curobo.yml \
-  --refit-link j2n6s200_link_3 \
-  --budget j2n6s200_link_4=8 --budget j2n6s200_link_5=6 \
+  --config /tmp/robot.curobo.yml \
+  --refit-link link_3 \
+  --budget link_4=8 --budget link_5=6 \
   --fit-type morphit --iterations 200 \
-  --output /tmp/adir.curobo.yml
+  --output /tmp/robot.curobo.yml
 
 # Merge spheres exported from the bubblify GUI back into the config
 ros2 run curobov2_ros_extra build_curobo_config \
-  --config /tmp/adir.curobo.yml \
+  --config /tmp/robot.curobo.yml \
   --import-bubblify /tmp/robot_spherized.yml \
-  --output /tmp/adir.curobo.yml
+  --output /tmp/robot.curobo.yml
 ```
 
 ## Arguments

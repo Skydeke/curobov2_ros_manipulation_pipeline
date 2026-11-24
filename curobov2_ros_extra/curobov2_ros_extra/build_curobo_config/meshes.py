@@ -4,9 +4,9 @@
 Create a new config from a URDF::
 
     ros2 run curobov2_ros_extra build_curobo_config \
-        --urdf /tmp/kortex.urdf \
+        --urdf /tmp/robot.urdf \
         --asset-path ~/ros2_ws \
-        --output /tmp/kortex_curobo.yml \
+        --output /tmp/robot_curobo.yml \
         --tool-frame grasping_frame
 
 Edit an existing config (loads spheres + collision matrix, like a
@@ -61,28 +61,28 @@ def resolve_package_meshes(urdf_path: str, asset_path: str) -> str:
                     return candidate
         else:
             p = re.sub(r"^file://", "", uri)
-            # Detect the package from the path so that relative paths, bare
-            # package-relative paths, and stale absolute paths (from another
-            # machine / workspace) all get remapped into this workspace's
-            # install tree. Handle both '<pkg>/...' and 'share/<pkg>/...'.
-            for known in ("kortex_description", "robotiq_description"):
-                idx = p.find("share/" + known + "/")
-                if idx != -1:
-                    pkg = known
-                    rel = p[idx + len("share/" + known) + 1:]
-                    break
-            if pkg is None:
-                for known in ("kortex_description", "robotiq_description"):
-                    idx = p.find(known + "/")
-                    if idx != -1:
-                        pkg = known
-                        rel = p[idx + len(known) + 1:]
+            # Keep an existing absolute path as-is; otherwise recover
+            # '<pkg>/<asset path>' from 'share/<pkg>/...' or from a path whose
+            # package directory owns the asset directory, so URIs and stale
+            # absolute paths (from another machine / workspace) get remapped
+            # into this workspace's install tree.
+            if os.path.isabs(p) and os.path.exists(p):
+                return p
+            parts = [part for part in p.split("/") if part]
+            if "share" in parts:
+                idx = len(parts) - 1 - parts[::-1].index("share")
+                if idx + 2 < len(parts):
+                    pkg = parts[idx + 1]
+                    rel = "/".join(parts[idx + 2:])
+            else:
+                for idx in range(len(parts) - 2, -1, -1):
+                    if parts[idx + 1] in ("meshes", "urdf", "config"):
+                        pkg = parts[idx]
+                        rel = "/".join(parts[idx + 1:])
                         break
             if pkg is None:
-                # Package can't be detected; if it's an existing absolute path
-                # keep it, otherwise leave as-is so curobo tries asset_path.
-                if os.path.isabs(p) and os.path.exists(p):
-                    return p
+                # Package can't be detected; leave as-is so curobo tries
+                # asset_path.
                 return uri
 
         try:

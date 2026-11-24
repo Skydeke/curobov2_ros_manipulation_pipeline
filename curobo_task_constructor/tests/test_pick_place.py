@@ -124,8 +124,8 @@ def _named_configs() -> dict:
     return {
         "home": {**zeros},
         "grasp_home": {**zeros},
-        # Gripper-group configs: only the finger joints are named (as in the
-        # real Kortex SRDF), so a MoveTo of the same name leaves the arm at
+        # Gripper-group configs: only the finger joints are named (as in a
+        # real SRDF), so a MoveTo of the same name leaves the arm at
         # the current pose — the grasp/place config — instead of collapsing
         # it to the straight-arm singularity at full extension.
         "open": {"finger_joint": 0.0},

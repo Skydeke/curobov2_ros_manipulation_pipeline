@@ -1,11 +1,11 @@
 """A gripper-only action must touch only the jaws.
 
-TIAGo represents an open/close as a ``FollowJointTrajectory`` command to the
-pal-gripper controller (two finger joints); the fingers are ``lock_joints`` and
-are NOT in the 8-DOF torso+arm cspace. A goal that names only those joints can
-therefore not be a cuRobo plan: before this fix it was projected onto the
-cspace, leaving an arm-only goal equal to the start pose — a full-arm plan for
-an action that should move only the jaws.
+A robot may represent an open/close as a ``FollowJointTrajectory`` command to a
+parallel-gripper controller (two finger joints) while the fingers are
+``lock_joints`` and NOT part of the arm cspace. A goal that names only those
+joints can therefore not be a cuRobo plan: projecting it onto the cspace leaves
+an arm-only goal equal to the start pose, a full-arm plan for an action that
+should move only the jaws.
 
 These tests pin the two halves of the contract:
 
@@ -37,46 +37,46 @@ from curobo_task_constructor.graph.spec import StageSpec
 from curobo_task_constructor.stages.gripper_command import GripperCommand
 from tests.mock_curobo import MockCuroboServer
 
-#: TIAGo's 8-DOF planning cspace (torso lift + seven arm joints). The fingers
-#: are lock_joints and deliberately absent.
-TIAGO_CSPACE = [
-    "torso_lift_joint",
-    "arm_1_joint",
-    "arm_2_joint",
-    "arm_3_joint",
-    "arm_4_joint",
-    "arm_5_joint",
-    "arm_6_joint",
-    "arm_7_joint",
+#: An 8-DOF planning cspace. The fingers are lock_joints and deliberately
+#: absent.
+CSPACE = [
+    "joint_1",
+    "joint_2",
+    "joint_3",
+    "joint_4",
+    "joint_5",
+    "joint_6",
+    "joint_7",
+    "joint_8",
 ]
-LEFT = "gripper_left_finger_joint"
-RIGHT = "gripper_right_finger_joint"
-TIAGO_ARM = {
-    "torso_lift_joint": 0.149,
-    "arm_1_joint": 0.50,
-    "arm_2_joint": -1.34,
-    "arm_3_joint": -0.48,
-    "arm_4_joint": 1.94,
-    "arm_5_joint": -1.49,
-    "arm_6_joint": 1.37,
-    "arm_7_joint": 0.0,
+LEFT = "finger_joint1"
+RIGHT = "finger_joint2"
+ARM = {
+    "joint_1": 0.149,
+    "joint_2": 0.50,
+    "joint_3": -1.34,
+    "joint_4": -0.48,
+    "joint_5": 1.94,
+    "joint_6": -1.49,
+    "joint_7": 1.37,
+    "joint_8": 0.0,
 }
 
 
-class TiagoMock:
-    """The TIAGo surface the stages touch, with the descriptor's gripper map."""
+class RobotMock:
+    """The robot surface the stages touch, with the descriptor's gripper map."""
 
     joint_state_cls = None
     pose_cls = None
 
     def __init__(self):
-        self._joint_order = list(TIAGO_CSPACE)
+        self._joint_order = list(CSPACE)
         self._current = JointStateStub(
-            names=list(TIAGO_CSPACE) + [LEFT, RIGHT],
-            positions=[TIAGO_ARM[n] for n in TIAGO_CSPACE] + [0.0, 0.0],
+            names=list(CSPACE) + [LEFT, RIGHT],
+            positions=[ARM[n] for n in CSPACE] + [0.0, 0.0],
         )
-        #: Same schema the TIAGo descriptor carries: one parallel gripper
-        #: commanded through a FollowJointTrajectory controller.
+        #: The descriptor's schema: one parallel gripper commanded through a
+        #: FollowJointTrajectory controller.
         self._grippers = {
             "gripper": {
                 "type": "JointTrajectory",
@@ -145,8 +145,8 @@ def _joint_values(state) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_planned_tiago_gripper_open_is_a_command_not_an_arm_plan():
-    robot = TiagoMock()
+def test_planned_gripper_open_is_a_command_not_an_arm_plan():
+    robot = RobotMock()
     spec = _spec(_current_state(), StageSpec(
         stage_type="move_to", name="open",
         params_yaml=(
@@ -167,9 +167,9 @@ def test_planned_tiago_gripper_open_is_a_command_not_an_arm_plan():
 
     start = _joint_values(leaf.start.joint_state)
     end = _joint_values(leaf.end.joint_state)
-    for name in TIAGO_CSPACE:
-        assert start[name] == pytest.approx(TIAGO_ARM[name])
-        assert end[name] == pytest.approx(TIAGO_ARM[name]), (
+    for name in CSPACE:
+        assert start[name] == pytest.approx(ARM[name])
+        assert end[name] == pytest.approx(ARM[name]), (
             "the arm must stay exactly where the previous stage left it")
     assert end[LEFT] == pytest.approx(0.045)
     assert end[RIGHT] == pytest.approx(0.045)
@@ -181,7 +181,7 @@ def test_planned_tiago_gripper_open_is_a_command_not_an_arm_plan():
 
 
 def test_named_gripper_config_is_also_a_command_not_an_arm_plan():
-    robot = TiagoMock()
+    robot = RobotMock()
     spec = _spec(_current_state(), StageSpec(
         stage_type="move_to", name="open",
         params_yaml="goal:\n  name: open\n"))
@@ -200,7 +200,7 @@ def test_planned_gripper_open_drives_only_the_gripper_over_the_wire():
     """The serialized solution carries a gripper segment, not a trajectory."""
     from curobo_task_constructor.executor import drive_solution_dict
 
-    robot = TiagoMock()
+    robot = RobotMock()
     spec = _spec(_current_state(), StageSpec(
         stage_type="move_to", name="open",
         params_yaml="goal:\n  joints:\n"
@@ -217,7 +217,7 @@ def test_planned_gripper_open_drives_only_the_gripper_over_the_wire():
     assert segments[0]["trajectory"]["joint_names"] == []
     assert d["start_state"]["name"], "the task start state must be complete"
 
-    robot2 = TiagoMock()
+    robot2 = RobotMock()
     results, failed, cancelled = drive_solution_dict(robot2, d)
     assert failed is None and not cancelled
     assert all(r.success for r in results)
@@ -259,7 +259,7 @@ def test_gripper_stage_after_arm_motion_uses_the_previous_stage_state():
 
 
 def test_solution_message_folds_all_gripper_joints_into_motion_points():
-    """TIAGo's pal-gripper has two fingers, but the command names only one.
+    """The gripper has two fingers, but the command names only one.
 
     The trajectory display must show both jaws open during the pre-grasp and
     closed after the close, not leave the second finger at the start value.
@@ -281,17 +281,17 @@ def test_solution_message_folds_all_gripper_joints_into_motion_points():
          "gripper_state": {"name": [LEFT, RIGHT], "position": [0.045, 0.045]},
          "trajectory": {"joint_names": [], "points": [], "velocities": []}},
         {"replay_goal": {"start_pose": {}},
-         "trajectory": {"joint_names": ["arm_1_joint"],
+         "trajectory": {"joint_names": ["joint_1"],
                         "points": [[0.1], [0.2]], "velocities": []}},
         {"replay_goal": {"gripper_command": close_cmd},
          "gripper_state": {"name": [LEFT, RIGHT], "position": [0.0, 0.0]},
          "trajectory": {"joint_names": [], "points": [], "velocities": []}},
         {"replay_goal": {"start_pose": {}},
-         "trajectory": {"joint_names": ["arm_1_joint"],
+         "trajectory": {"joint_names": ["joint_1"],
                         "points": [[0.2], [0.3]], "velocities": []}},
     ]
     out = _carry_gripper_state(
-        segments, ["arm_1_joint", LEFT, RIGHT], [0.0, 0.0, 0.0])
+        segments, ["joint_1", LEFT, RIGHT], [0.0, 0.0, 0.0])
     pre = out[1]["trajectory"]
     retreat = out[3]["trajectory"]
     assert pre["joint_names"][-2:] == [LEFT, RIGHT]
@@ -308,7 +308,7 @@ def test_solution_message_folds_all_gripper_joints_into_motion_points():
 
 
 def test_gripper_command_fills_missing_arm_from_the_current_measurement():
-    robot = TiagoMock()
+    robot = RobotMock()
     stage = GripperCommand("open")
     stage.robot = robot
     stage.params = {"gripper": "gripper", "joint": LEFT, "position": 0.045}
@@ -323,34 +323,33 @@ def test_gripper_command_fills_missing_arm_from_the_current_measurement():
     # carry the full arm pose plus both commanded jaws.
     assert sol.start is state
     end = _joint_values(sol.end.joint_state)
-    for name in TIAGO_CSPACE:
-        assert end[name] == pytest.approx(TIAGO_ARM[name])
+    for name in CSPACE:
+        assert end[name] == pytest.approx(ARM[name])
     assert end[LEFT] == pytest.approx(0.045)
     assert end[RIGHT] == pytest.approx(0.045)
 
 
 # ---------------------------------------------------------------------------
-# the real TIAGo descriptor (when this copy carries it)
+# a robot descriptor, when one is present
 # ---------------------------------------------------------------------------
 
 
-def _tiago_descriptor():
+def _descriptor():
     for root in Path(__file__).resolve().parents:
-        candidate = (root / "iki_tiago_curobo_config" / "config"
-                     / "robots" / "tiago.yaml")
+        candidate = root / "config" / "robots" / "robot.yaml"
         if candidate.is_file():
             return candidate
     return None
 
 
-def test_tiago_descriptor_represents_open_as_a_gripper_trajectory():
-    path = _tiago_descriptor()
+def test_descriptor_represents_open_as_a_gripper_trajectory():
+    path = _descriptor()
     if path is None:
-        pytest.skip("TIAGo descriptor is not present in this robot copy")
+        pytest.skip("no robot descriptor is present")
 
     descriptor = yaml.safe_load(path.read_text())
     order = canonical_joint_order(str(path))
-    assert order == TIAGO_CSPACE, (
+    assert order == CSPACE, (
         "the fingers are lock_joints, not planning DOFs")
     assert LEFT not in order and RIGHT not in order
 

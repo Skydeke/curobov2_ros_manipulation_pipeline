@@ -263,13 +263,8 @@ def robot_segment(handle, depth, intrinsics, cam_pose, q, masks_json):
 
     # Distance to the nearest robot sphere. The naive
     # `torch.norm(base[:, None] - spheres[None, :, :3], dim=2)` materialises an
-    # [N, S, 3] float32 tensor, and on KATE that is not a rounding error: the
-    # collision model carries 592 spheres over 68 links (the simulated chassis
-    # wheel hubs, top_plate, screen, router, sonars -- not just an arm like the
-    # franka/ur10e demos), so a single 800x600 frame asks for ~886 MiB here. On
-    # this 7.7 GiB card, shared with the GPU Gazebo/MoveIt, that allocation
-    # fails, the frame is dropped, the masked depth stops and the Mapper freezes.
-    # Two guards bound it:
+    # [N, S, 3] float32 tensor, which is far too large for a collision model
+    # with hundreds of spheres and a full-resolution frame. Two guards bound it:
     #   1. only points inside the robot's AABB (+threshold) can be within
     #      `threshold` of a sphere -- everything else is kept with no distance
     #      computation at all (the robot covers a small part of the view);

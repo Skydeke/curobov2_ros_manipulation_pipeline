@@ -1,0 +1,53 @@
+# GraspGenX layer.
+#
+# Build context: this repository's root.
+#
+#   docker build -f docker/Dockerfile.graspgenx \
+#     --build-arg BASE_IMAGE=<curobo-image> \
+#     -t <graspgenx-image> .
+#
+# The base image must provide grasp_pose_detection_interfaces.
+
+ARG BASE_IMAGE=curobo:latest
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-c"]
+
+ARG ROS_WS=/root/ros2_ws
+ARG ROS_DISTRO=jazzy
+
+ENV ROS_DISTRO=${ROS_DISTRO}
+ENV ROS_WS=${ROS_WS}
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
+
+USER root
+
+COPY graspgenx/GraspGenX /opt/graspgenx
+
+RUN python3 -m pip install --no-cache-dir --no-deps \
+      diffusers omegaconf jaxtyping roma addict h5py \
+      msgpack msgpack-numpy pyzmq antlr4-python3-runtime regex && \
+    python3 -m pip install --no-cache-dir --no-deps --no-build-isolation -e /opt/graspgenx
+
+ENV GRASPGENX_CHECKPOINT_DIR=/opt/graspgenx/ext/graspgenx_checkpoints
+ENV GRASPGENX_GRIPPER_CFG_DIR=/opt/graspgenx/ext/gripper_descriptions
+
+RUN mkdir -p /opt/graspgenx/ext/gripper_descriptions && \
+    python3 -c "\
+from huggingface_hub import snapshot_download; \
+snapshot_download('adithyamurali/GraspGenXModel', \
+                  local_dir='/opt/graspgenx/ext/graspgenx_checkpoints')"
+
+COPY graspgenx_ros ${ROS_WS}/src/graspgenx_ros
+
+RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
+    source ${ROS_WS}/install/setup.bash && \
+    colcon build \
+      --base-paths ${ROS_WS}/src/graspgenx_ros \
+      --packages-select graspgenx_ros \
+      --cmake-args -DCMAKE_BUILD_TYPE=Release
+
+RUN echo "source /opt/ros/${ROS_DISTRO}/setup.bash" >> /root/.bashrc && \
+    echo "source ${ROS_WS}/install/setup.bash" >> /root/.bashrc
+
+WORKDIR ${ROS_WS}

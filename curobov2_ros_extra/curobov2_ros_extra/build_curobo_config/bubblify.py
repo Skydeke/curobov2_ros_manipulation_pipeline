@@ -4,9 +4,9 @@
 Create a new config from a URDF::
 
     ros2 run curobov2_ros_extra build_curobo_config \
-        --urdf /tmp/kortex.urdf \
+        --urdf /tmp/robot.urdf \
         --asset-path ~/ros2_ws \
-        --output /tmp/kortex_curobo.yml \
+        --output /tmp/robot_curobo.yml \
         --tool-frame grasping_frame
 
 Edit an existing config (loads spheres + collision matrix, like a

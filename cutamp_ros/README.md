@@ -74,7 +74,7 @@ Poses are in the robot base frame; `Goalset.frame_id` is the node's
 
 ## Parameters (flat keys)
 
-`kate_bringup/launch/jaco2/moveit_curobo.launch.py` loads `cutamp_config` with
+The deployment launch file loads `cutamp_config` with
 `yaml.safe_load` and passes the mapping straight to `parameters=[...]`, so the
 file must contain **flat** keys (no `cutamp: ros__parameters:` nesting). See
 `config/cutamp_params.example.yaml` for the complete list:

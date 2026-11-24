@@ -36,7 +36,7 @@ def test_ns_topics_and_service():
     assert t.introspection().get_solution_service_name() == "/my_ns/get_solution_task"
 
 
-def test_load_planner_configs_jaco_shape(tmp_path):
+def test_load_planner_configs_group_shape(tmp_path):
     p = tmp_path / "groups.yaml"
     p.write_text(
         "planning_groups: ['arm', 'gripper']\n"

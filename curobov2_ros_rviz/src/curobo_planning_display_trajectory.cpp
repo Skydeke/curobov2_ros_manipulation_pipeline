@@ -529,7 +529,7 @@ void CuroboPlanningDisplay::mergeClientFk(
   const std::map<std::string, double> & joint_positions,
   std::map<std::string, Eigen::Isometry3d> & transforms) const
 {
-  // Expand URDF mimic joints (OpenArm finger_joint2 mirrors finger_joint1).
+  // Expand URDF mimic joints (finger_joint2 mirrors finger_joint1).
   // The planner trajectory only names the primary jaw, so otherwise the ghost
   // uses the live value for the mimic link and shows the wrong gripper state.
   std::map<std::string, double> expanded = joint_positions;

@@ -15,14 +15,11 @@ from curobo_task_constructor.graph.builder import build_tree
 from curobo_task_constructor.graph.spec import StageSpec
 
 
-#: The start-agreement number the whole pipeline shares: 0.01 rad. Kept here
-#: as the reference value because it is ALSO what the controller must enforce
-#: before it accepts a replayed trajectory (``allowed_start_tolerance`` in
-#: iki_kortex_moveit_config/config/moveit_controllers.yaml). The cuRobo
-#: executor no longer compares endpoints itself — MTC ``Task::execute`` replays
-#: the stored ``RobotTrajectory`` verbatim and lets the controller's start
-#: tolerance reject a replay whose first point is not where the arm is. This
-#: constant documents that shared number.
+#: The start-agreement number the whole pipeline shares: 0.01 rad. It is also
+#: what the trajectory controller enforces before it accepts a replayed
+#: trajectory (``allowed_start_tolerance``). MTC ``Task::execute`` replays the
+#: stored ``RobotTrajectory`` verbatim and lets the controller's start
+#: tolerance reject a replay whose first point is not where the arm is.
 
 from curobo_task_constructor.executor_io import *
 
@@ -168,7 +165,7 @@ class _ExecutorSerializationMixin:
                            "after": _scene_ops_to_dict([])},
             "replay_goal": {"gripper_command": cmd},
             # Display-only: the post-command state carries every jaw the
-            # controller moves (TIAGo's two fingers, OpenArm's left/right).
+            # controller moves (both fingers of a parallel gripper).
             # The solution message folds this into the following motion
             # trajectories so RViz shows the jaws in the state the task will
             # actually be in at that point. Execution ignores this key.

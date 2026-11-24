@@ -86,11 +86,9 @@ def _robot_kinematics_block(data: dict) -> dict:
     """The kinematics mapping of a robot YAML, structure-aware.
 
     cuRobo's loader accepts three shapes: ``robot_cfg.kinematics.*``, a
-    root-level ``kinematics`` block (``kate.curobo.yaml``), or a flat config with
-    the kinematics keys at the document root. Reading ``data["lock_joints"]``
-    directly therefore found nothing for ``kate.curobo.yaml`` - which silently
-    left the unpinned lock joints (``lock_joints: {joint: null}``) unreported, so
-    nothing ever drove them from the joint state.
+    root-level ``kinematics`` block, or a flat config with the kinematics keys
+    at the document root. A root-level block must be read from that level, not
+    from the document root.
     """
     if not isinstance(data, dict):
         return {}

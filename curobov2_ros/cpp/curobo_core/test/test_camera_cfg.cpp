@@ -16,7 +16,7 @@ using curobo_core::PerceptionCameraCfg;
 TEST(CameraCfg, MaskedDepthTopicReplacesTheLeaf)
 {
   // PORT: masked_depth_topic
-  EXPECT_EQ(masked_depth_topic("/kortex_vision/depth/image"), "/kortex_vision/depth/masked_depth");
+  EXPECT_EQ(masked_depth_topic("/camera/depth/image"), "/camera/depth/masked_depth");
   EXPECT_EQ(masked_depth_topic("image"), "masked_depth");
   EXPECT_EQ(masked_depth_topic(""), "");
   EXPECT_EQ(masked_depth_topic("/a/b/"), "/a/masked_depth");

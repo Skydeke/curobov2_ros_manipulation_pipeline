@@ -101,14 +101,14 @@ TEST(ReactiveController, AcceptsBimanualMultiToolGoal)
   }
   auto node = std::make_shared<rclcpp::Node>("unified_planner");
   curobo_runtime::FakeBridge bridge;
-  bridge.set_tool_frames({"openarm_left_grasp_frame", "openarm_right_grasp_frame"});
+  bridge.set_tool_frames({"left_grasp_frame", "right_grasp_frame"});
   RobotContext robot_context(
     node.get(), 0.025, joint_names(), "emulator", {},
     std::vector<double>(7, 0.0));
   MPCController mpc(&bridge, 7, joint_names(), node.get());
 
   ReactiveGoal goal;
-  goal.tool_frames = {"openarm_left_grasp_frame", "openarm_right_grasp_frame"};
+  goal.tool_frames = {"left_grasp_frame", "right_grasp_frame"};
   goal.tool_poses = {
     {0.1, 0.2, 0.3, 1.0, 0.0, 0.0, 0.0},
     {0.4, 0.5, 0.6, 1.0, 0.0, 0.0, 0.0}};
@@ -119,7 +119,7 @@ TEST(ReactiveController, AcceptsBimanualMultiToolGoal)
   EXPECT_EQ(
     bridge.mpc_goal_tool_frames(),
     (std::vector<std::string>{
-      "openarm_left_grasp_frame", "openarm_right_grasp_frame"}));
+      "left_grasp_frame", "right_grasp_frame"}));
   const auto poses = bridge.mpc_goal_tool_poses();
   ASSERT_EQ(poses.size(), 2u);
   EXPECT_NEAR(poses[0][0], 0.1, 1e-6);
@@ -137,7 +137,7 @@ TEST(ReactiveController, SinglePoseGoalOnBimanualPassesHoldState)
   }
   auto node = std::make_shared<rclcpp::Node>("unified_planner");
   curobo_runtime::FakeBridge bridge;
-  bridge.set_tool_frames({"openarm_left_grasp_frame", "openarm_right_grasp_frame"});
+  bridge.set_tool_frames({"left_grasp_frame", "right_grasp_frame"});
   RobotContext robot_context(
     node.get(), 0.025, joint_names(), "emulator", {},
     std::vector<double>(7, 0.0));

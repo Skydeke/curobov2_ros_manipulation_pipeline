@@ -88,7 +88,7 @@ TEST_F(ActionTest, MultiToolGoalKeepsEveryToolPose)
 {
   SendTrajectory::Goal goal;
   auto & goalset = goal.goal.goalsets.emplace_back();
-  goalset.tool_frames = {"openarm_left_grasp_frame", "openarm_right_grasp_frame"};
+  goalset.tool_frames = {"left_grasp_frame", "right_grasp_frame"};
   geometry_msgs::msg::Pose left;
   left.position.x = 0.1;
   left.orientation.w = 1.0;
@@ -103,8 +103,8 @@ TEST_F(ActionTest, MultiToolGoalKeepsEveryToolPose)
   const auto reactive = curobo_core::make_reactive_goal(goal);
   ASSERT_EQ(reactive.tool_frames.size(), 2u);
   ASSERT_EQ(reactive.tool_poses.size(), 2u);
-  EXPECT_EQ(reactive.tool_frames[0], "openarm_left_grasp_frame");
-  EXPECT_EQ(reactive.tool_frames[1], "openarm_right_grasp_frame");
+  EXPECT_EQ(reactive.tool_frames[0], "left_grasp_frame");
+  EXPECT_EQ(reactive.tool_frames[1], "right_grasp_frame");
   EXPECT_DOUBLE_EQ(reactive.tool_poses[0][0], 0.1);
   EXPECT_DOUBLE_EQ(reactive.tool_poses[1][0], 0.4);
 }

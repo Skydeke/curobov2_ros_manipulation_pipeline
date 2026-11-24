@@ -379,7 +379,7 @@ class MultiPlanner(PlannerInterface):
 
 
 def load_planner_configs(path_or_dict: Any) -> dict:
-    """Per-group planner configs (``moveit_wrapper_task_constructor/params/jaco2.yaml`` shape). Input ``{planning_groups: [...], <group>: {planning_time,
+    """Per-group planner configs. Input ``{planning_groups: [...], <group>: {planning_time,
     max_velocity_scaling_factor, max_acceleration_scaling_factor,
     planning_attempts, planner_id, planning_pipeline_id}}`` or a YAML file
     path with the same content. Empty ``planner_id`` means the pipeline

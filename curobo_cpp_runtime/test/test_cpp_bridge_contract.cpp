@@ -34,16 +34,16 @@ std::string throws_with_method(const char * method, Function function)
 
 TEST(CppBridgeContract, IdentityAndNoInterpreter)
 {
-  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "openarm", "", 0);
+  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "test_robot", "", 0);
   EXPECT_EQ(bridge.artifact_directory(), "/tmp/curobo-nonexistent-artifact");
-  EXPECT_EQ(bridge.robot_name(), "openarm");
+  EXPECT_EQ(bridge.robot_name(), "test_robot");
   EXPECT_EQ(bridge.interpreter_init_count(), 0);
   EXPECT_FALSE(bridge.initialized());
 }
 
 TEST(CppBridgeContract, InitFailsClearlyOnMissingArtifact)
 {
-  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "openarm", "", 0);
+  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "test_robot", "", 0);
   try {
     bridge.init("");
     FAIL() << "init should have thrown";
@@ -57,7 +57,7 @@ TEST(CppBridgeContract, InitFailsClearlyOnMissingArtifact)
 
 TEST(CppBridgeContract, UnsupportedMethodsNameThemselves)
 {
-  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "openarm");
+  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "test_robot");
 
   curobo_runtime::TensorF32 q;
   q.shape = {1, 7};
@@ -116,7 +116,7 @@ TEST(CppBridgeContract, UnsupportedMethodsNameThemselves)
 
 TEST(CppBridgeContract, GlobalFlagsAndLanesAreLocal)
 {
-  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "openarm");
+  CppBridge bridge("/tmp/curobo-nonexistent-artifact", "test_robot");
   bridge.bind_lane("plan");
   bridge.bind_lane("plan");
   bridge.bind_lane("kin");

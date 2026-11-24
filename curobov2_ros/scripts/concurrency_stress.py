@@ -19,7 +19,7 @@ from sensor_msgs.msg import JointState
 from curobov2_ros_interfaces.srv import FkBatch, IkBatch, TrajectoryGeneration
 from curobov2_ros_interfaces.msg import Goalset, TrajectoryGoal
 
-# Server node name differs per stack (curobo_server on the kortex stack,
+# Server node name differs per stack (curobo_server on the arm stack,
 # unified_planner on the benchmark stack). Override without editing:
 # CUROBO_SERVER_NODE=curobo_server python3 concurrency_stress.py ...
 NODE = os.environ.get("CUROBO_SERVER_NODE", "unified_planner")

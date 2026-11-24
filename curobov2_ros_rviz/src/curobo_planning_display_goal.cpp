@@ -106,8 +106,8 @@ bool CuroboPlanningDisplay::goalPoseInBase(
 {
   base_pose = pose;
   // The target lives in the RViz fixed frame. IK expects the planner's base
-  // link, NOT the URDF root: a robot whose URDF root is "world" (OpenArm) has
-  // its configured base_link below that root, so using the root silently
+  // link, NOT the URDF root: a robot whose URDF root is "world" has its
+  // configured base_link below that root, so using the root silently
   // solves for a point offset by the root->base transform.
   const std::string base_frame =
     fk_base_link_.empty() ? robot_root_frame_ : fk_base_link_;

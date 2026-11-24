@@ -111,21 +111,21 @@ void create_artifact(const fs::path & artifact, const std::string & manifest)
 TEST(ArtifactSelection, ResolvesByRobotAndArch)
 {
   TemporaryTree tree;
-  const std::string config_text = "robot: openarm\n";
-  const fs::path config = tree.path() / "robots" / "openarm.yaml";
+  const std::string config_text = "robot: test_robot\n";
+  const fs::path config = tree.path() / "robots" / "test_robot.yaml";
   write_file(config, config_text);
   create_artifact(
-    tree.artifact("openarm"),
-    complete_manifest("openarm", "sm_89", sha256_hex(config_text)));
+    tree.artifact("test_robot"),
+    complete_manifest("test_robot", "sm_89", sha256_hex(config_text)));
 
   ArtifactBundleResolver resolver(tree.path() / "artifacts", "sm_89");
-  const ArtifactBundle bundle = resolver.resolve("openarm", config.string());
+  const ArtifactBundle bundle = resolver.resolve("test_robot", config.string());
   ASSERT_TRUE(bundle.valid) << bundle.error;
   EXPECT_TRUE(bundle.arch_matches);
   EXPECT_TRUE(bundle.hash_available);
   EXPECT_TRUE(bundle.hash_matches);
   EXPECT_TRUE(bundle.capability_profile_complete);
-  EXPECT_EQ(bundle.manifest.robot, "openarm");
+  EXPECT_EQ(bundle.manifest.robot, "test_robot");
   EXPECT_EQ(bundle.manifest.joint_names, (std::vector<std::string>{"j1", "j2"}));
   EXPECT_EQ(bundle.manifest.tool_frames, (std::vector<std::string>{"tool"}));
   EXPECT_EQ(bundle.manifest.num_dof, 2);
@@ -135,11 +135,11 @@ TEST(ArtifactSelection, WrongArchDoesNotResolve)
 {
   TemporaryTree tree;
   create_artifact(
-    tree.artifact("openarm", "sm_89"),
-    complete_manifest("openarm", "sm_89", ""));
+    tree.artifact("test_robot", "sm_89"),
+    complete_manifest("test_robot", "sm_89", ""));
 
   ArtifactBundleResolver resolver(tree.path() / "artifacts", "sm_90");
-  const ArtifactBundle bundle = resolver.resolve("openarm");
+  const ArtifactBundle bundle = resolver.resolve("test_robot");
   EXPECT_FALSE(bundle.valid);
   EXPECT_NE(bundle.error.find("sm_90"), std::string::npos) << bundle.error;
 }
@@ -147,7 +147,7 @@ TEST(ArtifactSelection, WrongArchDoesNotResolve)
 TEST(ArtifactSelection, MissingManifestDoesNotResolve)
 {
   TemporaryTree tree;
-  const fs::path artifact = tree.artifact("openarm");
+  const fs::path artifact = tree.artifact("test_robot");
   fs::create_directories(artifact);
   write_file(artifact / "robot_kinematics_manifest.json", "{}\n");
   write_file(artifact / "robot_ik_manifest.json", "{}\n");
@@ -155,7 +155,7 @@ TEST(ArtifactSelection, MissingManifestDoesNotResolve)
   write_file(artifact / "robot_motion_manifest.json", "{}\n");
 
   ArtifactBundleResolver resolver(tree.path() / "artifacts", "sm_89");
-  const ArtifactBundle bundle = resolver.resolve("openarm");
+  const ArtifactBundle bundle = resolver.resolve("test_robot");
   EXPECT_FALSE(bundle.valid);
   EXPECT_NE(bundle.error.find("manifest.json"), std::string::npos) << bundle.error;
 }
@@ -163,14 +163,14 @@ TEST(ArtifactSelection, MissingManifestDoesNotResolve)
 TEST(ArtifactSelection, SourceHashMismatchDoesNotResolve)
 {
   TemporaryTree tree;
-  const fs::path config = tree.path() / "robots" / "openarm.yaml";
+  const fs::path config = tree.path() / "robots" / "test_robot.yaml";
   write_file(config, "robot: changed\n");
   create_artifact(
-    tree.artifact("openarm"),
-    complete_manifest("openarm", "sm_89", sha256_hex("robot: original\n")));
+    tree.artifact("test_robot"),
+    complete_manifest("test_robot", "sm_89", sha256_hex("robot: original\n")));
 
   ArtifactBundleResolver resolver(tree.path() / "artifacts", "sm_89");
-  const ArtifactBundle bundle = resolver.resolve("openarm", config.string());
+  const ArtifactBundle bundle = resolver.resolve("test_robot", config.string());
   EXPECT_FALSE(bundle.valid);
   EXPECT_TRUE(bundle.hash_available);
   EXPECT_FALSE(bundle.hash_matches);
@@ -181,11 +181,11 @@ TEST(ArtifactSelection, IncompleteCapabilityProfileSelectsHybridCpp)
 {
   TemporaryTree tree;
   create_artifact(
-    tree.artifact("openarm"),
-    complete_manifest("openarm", "sm_89", "", false));
+    tree.artifact("test_robot"),
+    complete_manifest("test_robot", "sm_89", "", false));
 
   ArtifactBundleResolver resolver(tree.path() / "artifacts", "sm_89");
-  const ArtifactBundle bundle = resolver.resolve("openarm");
+  const ArtifactBundle bundle = resolver.resolve("test_robot");
   ASSERT_TRUE(bundle.valid) << bundle.error;
   EXPECT_FALSE(bundle.capability_profile_complete);
 
@@ -204,17 +204,17 @@ TEST(ArtifactSelection, ParsesNamedPosesAndGrippersForGetJointInfo)
       "arch": "sm_89",
       "robot": "reference",
       "named_joint_configs": {
-        "home": {"torso_lift_joint": 0.149, "arm_1_joint": 0.5},
-        "open": {"gripper_left_finger_joint": 0.045,
-                 "gripper_right_finger_joint": 0.045}
+        "home": {"joint_2": 0.149, "joint_1": 0.5},
+        "open": {"finger_joint1": 0.045,
+                 "finger_joint2": 0.045}
       },
       "gripper_controllers": {
         "gripper": {
           "type": "JointTrajectory",
           "name": "gripper_controller",
-          "joints": ["gripper_left_finger_joint",
-                     "gripper_right_finger_joint"],
-          "command_joint": "gripper_left_finger_joint",
+          "joints": ["finger_joint1",
+                     "finger_joint2"],
+          "command_joint": "finger_joint1",
           "open": 0.045,
           "close": 0.0,
           "max_effort": 16.0,
@@ -236,8 +236,8 @@ TEST(ArtifactSelection, ParsesNamedPosesAndGrippersForGetJointInfo)
     (std::vector<std::int64_t>{2, 2}));
   EXPECT_EQ(manifest.named_config_joint_names,
     (std::vector<std::string>{
-      "arm_1_joint", "torso_lift_joint",
-      "gripper_left_finger_joint", "gripper_right_finger_joint"}));
+      "joint_1", "joint_2",
+      "finger_joint1", "finger_joint2"}));
   EXPECT_EQ(manifest.named_config_positions,
     (std::vector<double>{0.5, 0.149, 0.045, 0.045}));
 
@@ -246,8 +246,8 @@ TEST(ArtifactSelection, ParsesNamedPosesAndGrippersForGetJointInfo)
   EXPECT_EQ(manifest.gripper_types[0], "JointTrajectory");
   EXPECT_EQ(manifest.gripper_controllers[0], "gripper_controller");
   EXPECT_EQ(manifest.gripper_joint_lists[0],
-    "gripper_left_finger_joint gripper_right_finger_joint");
-  EXPECT_EQ(manifest.gripper_command_joints[0], "gripper_left_finger_joint");
+    "finger_joint1 finger_joint2");
+  EXPECT_EQ(manifest.gripper_command_joints[0], "finger_joint1");
   EXPECT_DOUBLE_EQ(manifest.gripper_open_positions[0], 0.045);
   EXPECT_DOUBLE_EQ(manifest.gripper_close_positions[0], 0.0);
   EXPECT_DOUBLE_EQ(manifest.gripper_max_efforts[0], 16.0);
@@ -257,20 +257,20 @@ TEST(ArtifactSelection, ParsesNamedPosesAndGrippersForGetJointInfo)
 TEST(ArtifactSelection, ParsesGeneratedNestedManifest)
 {
   TemporaryTree tree;
-  const fs::path artifact = tree.artifact("openarm");
+  const fs::path artifact = tree.artifact("test_robot");
   write_file(
     artifact / "manifest.json",
     R"({
       "arch": "sm_89",
       "tool_frames": ["left_tool", "right_tool"],
       "robot": {
-        "name": "openarm",
+        "name": "test_robot",
         "base_link": "base_link",
-        "curobo_config": "/tmp/openarm.yml"
+        "curobo_config": "/tmp/test_robot.yml"
       },
       "files": {
-        "robot_config": "/tmp/robots/openarm.yaml",
-        "curobo_config": "/tmp/openarm.yml"
+        "robot_config": "/tmp/robots/test_robot.yaml",
+        "curobo_config": "/tmp/test_robot.yml"
       },
       "source_hash": "deadbeef",
       "home": {"joint_names": ["j1", "j2"], "positions": [0.1, 0.2]},
@@ -289,12 +289,12 @@ TEST(ArtifactSelection, ParsesGeneratedNestedManifest)
   write_file(artifact / "robot_motion_manifest.json", "{}\n");
 
   ArtifactBundleResolver resolver(tree.path() / "artifacts", "sm_89");
-  const ArtifactBundle bundle = resolver.resolve("openarm");
+  const ArtifactBundle bundle = resolver.resolve("test_robot");
   ASSERT_TRUE(bundle.valid) << bundle.error;
-  EXPECT_EQ(bundle.manifest.robot, "openarm");
+  EXPECT_EQ(bundle.manifest.robot, "test_robot");
   EXPECT_EQ(bundle.manifest.base_link, "base_link");
-  EXPECT_EQ(bundle.manifest.curobo_config, "/tmp/openarm.yml");
-  EXPECT_EQ(bundle.manifest.source_file, "/tmp/robots/openarm.yaml");
+  EXPECT_EQ(bundle.manifest.curobo_config, "/tmp/test_robot.yml");
+  EXPECT_EQ(bundle.manifest.source_file, "/tmp/robots/test_robot.yaml");
   EXPECT_EQ(bundle.manifest.home_names, (std::vector<std::string>{"j1", "j2"}));
   EXPECT_EQ(bundle.manifest.locked_joint_names, (std::vector<std::string>{"finger"}));
   ASSERT_EQ(bundle.manifest.locked_positions.size(), 1u);
@@ -328,13 +328,13 @@ TEST(RuntimeSelection, AutoResolvesHybridCppThenFallsBackWhenMissing)
 {
   TemporaryTree tree;
   create_artifact(
-    tree.artifact("openarm"),
-    complete_manifest("openarm", "sm_89", ""));
+    tree.artifact("test_robot"),
+    complete_manifest("test_robot", "sm_89", ""));
 
   RuntimeSelectionRequest request;
   request.mode = RuntimeMode::Auto;
   request.artifact_root = (tree.path() / "artifacts").string();
-  request.robot = "openarm";
+  request.robot = "test_robot";
   request.sm_arch = "sm_89";
 
   RuntimeSelection selection = resolve_runtime_selection(request);
@@ -346,8 +346,8 @@ TEST(RuntimeSelection, AutoResolvesHybridCppThenFallsBackWhenMissing)
   // An incomplete profile still starts the hybrid cpp bridge; unsupported
   // calls fall back to Python at dispatch time.
   write_file(
-    tree.artifact("openarm") / "manifest.json",
-    complete_manifest("openarm", "sm_89", "", false));
+    tree.artifact("test_robot") / "manifest.json",
+    complete_manifest("test_robot", "sm_89", "", false));
   selection = resolve_runtime_selection(request);
   EXPECT_TRUE(selection.artifact_valid) << selection.reason;
   EXPECT_EQ(selection.selected_mode, RuntimeMode::Cpp);

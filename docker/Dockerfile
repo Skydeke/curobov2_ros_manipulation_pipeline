@@ -1,21 +1,8 @@
 # cuRobo / curobo_ros_manipulation_pipeline image.
 #
-# Builds and installs this repository's packages -- the Python `curobo` stack,
-# the C++ `curobov2_ros` port with its embedded-interpreter bridge
-# `curobo_python_runtime`, the task-constructor packages and the RViz plugins -- on top
-# of a base image that already provides ROS 2 (or a bare CUDA base, in which
-# case ROS is installed here).
-#
-# The build context is this repository's root. Everything that varies with the
-# base image is a build argument:
-#
-#   BASE_IMAGE      runtime image to layer onto (default: CUDA 13.4 runtime)
-#   ROS_DISTRO      distro used for the apt package names (default: jazzy)
-#   CUDA_TOOLKIT    CUDA version from NVIDIA's repo. Warp 1.19 is built with
-#                   CUDA 13.4, so this defaults to 13-4.
-#
-# The default base is a CUDA runtime image; nvcc is installed only in the
-# native build stage, so it never reaches the final image.
+# Builds this repository's packages on top of a ROS 2 or bare CUDA base.
+# Build args: BASE_IMAGE, ROS_DISTRO, CUDA_TOOLKIT. nvcc is only present in
+# the native build stage.
 
 ARG BASE_IMAGE=nvidia/cuda:13.4.3-runtime-ubuntu24.04
 FROM ${BASE_IMAGE} AS curobo-python-base
@@ -26,17 +13,9 @@ ARG CUDA_TOOLKIT=13-4
 ENV ROS_DISTRO=${ROS_DISTRO}
 ENV ROS_WS=/root/ros2_ws
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
-# The vendored checkout has no .git in the build context; the upstream package
-# reads its version through setuptools-scm at build and import time.
+# The vendored checkout has no .git, so setuptools-scm needs a version.
 ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_NVIDIA_CUROBO=0.8.0
-# CUDA: the final image carries only libcudart; headers, stubs and nvcc stay in
-# the build stages. The Python side is resolved by pip and is not pinned to a
-# CUDA major here; keep the CUDA version and the Warp wheel in sync.
-#
-# /usr/local/cuda is the symlink that both the NVIDIA CUDA base images and the
-# cuda-cudart packages create, so one set of ENVs serves a base that ships CUDA
-# and one where CUDA_TOOLKIT installs it. Re-prepending PATH/LD_LIBRARY_PATH is
-# harmless when the base already set them.
+# Keep CUDA_TOOLKIT and the Warp wheel in sync.
 ENV CUDA_HOME=/usr/local/cuda
 ENV PATH=/usr/local/cuda/bin:${PATH}
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:${LD_LIBRARY_PATH}
@@ -45,13 +24,8 @@ SHELL ["/bin/bash", "-e", "-o", "pipefail", "-c"]
 # Every install below runs as root.
 USER root
 
-# --- CUDA runtime (only when the BASE_IMAGE does not ship it) ---
-# The final image needs libcudart at runtime. Headers, stubs and nvcc are
-# build-only and live in the build stages.
-# NVIDIA's repos are keyed by <distro><version-without-dot>, e.g. ubuntu2204;
-# derive it so this works for the 22.04 and 24.04 bases alike. NOTE: the repo's
-# old .pub key file is gone upstream (404); the cuda-keyring deb is the
-# supported way to register repo + key.
+# --- CUDA runtime (only when the base does not ship it) ---
+# NVIDIA's repos are keyed by <distro><version>, e.g. ubuntu2204.
 RUN [ -z "${CUDA_TOOLKIT}" ] || ( \
   apt-get update && apt-get install -y --no-install-recommends \
   curl ca-certificates && \
@@ -82,9 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
   && rm -rf /var/lib/apt/lists/* && \
   (command -v colcon >/dev/null 2>&1) || pip install colcon-common-extensions
 
-# Install ROS 2 + rosdep only if not already present in BASE_IMAGE.
-# ros-${ROS_DISTRO}-rosidl-generator-type-description is Jazzy-only, so it is
-# added to the list only for jazzy.
+# Install ROS 2 + rosdep if the base lacks them.
+# rosidl-generator-type-description only exists on Jazzy.
 RUN [ -f /opt/ros/${ROS_DISTRO}/setup.bash ] || ( \
   apt-get update && apt-get install -y --no-install-recommends \
   curl gnupg2 ca-certificates && \
@@ -100,29 +73,15 @@ RUN [ -f /opt/ros/${ROS_DISTRO}/setup.bash ] || ( \
   rm -rf /var/lib/apt/lists/* \
 )
 
-# Only the upstream project metadata is copied here, so source edits do not
-# invalidate this dependency layer. Installing the metadata-only stub makes pip
-# resolve upstream's declared dependencies; drop the stub afterwards, colcon
-# ships the actual curobo package. The extra packages are pipeline dependencies
-# that upstream does not declare. setuptools 80 dropped `develop --uninstall`,
-# which colcon uses to replace existing symlink installs; torch needs >=77, so
-# keep 77-79.
+# Install upstream's declared dependencies from its metadata, then remove the
+# stub (colcon installs the real package). setuptools 80 dropped
+# `develop --uninstall`, so keep setuptools 77-79 for torch.
 COPY curobo/curobo/pyproject.toml curobo/curobo/README.md /tmp/curobo-meta/
-# setuptools_scm 9 pulls vcs-versioning, which requires packaging>=26.2; the
-# Ubuntu 22.04 base still resolves its system packaging 21.3 through
-# pkg_resources, so the metadata build fails before pip can install anything.
-# Pin the older scm release for the metadata-only stub.
+# setuptools_scm 9 needs packaging>=26.2, which the older base cannot build.
 RUN sed -i 's/setuptools_scm>=6.2/setuptools_scm<9/' /tmp/curobo-meta/pyproject.toml
 
-# Build the metadata stub without isolation. Ubuntu's system setuptools 59
-# cannot parse [project], so the wheel is named UNKNOWN and has no
-# Requires-Dist entries; pip then silently skips warp-lang and every other
-# upstream dependency. Build the wheel with a modern setuptools first, then
-# install that wheel normally so pip can also build third-party metadata
-# (e.g. the benchmark extra uses a poetry backend). pandas is floored because
-# the Python 3.12 Jazzy base otherwise selects a source-only pandas whose
-# NumPy Cython headers require Cython 3. setuptools is pinned to 78.1.1 because
-# torch requires >=77.0.3.
+# Build the metadata wheel with a modern setuptools so pip can read its
+# Requires-Dist entries; then install it with the pipeline's extras.
 RUN --mount=type=cache,target=/root/.cache/pip \
   python3 -m pip install --ignore-installed \
   "numpy<2" \
@@ -147,15 +106,14 @@ RUN --mount=type=cache,target=/root/.cache/pip \
   python3 -m pip uninstall -y nvidia-curobo && \
   rm -rf /tmp/curobo-meta /tmp/curobo-wheels
 
-# Someone is misusing pinning, for no good damn reason
+# Pin ros2_numpy to the pipeline's NumPy range.
 RUN git clone https://github.com/nitesh-subedi/ros2_numpy.git /tmp/ros2_numpy && \
   sed -i 's/numpy==1\.24\.2/numpy>=1.26.4,<2/' \
   /tmp/ros2_numpy/setup.py \
   /tmp/ros2_numpy/requirements.txt 2>/dev/null || true && \
   python3 -m pip install /tmp/ros2_numpy
 
-# Reinstall the message packages against this distro. rosidl-generator-type-
-# description rides along on Jazzy only (it does not exist on Humble).
+# Reinstall the message packages against this distro.
 RUN apt-get update && apt-get install -y --reinstall \
   $( [ "${ROS_DISTRO}" = jazzy ] && echo ros-${ROS_DISTRO}-rosidl-generator-type-description ) \
   ros-${ROS_DISTRO}-sensor-msgs \
@@ -169,8 +127,7 @@ RUN apt-get update && apt-get install -y --reinstall \
   rm -rf /var/lib/apt/lists/*
 
 # --- C++ port build dependencies ---
-# pybind11 (embedded interpreter) and Eigen come from Ubuntu universe; the CUDA
-# base image does not have universe enabled by default.
+# pybind11 (embedded interpreter) and Eigen; the CUDA base lacks universe.
 RUN add-apt-repository -y universe && \
   apt-get update && apt-get install -y --no-install-recommends \
   pybind11-dev \
@@ -214,33 +171,22 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
 # curobov2_ros_extra; the package still builds without them.
 
 
-# ============================================================================
-# Standalone native cpp_runtime: NOT a colcon package.
-#
-# The vendored cuRobo checkout lives at curobo/curobo (the pipeline's curobo/
-# package wraps it), so the upstream standalone sources are at
-# curobo/curobo/cpp_runtime.  Build robot and mapper with plain CMake and
-# install them into /opt/curobo/native for the curobo_cpp_runtime package.
-#
-# CUROBO_CUDA_ARCHS is required. It is the CMake list that may name several
-# targets (e.g. "86;89;90" or "86,89,90").
+# --- Standalone native cpp_runtime (not a colcon package) ---
+# CUROBO_CUDA_ARCHS is required, e.g. "86;89;90".
 # ============================================================================
 FROM curobo-python-base AS curobo-native
 
 ARG CUROBO_CUDA_ARCHS
 ARG CUDA_TOOLKIT=13-4
 
-# nvcc and the CUDA dev packages are build-only. Keeping the full toolkit in
-# this stage means the final runtime image only carries libcudart.
+# nvcc and the CUDA dev packages are build-only.
 RUN [ -z "${CUDA_TOOLKIT}" ] || ( \
   apt-get update && apt-get install -y --no-install-recommends \
   cuda-toolkit-${CUDA_TOOLKIT} && \
   rm -rf /var/lib/apt/lists/* \
 )
 
-# Warp ships its native headers next to the installed Python package.  The
-# pipeline already pip-installed warp-lang in curobo-python-base; expose the
-# stable /opt/warp/native path used by CMake.
+# Expose Warp's native headers at a stable path for CMake.
 ENV WARP_NATIVE_INCLUDE_DIR=/opt/warp/native
 RUN WARP_ROOT="$(python3 -c 'from pathlib import Path; import warp; print(Path(warp.__file__).parent)')" && \
     mkdir -p /opt/warp && \
@@ -279,8 +225,7 @@ RUN : "${CUROBO_CUDA_ARCHS:?CUROBO_CUDA_ARCHS must be set}" && \
     rm -rf /opt/curobo-src
 
 # ============================================================================
-# ROS workspace build stage. Its install tree is copied to the final image;
-# the sources and build directory are not.
+# ROS workspace build stage.
 # ============================================================================
 FROM curobo-python-base AS curobo-pipeline-build
 
@@ -320,11 +265,8 @@ COPY curobo_cpp_runtime ${ROS_WS}/src/curobo_cpp_runtime
 # --- cuRobo v2 ---
 COPY curobo ${ROS_WS}/src/curobo
 
-# --base-paths is limited to the directories copied above: a base image may
-# already carry other copies of these packages (e.g. as part of a larger
-# source tree), and colcon refuses to build a workspace with duplicate package
-# names. ${ROS_WS}/install is sourced for bases whose image already carries
-# workspace deps; it does not exist yet on a fresh build and that is tolerated.
+# Limit discovery to the copied directories: a base may already contain
+# duplicate package names.
 RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
   if [ -f ${ROS_WS}/install/setup.bash ]; then \
     source ${ROS_WS}/install/setup.bash; \
@@ -352,8 +294,7 @@ RUN source /opt/ros/${ROS_DISTRO}/setup.bash && \
   curobo_python_runtime curobo_cpp_runtime
 
 # ============================================================================
-# Final runtime image: native libraries plus the installed ROS workspace.
-# Build tools and sources stay in curobo-pipeline-build.
+# Final runtime image.
 # ============================================================================
 FROM curobo-python-base AS curobo-manipulation-pipeline
 
@@ -365,7 +306,7 @@ COPY --from=curobo-pipeline-build ${ROS_WS}/src/curobo/curobo/curobo ${ROS_WS}/s
 COPY --from=curobo-pipeline-build ${ROS_WS}/src/curobo/curobo/benchmark ${ROS_WS}/src/curobo/curobo/benchmark
 COPY --from=curobo-pipeline-build ${ROS_WS}/src/curobov2_ros ${ROS_WS}/src/curobov2_ros
 
-# Artifact metadata helper used by the post-step Dockerfile.curobo layer.
+# Artifact metadata helper for the artifact-export layer.
 COPY docker/write_artifact_metadata.py /opt/curobo/tools/write_artifact_metadata.py
 
 ENV CUROBO_CPP_ROOT=/opt/curobo/native

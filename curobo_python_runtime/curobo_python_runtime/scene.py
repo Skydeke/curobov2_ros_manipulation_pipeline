@@ -227,8 +227,7 @@ def _select_attach_link(entry, kin, fk_result, spec, preferred=None):
     / ``attached_object_right`` / ...; bimanual is the two-arm case). The caller
     may name the arm's link (``preferred``); otherwise use the object's world
     position: the attach link whose parent flange is closest to the object is
-    the arm holding it. Single-attach-link robots (Franka, KATE, UR10e) always
-    use their one link.
+    the arm holding it. Single-attach-link robots always use their one link.
     """
     import numpy as np
 

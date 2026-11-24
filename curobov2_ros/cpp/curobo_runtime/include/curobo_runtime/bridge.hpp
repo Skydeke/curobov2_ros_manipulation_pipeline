@@ -648,7 +648,7 @@ public:
   // are parallel. An empty frame name selects the solver's first tool. Tools
   // not named here hold the FK pose of `hold_q` (empty -> the `mpc_setup`
   // start state), so a single-arm goal never drags the other arm to a foreign
-  // pose. This is the bimanual path (OpenArm has two grasp frames).
+  // pose. This is the bimanual path (a dual-arm robot has two grasp frames).
   virtual bool mpc_update_goal_poses(
     RobotHandle handle, const std::vector<std::string> & tool_frames,
     const TensorF32 & poses, bool run_ik,

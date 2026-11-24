@@ -222,7 +222,7 @@ class CuroboServerInterface(_MsgMixin, _PlanClientMixin, _SceneClientMixin, Robo
     def normalize_joint_state(self, joint_state):
         """Reorder a joint-state reading into the server's cspace order.
 
-        ``/joint_states`` order is publisher-defined (the kortex sim emits the
+        ``/joint_states`` order is publisher-defined (a publisher may emit the
         finger joint FIRST); the server resolves ``start_pose`` position lists
         VERBATIM in cspace order (``kinematics.cspace.joint_names``), so an
         un-reordered reading misaligns every joint of the start state. Readings

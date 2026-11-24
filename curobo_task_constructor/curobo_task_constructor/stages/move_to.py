@@ -122,12 +122,11 @@ class MoveTo(PropagatingEitherWay):
     def _gripper_command_goal(self):
         """A command for a goal that names only gripper (non-cspace) joints.
 
-        TIAGo's fingers are locked out of the planner cspace (``lock_joints``)
-        and driven by the pal-gripper ``FollowJointTrajectory`` controller.
-        Planning a sparse ``{gripper_left_finger_joint: 0.045}`` goal projected
-        it away and produced an arm-only plan from the start pose to itself —
-        the arm was commanded for an action that should move only the jaws.
-        Robots whose cspace owns the fingers (KATE/Kortex) keep planning.
+        A gripper whose fingers are locked out of the planner cspace
+        (``lock_joints``) and driven by a ``FollowJointTrajectory`` controller
+        cannot take a sparse ``{finger_joint1: 0.045}`` goal as a plan: the
+        projection leaves an arm-only goal from the start pose to itself.
+        Robots whose cspace owns the fingers keep planning.
         """
         targets = self._goal_joint_targets()
         if not targets:
@@ -235,7 +234,7 @@ class MoveTo(PropagatingEitherWay):
             return
         if pose_goals:
             goalset = goalset_for_scene(state.scene, poses=pose_goals)
-            # Pose goals keep the full task state: a TIAGo leg planned after a
+            # Pose goals keep the full task state: a leg planned after a
             # jaw command must carry the commanded finger value so the server
             # fits the collision geometry in the state the task will be in.
             start_joint_state = state.joint_state

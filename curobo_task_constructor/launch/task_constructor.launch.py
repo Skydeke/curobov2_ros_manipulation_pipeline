@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Launch the curobo_task_constructor ExecuteTaskSolution server. Runs inside the kortex_moveit / kortex_cumotion container (NOT with the grasp
-orchestrator): the same container that hosts curobo_server and move_group, so
-the execute server can drive SendTrajectory, /joint_states and the planning-scene
-services without cross-container networking. Planning is local (in-process,
-like MoveIt); only execution goes over the wire."""
+"""Launch the curobo_task_constructor ExecuteTaskSolution server.
+
+Run it in the same container that hosts curobo_server and move_group (not with
+the grasp orchestrator): the execute server then drives SendTrajectory,
+/joint_states and the planning-scene services without cross-container
+networking. Planning is local (in-process, like MoveIt); only execution goes
+over the wire."""
 
 import os
 

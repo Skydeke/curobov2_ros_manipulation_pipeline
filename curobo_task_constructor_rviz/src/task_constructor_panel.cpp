@@ -173,7 +173,7 @@ struct GripperCommandStep
 {
   std::string joint;
   double position = 0.0;
-  // Every joint the command drives (TIAGo's pal-gripper has two fingers on one
+  // Every joint the command drives (a parallel gripper has two fingers on one
   // FollowJointTrajectory command). ``joints``/``positions`` are parallel; the
   // single ``joint``/``position`` pair is the legacy fallback.
   std::vector<std::string> joints;
